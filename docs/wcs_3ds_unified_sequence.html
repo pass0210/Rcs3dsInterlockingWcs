@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WCS ↔ AGV(RCS) ↔ 3DS · 인터랙티브 시퀀스</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5FA; --card:#FFFFFF;
+    --ink:#0F172A; --ink-soft:#475569; --ink-faint:#94A3B8;
+    --line:#E8EAF0; --line-strong:#D7DBE6;
+    --brand:#6366F1; --brand-deep:#4F46E5; --brand-soft:#EEF0FE;
+    --wcs:#F97316; --rcs:#3B82F6; --sorter:#10B981;
+    --ok:#10B981; --ng:#EF4444; --wait:#F59E0B;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
+    --sh-sm:0 1px 2px rgba(15,23,42,.05),0 2px 6px rgba(15,23,42,.06);
+    --sh-md:0 6px 14px -6px rgba(15,23,42,.12),0 18px 36px -16px rgba(15,23,42,.18);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.45;font-size:13px;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1880px;margin:0 auto;padding:18px clamp(16px,2.4vw,34px) 40px;}
+
+  header.doc{display:flex;flex-direction:column;gap:2px;padding:0 0 12px;margin-bottom:12px;border-bottom:1px solid var(--line);}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--brand-deep);font-weight:600;}
+  h1{font-size:21px;line-height:1.18;margin:4px 0 2px;letter-spacing:-.02em;font-weight:800;color:var(--ink);}
+  h1 small{display:block;font-size:12px;font-weight:500;color:var(--ink-soft);margin-top:4px;line-height:1.5;}
+  .actors{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 0;}
+  .ac{font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;border:1px solid transparent;display:inline-flex;align-items:center;gap:6px;}
+  .ac::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .ac.scn{background:#F1F5F9;color:#64748B;}
+  .ac.rcs{background:#EAF1FE;color:var(--rcs);}
+  .ac.wcs{background:#FEF0E6;color:var(--wcs);}
+  .ac.srt{background:#E6F8F0;color:var(--sorter);}
+  .hint{font-size:11px;color:var(--ink-faint);margin-top:9px;}
+
+  .tabs{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0;}
+  .tab{font-family:var(--sans);font-size:12px;font-weight:600;padding:6px 13px;border-radius:9px;border:1px solid var(--line-strong);background:var(--card);color:var(--ink-soft);cursor:pointer;transition:.15s;}
+  .tab:hover{border-color:var(--brand);color:var(--brand-deep);}
+  .tab.active{background:var(--brand);color:#fff;border-color:var(--brand);box-shadow:var(--sh-sm);}
+  .tab .id{opacity:.7;margin-right:5px;}
+
+  .scn-head{margin:14px 0 4px;}
+  .scn-head h2{font-size:15px;margin:0;font-weight:800;letter-spacing:-.01em;}
+  .scn-head .d{font-size:11.5px;color:var(--ink-soft);margin:4px 0 0;line-height:1.5;max-width:1100px;}
+
+  .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin:10px 0 0;display:flex;align-items:center;gap:8px;font-weight:600;}
+  .cap::before{content:"";flex:none;width:16px;height:2px;border-radius:2px;background:var(--brand);}
+  .cap b{color:var(--brand-deep);}
+
+  /* 다이어그램 카드 */
+  .mer{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 16px;margin:8px 0 0;box-shadow:var(--sh-sm);}
+  .mer pre.mermaid{margin:0;text-align:left;min-height:30px;}
+  /* SVG를 폭에 맞춰 확대하지 않도록 자연 크기 강제 */
+  .mer svg{width:auto!important;max-width:none!important;height:auto!important;}
+  /* 폰트 강제(렌더 무시 대비) */
+  .mer svg text,.mer svg .messageText{font-size:10px!important;}
+  .mer svg .actor,.mer svg .actor tspan,.mer svg text.actor,.mer svg text.actor tspan{font-size:10.5px!important;font-weight:600;}
+  .mer svg .noteText,.mer svg .noteText tspan{font-size:9px!important;}
+  .mer svg .loopText,.mer svg .loopText tspan,.mer svg .labelText,.mer svg .labelText tspan{font-size:9px!important;}
+  /* alt/opt/loop 구역 — 인디고 점선(구조처럼) */
+  .mer svg .loopLine{stroke:#C7CBF7!important;stroke-width:1px!important;stroke-dasharray:6 4!important;}
+  .mer svg .labelBox{fill:var(--brand-soft)!important;stroke:#C7CBF7!important;}
+  .mer svg .labelText,.mer svg .labelText tspan{fill:var(--brand-deep)!important;font-weight:700;}
+  .mer svg .loopText,.mer svg .loopText tspan{fill:#6B70C9!important;paint-order:stroke;stroke:#FFFFFF!important;stroke-width:3px!important;stroke-linejoin:round;}
+  /* 메시지 화살표 — 진한 슬레이트, 응답은 가는 점선 */
+  .mer svg .messageLine0{stroke:#334155!important;stroke-width:1.5px!important;}
+  .mer svg .messageLine1{stroke:#334155!important;stroke-width:1.3px!important;stroke-dasharray:2.5 2.5!important;}
+  /* 클릭 가능한 메시지 글자 */
+  .mer svg .messageText{cursor:pointer;transition:fill .12s;}
+  .mer svg .messageText:hover{fill:var(--brand)!important;}
+  .mer svg .messageText.sel{fill:var(--brand-deep)!important;font-weight:700;}
+
+  /* 상세 패널/팝업 */
+  .detail{border:1px solid var(--line);border-radius:14px;background:var(--card);padding:14px 16px;margin:8px 0 0;min-height:70px;box-shadow:var(--sh-sm);}
+  .dt-hint{font-size:12.5px;color:var(--ink-faint);}
+  .dt-t{font-size:14.5px;font-weight:800;color:var(--ink);margin-bottom:8px;display:flex;align-items:center;gap:9px;letter-spacing:-.01em;}
+  .dt-t::before{content:"";flex:none;width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,var(--brand),var(--brand-deep));}
+  .blk{margin:11px 0 0;}
+  .blk-h{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;display:inline-flex;align-items:center;gap:6px;margin-bottom:6px;padding:2px 9px;border-radius:999px;}
+  .blk-h::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .blk-h.req{color:var(--rcs);background:#EAF1FE;}
+  .blk-h.res{color:var(--sorter);background:#E6F8F0;}
+  .blk-h.why{color:var(--wait);background:#FEF6E7;}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px;align-items:start;}
+  .kv .k{font-family:var(--mono);font-weight:700;color:var(--ink);background:#F1F5F9;padding:1px 7px;border-radius:6px;justify-self:start;}
+  .kv .v{color:var(--ink-soft);}
+  .whytx{font-size:12.5px;color:#3F3A2B;background:#FCF8EE;border:1px solid #F1E6C9;border-left:3px solid var(--wait);padding:9px 13px;border-radius:0 9px 9px 0;line-height:1.55;}
+  code{font-family:var(--mono);font-size:.86em;background:#F1F5F9;padding:1px 6px;border-radius:5px;border:1px solid var(--line);color:#334155;}
+  .note{font-size:11px;color:var(--ink-faint);margin:9px 0 0;}
+  .footer{margin-top:22px;padding-top:12px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);}
+  @media(max-width:680px){.page{padding:14px 12px 40px;}h1{font-size:18px;}}
+
+  /* 팝업 모달 */
+  .pop-ov{position:fixed;inset:0;background:rgba(15,23,42,.45);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:100;padding:20px;}
+  .pop-ov.show{display:flex;}
+  .pop{background:var(--card);border:1px solid var(--line);border-radius:18px;max-width:480px;width:100%;max-height:84vh;overflow:auto;box-shadow:var(--sh-md);padding:20px 22px 22px;position:relative;animation:popin .18s cubic-bezier(.16,1,.3,1);}
+  @keyframes popin{from{opacity:0;transform:translateY(10px) scale(.98);}to{opacity:1;transform:none;}}
+  .pop .dt-t{padding-right:34px;}
+  .pop-x{position:absolute;top:13px;right:13px;width:30px;height:30px;border:1px solid var(--line);background:#F8FAFC;border-radius:9px;cursor:pointer;font-size:16px;line-height:1;color:var(--ink-soft);display:flex;align-items:center;justify-content:center;transition:.15s;}
+  .pop-x:hover{background:#F1F5F9;color:var(--ink);border-color:var(--line-strong);}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="doc">
+    <div class="eyebrow">Interactive Sequence · AGV(2DS) · 3DS · WCS</div>
+    <h1>WCS ↔ AGV(RCS) ↔ 3DS 연동 시퀀스
+      <small>다이어그램의 메시지(글자)를 클릭하면 요청·응답 값과 목적이 표시됩니다</small>
+    </h1>
+    <div class="actors">
+      <span class="ac scn">인덕션 스캐너</span>
+      <span class="ac rcs">RCS (AGV·2DS)</span>
+      <span class="ac wcs">WCS (자사)</span>
+      <span class="ac srt">3DS (VEICHI PLC)</span>
+    </div>
+    <div class="hint">▸ 다이어그램의 <b>메시지 글자</b>를 클릭하면 필드·PLC 워드·동작이 팝업으로 나옵니다. (API = WCS↔RCS / PLC = WCS↔3DS Modbus · 분기·예외는 alt/opt)</div>
+  </header>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="view"></div>
+  <div class="footer" id="foot"></div>
+</div>
+
+<div class="pop-ov" id="pop-ov">
+  <div class="pop">
+    <button class="pop-x" id="pop-x" aria-label="닫기">✕</button>
+    <div id="pop-body"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+/* 각 시나리오: id, kind, title, desc, mer(다이어그램),
+   det(상세 객체 배열), map(메시지 화살표 i → det 인덱스) — map은 mer의 화살표(->>,-->>) 순서와 1:1 */
+
+const S = [
+{ id:'U1', kind:'chute', title:'WCS ↔ RCS ↔ 3DS 통합 시퀀스',
+  desc:'실시간 연속 흐름: 인덕션·목적지 조회 → 투입 가부(층 비교) → 투입. 메시지 클릭 시 필드·PLC 워드·동작 팝업. ※ IF-01~04(작업 시작/종료 등) 제외 · IF-16은 IF-05로 통합 · 낙하 대기는 PLC N초 · 시간값은 임의 표준(현장 조정).',
+  mer:`sequenceDiagram
+    autonumber
+    participant SCN as 인덕션
+    participant RCS as RCS
+    participant WCS as WCS
+    participant SRT as 3DS
+    Note over SCN,WCS: ① 인덕션 · 목적지 조회
+    SCN->>RCS: 스캔 (qty)
+    opt 판독 실패
+        SCN->>RCS: NO_READ (재스캔/리젝트)
+    end
+    RCS->>WCS: IF-05 인덕션 투입 + 목적지 조회
+    alt 정상 / 일시적 막힘 → 그 목적지로
+        WCS-->>RCS: OK·chuteNo (BUSY/FULL/PAUSED 포함)
+        RCS->>RCS: AGV를 chuteNo(목적지)로 이동
+    else NG → AGV 대기
+        WCS-->>RCS: NG (OVER / COMPLETED / NO_DEST / OFFLINE)
+    end
+    Note over RCS,SRT: ② 투입 가부 (재호출 500ms · 층 비교)
+    loop 허가될 때까지
+        RCS->>WCS: IF-08 투입 가능?
+        WCS->>SRT: Ready·CurFloor 읽기 (D4.2 · D5)
+        SRT-->>WCS: Ready·CurFloor 회신
+        alt Ready=1 · 층 일치
+            WCS-->>RCS: allowed=true
+        else 층 다름 또는 분류 중·이동 중 (Ready=0)
+            WCS->>SRT: TgtFloor 쓰기 (D6, 0일 때)
+            WCS-->>RCS: allowed=false (WRONG_FLOOR / BUSY)
+        else 막힘 (FULL/PAUSED/OFFLINE)
+            WCS-->>RCS: allowed=false (FULL/PAUSED/OFFLINE)
+        end
+    end
+    Note over RCS,SRT: ③ 투입 (슈트/3D 구분 없음)
+    RCS->>WCS: IF-10 투입 보고
+    WCS-->>RCS: OK·접수
+    WCS->>SRT: IF-11 셀 지정 — C_Flag=0 확인 후 C·C_Flag=1
+    SRT->>SRT: C 값 읽음 → C 초기화 (C_Flag=0)
+    SRT->>SRT: 셀 적재 → R_Flag=0 확인 후 R·R_Flag=1
+    loop R_Flag=1 (100ms · 분류 완료까지)
+        WCS->>SRT: R_Flag 읽기
+        SRT-->>WCS: R_Flag 회신
+    end
+    WCS->>SRT: R 값 읽음 → R 초기화 (R_Flag=0)
+    Note over WCS,SRT: 분류 후 복귀
+    SRT->>SRT: TgtFloor 층으로 복귀 → 도착 후 CurFloor 기입 (D5)`,
+  det:[
+    {t:'바코드 스캔 (qty)', res:[['barcode','상품 바코드'],['qty','트레이 적재 수량 (같은 상품 여러 개 가능)']], why:'인덕션 스캐너가 트레이 상품을 스캔. 한 트레이에 같은 상품 여러 개(qty)를 싣고 한 번에 전량 틸트.'},
+    {t:'NO_READ (판독 실패)', res:[['결과','NO_READ (미판독)']], why:'스캐너가 못 읽음 → RCS 내부에서 재스캔 또는 리젝트. IF-05 대상이 아니다.'},
+    {t:'IF-05 인덕션 투입 + 목적지 조회', req:[['pId','피스 고유값 (1~30000)'],['agvNo','로봇 번호'],['barcode','바코드'],['inductionNo','인덕션 No'],['qty','적재 수량'],['timeStamp','시각']], res:[['→','정상·일시적막힘 / NG 분기']], why:'시점이 같아 IF-16(인덕션 투입 기록)을 IF-05로 통합 — 한 번 호출로 라인 투입 기록(추적 시작)과 목적지·수량 판정을 처리한다. WCS가 목적지(chuteNo)를 정하고 인덕션 시점에 예약 차감. 투입 기록은 응답이 NG여도 남는다. BUSY/FULL/PAUSED는 일시적이라 거부가 아니라 그 목적지를 그대로 배정.'},
+    {t:'OK · chuteNo (그 목적지로 진행)', res:[['result','OK'],['reason','NORMAL (또는 BUSY / FULL / PAUSED)'],['chuteNo','목적지 번호'],['예약','전량 수용 · 차감']], why:'전량이 한 곳(chuteNo)에 들어가면 그 목적지로 진행. BUSY·FULL·PAUSED는 일시적 상태일 뿐 — 거기로 그대로 보낸다. 실제 투입 가부는 도착 후 IF-08에서 확인하고, 막혀 있으면 그 앞에서 대기.'},
+    {t:'NG · AGV 대기 (보낼 수 없음)', res:[['result','NG'],['reason','OVER / COMPLETED / NO_DEST / OFFLINE']], why:'전량을 보낼 수 없으면 NG → AGV 대기(이동 안 함) — 동작은 네 사유 모두 동일. OVER=전량이 한 곳(슈트/3D 한 셀)에 안 들어감(전량 가능할 때까지 대기). COMPLETED=수량 충족. NO_DEST=미등록. OFFLINE=3D 끊김(대체 3D/보류). ※ BUSY·FULL·PAUSED는 NG가 아니라 그 목적지로 보냄(위 정상 분기).'},
+    {t:'IF-08 투입 가능 여부 (상태·층 확인)', req:[['pId','피스 고유값 (1~30000)'],['chuteNo','목적지 번호'],['agvNo','로봇 번호']], res:[['→','허가 / TgtFloor 쓰기(층 다름·분류 중) / 막힘']], why:'투입 직전 가부 확인. WCS가 PLC 상태(Ready=D4.2 비트)와 현재 층(CurFloor=D5)을 함께 확인한다 — 층이 같아도 분류 중·이동 중(Ready=0)이면 BUSY. 상태·층 비교·이동 명령·반복이 모두 이 IF-08 안에서 일어나며, RCS가 500ms 간격으로 재호출한다.'},
+    {t:'Ready·CurFloor 읽기 · 상태/층 확인', req:[['읽기','Ready (D4.2 비트) · CurFloor (D5) — FC03']], res:[['Ready','1=받을 수 있음(정지) / 0=분류 중·이동 중'],['CurFloor','현재 층 → AGV층과 비교']], why:'IF-08을 받을 때마다 WCS가 PLC의 상태(Ready=D4.2 비트)와 현재 층(CurFloor=D5)을 같이 읽는다. 층이 같아도 분류 중(Ready=0)이면 받을 수 없으므로 BUSY를 반환해야 한다 — 그래서 층만 보지 않고 상태를 함께 확인한다. Ready=1(정지·수용 가능)이고 층이 일치하면 허가, 층이 다르면 WRONG_FLOOR. 분류 중이거나 이동 중이면(Ready=0) BUSY를 반환하되, 분류 중일 때 TgtFloor==0이면 AGV층(D6)을 미리 써 분류 후 그 층으로 복귀시킨다. (이동 완료 플래그가 없어 CurFloor 일치로 도착을 판단)'},
+    {t:'allowed = true', res:[['allowed','true']], why:'Ready=1 이고 CurFloor==AGV층 → 투입 가능, 진행.'},
+    {t:'층 다름·분류 중 → TgtFloor 쓰기 · allowed=false', req:[['TgtFloor','AGV층 (D6 · FC06 · WCS write · TgtFloor==0일 때)']], res:[['allowed','false'],['reason','WRONG_FLOOR(층 다름) / BUSY(분류 중·이동 중)']], why:'층이 다르거나(Ready=1·다른 층) 분류 중·이동 중(Ready=0)이면 받을 수 없어 allowed=false — 두 경우 동작이 같아 한 분기로 합쳤다. TgtFloor==0이면 WCS가 AGV층(D6)을 쓴다: 층 다름이면 그 층으로 이동, 분류 중이면 분류 후 그 층으로 복귀. 진행 중(TgtFloor≠0, 예: 이미 이동 중)엔 덮어쓰지 않아 핑퐁 차단. 사유는 층 다름=WRONG_FLOOR, 분류 중·이동 중=BUSY. 도착 시엔 CurFloor만 기입(TgtFloor 유지), TgtFloor는 분류 시작(Ready=0 진입) 시 0으로 클리어. RCS는 500ms 간격 재호출.'},
+    {t:'막힘 → allowed = false (FULL/PAUSED/OFFLINE)', res:[['allowed','false'],['reason','FULL / PAUSED / OFFLINE']], why:'FULL(만재)·PAUSED(일시정지)·OFFLINE(폴 타임아웃)은 장기 차단 — WCS가 판단한다(PLC는 분류 중 Ready만 제공). 이동시켜도 점유만 하므로 TgtFloor를 쓰지 않고, RCS는 해소될 때까지 500ms 간격으로 IF-08을 재호출하며 그 앞에서 대기한다. (층 다름·분류 중은 위 분기에서 TgtFloor 쓰기)'},
+    {t:'IF-10 투입 보고 (슈트/3D 공통)', req:[['pId','피스 고유값'],['barcode','바코드'],['chuteNo','목적지 번호'],['agvNo','로봇 번호']], res:[['OK','접수']], why:'슈트/3D를 구분하지 않고 동일하게 투입을 보고한다. 전량을 목적지(chuteNo)에 한 번에 틸트. 보고 후 WCS가 셀을 지정(IF-11).'},
+    {t:'IF-11 셀 지정 (영역 C)', req:[['C_CellNo','D0 · 지정할 셀 번호 (WCS write)'],['C_Seq','D1 · 명령 순번 (유실/중복 검출용, 매 건 증가)'],['C_Flag','D4.0 (워드 D4 비트0) · WCS가 1로 set = "셀 지정 썼음"']], res:[['—','PLC가 C_Flag=1 보고 C 값을 읽음']], why:'쓰기 전 C_Flag=0을 확인한다 — PLC가 아직 안 읽은 명령을 덮어쓰지 않도록(C_Flag=1이면 PLC가 읽고 0으로 내릴 때까지 대기). C_Flag=0이면 C_CellNo·C_Seq를 쓰고 C_Flag=1로 올린다. PLC는 값을 읽어도 N초 지연 후 분류/이동하므로(틸트 물건이 트레이에 안착할 시간 확보) WCS 측 쓰기 지연은 두지 않는다.'},
+    {t:'C 값 읽음 → C 초기화 (PLC가 클리어)', res:[['PLC가 읽음','C_CellNo · C_Seq'],['클리어','C_CellNo · C_Seq · C_Flag = 0']], why:'PLC가 C_Flag=1을 보고 셀 지정 값(C_CellNo·C_Seq)을 읽은 직후, C 값들을 C_Flag와 함께 0으로 초기화한다 — "읽은 쪽이 0"으로 내리는 핸드셰이크. 즉 C_Flag는 WCS가 아니라 PLC가, 투입 값을 읽을 때 C 값과 같이 클리어한다.'},
+    {t:'셀 적재 → R 쓰고 R_Flag=1 (영역 R)', res:[['R_CellNo','D2 · 실제 적재한 셀 (PLC write)'],['R_Seq','D3 · 처리한 순번 (= 받은 C_Seq)'],['R_Flag','D4.1 (워드 D4 비트1) · PLC가 1로 set = "적재 완료"']], why:'PLC도 쓰기 전 R_Flag=0을 확인한다 — WCS가 아직 안 읽은 결과를 덮어쓰지 않도록. R_Flag=0이면 지정 셀에 적재한 결과를 R 영역에 쓰고 R_Flag=1로 통지한다. 이 적재(분류)를 시작하는 순간 3DS는 Ready=0(BUSY)이 되며, 이때 PLC가 TgtFloor=0을 클리어한다 — 도착 즉시가 아니라 분류 시작 시 비워 왕복을 막는다.'},
+    {t:'R_Flag 폴링 (완료 대기)', req:[['읽기','R_Flag (D4.1, 워드 D4 · FC03)']], res:[['R_Flag','0 또는 1']], why:'R_Flag를 100ms 간격으로 폴링한다. 분류(틸트) 소요시간은 가변적이고 5초를 넘을 수 있으므로, 타임아웃은 고정 5초가 아니라 분류 최대 소요시간 + 여유로 넉넉히 설정한다(현장 확정). 소터가 분류 중(Ready=0)인 동안은 정상 대기. R_Flag=1이면 적재 완료 → R 값을 읽으러 간다. 타임아웃을 초과해도 R_Flag=0이면 알람 · 상태 재확인.'},
+    {t:'R 값 읽음 → R 초기화 (WCS가 클리어)', req:[['읽기','R_CellNo · R_Seq (FC03)'],['클리어','R_CellNo · R_Seq · R_Flag = 0 (WCS write)']], why:'R_Flag=1이면 WCS가 R_CellNo·R_Seq를 읽고(R_Seq가 보낸 C_Seq와 같은지 대사로 유실/중복 검출), 곧바로 R 값들을 R_Flag와 함께 0으로 초기화한다 — "읽은 쪽이 0". R_Flag는 WCS가 클리어한다.'},
+    {t:'분류 후 복귀 — TgtFloor 층으로 이동 · CurFloor 기입', res:[['TgtFloor','D6 · 복귀할 층 (값이 있으면 그 층으로)'],['CurFloor','D5 · 도착 후 PLC가 그 층을 기입']], why:'3DS가 분류를 마치고 복귀할 때 TgtFloor(D6)에 층이 써 있으면 그 층으로 이동하고, 도착하면 CurFloor(D5)에 그 층을 기입한다(TgtFloor는 유지). TgtFloor는 도착 즉시가 아니라 분류를 시작할 때(Ready=0 진입) 0으로 클리어한다 — 도착하자마자 비우면 곧바로 다시 써져 왕복하기 때문. 이 CurFloor를 다음 IF-08에서 WCS가 읽어 비교 — 층 이동의 폐루프.'},
+    {t:'AGV를 chuteNo(목적지)로 이동', res:[['chuteNo','IF-05에서 응답받은 목적지 번호']], why:'IF-05에서 OK·chuteNo를 받으면 RCS가 AGV를 그 목적지(chuteNo)로 이동시킨다 — 슈트/3D 공통. 도착하면 그 앞에서 투입 가부(IF-08)를 확인한다. BUSY/FULL/PAUSED여도 일단 그 목적지로 이동하고, 막혀 있으면 IF-08에서 해소될 때까지 대기한다.'}
+  ],
+  map:[0,1,2,3,17,4,5,6,6,7,8,8,9,10,10,11,12,13,14,14,15,16] }
+];
+
+/* ============ 렌더 ============ */
+const KIND_CLS = {chute:'', '3d':'s-3d', ng:'s-ng', op:'s-op'};
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function kvHTML(rows){ return `<div class="kv">${rows.map(([k,v])=>`<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')}</div>`; }
+function renderDetail(d){
+  if(!d) return `<div class="dt-hint">▸ 위 다이어그램의 <b>메시지(글자)</b>를 클릭하면 여기에 요청·응답 값과 목적이 표시됩니다.</div>`;
+  let h=`<div class="dt-t">${esc(d.t)}</div>`;
+  if(d.req&&d.req.length) h+=`<div class="blk"><div class="blk-h req">▸ 요청 / 보냄</div>${kvHTML(d.req)}</div>`;
+  if(d.res&&d.res.length) h+=`<div class="blk"><div class="blk-h res">◂ 응답 / 받음</div>${kvHTML(d.res)}</div>`;
+  if(d.why) h+=`<div class="blk"><div class="blk-h why">목적 — 왜</div><div class="whytx">${esc(d.why)}</div></div>`;
+  return h;
+}
+function scenarioHTML(sc){
+  const cls = KIND_CLS[sc.kind]||'';
+  return `<div class="scn-head ${cls}"><h2>${esc(sc.title)}</h2><p class="d">${esc(sc.desc)}</p></div>
+    <div class="cap">시퀀스 다이어그램 — <b>&nbsp;메시지 글자 클릭</b></div>
+    <div class="mer"><pre class="mermaid">${sc.mer}</pre></div>
+    <p class="note">메시지(요청/응답 글자)를 클릭하면 해당 단계의 요청·응답 값과 목적이 <b>팝업</b>으로 표시됩니다.</p>`;
+}
+
+const tabsEl=document.getElementById('tabs'), viewEl=document.getElementById('view');
+const TAB_NAME={U1:'전체 통합 흐름'};
+const ORDER=['U1'];
+const DNUM={U1:''};
+const SBY={}; S.forEach(s=>{ SBY[s.id]=s; });
+let active=ORDER[0];
+
+let curTexts=[];
+function clearSel(){ curTexts.forEach(t=>t.classList.remove('sel')); }
+function norm(s){ return (s||'').replace(/\s+/g,'').replace(/^[0-9]+/,''); }  /* 공백 + 선두 자동번호 제거 */
+function labelsOf(sc){
+  if(!sc._labels){
+    sc._labels = sc.mer.split('\n').filter(l=>l.includes('->>') && l.includes(':')).map(l=>l.slice(l.indexOf(':')+1).trim());
+  }
+  return sc._labels;
+}
+function wire(sc){
+  const svg=viewEl.querySelector('.mer svg');
+  if(!svg) return;
+  const normLabels=labelsOf(sc).map(norm);   /* 소스 순서의 메시지 라벨 (map과 1:1) */
+  const texts=svg.querySelectorAll('.messageText');
+  curTexts=Array.from(texts);
+  texts.forEach((el)=>{
+    el.style.cursor='pointer';
+    el.addEventListener('click',(ev)=>{
+      ev.stopPropagation();
+      const ct=norm(el.textContent);            /* 클릭한 메시지 글자(공백 제거) */
+      let best=normLabels.indexOf(ct);          /* 1순위: 완전 일치 */
+      if(best<0){                               /* 2순위: 길이 가장 비슷한 포함 관계 */
+        let bestDiff=1e9;
+        for(let j=0;j<normLabels.length;j++){
+          const L=normLabels[j]; if(!L) continue;
+          if(ct.includes(L)||L.includes(ct)){
+            const diff=Math.abs(L.length-ct.length);
+            if(diff<bestDiff){ bestDiff=diff; best=j; }
+          }
+        }
+      }
+      clearSel(); el.classList.add('sel');
+      openPop(best>=0 ? (sc.det[sc.map[best]]||null) : null);
+      if(best<0) console.warn('[seq] no match for:', el.textContent);
+    });
+  });
+}
+function renderView(){
+  const sc=S.find(x=>x.id===active);
+  viewEl.innerHTML=scenarioHTML(sc);
+  const pre=viewEl.querySelector('pre.mermaid');
+  if(window.mermaid && pre){
+    Promise.resolve(mermaid.run({nodes:[pre]})).then(()=>wire(sc)).catch(e=>console.warn('mermaid',e));
+  }
+}
+function renderTabs(){
+  tabsEl.innerHTML = ORDER.map(id=>`<button class="tab${id===active?' active':''}" data-id="${id}"><span class="id">${DNUM[id]}</span>${TAB_NAME[id]}</button>`).join('');
+  tabsEl.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{active=b.dataset.id;renderTabs();renderView();window.scrollTo({top:0,behavior:'smooth'});});
+}
+
+if(window.mermaid){
+  mermaid.initialize({
+    startOnLoad:false, theme:'base',
+    themeVariables:{
+      fontFamily:"'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif", fontSize:'10px',
+      primaryColor:'#FFFFFF', primaryTextColor:'#0F172A', primaryBorderColor:'#D7DBE6',
+      lineColor:'#B6BECC', textColor:'#0F172A',
+      actorBkg:'#FFFFFF', actorBorder:'#CBD5E1', actorTextColor:'#0F172A', actorLineColor:'#CBD5E1',
+      signalColor:'#334155', signalTextColor:'#0F172A',
+      labelBoxBkgColor:'#EEF0FE', labelBoxBorderColor:'#C7CBF7', labelTextColor:'#4F46E5', loopTextColor:'#4F46E5',
+      noteBkgColor:'#FEF3C7', noteBorderColor:'#FCD34D', noteTextColor:'#92400E',
+      activationBkgColor:'#D1FAE5', activationBorderColor:'#10B981', sequenceNumberColor:'#FFFFFF'
+    },
+    sequence:{ useMaxWidth:false, wrap:false, diagramMarginX:8, diagramMarginY:1, actorMargin:170, boxMargin:11, boxTextMargin:5, noteMargin:1, messageMargin:6, mirrorActors:false, messageFontSize:10, actorFontSize:11, noteFontSize:9.5 }
+  });
+}
+const popOv=document.getElementById('pop-ov'), popBody=document.getElementById('pop-body');
+function openPop(d){ popBody.innerHTML=renderDetail(d); popOv.classList.add('show'); }
+function closePop(){ popOv.classList.remove('show'); clearSel(); }
+popOv.addEventListener('click',e=>{ if(e.target===popOv) closePop(); });
+document.getElementById('pop-x').addEventListener('click',closePop);
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closePop(); });
+
+document.getElementById('foot').textContent='WCS ↔ AGV(RCS) ↔ 3DS · 통합 시퀀스 · 메시지 클릭 시 요청·응답·PLC 워드·목적 팝업 · 시간값은 임의 표준(현장 조정)';
+renderTabs(); renderView();
+</script>
+</body>
+</html>

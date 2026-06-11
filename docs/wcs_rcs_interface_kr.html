@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WCS ↔ RCS 인터페이스 정의서</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5FA; --card:#FFFFFF;
+    --ink:#0F172A; --ink-soft:#475569; --ink-faint:#94A3B8;
+    --line:#E8EAF0; --line-strong:#D7DBE6;
+    --brand:#6366F1; --brand-deep:#4F46E5; --brand-soft:#EEF0FE;
+    --wcs:#F97316; --rcs:#3B82F6;
+    --ok:#10B981; --ng:#EF4444; --wait:#F59E0B;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
+    --sh-sm:0 1px 2px rgba(15,23,42,.04),0 2px 8px rgba(15,23,42,.05);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.6;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1060px;margin:0 auto;padding:30px clamp(16px,3vw,40px) 72px;}
+  header.doc{padding-bottom:16px;margin-bottom:8px;border-bottom:1px solid var(--line);}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--brand-deep);font-weight:600;}
+  h1{font-size:24px;line-height:1.2;margin:8px 0 4px;letter-spacing:-.02em;font-weight:800;}
+  h1 small{display:block;font-size:13px;font-weight:500;color:var(--ink-soft);margin-top:6px;line-height:1.55;}
+  .actors{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 0;}
+  .ac{font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;}
+  .ac::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .ac.rcs{background:#EAF1FE;color:var(--rcs);}
+  .ac.wcs{background:#FEF0E6;color:var(--wcs);}
+  .toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0;}
+  .toc a{font-family:var(--mono);font-size:11px;text-decoration:none;color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:999px;padding:4px 11px;transition:.15s;background:var(--card);}
+  .toc a:hover{border-color:var(--brand);color:var(--brand-deep);background:var(--brand-soft);}
+  section{margin:30px 0 0;scroll-margin-top:14px;}
+  h2{font-size:18px;font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:11px;letter-spacing:-.01em;}
+  h2 .n{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:9px;padding:3px 9px;box-shadow:var(--sh-sm);}
+  h3{font-size:14.5px;font-weight:700;margin:18px 0 6px;color:var(--ink);display:flex;align-items:center;gap:9px;}
+  h3 .ifid{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--brand-deep);background:var(--brand-soft);border:1px solid #DADCFB;border-radius:6px;padding:1px 7px;}
+  p{margin:7px 0;color:var(--ink-soft);}
+  ul,ol{margin:7px 0;padding-left:21px;color:var(--ink-soft);}
+  li{margin:4px 0;}
+  table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:var(--sh-sm);}
+  th,td{padding:9px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);}
+  tr:last-child td{border-bottom:none;}
+  th{background:var(--brand-soft);color:var(--brand-deep);font-weight:700;font-size:11.5px;letter-spacing:.02em;border-bottom:1px solid var(--line-strong);}
+  td+td,th+th{border-left:1px solid var(--line);}
+  tbody tr:hover td{background:#FBFBFE;}
+  code{font-family:var(--mono);font-size:12px;background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#334155;}
+  pre{background:#0F172A;color:#E2E8F0;border-radius:11px;padding:12px 15px;overflow-x:auto;font:12px/1.6 var(--mono);margin:8px 0;}
+  pre .c{color:#7DD3FC;} pre .s{color:#86EFAC;} pre .n{color:#FCD34D;}
+  .tag{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;color:var(--rcs);background:#EAF1FE;}
+  .tag::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;}
+  .pill{font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;color:#fff;display:inline-block;}
+  .pill.ok{background:var(--ok);}.pill.ng{background:var(--ng);}.pill.wait{background:var(--wait);}.pill.go{background:var(--rcs);}
+  .note{background:var(--brand-soft);border:1px solid #DADCFB;border-left:3px solid var(--brand);padding:10px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#3E3F73;margin:12px 0;line-height:1.55;}
+  .note b{color:var(--brand-deep);}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;}
+  .flow .st{font-family:var(--mono);font-size:12px;background:var(--card);border:1px solid var(--line-strong);border-radius:10px;padding:7px 13px;font-weight:600;box-shadow:var(--sh-sm);}
+  .flow .ar{color:var(--brand);font-weight:800;}
+  .ask{background:#FFF;border:1px solid #DADCFB;border-left:4px solid var(--brand);border-radius:0 14px 14px 0;padding:6px 18px 12px;box-shadow:var(--sh-sm);margin:10px 0;}
+  .ask ol{counter-reset:q;list-style:none;padding-left:0;}
+  .ask li{position:relative;padding:9px 0 9px 38px;border-bottom:1px dashed var(--line);color:var(--ink);}
+  .ask li:last-child{border-bottom:none;}
+  .ask li::before{counter-increment:q;content:"Q"counter(q);position:absolute;left:0;top:8px;font:700 10px var(--mono);color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:7px;padding:2px 5px;}
+  .footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);}
+  @media(max-width:680px){.page{padding:20px 13px 50px;}h1{font-size:20px;}}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="doc">
+    <div class="eyebrow">WCS ↔ RCS · API 인터페이스 — RCS 검토용</div>
+    <h1>WCS ↔ RCS 인터페이스 정의서
+      <small>REST / JSON API. <b>RCS가 클라이언트</b>(WCS를 호출), WCS는 응답만 한다. 실시간·투입 단위(배치 없음). 본 문서는 <b>RCS 측 구현 가능 여부를 검토받기 위한 제안</b> — 엔드포인트·인증·시간값은 예시이며 협의 가능.</small>
+    </h1>
+    <div class="actors">
+      <span class="ac wcs">WCS — 오더·목적지 보유 (서버)</span>
+      <span class="ac rcs">RCS — AGV / 로봇 제어 (클라이언트)</span>
+    </div>
+    <nav class="toc">
+      <a href="#s1">1 개요</a><a href="#s2">2 통신</a><a href="#s3">3 데이터 모델</a>
+      <a href="#s4">4 인터페이스 목록</a><a href="#s5">5 API 정의</a><a href="#s6">6 사유 코드</a>
+      <a href="#s7">7 플로우</a><a href="#s8">8 타이밍·재시도</a><a href="#s9">9 RCS 확인 사항</a>
+    </nav>
+  </header>
+
+  <section id="s1">
+    <h2><span class="n">1</span> 개요 &amp; 역할</h2>
+    <p>WCS가 오더와 목적지 배정을 보유한다. RCS는 AGV/로봇을 제어한다. 인덕션(투입구)에서 로봇이 <b>트레이에 상품을 받아</b> WCS에 목적지를 조회하고, 그 목적지(슈트)로 이동해 <b>트레이 수량 전량을 한 번에 틸트</b>한다(부분 투입 없음).</p>
+    <ul>
+      <li><b>RCS가 호출, WCS가 응답.</b> 세 인터페이스 모두 RCS → WCS HTTP 요청이며 WCS가 JSON으로 응답한다. 현재 설계에 WCS→RCS 푸시는 없다.</li>
+      <li><b>실시간·연속.</b> 배치(차수) 시작/종료 없음. 상품이 인덕션에 들어오는 즉시 처리.</li>
+      <li><b>목적지 = <code>chuteNo</code>.</b> 목적지는 슈트 번호로 지정한다.</li>
+      <li>투입 가부(<code>IF-08</code>)의 내부 판정은 WCS가 한다. RCS는 <code>allowed</code> / <code>reason</code> 결과만 보면 된다.</li>
+    </ul>
+  </section>
+
+  <section id="s2">
+    <h2><span class="n">2</span> 통신</h2>
+    <table>
+      <tr><th style="width:150px">항목</th><th>내용</th></tr>
+      <tr><td>프로토콜</td><td>REST over HTTP(S), <code>Content-Type: application/json</code></td></tr>
+      <tr><td>방향</td><td><b>RCS = 클라이언트</b>(요청) · <b>WCS = 서버</b>(응답). 투입마다 1요청 → 1응답.</td></tr>
+      <tr><td>메서드</td><td>모든 인터페이스 <code>POST</code> (JSON 바디)</td></tr>
+      <tr><td>인코딩</td><td>UTF-8 JSON</td></tr>
+      <tr><td>타임아웃</td><td><code>3 s</code> 요청 타임아웃 (예시 — 협의)</td></tr>
+      <tr><td>인증</td><td>결정 필요 (없음 / API 키 헤더 / mTLS 등) — Q7 참조</td></tr>
+      <tr><td>Base URL</td><td>WCS가 제공 (호스트 / IP / 포트) — Q7 참조</td></tr>
+    </table>
+  </section>
+
+  <section id="s3">
+    <h2><span class="n">3</span> 데이터 모델 / 필드</h2>
+    <table>
+      <tr><th style="width:140px">필드</th><th style="width:120px">타입</th><th>설명</th></tr>
+      <tr><td><code>pId</code></td><td>integer</td><td>피스(상품) 고유 ID (RCS 부여). 범위 <b>1 – 30000</b> — 전송 가능 여부·초기화 정책은 Q2에서 확인. 호출 간 피스 추적 키.</td></tr>
+      <tr><td><code>agvNo</code></td><td>integer</td><td>로봇(AGV) 번호</td></tr>
+      <tr><td><code>barcode</code></td><td>string</td><td>상품 바코드 (인덕션 스캔 값)</td></tr>
+      <tr><td><code>inductionNo</code></td><td>integer</td><td>인덕션(투입구) 번호</td></tr>
+      <tr><td><code>chuteNo</code></td><td>integer</td><td>목적지 번호 — 슈트 번호</td></tr>
+      <tr><td><code>qty</code></td><td>integer</td><td>트레이 적재 수량 (같은 상품, 1개 초과 가능)</td></tr>
+      <tr><td><code>timeStamp</code></td><td>string</td><td>이벤트 시각 — 해당 지역 <b>로컬 시간</b> 형식 (예: <code>2026-06-08 14:30:00</code>)</td></tr>
+    </table>
+  </section>
+
+  <section id="s4">
+    <h2><span class="n">4</span> 인터페이스 목록</h2>
+    <table>
+      <tr><th style="width:70px">IF</th><th style="width:200px">이름</th><th style="width:140px">방향</th><th>요약</th></tr>
+      <tr><td><code>IF-05</code></td><td>목적지 조회</td><td><span class="tag">RCS → WCS</span></td><td>목적지·수량 판정 (피스 추적 시작)</td></tr>
+      <tr><td><code>IF-08</code></td><td>투입 가부</td><td><span class="tag">RCS → WCS</span></td><td>지금 목적지에 투입해도 되는지 확인(허가될 때까지 폴링)</td></tr>
+      <tr><td><code>IF-10</code></td><td>투입 보고</td><td><span class="tag">RCS → WCS</span></td><td>틸트 보고</td></tr>
+    </table>
+  </section>
+
+  <section id="s5">
+    <h2><span class="n">5</span> API 정의</h2>
+
+    <h3><span class="ifid">IF-05</span> 목적지 조회</h3>
+    <p>제안: <code>POST /api/v1/destination-query</code>. 인덕션 스캔 시 1회 호출. WCS가 피스를 기록하고(추적 시작 — 결과가 NG여도 기록은 남음) 목적지·수량을 판정한다.</p>
+    <table>
+      <tr><th style="width:140px">요청(req)</th><th>응답(res)</th></tr>
+      <tr><td><code>pId</code>, <code>agvNo</code>, <code>barcode</code>, <code>inductionNo</code>, <code>qty</code>, <code>timeStamp</code></td><td><code>result</code> (OK / NG), <code>reason</code>, <code>chuteNo</code> (OK일 때 포함)</td></tr>
+    </table>
+<pre><span class="c">// 요청</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"agvNo"</span>: <span class="n">7</span>, <span class="s">"barcode"</span>: <span class="s">"8801234567890"</span>,
+  <span class="s">"inductionNo"</span>: <span class="n">2</span>, <span class="s">"qty"</span>: <span class="n">3</span>, <span class="s">"timeStamp"</span>: <span class="s">"2026-06-08 14:30:00"</span> }
+
+<span class="c">// 응답 — OK</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span>, <span class="s">"reason"</span>: <span class="s">"NORMAL"</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span> }
+
+<span class="c">// 응답 — NG (지금 보낼 목적지 없음)</span>
+{ <span class="s">"result"</span>: <span class="s">"NG"</span>, <span class="s">"reason"</span>: <span class="s">"OVER"</span>, <span class="s">"chuteNo"</span>: <span class="n">null</span> }</pre>
+    <p><span class="pill go">OK</span>이면 RCS가 AGV를 <code>chuteNo</code>로 이동시킨다. <span class="pill ng">NG</span>이면 AGV는 대기하고 이후 다시 호출한다(사유 코드 참조).</p>
+
+    <h3><span class="ifid">IF-08</span> 투입 가부</h3>
+    <p>제안: <code>POST /api/v1/deposit-permission</code>. AGV가 목적지에 도착해 투입 직전에 호출. WCS가 내부에서 가부를 판정하며, RCS는 결과만 받아 <b><code>allowed=true</code>가 될 때까지 500ms 간격(협의 가능)으로 폴링</b>한다.</p>
+    <table>
+      <tr><th style="width:140px">요청(req)</th><th>응답(res)</th></tr>
+      <tr><td><code>pId</code>, <code>chuteNo</code>, <code>agvNo</code></td><td><code>allowed</code> (true / false), <code>reason</code></td></tr>
+    </table>
+<pre><span class="c">// 요청</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"agvNo"</span>: <span class="n">7</span> }
+
+<span class="c">// 응답 — 아직 AGV 층이 아님 (WCS가 처리 중)</span>
+{ <span class="s">"allowed"</span>: <span class="n">false</span>, <span class="s">"reason"</span>: <span class="s">"WRONG_FLOOR"</span> }
+
+<span class="c">// 응답 — 투입 가능</span>
+{ <span class="s">"allowed"</span>: <span class="n">true</span>, <span class="s">"reason"</span>: <span class="s">"READY"</span> }</pre>
+
+    <h3><span class="ifid">IF-10</span> 투입 보고</h3>
+    <p>제안: <code>POST /api/v1/deposit-report</code>. 틸트 후 전송. <code>qty</code> 전량을 한 번에 틸트한다.</p>
+    <table>
+      <tr><th style="width:140px">요청(req)</th><th>응답(res)</th></tr>
+      <tr><td><code>pId</code>, <code>barcode</code>, <code>chuteNo</code>, <code>agvNo</code></td><td><code>result</code> (OK)</td></tr>
+    </table>
+<pre><span class="c">// 요청</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"barcode"</span>: <span class="s">"8801234567890"</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"agvNo"</span>: <span class="n">7</span> }
+
+<span class="c">// 응답</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
+  </section>
+
+  <section id="s6">
+    <h2><span class="n">6</span> 사유 코드</h2>
+    <h3>IF-05 — 목적지 조회</h3>
+    <table>
+      <tr><th style="width:210px">reason</th><th style="width:120px">result</th><th>RCS 동작</th></tr>
+      <tr><td><code>NORMAL</code></td><td><span class="pill go">OK</span></td><td>AGV를 <code>chuteNo</code>로 이동</td></tr>
+      <tr><td><code>BUSY / FULL / PAUSED</code></td><td><span class="pill go">OK</span></td><td>그래도 <code>chuteNo</code>로 이동(일시적 막힘 — 도착 후 IF-08에서 실제 가부 재확인)</td></tr>
+      <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>AGV 대기(전량이 한 목적지에 아직 안 들어감)</td></tr>
+      <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>AGV 대기 — 보낼 목적지 없음(OFFLINE = 목적지 연결 끊김; 대체 / 보류)</td></tr>
+    </table>
+    <h3>IF-08 — 투입 가부</h3>
+    <table>
+      <tr><th style="width:130px">allowed</th><th style="width:200px">reason</th><th>RCS 동작</th></tr>
+      <tr><td><span class="pill ok">true</span></td><td><code>READY</code></td><td>투입(틸트 진행)</td></tr>
+      <tr><td><span class="pill wait">false</span></td><td><code>WRONG_FLOOR</code></td><td>목적지가 아직 AGV 층에 정렬되지 않음 — WCS가 처리 중. <b>500ms</b>(협의 가능) 뒤 재호출</td></tr>
+      <tr><td><span class="pill ng">false</span></td><td><code>BUSY / FULL / PAUSED / OFFLINE</code></td><td>지금 받을 수 없음. 앞에서 대기하며 <b>500ms</b>(협의 가능) 간격으로 <code>true</code> 될 때까지 재호출</td></tr>
+    </table>
+  </section>
+
+  <section id="s7">
+    <h2><span class="n">7</span> 전체 플로우</h2>
+    <div class="flow">
+      <span class="st">① 목적지 조회</span><span class="ar">→</span>
+      <span class="st">② 투입 가부 (500ms 폴링·협의 가능)</span><span class="ar">→</span>
+      <span class="st">③ 투입 보고</span>
+    </div>
+    <ol>
+      <li><b>① 목적지 조회</b> — 스캔 시 RCS가 <code>IF-05</code> 호출. OK면 AGV를 <code>chuteNo</code>로 이동, NG면 AGV 대기.</li>
+      <li><b>② 투입 가부</b> — 목적지에서 RCS가 <code>IF-08</code>을 <code>allowed=true</code>가 될 때까지 500ms(협의 가능) 간격으로 반복. <code>WRONG_FLOOR</code> / <code>BUSY</code> / <code>FULL</code> / <code>PAUSED</code> / <code>OFFLINE</code>은 “대기 후 재시도”.</li>
+      <li><b>③ 투입 보고</b> — RCS가 목적지에서 <code>qty</code> 전량을 틸트하고 <code>IF-10</code>으로 보고.</li>
+    </ol>
+  </section>
+
+  <section id="s8">
+    <h2><span class="n">8</span> 타이밍 &amp; 재시도 <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(예시 — 협의)</span></h2>
+    <table>
+      <tr><th style="width:240px">항목</th><th style="width:120px">값</th><th>비고</th></tr>
+      <tr><td>IF-08 재호출 간격</td><td><code>500 ms</code></td><td>RCS가 <code>allowed=true</code>까지 폴링 · <b>간격 협의 가능</b></td></tr>
+      <tr><td>API 요청 타임아웃</td><td><code>3 s</code></td><td>RCS → WCS 응답 한계</td></tr>
+    </table>
+  </section>
+
+  <section id="s9">
+    <h2><span class="n">9</span> RCS 확인 사항 (구현 가능 여부)</h2>
+    <p>아래 항목을 RCS 측에서 구현 가능한지 검토·회신 부탁드립니다. 위에서 “제안/미정”으로 표기된 부분은 RCS 의견을 반영할 수 있습니다.</p>
+    <div class="ask">
+      <ol>
+        <li><b>HTTP 클라이언트.</b> RCS가 클라이언트로서 WCS REST/JSON 엔드포인트를 <b>투입마다 실시간</b>으로 호출할 수 있습니까(배치 아님)?</li>
+        <li><b>피스 ID(<code>pId</code>).</b> RCS가 <code>pId</code>를 <b>1–30000 범위로 부여·전송</b>할 수 있습니까? 가능하다면 30000에 도달하면 1로 순환할지, 매일 1로 초기화할지 정책을 알려주세요.</li>
+        <li><b>인덕션 데이터.</b> 스캔 시 RCS가 <code>agvNo</code>, <code>barcode</code>, <code>inductionNo</code>, <code>qty</code>를 제공할 수 있습니까?</li>
+        <li><b>IF-05 처리.</b> <code>OK</code>면 AGV를 <code>chuteNo</code>로 이동, <code>NG</code>면 AGV 대기 후 재시도 — 가능합니까?</li>
+        <li><b>IF-08 폴링.</b> RCS가 투입 가부를 <code>allowed=true</code>까지 <b>500ms(협의 가능)</b> 간격으로 폴링하고, <code>WRONG_FLOOR / BUSY / FULL / PAUSED / OFFLINE</code>을 “목적지 앞에서 대기·재시도”로 처리할 수 있습니까?</li>
+        <li><b>IF-10 보고.</b> 틸트(투입) 후 투입 보고(<code>IF-10</code>)를 전송할 수 있습니까?</li>
+        <li><b>접속 &amp; 인증.</b> 어떤 Base URL / IP / 포트를 사용하며, 어떤 인증을 지원합니까(없음 / API 키 / mTLS 등)?</li>
+      </ol>
+    </div>
+  </section>
+
+  <div class="footer">WCS ↔ RCS 인터페이스 정의서 · REST/JSON · RCS가 클라이언트, WCS가 응답 · 엔드포인트/인증/시간값은 RCS 검토용 제안 · 사내 참조: 마스터 정의서, 통합 시퀀스 다이어그램</div>
+</div>
+</body>
+</html>

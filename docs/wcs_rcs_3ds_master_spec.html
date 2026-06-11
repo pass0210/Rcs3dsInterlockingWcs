@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WCS ↔ RCS / 3D Sorter 통합 인터페이스 정의서</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5FA; --card:#FFFFFF;
+    --ink:#0F172A; --ink-soft:#475569; --ink-faint:#94A3B8;
+    --line:#E8EAF0; --line-strong:#D7DBE6;
+    --brand:#6366F1; --brand-deep:#4F46E5; --brand-soft:#EEF0FE;
+    --wcs:#F97316; --rcs:#3B82F6; --sorter:#10B981;
+    --ok:#10B981; --ng:#EF4444; --wait:#F59E0B;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
+    --sh-sm:0 1px 2px rgba(15,23,42,.04),0 2px 8px rgba(15,23,42,.05);
+    --sh-md:0 6px 14px -6px rgba(15,23,42,.12),0 18px 36px -16px rgba(15,23,42,.18);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.6;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1080px;margin:0 auto;padding:30px clamp(16px,3vw,40px) 72px;}
+
+  header.doc{padding-bottom:16px;margin-bottom:8px;border-bottom:1px solid var(--line);}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--brand-deep);font-weight:600;}
+  h1{font-size:24px;line-height:1.2;margin:8px 0 4px;letter-spacing:-.02em;font-weight:800;}
+  h1 small{display:block;font-size:13px;font-weight:500;color:var(--ink-soft);margin-top:6px;line-height:1.55;}
+  .actors{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 0;}
+  .ac{font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;}
+  .ac::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .ac.rcs{background:#EAF1FE;color:var(--rcs);}
+  .ac.wcs{background:#FEF0E6;color:var(--wcs);}
+  .ac.srt{background:#E6F8F0;color:var(--sorter);}
+  .toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0;}
+  .toc a{font-family:var(--mono);font-size:11px;text-decoration:none;color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:999px;padding:4px 11px;transition:.15s;background:var(--card);}
+  .toc a:hover{border-color:var(--brand);color:var(--brand-deep);background:var(--brand-soft);}
+
+  section{margin:30px 0 0;scroll-margin-top:14px;}
+  h2{font-size:18px;font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:11px;letter-spacing:-.01em;}
+  h2 .n{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:9px;padding:3px 9px;box-shadow:var(--sh-sm);}
+  h3{font-size:14px;font-weight:700;margin:18px 0 6px;color:var(--ink);}
+  p{margin:7px 0;color:var(--ink-soft);}
+  ul,ol{margin:7px 0;padding-left:21px;color:var(--ink-soft);}
+  li{margin:4px 0;}
+
+  table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:var(--sh-sm);}
+  th,td{padding:9px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);}
+  tr:last-child td{border-bottom:none;}
+  th{background:var(--brand-soft);color:var(--brand-deep);font-weight:700;font-size:11.5px;letter-spacing:.02em;border-bottom:1px solid var(--line-strong);}
+  td+td,th+th{border-left:1px solid var(--line);}
+  tbody tr:hover td{background:#FBFBFE;}
+
+  code{font-family:var(--mono);font-size:12px;background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#334155;}
+  .mono{font-family:var(--mono);}
+  .dir{font-family:var(--mono);font-size:11px;white-space:nowrap;}
+  .w{color:var(--wcs);font-weight:700;}.s{color:var(--sorter);font-weight:700;}.r{color:var(--rcs);font-weight:700;}
+
+  .tag{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
+  .tag::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;}
+  .tag.api,.tag.rd{color:var(--rcs);background:#EAF1FE;}
+  .tag.plc,.tag.pw{color:var(--sorter);background:#E6F8F0;}
+  .tag.wr{color:var(--wcs);background:#FEF0E6;}
+
+  .pill{font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;color:#fff;display:inline-block;}
+  .pill.ok{background:var(--ok);}.pill.ng{background:var(--ng);}.pill.wait{background:var(--wait);}.pill.go{background:var(--sorter);}
+
+  .note{background:var(--brand-soft);border:1px solid #DADCFB;border-left:3px solid var(--brand);padding:10px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#3E3F73;margin:12px 0;line-height:1.55;}
+  .note b{color:var(--brand-deep);}
+  .note.warn{background:#FCF8EE;border-color:#F1E6C9;border-left-color:var(--wait);color:#5A4A22;}
+  .note.warn b{color:#92400E;}
+
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;}
+  .flow .st{font-family:var(--mono);font-size:12px;background:var(--card);border:1px solid var(--line-strong);border-radius:10px;padding:7px 13px;font-weight:600;box-shadow:var(--sh-sm);}
+  .flow .ar{color:var(--brand);font-weight:800;}
+
+  .footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);}
+
+  .hs{counter-reset:step;list-style:none;padding-left:0;margin:8px 0;}
+  .hs li{position:relative;padding:8px 0 8px 34px;border-bottom:1px dashed var(--line);}
+  .hs li:last-child{border-bottom:none;}
+  .hs li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:7px;width:23px;height:23px;border-radius:50%;background:linear-gradient(135deg,var(--brand),var(--brand-deep));color:#fff;font-family:var(--mono);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:var(--sh-sm);}
+  @media(max-width:680px){.page{padding:20px 13px 50px;}h1{font-size:20px;}}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="doc">
+    <div class="eyebrow">WCS ↔ RCS ↔ 3D Sorter · Master Spec</div>
+    <h1>WCS ↔ RCS / 3D Sorter 통합 인터페이스 정의서
+      <small>실시간 연속 운영. 로봇이 트레이 상품을 목적지(슈트 또는 3D 셀)에 한 번에 전량 틸트. ※ PLC 주소는 3DS 제공 맵 기준(§7), 시간값은 예시(현장 조정).</small>
+    </h1>
+    <div class="actors">
+      <span class="ac rcs">RCS · AGV/로봇 제어</span>
+      <span class="ac wcs">WCS · 오더 보유</span>
+      <span class="ac srt">3D Sorter · VEICHI PLC</span>
+    </div>
+    <nav class="toc">
+      <a href="#s0">00 개요</a><a href="#s1">01 통신</a><a href="#s2">02 모델·식별자</a>
+      <a href="#s3">03 IF 목록</a><a href="#s4">04 API 정의</a><a href="#s5">05 목적지 조회</a>
+      <a href="#s6">06 투입 가부</a><a href="#s7">07 PLC 레지스터</a><a href="#s8">08 플로우</a>
+      <a href="#s9">09 예외</a><a href="#s10">10 확정 사항</a>
+    </nav>
+  </header>
+
+  <section id="s0">
+    <h2><span class="n">00</span> 개요 &amp; 시스템 구성</h2>
+    <p><span class="w">WCS</span>(자사, 오더 보유)가 <span class="r">RCS</span>(AGV·로봇)와 <span class="s">3D Sorter</span>(VEICHI PLC)를 연동한다. 로봇이 인덕션에서 트레이를 받아, 목적지(슈트 또는 3D 셀)에 상품 <b>전량을 한 번에 틸트</b>한다.</p>
+    <ul>
+      <li><b>실시간 연속 운영</b> — 배치(차수) 시작/종료 개념 없음. 인덕션부터 바로 처리(작업 데이터 수신·시작·종료·결과 전송 IF 제외).</li>
+      <li><b>목적지 = chuteNo</b> — 슈트/3D를 하나의 번호로 식별(메시지에 destType 없음). 투입 보고도 슈트/3D 구분 없이 동일.</li>
+      <li><b>한 번에 전량 틸트</b> — 한 트레이에 같은 상품 여러 개(qty)를 싣고, 한 목적지에 전량을 한 번에. 부분 투입 불가.</li>
+    </ul>
+  </section>
+
+  <section id="s1">
+    <h2><span class="n">01</span> 통신 구성</h2>
+    <table>
+      <tr><th style="width:150px">구간</th><th style="width:150px">방식</th><th>설명</th></tr>
+      <tr><td><span class="r">WCS ↔ RCS</span></td><td><span class="tag api">REST / JSON</span></td><td><b>RCS가 WCS를 호출</b>하고 WCS는 응답. 상품 단위 요청/응답. API 타임아웃 3s(예시).</td></tr>
+      <tr><td><span class="s">WCS ↔ 3DS</span></td><td><span class="tag plc">VEICHI PLC Modbus</span></td><td><b>WCS = 마스터(폴링)</b>, PLC = 슬레이브. TCP(502)/RTU. <b>모두 Holding Register</b>(읽기 FC03 · 쓰기 FC06/16) — 플래그/상태는 워드 D4의 비트. 단선=폴 타임아웃/소켓. → 상세 <b>WCS↔3DS 인터페이스 문서</b> 참조.</td></tr>
+    </table>
+  </section>
+
+  <section id="s2">
+    <h2><span class="n">02</span> 핵심 모델 &amp; 식별자</h2>
+    <table>
+      <tr><th style="width:150px">필드</th><th>의미</th></tr>
+      <tr><td><code>pId</code></td><td>피스(상품) 고유값 — <b>1 ~ 30000</b></td></tr>
+      <tr><td><code>agvNo</code></td><td>로봇 번호 (= agvId)</td></tr>
+      <tr><td><code>barcode</code></td><td>상품 바코드</td></tr>
+      <tr><td><code>inductionNo</code></td><td>인덕션(투입구) 번호</td></tr>
+      <tr><td><code>chuteNo</code></td><td>목적지 번호 (슈트/3D 공통). 유형은 chuteNo로 구분</td></tr>
+      <tr><td><code>qty</code></td><td>트레이 적재 수량 (같은 상품 여러 개 가능)</td></tr>
+    </table>
+    <div class="note"><b>예약 차감</b> — 목적지 수량은 <b>IF-05(인덕션 시점)에 예약 차감</b>한다. 이동 중인 물량까지 반영해 같은 목적지에 중복/초과 배정되는 것을 막는다.</div>
+  </section>
+
+  <section id="s3">
+    <h2><span class="n">03</span> 인터페이스 목록</h2>
+    <table>
+      <tr><th style="width:90px">IF</th><th style="width:150px">이름</th><th style="width:160px">구간 / 방향</th><th>요약</th></tr>
+      <tr><td><code>IF-05</code></td><td>인덕션 투입 + 목적지 조회</td><td><span class="tag api">RCS → WCS</span></td><td>라인 투입 기록(추적 시작) + 목적지(chuteNo)·수량 판정 + 예약 차감 <b>(IF-16 통합)</b></td></tr>
+      <tr><td><code>IF-08</code></td><td>투입 가부</td><td><span class="tag api">RCS → WCS</span></td><td>투입 직전 가부(Ready·층 확인). 재호출 500ms</td></tr>
+      <tr><td><code>IF-10</code></td><td>투입 보고</td><td><span class="tag api">RCS → WCS</span></td><td>틸트 보고(슈트/3D 공통)</td></tr>
+      <tr><td><code>IF-06</code></td><td>3DS 상태 조회</td><td><span class="tag plc">WCS → PLC</span></td><td>Ready/CurFloor 등 (IF-08 처리 시)</td></tr>
+      <tr><td><code>IF-11</code></td><td>셀 지정</td><td><span class="tag plc">WCS → PLC</span></td><td>적재할 셀 지정(영역 C 핸드셰이크)</td></tr>
+      <tr><td><code>IF-12</code></td><td>적재 완료</td><td><span class="tag plc">PLC → WCS</span></td><td>적재 결과 통지(영역 R 핸드셰이크)</td></tr>
+      <tr><td>—</td><td>슈트 상태 / 만재 / 일시정지·해제</td><td><span class="tag api">운영</span></td><td>슈트 운영 이벤트(가용/만재/정지)</td></tr>
+    </table>
+    <div class="note warn"><b>제외(실시간 연속이라 미사용)</b> — <code>IF-01</code> 작업 데이터 수신 · <code>IF-02</code> 작업 시작 · <code>IF-03</code> 작업 종료 · <code>IF-04</code> 결과 전송. 또한 <code>IF-09</code> 슈트 분류 보고는 <b>IF-10 투입 보고로 통합</b>(슈트/3D 구분 없음), <code>IF-16</code> 인덕션 투입은 <b>IF-05로 통합</b>(스캔 직후 목적지 조회와 시점이 같음).</div>
+  </section>
+
+  <section id="s4">
+    <h2><span class="n">04</span> API 데이터 정의 (WCS ↔ RCS)</h2>
+    <table>
+      <tr><th style="width:90px">IF</th><th>요청(req)</th><th>응답(res)</th></tr>
+      <tr><td><code>IF-05</code></td><td>pId · agvNo · barcode · inductionNo · qty · timeStamp</td><td>result · reason · chuteNo (+ 예약/수량)</td></tr>
+      <tr><td><code>IF-08</code></td><td>pId · chuteNo · agvNo</td><td>allowed · reason</td></tr>
+      <tr><td><code>IF-10</code></td><td>pId · barcode · chuteNo · agvNo</td><td>OK</td></tr>
+    </table>
+    <div class="note">필드명 정리: <code>destId→chuteNo</code>, <code>bizDay·batch</code> 제거, <code>destType</code> 제거, <code>agvFloor</code> 제거(층은 agvNo의 층 / CurFloor로 판정).</div>
+  </section>
+
+  <section id="s5">
+    <h2><span class="n">05</span> 목적지 조회 (IF-05) 사유</h2>
+    <p>WCS가 목적지(chuteNo)와 수량을 판정한다. <b>막힘이어도 BUSY/FULL/PAUSED는 그 목적지로 그대로 배정</b>(일시적이라 거부 아님) → 도착 후 IF-08에서 실제 가부 확인.</p>
+    <table>
+      <tr><th style="width:170px">reason</th><th style="width:130px">결과</th><th>동작</th></tr>
+      <tr><td><code>NORMAL</code></td><td><span class="pill go">OK · chuteNo</span></td><td>전량이 한 곳에 들어감 → 그 목적지로 진행</td></tr>
+      <tr><td><code>BUSY / FULL / PAUSED</code></td><td><span class="pill go">OK · chuteNo</span></td><td>일시적 막힘 → <b>그 목적지로 보냄</b>. 도착 후 IF-08에서 가부 확인·대기</td></tr>
+      <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>전량이 한 곳(슈트/3D 한 셀)에 안 들어감 → 전량 가능할 때까지 AGV 대기</td></tr>
+      <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>보낼 곳 없음 → AGV 대기(이동 안 함). OFFLINE은 대체 3D/보류</td></tr>
+    </table>
+    <div class="note">OVER와 보낼 곳 없음(COMPLETED/NO_DEST/OFFLINE)은 <b>동작이 동일</b>(NG·대기)하여 하나로 묶는다. BUSY/FULL/PAUSED만 “그 목적지로 진행”.</div>
+  </section>
+
+  <section id="s6">
+    <h2><span class="n">06</span> 투입 가부 (IF-08) — 층 비교 포함</h2>
+    <p>요청 <code>pId · chuteNo · agvNo</code>. WCS가 PLC 상태(<code>Ready</code> D4.2)와 <code>CurFloor</code>(D5 == AGV 층)를 <b>함께</b> 확인한다 — 층이 같아도 분류 중·이동 중(Ready=0)이면 BUSY. 상태·층 비교·이동 명령·반복이 모두 IF-08 안에서 일어나며 RCS가 500ms 간격으로 재호출한다.</p>
+    <table>
+      <tr><th style="width:230px">조건</th><th style="width:210px">응답</th><th>동작</th></tr>
+      <tr><td>받을 수 있음(Ready=1) · 층 일치</td><td><span class="pill ok">allowed = true</span></td><td>투입 진행</td></tr>
+      <tr><td>받을 수 있음(Ready=1) · 층 다름</td><td><span class="pill wait">false · WRONG_FLOOR</span></td><td>WCS가 <code>TgtFloor</code>(D6)에 AGV 층 쓰기(<b>TgtFloor==0일 때</b>) → 그 층으로 이동, 정렬될 때까지 500ms 재호출</td></tr>
+      <tr><td>분류 중·이동 중(Ready=0) = BUSY</td><td><span class="pill ng">false · BUSY</span></td><td>층이 같아도 BUSY. WCS가 <code>TgtFloor</code>=AGV 층 쓰기(<b>TgtFloor==0일 때</b>) → <b>분류 끝나면 그 층으로 복귀</b>. 500ms 재호출</td></tr>
+      <tr><td>막힘 (FULL/PAUSED/OFFLINE)</td><td><span class="pill ng">false</span></td><td>장기 차단 — 해소될 때까지 500ms 재호출 대기 (<b>TgtFloor 안 씀</b>)</td></tr>
+    </table>
+  </section>
+
+  <section id="s7">
+    <h2><span class="n">07</span> 3DS PLC 레지스터 + 핸드셰이크</h2>
+    <table>
+      <tr><th style="width:130px">영역</th><th>워드/비트</th><th style="width:140px">방향</th><th>설명</th></tr>
+      <tr><td>셀 지정 (C) · IF-11</td><td><code>C_CellNo</code>(D0) · <code>C_Seq</code>(D1) · <code>C_Flag</code>(D4.0)</td><td><span class="tag plc">WCS→PLC</span></td><td>WCS가 셀 지정 후 C_Flag=1</td></tr>
+      <tr><td>적재 완료 (R) · IF-12</td><td><code>R_CellNo</code>(D2) · <code>R_Seq</code>(D3) · <code>R_Flag</code>(D4.1)</td><td><span class="tag plc">PLC→WCS</span></td><td>PLC가 적재 후 R_Flag=1</td></tr>
+      <tr><td>상태 · 층</td><td><code>Ready</code>(D4.2) · <code>CurFloor</code>(D5) · <code>TgtFloor</code>(D6)</td><td><span class="tag plc">WCS read / write</span></td><td>Ready(0=분류 중→BUSY) · 현재 층(1/2) · 목표 층(0=없음)</td></tr>
+    </table>
+    <h3>핸드셰이크 규칙</h3>
+    <ol class="hs">
+      <li><b>쓰기 전 해당 Flag=0 확인</b> — 아직 안 읽힌 값을 덮어쓰지 않도록(C_Flag / R_Flag 각각).</li>
+      <li><b>C 영역</b>: <span class="w">WCS</span>가 C_Flag=0일 때 C값 쓰고 C_Flag=1 → <span class="s">PLC</span>가 C값 읽고 <b>C_CellNo·C_Seq·C_Flag=0 클리어</b> 후 적재.</li>
+      <li><b>R 영역</b>: <span class="s">PLC</span>가 R_Flag=0일 때 R값 쓰고 R_Flag=1 → <span class="w">WCS</span>가 R값 읽고 <code>R_Seq==C_Seq</code> 대사 후 <b>R_CellNo·R_Seq·R_Flag=0 클리어</b>.</li>
+      <li><b>층 폐루프</b>: WCS가 <code>TgtFloor==0</code>이고 (<b>층 다름</b> 또는 <b>분류 중</b>)일 때 <code>TgtFloor</code>=AGV 층 쓰기 → 층 다르면 이동, 분류 중이면 분류 후 복귀 → 도착 시 PLC가 CurFloor 기입(<b>TgtFloor 유지</b>) → 다음 IF-08에서 WCS가 CurFloor 읽어 비교. <code>TgtFloor</code>는 <b>분류 시작(BUSY 진입) 시 0으로 클리어</b>(도착 즉시 비우면 곧바로 다시 써져 왕복). TgtFloor≠0이면 덮어쓰지 않아 핑퐁 차단.</li>
+    </ol>
+    <div class="note">“쓰는 쪽은 Flag=0 확인 후 쓰고 1, 읽는 쪽은 읽고 0.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭. 틸트 낙하 대기는 <b>PLC가 N초 지연</b>으로 처리(WCS 측 지연 없음). <b>모든 레지스터는 Holding Register</b>(읽기 FC03 · 쓰기 FC06/16)이고 <code>C_Flag</code>·<code>R_Flag</code>·<code>Ready</code>는 워드 <b>D4의 비트0·1·2</b>다 — 한 비트만 바꿀 땐 D4 read-modify-write(상대 비트 보존). 주소는 3DS 제공 맵(D0~D4) + 층 신설(D5·D6).</div>
+  </section>
+
+  <section id="s8">
+    <h2><span class="n">08</span> 핵심 플로우</h2>
+    <div class="flow">
+      <span class="st">① 인덕션·목적지 조회</span><span class="ar">→</span>
+      <span class="st">② 투입 가부(층 비교)</span><span class="ar">→</span>
+      <span class="st">③ 투입(슈트/3D 공통)</span>
+    </div>
+    <ol>
+      <li><b>① 인덕션·목적지 조회</b> — 스캔(qty) → (판독 실패 시 NO_READ·재스캔/리젝트) → <code>IF-05</code>(라인 투입 기록 + 목적지·수량 판정) → OK·chuteNo(BUSY/FULL/PAUSED 포함) / NG·대기(OVER·COMPLETED·NO_DEST·OFFLINE).</li>
+      <li><b>② 투입 가부</b> — <code>IF-08</code> 반복(500ms): CurFloor 비교 → 허가 / WRONG_FLOOR(TgtFloor 쓰기) / 막힘.</li>
+      <li><b>③ 투입</b> — <code>IF-10</code> 투입 보고 → <code>IF-11</code> 셀 지정(C_Flag=0 확인 후 1) → PLC가 C 읽고 초기화 → 적재(R_Flag=0 확인 후 1) → WCS R_Flag 폴링 → R 읽고 초기화. 이후 <b>분류 후 복귀</b>(TgtFloor 층으로 이동 → 도착 시 CurFloor 기입).</li>
+    </ol>
+  </section>
+
+  <section id="s9">
+    <h2><span class="n">09</span> 예외 처리</h2>
+    <table>
+      <tr><th style="width:180px">상황</th><th>처리</th></tr>
+      <tr><td>NO_READ (판독 실패)</td><td>RCS 내부 재스캔 또는 리젝트. IF-05 대상 아님</td></tr>
+      <tr><td>OVER (전량 불가)</td><td>NG → 전량 가능할 때까지 AGV 대기</td></tr>
+      <tr><td>막힘 (FULL/PAUSED/BUSY/OFFLINE)</td><td>IF-05/IF-08에서 처리. OFFLINE은 대체 3D/보류</td></tr>
+      <tr><td>WRONG_FLOOR</td><td>WCS가 TgtFloor로 이동 명령, CurFloor 일치까지 IF-08 재호출 대기</td></tr>
+      <tr><td>핸드셰이크 타임아웃</td><td>R_Flag 5s 초과 → 알람·상태 재확인. <code>R_Seq≠C_Seq</code> → 유실/중복</td></tr>
+    </table>
+  </section>
+
+  <section id="s10">
+    <h2><span class="n">10</span> 확정 사항 (PLC 협의 완료)</h2>
+    <ul>
+      <li><b>PLC가 주는 상태 = 수용 가능 여부(Ready=D4.2)</b> — <code>Ready=0</code>은 <b>분류 중 또는 이동 중</b>(둘 다 받을 수 없음). <b>FULL(만재)·PAUSED(일시정지)·OFFLINE</b>은 <b>WCS가 판단</b>한다(만재=예약/수량, 일시정지=운영 상태, OFFLINE=폴 타임아웃). BUSY/FULL 구분용 별도 PLC 비트는 두지 않는다.</li>
+      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (층 다름 또는 분류 중)</b> — <code>TgtFloor==0</code>이고 층이 다르거나 분류 중(BUSY)이면 AGV 층을 써서 그 층으로 이동(층 다름)하거나 분류 후 복귀(분류 중)시킨다. 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작(BUSY 진입) 시 <code>TgtFloor=0</code> 클리어</b>(도착 즉시 비우면 왕복 우려). FULL/PAUSED/OFFLINE은 쓰지 않고 대기.</li>
+      <li><b>플래그 위치 확정</b> — <code>C_Flag</code>=D4.0 · <code>R_Flag</code>=D4.1 · <code>Ready</code>=D4.2 (3DS 맵). 같은 워드(D4)라 한 비트만 바꿀 땐 read-modify-write.</li>
+    </ul>
+  </section>
+
+  <div class="footer">WCS ↔ RCS / 3D Sorter 통합 인터페이스 정의서 · 실시간 연속 운영 · 필드/흐름 최신화 반영 · PLC 상세는 WCS↔3DS 인터페이스 문서, 시각 흐름은 통합 시퀀스 다이어그램 참조</div>
+</div>
+</body>
+</html>

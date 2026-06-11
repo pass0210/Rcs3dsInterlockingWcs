@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WCS ↔ 3D Sorter (VEICHI PLC) 인터페이스 정의</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5FA; --card:#FFFFFF;
+    --ink:#0F172A; --ink-soft:#475569; --ink-faint:#94A3B8;
+    --line:#E8EAF0; --line-strong:#D7DBE6;
+    --brand:#6366F1; --brand-deep:#4F46E5; --brand-soft:#EEF0FE;
+    --wcs:#F97316; --rcs:#3B82F6; --sorter:#10B981;
+    --ok:#10B981; --ng:#EF4444; --wait:#F59E0B;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,-apple-system,system-ui,sans-serif;
+    --sh-sm:0 1px 2px rgba(15,23,42,.04),0 2px 8px rgba(15,23,42,.05);
+    --sh-md:0 6px 14px -6px rgba(15,23,42,.12),0 18px 36px -16px rgba(15,23,42,.18);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.6;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1080px;margin:0 auto;padding:30px clamp(16px,3vw,40px) 72px;}
+
+  header.doc{padding-bottom:16px;margin-bottom:8px;border-bottom:1px solid var(--line);}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--brand-deep);font-weight:600;}
+  h1{font-size:24px;line-height:1.2;margin:8px 0 4px;letter-spacing:-.02em;font-weight:800;}
+  h1 small{display:block;font-size:13px;font-weight:500;color:var(--ink-soft);margin-top:6px;line-height:1.55;}
+  .actors{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 0;}
+  .ac{font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;}
+  .ac::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .ac.rcs{background:#EAF1FE;color:var(--rcs);}
+  .ac.wcs{background:#FEF0E6;color:var(--wcs);}
+  .ac.srt{background:#E6F8F0;color:var(--sorter);}
+  .toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0;}
+  .toc a{font-family:var(--mono);font-size:11px;text-decoration:none;color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:999px;padding:4px 11px;transition:.15s;background:var(--card);}
+  .toc a:hover{border-color:var(--brand);color:var(--brand-deep);background:var(--brand-soft);}
+
+  section{margin:30px 0 0;scroll-margin-top:14px;}
+  h2{font-size:18px;font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:11px;letter-spacing:-.01em;}
+  h2 .n{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:9px;padding:3px 9px;box-shadow:var(--sh-sm);}
+  h3{font-size:14px;font-weight:700;margin:18px 0 6px;color:var(--ink);}
+  p{margin:7px 0;color:var(--ink-soft);}
+  ul,ol{margin:7px 0;padding-left:21px;color:var(--ink-soft);}
+  li{margin:4px 0;}
+
+  table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:var(--sh-sm);}
+  th,td{padding:9px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);}
+  tr:last-child td{border-bottom:none;}
+  th{background:var(--brand-soft);color:var(--brand-deep);font-weight:700;font-size:11.5px;letter-spacing:.02em;border-bottom:1px solid var(--line-strong);}
+  td+td,th+th{border-left:1px solid var(--line);}
+  tbody tr:hover td{background:#FBFBFE;}
+
+  code{font-family:var(--mono);font-size:12px;background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#334155;}
+  .mono{font-family:var(--mono);}
+  .dir{font-family:var(--mono);font-size:11px;white-space:nowrap;}
+  .w{color:var(--wcs);font-weight:700;}.s{color:var(--sorter);font-weight:700;}.r{color:var(--rcs);font-weight:700;}
+
+  .tag{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;}
+  .tag::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;}
+  .tag.api,.tag.rd{color:var(--rcs);background:#EAF1FE;}
+  .tag.plc,.tag.pw{color:var(--sorter);background:#E6F8F0;}
+  .tag.wr{color:var(--wcs);background:#FEF0E6;}
+
+  .pill{font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;color:#fff;display:inline-block;}
+  .pill.ok{background:var(--ok);}.pill.ng{background:var(--ng);}.pill.wait{background:var(--wait);}.pill.go{background:var(--sorter);}
+
+  .note{background:var(--brand-soft);border:1px solid #DADCFB;border-left:3px solid var(--brand);padding:10px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#3E3F73;margin:12px 0;line-height:1.55;}
+  .note b{color:var(--brand-deep);}
+  .note.warn{background:#FCF8EE;border-color:#F1E6C9;border-left-color:var(--wait);color:#5A4A22;}
+  .note.warn b{color:#92400E;}
+
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;}
+  .flow .st{font-family:var(--mono);font-size:12px;background:var(--card);border:1px solid var(--line-strong);border-radius:10px;padding:7px 13px;font-weight:600;box-shadow:var(--sh-sm);}
+  .flow .ar{color:var(--brand);font-weight:800;}
+
+  .footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);}
+
+  .hs{counter-reset:step;list-style:none;padding-left:0;margin:8px 0;}
+  .hs li{position:relative;padding:8px 0 8px 34px;border-bottom:1px dashed var(--line);}
+  .hs li:last-child{border-bottom:none;}
+  .hs li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:7px;width:23px;height:23px;border-radius:50%;background:linear-gradient(135deg,var(--brand),var(--brand-deep));color:#fff;font-family:var(--mono);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:var(--sh-sm);}
+  @media(max-width:680px){.page{padding:20px 13px 50px;}h1{font-size:20px;}}
+
+  /* ===== 인쇄 / PDF 출력 ===== */
+  @media print{
+    @page{ size:A4 portrait; margin:12mm; }
+    *{ -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
+    html,body{ background:#fff !important; }
+    .page{ max-width:none !important; margin:0 !important; padding:0 !important; }
+    .toc{ display:none !important; }
+    section{ margin-top:16px; }
+    h1,h2,h3{ break-after:avoid; page-break-after:avoid; }
+    tr,th,td,.note,.flow,.hs li,ol li,ul li{ break-inside:avoid; page-break-inside:avoid; }
+    /* 타이밍 차트: 페이지 폭에 맞춰 축소(가로 잘림 방지) + 페이지 경계 분할 방지 */
+    svg{ min-width:0 !important; max-width:100% !important; width:100% !important; height:auto !important; }
+    div[style*="overflow-x"]{ overflow:visible !important; break-inside:avoid; page-break-inside:avoid; padding:8px 10px !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="doc">
+    <div class="eyebrow">WCS ↔ 3D Sorter · Modbus Interface</div>
+    <h1>WCS ↔ 3D Sorter (VEICHI PLC) 인터페이스 정의
+      <small>WCS = Modbus 마스터(주기 폴링) · PLC = 슬레이브. 셀 지정(IF-11)·적재 완료(IF-12)·상태/층 제어. ※ 레지스터 주소·시간값은 예시(현장 확정).</small>
+    </h1>
+    <nav class="toc">
+      <a href="#s1">1 통신</a><a href="#s2">2 레지스터 맵</a><a href="#s3">3 핸드셰이크</a>
+      <a href="#s4">4 층 제어</a><a href="#s5">5 타이밍</a><a href="#s6">6 확정 사항</a>
+    </nav>
+  </header>
+
+  <section id="s1">
+    <h2><span class="n">1</span> 통신 구성</h2>
+    <table>
+      <tr><th style="width:130px">항목</th><th>내용</th></tr>
+      <tr><td>프로토콜</td><td>Modbus <b>TCP(502)</b> 또는 RTU(시리얼) — 현장 선택</td></tr>
+      <tr><td>역할</td><td>WCS = <b>마스터</b>(주기적으로 PLC를 읽고 씀) · PLC = <b>슬레이브</b></td></tr>
+      <tr><td>워드</td><td>모두 Holding Register(16bit) — 읽기 <code>FC03</code> · 단일 쓰기 <code>FC06</code> · 다중 쓰기 <code>FC16</code> (3DS 적용)</td></tr>
+      <tr><td>플래그 비트</td><td><code>C_Flag</code>·<code>R_Flag</code>·<code>Ready</code>는 <b>워드 D4의 비트</b>로 처리 — 별도 Coil(FC01/05/15) 미사용. 한 비트만 바꿀 땐 D4를 읽어 해당 비트만 수정 후 다시 쓰기(read-modify-write)</td></tr>
+      <tr><td>단선 감지</td><td><b>폴 타임아웃 / 소켓 끊김</b>으로 감지 → OFFLINE 처리 (별도 heartbeat·워치독 없음)</td></tr>
+      <tr><td>정합성</td><td>명령 순번 <code>Seq</code>로 유실·중복 검출 (R_Seq == 보낸 C_Seq 대사)</td></tr>
+    </table>
+  </section>
+
+  <section id="s2">
+    <h2><span class="n">2</span> 레지스터 맵 <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(3DS 제공 맵 · D0~D6)</span></h2>
+    <table>
+      <tr><th style="width:120px">영역</th><th>이름</th><th style="width:64px">주소</th><th style="width:64px">타입</th><th style="width:150px">방향</th><th>설명</th></tr>
+      <tr><td rowspan="3">셀 지정 (C)<br><span class="dir s">IF-11 · WCS→PLC</span></td><td><code>C_CellNo</code></td><td>D0</td><td>HR</td><td><span class="tag wr">WCS write</span></td><td>지정할 셀 번호</td></tr>
+      <tr><td><code>C_Seq</code></td><td>D1</td><td>HR</td><td><span class="tag wr">WCS write</span></td><td>명령 순번 (매 건 증가)</td></tr>
+      <tr><td><code>C_Flag</code></td><td>D4.0</td><td>HR 비트</td><td><span class="tag wr">WCS set</span> / <span class="tag pw">PLC clear</span></td><td>워드 D4의 비트0 · 1=WCS가 씀 · 0=PLC가 읽고 클리어</td></tr>
+      <tr><td rowspan="3">적재 완료 (R)<br><span class="dir s">IF-12 · PLC→WCS</span></td><td><code>R_CellNo</code></td><td>D2</td><td>HR</td><td><span class="tag pw">PLC write</span></td><td>실제 적재한 셀</td></tr>
+      <tr><td><code>R_Seq</code></td><td>D3</td><td>HR</td><td><span class="tag pw">PLC write</span></td><td>처리한 순번 (= 받은 C_Seq)</td></tr>
+      <tr><td><code>R_Flag</code></td><td>D4.1</td><td>HR 비트</td><td><span class="tag pw">PLC set</span> / <span class="tag rd">WCS clear</span></td><td>워드 D4의 비트1 · 1=PLC가 씀 · 0=WCS가 읽고 클리어</td></tr>
+      <tr><td rowspan="3">상태·층</td><td><code>Ready</code></td><td>D4.2</td><td>HR 비트</td><td><span class="tag rd">WCS read</span></td><td>워드 D4의 비트2 · 1=받을 수 있음(정지·비분류) / 0=<b>분류 중 또는 이동 중</b>(받을 수 없음 → BUSY). FULL·PAUSED·OFFLINE은 WCS가 판단</td></tr>
+      <tr><td><code>CurFloor</code></td><td>D5</td><td>HR</td><td><span class="tag pw">PLC write</span> / <span class="tag rd">WCS read</span></td><td>3D 현재 층 (1 / 2)</td></tr>
+      <tr><td><code>TgtFloor</code></td><td>D6</td><td>HR</td><td><span class="tag wr">WCS write</span></td><td>목표 층(이동 명령). 0 = 없음</td></tr>
+    </table>
+    <div class="note"><b>D4 = 플래그·상태 워드</b> — 비트0 <code>C_Flag</code> · 비트1 <code>R_Flag</code> · 비트2 <code>Ready</code> · 비트3~ 예비. 한 비트만 바꿀 땐 D4를 읽어 해당 비트만 수정 후 다시 쓰기(read-modify-write). 주소는 <b>3DS 제공 맵(D0~D4)</b> 기준이며, 층(<code>D5</code>·<code>D6</code>)은 본 협의로 신설.</div>
+  </section>
+
+  <section id="s3">
+    <h2><span class="n">3</span> 핸드셰이크 프로토콜</h2>
+    <p><b>공통 규칙</b> — ① <b>쓰기 전 해당 Flag=0 확인</b>(아직 안 읽힌 값 덮어쓰기 방지). ② <b>쓴 쪽이 Flag=1, 읽은 쪽이 Flag=0</b>으로 내림(대칭). ③ C_Flag/R_Flag로 한 건씩 직렬 처리.</p>
+
+    <h3>C 영역 — 셀 지정 (WCS → PLC)</h3>
+    <ol class="hs">
+      <li><span class="w">WCS</span>: <code>C_Flag==0</code> 확인 → <code>C_CellNo</code>·<code>C_Seq</code> 쓰기 → <code>C_Flag=1</code></li>
+      <li><span class="s">PLC</span>: <code>C_Flag=1</code> 감지 → <code>C_CellNo</code>·<code>C_Seq</code> 읽기 → <b>읽은 직후</b> <code>C_CellNo·C_Seq·C_Flag = 0</code> 클리어 → 해당 셀로 적재 수행</li>
+    </ol>
+
+    <h3>R 영역 — 적재 완료 (PLC → WCS)</h3>
+    <ol class="hs">
+      <li><span class="s">PLC</span>: <code>R_Flag==0</code> 확인 → 적재 결과 <code>R_CellNo</code>·<code>R_Seq</code> 쓰기 → <code>R_Flag=1</code></li>
+      <li><span class="w">WCS</span>: <code>R_Flag</code> 폴링 → 1이면 <code>R_CellNo</code>·<code>R_Seq</code> 읽기 → <b><code>R_Seq == C_Seq</code> 대사</b>(유실·중복 검출) → <code>R_CellNo·R_Seq·R_Flag = 0</code> 클리어</li>
+    </ol>
+    <div class="note"><b>요약</b> — “쓰는 쪽은 Flag=0 확인 후 쓰고 1로 set, 읽는 쪽은 읽고 0으로 clear.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭. <code>C_Flag</code>(D4.0)·<code>R_Flag</code>(D4.1)는 같은 워드 D4의 비트이므로, set/clear 시 D4를 읽어 해당 비트만 바꿔 다시 쓴다(read-modify-write · 상대 플래그 비트 보존).</div>
+  <h3 style="margin-top:18px">타이밍 차트 ① — 셀 지정 → 적재 완료 (C/R 핸드셰이크)</h3>
+    <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
+    <svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:740px;height:auto">
+      <style>
+        .g{stroke:#D7DBE6;stroke-width:1;stroke-dasharray:3 3}
+        .ax{stroke:#B6BECC;stroke-width:1.4}
+        .lbl{font:700 10px var(--mono);fill:#0F172A}
+        .adr{font:10px var(--mono);fill:#94A3B8}
+        .dig{fill:none;stroke:#4F46E5;stroke-width:2.2;stroke-linejoin:round}
+        .idle{stroke:#CBD5E1;stroke-width:1.6}
+        .busv{font:700 9px var(--mono);fill:#4F46E5}
+        .ph{font:700 9px var(--sans);fill:#0F172A}
+        .lo{font:9px var(--mono);fill:#94A3B8}
+      </style>
+      <rect x="200" y="10" width="156" height="18" rx="5" fill="#FCEBDD"/>
+      <rect x="356" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="512" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="668" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="824" y="10" width="156" height="18" rx="5" fill="#FCEBDD"/>
+      <text class="ph" x="278" y="23" text-anchor="middle">① WCS 쓰기</text>
+      <text class="ph" x="434" y="23" text-anchor="middle">② PLC 읽고 클리어</text>
+      <text class="ph" x="590" y="23" text-anchor="middle">③ N초 → 적재</text>
+      <text class="ph" x="746" y="23" text-anchor="middle">④ PLC 통지</text>
+      <text class="ph" x="902" y="23" text-anchor="middle">⑤ WCS 읽고 클리어</text>
+      <line class="g" x1="200" y1="32" x2="200" y2="262"/><line class="g" x1="356" y1="32" x2="356" y2="262"/><line class="g" x1="512" y1="32" x2="512" y2="262"/><line class="g" x1="668" y1="32" x2="668" y2="262"/><line class="g" x1="824" y1="32" x2="824" y2="262"/><line class="g" x1="980" y1="32" x2="980" y2="262"/>
+      <text class="lbl" x="190" y="74" text-anchor="end">C_CellNo·C_Seq</text><text class="adr" x="190" y="86" text-anchor="end">D0 · D1</text>
+      <text class="lbl" x="190" y="125" text-anchor="end">C_Flag</text><text class="adr" x="190" y="137" text-anchor="end">D4.0</text>
+      <text class="lbl" x="190" y="184" text-anchor="end">R_CellNo·R_Seq</text><text class="adr" x="190" y="196" text-anchor="end">D2 · D3</text>
+      <text class="lbl" x="190" y="235" text-anchor="end">R_Flag</text><text class="adr" x="190" y="247" text-anchor="end">D4.1</text>
+      <line class="idle" x1="200" y1="78" x2="344" y2="78"/><rect x="344" y="64" width="156" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="422" y="81" text-anchor="middle">유효 (셀·seq)</text><line class="idle" x1="500" y1="78" x2="980" y2="78"/>
+      <polyline class="dig" points="200,146 344,146 344,110 500,110 500,146 980,146"/>
+      <line class="idle" x1="200" y1="188" x2="812" y2="188"/><rect x="812" y="174" width="156" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="890" y="191" text-anchor="middle">유효 (R·seq)</text><line class="idle" x1="968" y1="188" x2="980" y2="188"/>
+      <polyline class="dig" points="200,256 812,256 812,220 968,220 968,256 980,256"/>
+      <line class="ax" x1="200" y1="278" x2="986" y2="278"/><polygon points="986,278 978,274 978,282" fill="#B6BECC"/><text class="lo" x="980" y="293" text-anchor="end">시간 →</text>
+    </svg>
+    </div>
+    <ol>
+      <li><b>① WCS 쓰기</b> — <code>C_Flag==0</code> 확인 → <code>C_CellNo·C_Seq</code> 쓰기 → <code>C_Flag=1</code></li>
+      <li><b>② PLC 읽고 클리어</b> — PLC가 <code>C_Flag=1</code> 보고 C 값 읽음 → <code>C_CellNo·C_Seq·C_Flag=0</code> 클리어</li>
+      <li><b>③ N초 → 적재</b> — PLC가 N초 대기(틸트 낙하 안착) 후 지정 셀에 적재</li>
+      <li><b>④ PLC 통지</b> — <code>R_Flag==0</code> 확인 → <code>R_CellNo·R_Seq</code> 쓰기 → <code>R_Flag=1</code></li>
+      <li><b>⑤ WCS 읽고 클리어</b> — WCS가 <code>R_Flag</code> 폴링 → R 값 읽고 <code>R_Seq==C_Seq</code> 대사 → <code>R_CellNo·R_Seq·R_Flag=0</code> 클리어</li>
+    </ol>
+  </section>
+
+  <section id="s4">
+    <h2><span class="n">4</span> 층 제어 (폐루프)</h2>
+    <p>3D가 1·2층을 오가며 AGV로부터 트레이를 받는다. 투입 가부(IF-08) 처리 시 층을 맞춘다.</p>
+    <ol class="hs">
+      <li><span class="w">WCS</span>: IF-08에서 <code>CurFloor</code>(D5)와 상태(<code>Ready</code> D4.2)를 읽어 AGV 층·수용 가능 여부와 비교 (<code>Ready=0</code> = 분류 중 <b>또는 이동 중</b>)</li>
+      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + 층 일치 → <code>allowed=true</code> (투입 진행)</li>
+      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + 층 다름 → <code>WRONG_FLOOR</code> 반환 → RCS가 <b>500ms 간격 재호출</b></li>
+      <li><b>분류 중 또는 이동 중</b>(<code>Ready=0</code> / BUSY) → <code>allowed=false</code>(BUSY) → RCS 재호출. 분류 중이면 곧 끝나므로 아래 조건으로 <code>TgtFloor</code>를 미리 써 둔다(이동 중이면 이미 <code>TgtFloor</code>가 설정됨)</li>
+      <li><b>TgtFloor 쓰기 조건</b> — <code>TgtFloor==0</code> 이고 (<b>층 다름</b> 또는 <b>분류 중</b>)이면 <span class="w">WCS</span>가 <code>TgtFloor</code>(D6)에 AGV 층을 쓴다 → 층 다르면 그 층으로 이동, 분류 중이면 <b>분류를 마친 뒤 그 층으로 복귀</b></li>
+      <li><span class="s">PLC</span>: <code>TgtFloor</code> 층으로 이동(또는 분류 후 복귀) → <b>도착하면</b> <code>CurFloor</code>(D5)에 도착 층 기입 (<code>TgtFloor</code>는 <b>유지</b>)</li>
+      <li><span class="s">PLC</span>: <b>분류를 시작할 때</b>(Ready=0 진입) <code>TgtFloor</code>=0 클리어 — 도착 즉시 비우면 곧바로 다시 써져 <b>왕복</b>할 수 있어, 분류 시작까지 그 층을 붙들어 둔다</li>
+    </ol>
+    <div class="note warn"><b>TgtFloor 쓰기 = <code>0</code>일 때 + (층 다름 또는 분류 중)</b> — 이전 명령이 진행 중(TgtFloor≠0)이면 덮어쓰지 않아 <b>핑퐁(왕복)을 차단</b>하고, 층이 다르거나 분류 중이면 AGV 층을 써서 그 층으로 이동/복귀시킨다. 도착 시엔 <span class="s">PLC</span>가 <code>CurFloor</code>만 기입하고(<code>TgtFloor</code> 유지), <b>분류를 시작할 때(BUSY 진입) <code>TgtFloor</code>=0 클리어</b> — 도착 즉시 비우면 곧바로 다시 써져 왕복하므로 분류 시작까지 그 층을 붙든다. <b>FULL·PAUSED·OFFLINE</b>은 장기 차단이라 이동시켜도 점유만 하므로 <b>쓰지 않고 대기</b>한다.</div>
+  <h3 style="margin-top:18px">타이밍 차트 ② — 층 정렬 · 분류 중 아님 (층 다름 → 이동 → 허가)</h3>
+    <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
+    <svg viewBox="0 0 1000 268" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:740px;height:auto">
+      <style>
+        .g{stroke:#D7DBE6;stroke-width:1;stroke-dasharray:3 3}
+        .ax{stroke:#B6BECC;stroke-width:1.4}
+        .lbl{font:700 10px var(--mono);fill:#0F172A}
+        .adr{font:10px var(--mono);fill:#94A3B8}
+        .dig{fill:none;stroke:#4F46E5;stroke-width:2.2;stroke-linejoin:round}
+        .idle{stroke:#CBD5E1;stroke-width:1.6}
+        .busv{font:700 9px var(--mono);fill:#4F46E5}
+        .ph{font:700 9px var(--sans);fill:#0F172A}
+        .lo{font:9px var(--mono);fill:#94A3B8}
+        .ok{font:700 9px var(--mono);fill:#15803D}
+        .warn{font:700 9px var(--mono);fill:#B45309}
+      </style>
+      <rect x="200" y="10" width="195" height="18" rx="5" fill="#FCEBDD"/>
+      <rect x="395" y="10" width="195" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="590" y="10" width="195" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="785" y="10" width="195" height="18" rx="5" fill="#FCEBDD"/>
+      <text class="ph" x="297" y="23" text-anchor="middle">① IF-08 #1 · 층 다름</text>
+      <text class="ph" x="492" y="23" text-anchor="middle">② 3D 이동 중</text>
+      <text class="ph" x="687" y="23" text-anchor="middle">③ 도착 · CurFloor 기입</text>
+      <text class="ph" x="882" y="23" text-anchor="middle">④ IF-08 #N · 허가</text>
+      <line class="g" x1="200" y1="32" x2="200" y2="240"/><line class="g" x1="395" y1="32" x2="395" y2="240"/><line class="g" x1="590" y1="32" x2="590" y2="240"/><line class="g" x1="785" y1="32" x2="785" y2="240"/><line class="g" x1="980" y1="32" x2="980" y2="240"/>
+      <text class="lbl" x="190" y="66" text-anchor="end">Ready</text><text class="adr" x="190" y="78" text-anchor="end">D4.2</text>
+      <text class="lbl" x="190" y="124" text-anchor="end">CurFloor</text><text class="adr" x="190" y="136" text-anchor="end">D5</text>
+      <text class="lbl" x="190" y="182" text-anchor="end">TgtFloor</text><text class="adr" x="190" y="194" text-anchor="end">D6</text>
+      <text class="lbl" x="190" y="228" text-anchor="end">IF-08 결과</text>
+      <polyline class="dig" points="200,48 395,48 395,68 590,68 590,48 980,48"/><text class="lo" x="206" y="44">1 = 받을 수 있음</text><text class="lo" x="492" y="90" text-anchor="middle">0 = 이동 중(받을 수 없음)</text>
+      <rect x="200" y="114" width="195" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="297" y="131" text-anchor="middle">2</text>
+      <rect x="395" y="114" width="195" height="28" rx="6" fill="#F4F5FB" stroke="#C7CBF7" stroke-width="1.2" stroke-dasharray="4 3"/><text class="busv" x="492" y="131" text-anchor="middle" fill="#94A3B8">이동 중</text>
+      <rect x="590" y="114" width="390" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="785" y="131" text-anchor="middle">1</text>
+      <line class="idle" x1="200" y1="186" x2="360" y2="186"/><text class="lo" x="280" y="183" text-anchor="middle">0</text>
+      <rect x="360" y="172" width="620" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="670" y="189" text-anchor="middle">1  (AGV층 · 분류 시작 시 0으로 클리어)</text>
+      <text class="warn" x="297" y="232" text-anchor="middle">WRONG_FLOOR</text>
+      <text class="warn" x="492" y="232" text-anchor="middle">BUSY (이동 중)</text>
+      <text class="ok" x="882" y="232" text-anchor="middle">allowed = true</text>
+      <line class="ax" x1="200" y1="250" x2="986" y2="250"/><polygon points="986,250 978,246 978,254" fill="#B6BECC"/><text class="lo" x="980" y="265" text-anchor="end">시간 →</text>
+    </svg>
+    </div>
+    <ol>
+      <li><b>① 층 다름</b> — WCS가 <code>CurFloor</code>(=2)·<code>Ready</code> 읽음. AGV층(1)과 달라 <code>TgtFloor==0</code>이므로 1 기입 → <code>WRONG_FLOOR</code></li>
+      <li><b>② 이동 중</b> — 3D가 1층으로 이동. 이동 중엔 <code>Ready=0</code>이라 받을 수 없음 → <code>BUSY</code>. <code>TgtFloor≠0</code>이라 덮어쓰지 않음(핑퐁 차단). RCS 500ms 재호출</li>
+      <li><b>③ 도착</b> — PLC가 <code>CurFloor=1</code> 기입 (<code>TgtFloor</code>는 유지). <code>TgtFloor</code>는 도착이 아니라 <b>분류 시작 시</b> 0으로 클리어 — 도착 즉시 비우면 곧바로 다시 써져 왕복하기 때문</li>
+      <li><b>④ 허가</b> — <code>CurFloor==AGV층</code> &amp; <code>Ready=1</code> → <code>allowed=true</code>, 투입 진행</li>
+    </ol>
+  <h3 style="margin-top:18px">타이밍 차트 ③ — 층 정렬 · <b>분류 중</b> (TgtFloor 선기입 → 분류 끝 → 복귀 → 허가)</h3>
+    <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
+    <svg viewBox="0 0 1000 268" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:760px;height:auto">
+      <style>
+        .g3{stroke:#D7DBE6;stroke-width:1;stroke-dasharray:3 3}
+        .ax3{stroke:#B6BECC;stroke-width:1.4}
+        .lbl3{font:700 10px var(--mono);fill:#0F172A}
+        .adr3{font:10px var(--mono);fill:#94A3B8}
+        .dig3{fill:none;stroke:#4F46E5;stroke-width:2.2;stroke-linejoin:round}
+        .idle3{stroke:#CBD5E1;stroke-width:1.6}
+        .busv3{font:700 9px var(--mono);fill:#4F46E5}
+        .ph3{font:700 9px var(--sans);fill:#0F172A}
+        .lo3{font:9px var(--mono);fill:#94A3B8}
+        .ok3{font:700 9px var(--mono);fill:#15803D}
+        .warn3{font:700 9px var(--mono);fill:#B45309}
+      </style>
+      <rect x="200" y="10" width="156" height="18" rx="5" fill="#FCEBDD"/>
+      <rect x="356" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="512" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="668" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
+      <rect x="824" y="10" width="156" height="18" rx="5" fill="#FCEBDD"/>
+      <text class="ph3" x="278" y="23" text-anchor="middle">① 분류 중·층 다름</text>
+      <text class="ph3" x="434" y="23" text-anchor="middle">② 분류 진행</text>
+      <text class="ph3" x="590" y="23" text-anchor="middle">③ 분류 끝 → 이동</text>
+      <text class="ph3" x="746" y="23" text-anchor="middle">④ 도착·허가</text>
+      <text class="ph3" x="902" y="23" text-anchor="middle">⑤ 투입→분류 시작</text>
+      <line class="g3" x1="200" y1="32" x2="200" y2="240"/><line class="g3" x1="356" y1="32" x2="356" y2="240"/><line class="g3" x1="512" y1="32" x2="512" y2="240"/><line class="g3" x1="668" y1="32" x2="668" y2="240"/><line class="g3" x1="824" y1="32" x2="824" y2="240"/><line class="g3" x1="980" y1="32" x2="980" y2="240"/>
+      <text class="lbl3" x="190" y="62" text-anchor="end">Ready</text><text class="adr3" x="190" y="74" text-anchor="end">D4.2</text>
+      <text class="lbl3" x="190" y="124" text-anchor="end">CurFloor</text><text class="adr3" x="190" y="136" text-anchor="end">D5</text>
+      <text class="lbl3" x="190" y="182" text-anchor="end">TgtFloor</text><text class="adr3" x="190" y="194" text-anchor="end">D6</text>
+      <text class="lbl3" x="190" y="228" text-anchor="end">IF-08 결과</text>
+      <polyline class="dig3" points="200,68 668,68 668,48 824,48 824,68 980,68"/><text class="lo3" x="206" y="64">0 = 분류 중·이동 중</text><text class="lo3" x="746" y="44" text-anchor="middle">1 = 받을 수 있음</text><text class="lo3" x="902" y="64" text-anchor="middle">0 = 새 분류</text>
+      <rect x="200" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="356" y="131" text-anchor="middle">2</text>
+      <rect x="512" y="114" width="156" height="28" rx="6" fill="#F4F5FB" stroke="#C7CBF7" stroke-width="1.2" stroke-dasharray="4 3"/><text class="busv3" x="590" y="131" text-anchor="middle" fill="#94A3B8">이동 중</text>
+      <rect x="668" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="824" y="131" text-anchor="middle">1</text>
+      <line class="idle3" x1="200" y1="186" x2="280" y2="186"/><text class="lo3" x="240" y="183" text-anchor="middle">0</text>
+      <rect x="280" y="172" width="544" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="552" y="189" text-anchor="middle">1  (AGV층 · 분류 중 선기입)</text>
+      <line class="idle3" x1="824" y1="186" x2="980" y2="186"/><text class="lo3" x="902" y="183" text-anchor="middle">0</text>
+      <text class="warn3" x="278" y="232" text-anchor="middle">BUSY</text>
+      <text class="warn3" x="434" y="232" text-anchor="middle">BUSY (재호출)</text>
+      <text class="warn3" x="590" y="232" text-anchor="middle">BUSY (이동 중)</text>
+      <text class="ok3" x="746" y="232" text-anchor="middle">allowed = true</text>
+      <text class="lo3" x="902" y="232" text-anchor="middle">(IF-10 투입 → 분류)</text>
+      <line class="ax3" x1="200" y1="250" x2="986" y2="250"/><polygon points="986,250 978,246 978,254" fill="#B6BECC"/><text class="lo3" x="980" y="265" text-anchor="end">시간 →</text>
+    </svg>
+    </div>
+    <ol>
+      <li><b>① 분류 중·층 다름</b> — WCS가 <code>Ready=0</code>(분류 중)·<code>CurFloor</code>(=2) 읽음. AGV층(1)과 다르고 분류 중이라 <code>TgtFloor==0</code>이므로 <b>1을 미리 기입</b> → <code>BUSY</code></li>
+      <li><b>② 분류 진행</b> — 3D가 분류를 계속. <code>TgtFloor=1</code> 유지(≠0이라 덮어쓰지 않음). RCS 500ms 재호출(<code>BUSY</code>)</li>
+      <li><b>③ 분류 끝 → 이동</b> — 분류가 끝나도 <code>TgtFloor=1</code>을 따라 1층으로 <b>복귀(이동)</b>하는 동안엔 <code>Ready=0</code>(이동 중엔 받을 수 없음) → <code>BUSY</code></li>
+      <li><b>④ 도착·허가</b> — 도착하면 PLC가 <code>CurFloor=1</code> 기입(<code>TgtFloor</code> 유지)하고 <code>Ready</code> 0→1(이제 정지·수용 가능). 층 일치 → <code>allowed=true</code></li>
+      <li><b>⑤ 투입 → 분류 시작</b> — AGV 투입(IF-10) 후 3DS가 새 분류를 시작(<code>Ready</code> 1→0). 이때 PLC가 <code>TgtFloor=0</code> 클리어 — <b>도착 즉시가 아니라 분류 시작 시</b> 비워 그 사이 성급한 재기입(왕복)을 막는다</li>
+    </ol>
+  </section>
+
+  <section id="s5">
+    <h2><span class="n">5</span> 타이밍 <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(임의 표준 — 현장 조정)</span></h2>
+    <table>
+      <tr><th style="width:220px">항목</th><th style="width:120px">값</th><th>비고</th></tr>
+      <tr><td>IF-08 재호출(가부·층 정렬)</td><td><code>500 ms</code></td><td>허가될 때까지 RCS 반복</td></tr>
+      <tr><td>R_Flag 폴링 / 타임아웃</td><td><code>100 ms</code> / <b>분류 최대 소요 + 여유</b></td><td>적재(분류) 완료 대기 — 분류는 5초 이상 걸릴 수 있어 그에 맞춰 설정(고정 5초 ✕). 분류 중(<code>Ready=0</code>)엔 정상 대기, 초과 시 알람</td></tr>
+      <tr><td>틸트 낙하 대기</td><td><code>PLC N초</code></td><td><b>PLC가 처리</b> — 값 읽어도 N초 지연 후 분류/이동(WCS 측 지연 없음)</td></tr>
+      <tr><td>WCS API 타임아웃</td><td><code>3 s</code></td><td>RCS↔WCS API 응답 한계</td></tr>
+      <tr><td>상태 폴링 주기</td><td><code>~100–200 ms</code></td><td>Ready/CurFloor 등</td></tr>
+    </table>
+  </section>
+
+  <section id="s6">
+    <h2><span class="n">6</span> 확정 사항 (결정됨)</h2>
+    <ul>
+      <li><b>PLC가 주는 상태 = 수용 가능 여부(Ready=D4.2)</b> — <code>Ready=0</code>은 <b>분류 중 또는 이동 중</b>(둘 다 받을 수 없음). <b>FULL(만재)·PAUSED(일시정지)·OFFLINE</b>은 <b>WCS가 판단</b>한다(만재=예약/수량, 일시정지=운영 상태, OFFLINE=폴 타임아웃). BUSY/FULL 구분용 별도 PLC 비트는 두지 않는다.</li>
+      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (층 다름 또는 분류 중)</b> — <code>TgtFloor==0</code>이고 층이 다르거나 분류 중(BUSY)이면 AGV 층을 써서 그 층으로 이동(층 다름)하거나 분류 후 복귀(분류 중)시킨다. 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작(BUSY 진입) 시 <code>TgtFloor</code>=0 클리어</b> — 도착 즉시 비우면 왕복 우려. FULL/PAUSED/OFFLINE은 쓰지 않고 대기.</li>
+    </ul>
+  </section>
+
+  <div class="footer">WCS ↔ 3D Sorter (VEICHI PLC) 인터페이스 정의 · Modbus 마스터-슬레이브 · 레지스터 주소는 3DS 제공 맵(D0~D4) + 층 신설(D5·D6), 시간값은 예시(현장 조정) · 상위 흐름은 통합 시퀀스/마스터 정의서 참조</div>
+</div>
+</body>
+</html>
