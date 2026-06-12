@@ -1,5 +1,6 @@
 namespace Wcs.Data;
 
-// TODO(M4): EF Core DbContext + 엔티티 — Order(목적지·계획수량), Reservation(예약 차감),
-// PieceTrace(pId 이력: IF-05/08/10 + C/R Seq), TransactionLog(레지스터 변화 + API 원문 JSON).
+// TODO(M4): docs/ERD.md의 16개 테이블을 EF Core 엔티티+DbContext로 구현.
+// 원칙: 대리키 bigint / p_id 필터드 유니크(is_active) / 상태 enum HasConversion<string>() /
+//       이력 테이블 append-only / row_version 동시성 / SQLite 개발 분기(ERD.md '인덱스' 참조).
 public sealed class Placeholder { }

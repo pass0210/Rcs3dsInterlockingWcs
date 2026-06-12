@@ -24,6 +24,7 @@
 
 ## 스펙 소스 (docs/ — 항상 이것이 정답)
 - `docs/SPEC.md` — 응축 스펙(레지스터 맵, 판정 표, 핸드셰이크, 시뮬레이터 동작). **먼저 읽을 것.**
+- `docs/ERD.md` — DB 스키마 12테이블(M4 구현 기준). 대리키·p_id 순환·이력 분리 원칙 포함.
 - `docs/wcs_3ds_interface.html` — WCS↔3DS Modbus 정의 + 타이밍 차트 ①②③
 - `docs/wcs_rcs_3ds_master_spec.html` — 마스터 정의서(§6 투입 가부 표 = 판정 스펙)
 - `docs/wcs_3ds_unified_sequence.html` — 통합 시퀀스(IF-05→08→10→11→12)

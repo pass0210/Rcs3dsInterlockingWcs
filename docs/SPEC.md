@@ -39,6 +39,7 @@ TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=agvFloor || Ready==0)
 - `POST /api/v1/destination-query` (IF-05) req{pId,barcode,inductionNo,qty,timeStamp}
   → OK·chuteNo (목적지 NORMAL/BUSY/FULL/PAUSED — 일단 이동) / NG·reason(OVER/COMPLETED/NO_DEST/OFFLINE — 대기)
   OK 시 예약 차감(이동 중 물량 반영, 중복 배정 방지)
+  · 오더의 destination이 NULL(송장/매장 단위 상위 등록)이면 **이 시점 WCS가 빈 슈트 자동 할당**(dest_assign_type=AUTO) 후 예약 — 같은 트랜잭션. 빈 슈트 없으면 NG·NO_DEST
 - `POST /api/v1/deposit-permission` (IF-08) req{pId,chuteNo,agvNo,timeStamp}
   → {allowed, reason?} — 판정 표 그대로. RCS는 false면 500ms 후 재호출
   ※ agvFloor 산출 방법(요청 필드 vs agvNo/chuteNo→층 매핑)은 미확정 — 설정 매핑으로 시작
@@ -46,6 +47,7 @@ TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=agvFloor || Ready==0)
   → {result:"OK"} — 멱등(pId 중복 보고 무해). 3D 목적지면 이후 IF-11 셀 지정 트리거
 
 ## 4. C/R 핸드셰이크 (3D 목적지 한정, IF-11/12)
+셀 선택: 오더의 활성 cell_assignment 있으면 그 셀 재사용, 없으면 그 destination 소속 빈 셀(enabled·미점유) 할당 — 빈 셀 없으면 해당 3DS는 FULL(WCS 판단 요소)
 C(셀 지정): WCS가 C_Flag==0 확인 → C_CellNo·C_Seq 쓰기 → C_Flag=1
             → PLC가 C_Flag=1 감지 → C 읽기 → 읽은 직후 C_CellNo·C_Seq·C_Flag=0 클리어 → (틸트 낙하 N초는 PLC 지연) → 적재
 R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=1

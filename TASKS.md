@@ -32,7 +32,7 @@ SDK 버전이 net10.0과 다르면 csproj TargetFramework 일괄 수정.
 - **Done**: Sim3ds + API 띄우고 curl 시나리오: IF-05 OK → IF-08(WRONG_FLOOR→이동→allowed) → IF-10 OK
 
 ## M4. 시나리오 검증 + 영속화
-- Wcs.Data: 오더/예약/pId 이력/트랜잭션 로그 엔티티 + EF Core(SQL Server Express, 개발은 SQLite 허용)
+- Wcs.Data: **docs/ERD.md의 16테이블** 그대로 EF Core 구현(SQL Server Express, 개발은 SQLite 분기) + Initial 마이그레이션 + 기준정보 시드
 - 시나리오 S1~S9 자동화(xUnit 통합 테스트, Sim3ds 고장 주입 사용):
   S1 정상 / S2 층 다름(차트②) / S3 분류 중 선기입·복귀·분류시작 클리어(차트③) / S4 핑퐁 차단(쓰기 이력 검증)
   / S5 R_Seq 불일치 알람 / S6 R_Flag 타임아웃 / S7 OFFLINE / S8 FULL·PAUSED / S9 다중 AGV 경합

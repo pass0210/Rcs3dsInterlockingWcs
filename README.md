@@ -1,1 +1,5 @@
-# Rcs3dsInterlockingWcs
+# WCS 개발 하네스
+Claude Code로 WCS를 개발하기 위한 골격. 시작:
+1) 이 폴더에서 `claude` 실행 → CLAUDE.md 자동 인식
+2) 첫 지시: "TASKS.md의 M0부터 진행해줘"
+스펙: docs/SPEC.md(요약) + docs/*.html(확정 원본). 테스트가 곧 스펙(tests/Wcs.Tests).
