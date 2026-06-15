@@ -23,7 +23,7 @@ D4는 한 워드 — 한 비트만 바꿀 땐 D4 읽기→비트 수정→쓰기
 
 | # | 조건 | allowed | reason | TgtFloor 쓰기 |
 |---|---|---|---|---|
-| 1 | Online && Hold=None && Ready=1 && CurFloor==agvFloor | true | None | 안 씀 |
+| 1 | Online && Hold=None && Ready=1 && CurFloor==agvFloor (TgtFloor 무관 — 이동완료 후 잔류 ≠0 포함) | true | None(와이어 reason="READY") | 안 씀 |
 | 2 | Ready=1 && CurFloor≠agvFloor && TgtFloor==0 | false | WRONG_FLOOR | **agvFloor 기입** |
 | 3 | Ready=1 && CurFloor≠agvFloor && TgtFloor≠0 | false | WRONG_FLOOR | 안 씀(핑퐁 차단) |
 | 4 | Ready=0 && TgtFloor==0 (층 무관) | false | BUSY | **agvFloor 기입**(분류 후 복귀 선기입) |
@@ -36,14 +36,15 @@ TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=agvFloor || Ready==0)
 
 ## 3. API (WCS=서버, RCS=클라이언트, 응답 3s 한계)
 공통 필드: pId(int 1~30000, RCS 부여), agvNo, barcode, inductionNo, chuteNo, qty, timeStamp("yyyy-MM-dd HH:mm:ss" 로컬)
-- `POST /api/v1/destination-query` (IF-05) req{pId,barcode,inductionNo,qty,timeStamp}
-  → OK·chuteNo (목적지 NORMAL/BUSY/FULL/PAUSED — 일단 이동) / NG·reason(OVER/COMPLETED/NO_DEST/OFFLINE — 대기)
+- `POST /api/v1/destination-query` (IF-05) req{pId,agvNo,barcode,inductionNo,qty,timeStamp}  ← agvNo 포함(원본 HTML·절대규칙 6)
+  → OK·chuteNo·reason(NORMAL/BUSY/FULL/PAUSED — 일단 이동) / NG·reason(OVER/COMPLETED/NO_DEST/OFFLINE — 대기)
   OK 시 예약 차감(이동 중 물량 반영, 중복 배정 방지)
+  · **NG여도 투입 기록은 남긴다**(IF-16 통합) — piece를 status=DENIED로 삽입 + piece_event 기록(ERD §order_item·piece 참조)
   · 오더의 destination이 NULL(송장/매장 단위 상위 등록)이면 **이 시점 WCS가 빈 슈트 자동 할당**(dest_assign_type=AUTO) 후 예약 — 같은 트랜잭션. 빈 슈트 없으면 NG·NO_DEST
-- `POST /api/v1/deposit-permission` (IF-08) req{pId,chuteNo,agvNo,timeStamp}
-  → {allowed, reason?} — 판정 표 그대로. RCS는 false면 500ms 후 재호출
-  ※ agvFloor 산출 방법(요청 필드 vs agvNo/chuteNo→층 매핑)은 미확정 — 설정 매핑으로 시작
-- `POST /api/v1/deposit-report` (IF-10) req{pId,barcode,chuteNo,agvNo,qty,timeStamp}
+- `POST /api/v1/deposit-permission` (IF-08) req{pId,chuteNo,agvNo}  ← timeStamp 없음(원본 HTML). WCS 감사용 필요시 DTO nullable 선택필드(§7 확정 대기)
+  → {allowed, reason} — 판정 표 그대로. **allowed=true → reason="READY"**(원본 §6 사유코드). RCS는 false면 500ms 후 재호출
+  · agvFloor는 agvNo→층 매핑으로 산출(원본 §4에서 agvFloor 필드 제거 확정). 매핑 테이블 값만 현장 확정 — 설정(M3)→agv.floor(M4)
+- `POST /api/v1/deposit-report` (IF-10) req{pId,barcode,chuteNo,agvNo}  ← qty·timeStamp 없음(원본 HTML — qty는 IF-05 등록값 사용, 전량 틸트)
   → {result:"OK"} — 멱등(pId 중복 보고 무해). 3D 목적지면 이후 IF-11 셀 지정 트리거
 
 ## 4. C/R 핸드셰이크 (3D 목적지 한정, IF-11/12)
@@ -60,13 +61,24 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 
 ## 6. Sim3ds 동작 스펙 (시뮬레이터가 흉내낼 PLC)
 - HR 7워드(D0~D6) 노출, FC03/06/16 응답
+- 분류와 이동은 **직렬**(분류 진행 중엔 이동 시작 안 함 — 차트③: 분류를 마친 뒤 복귀). Ready=1 블립 금지.
 - C_Flag=1 감지 → C 읽고 즉시 C_*·C_Flag=0 → TiltDelay 후 적재 → **분류 시작: Ready=0 + TgtFloor=0 클리어**
-  → SortDuration 후: R_CellNo=셀, R_Seq=받은 C_Seq, R_Flag=1, Ready=1
-- TgtFloor≠0 && TgtFloor!=CurFloor → 이동 시작(Ready=0) → MoveDuration 후 CurFloor=TgtFloor 기입(TgtFloor는 유지!) → Ready=1
+  → SortDuration 후: R_CellNo=셀, R_Seq=받은 C_Seq, R_Flag=1 세팅.
+  이때 **복귀 이동이 남았으면(TgtFloor≠0 && TgtFloor≠CurFloor) Ready=0을 유지한 채 곧바로 이동 시작**, 그 외에만 Ready=1.
+- **분류 중이 아닐 때** && TgtFloor≠0 && TgtFloor!=CurFloor → 이동 시작(Ready=0) → MoveDuration 후 CurFloor=TgtFloor 기입(TgtFloor는 유지!) → Ready=1
 - 설정: TiltDelay, SortDuration, MoveDuration, 초기 CurFloor / 고장 주입: R_Seq 불일치, R_Flag 지연, 무응답(OFFLINE 유발)
 
 ## 7. 미확정 사항 (구현 중 추측 금지 — 기록·질문)
-- agvFloor 출처(IF-08 요청 필드 추가 vs 매핑) — RCS 협의
+- agvFloor **산출 방법은 확정**(agvNo→층 매핑; 원본 §4 "agvFloor 필드 제거"). **매핑 테이블 값**만 현장 확정 — M3 설정→M4 agv.floor 단일 진실 전환
 - RCS Q1~Q7 회신 대기(HTTP 클라이언트 사양, pId 초기화 정책, 인증 등)
 - PLC측: Ready=0에 이동 중 포함 / TgtFloor 분류 시작 클리어 — 3DS 담당 확정 대기
 - R_Flag 타임아웃 실측값, TCP(502) vs RTU
+
+### 7-A. 하네스 검증(2026-06)에서 도출 — RCS/3DS 확정 대기
+- **API 필드 정렬(HTML 우선 적용함)**: IF-08은 timeStamp 없음 / IF-10은 qty·timeStamp 없음(qty=IF-05 등록값). WCS 감사용 timeStamp가 필요하면 DTO에 **nullable 선택필드**로 두고 RCS 미전송 허용 — RCS 확정.
+- **IF-08 allowed=true reason="READY"**: 원본 §6 사유코드는 READY 명시. API 계층에서 주입(Core ToWire(None)=null 유지). RCS가 reason 파싱 여부 확인.
+- **IF-05 NG 시 chuteNo**: null 포함 vs 키 생략 직렬화 정책(원본이 혼용). 권장=null 포함(STJ 기본). RCS 파서 전제 확인.
+- **R_Flag 타임아웃 초과 시 동작**: RFLAG_TIMEOUT 알람 + PLC 상태 재확인(Ready·Online) + sorter_command.status=TIMEOUT. **재시도 vs 포기** 정책 미정(재시도=새 행, ERD).
+- **C_Flag=1 대기 타임아웃**: R쪽과 달리 상한·알람 미정의(무한 대기 위험). appsettings 설정값 + 초과 시 알람/상태 재확인 — 3DS 협의.
+- **TgtFloor 잔류 해소**: 이동만 완료·투입 없이 AGV 이탈 시 TgtFloor≠0 영구 잔류 → 타 층 영구 WRONG_FLOOR. 해소책(PLC 무투입 N분 자체 클리어 / WCS 운영자 수동 리셋=절대규칙 3 예외 명문화) — 3DS 협의. S4 시나리오에 기대동작 정의.
+- **레지스터 시작 주소**: D0~D4는 3DS 제공 맵 기반, D5·D6은 본 협의 신설. D영역↔Modbus 주소 오프셋 포함 현장 확정 — 변경 시 RegisterMap 상수만 수정.
