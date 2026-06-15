@@ -1,65 +1,58 @@
-# Sprint Contract — S-M0 (솔루션 구성 + 빌드 그린)
+# Sprint Contract — S-M1 (판정 엔진 DepositDecider)
 
 ## Goal
-기존 6-프로젝트 스켈레톤을 빌드·테스트 가능한 .NET 솔루션으로 배선한다.
-이 스프린트 후 `dotnet build` 성공 + `dotnet test` 실행 → 프로젝트가 정의한 "정상 시작점" 도달:
-**DepositDecider.Decide 판정 9케이스 RED(NotImplementedException) / Wire_Strings_AreStable 1건 GREEN**.
-비즈니스 로직은 작성·변경하지 않는다. M1~M5는 별도 스프린트.
+`Wcs.Core`의 `DepositDecider.Decide`를 docs/SPEC.md §2 판정 표(7행) 그대로 **순수 함수**로 구현해
+`DepositDeciderTests`의 Decide 판정 케이스를 전부 GREEN으로 만든다. 더해 하네스 검증에서 도출한
+경계 테스트 **C1~C3**(표를 정확히 인코딩하는 케이스)을 추가하고 GREEN으로 만든다.
+표에 없는 동작은 추가하지 않는다. M1은 판정 로직만 — I/O·API·PLC 없음.
 
 ## Implementation Scope (Generator가 만들 것)
-1. 루트에 `Wcs.sln` 생성 (`dotnet new sln -n Wcs`)
-2. 6개 프로젝트 sln 추가: Wcs.Core, Wcs.PlcGateway, Wcs.Api, Wcs.Data, Wcs.Sim3ds, Wcs.Tests
-3. 프로젝트 참조(추가 참조 금지):
-   - Wcs.Api → Wcs.Core, Wcs.PlcGateway, Wcs.Data
-   - Wcs.PlcGateway → Wcs.Core
-   - Wcs.Data → Wcs.Core
-   - Wcs.Tests → Wcs.Core
-4. NuGet 패키지(추가 금지):
-   - Wcs.PlcGateway → FluentModbus
-   - Wcs.Sim3ds → FluentModbus
-   - Wcs.Tests → xunit, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk
-5. TargetFramework은 **net10.0 유지**(SDK 10.0.300 설치됨 — 변경 불필요). 빌드가 net10.0에서 실패함이 증명될 때만 다운그레이드 검토.
-6. `dotnet build` 성공 + `dotnet test`로 9 RED / 1 GREEN 분리 확인, 원문 요약을 증거로 보고.
+1. `src/Wcs.Core/DepositDecider.cs` — `Decide`의 `NotImplementedException` 스텁을 SPEC §2 표 구현으로 교체.
+   - 우선순위: **Offline → Hold(Full/Paused) → Ready/층 비교**
+   - 허가(행1): `Online && Hold=None && Ready=1 && CurFloor==agvFloor` → `Allow()` (TgtFloor 무관, 쓰기 없음)
+   - 거부 사유: `Ready=1 && CurFloor!=agvFloor` → `WrongFloor` / `Ready=0` → `Busy` / `Hold=Full|Paused` → `Full|Paused` / `!Online` → `Offline`
+   - TgtFloor 쓰기 조건: `TgtFloor==0 && (CurFloor!=agvFloor || Ready==0)` **단 Hold/Offline이면 절대 안 씀**. 값 = agvFloor.
+   - WCS는 TgtFloor를 클리어하지 않는다(Decide는 쓰기 여부만 결정).
+2. `tests/Wcs.Tests/DepositDeciderTests.cs` — 경계 테스트 3건 추가(TASKS.md M1):
+   - **C1** 행1 경계: `Snap(ready:true, cur:1, tgt:1), agvFloor:1` → `Allowed`, `WriteTgtFloor=false` (이동완료 후 TgtFloor 잔류 ≠0 포함)
+   - **C2** 행4 쓰기 차단: `Snap(ready:false, cur:2, tgt:0)` + `Full`/`Paused`/`Offline` → 거부 + `WriteTgtFloor=false` (Hold/Offline이 선기입 차단)
+   - **C3** 행6 강한 경계: `Snap(ready:true, cur:1, tgt:0), agvFloor:1` + `Full` → `Allowed=false`·`Reason=Full`·`WriteTgtFloor=false` (층일치·Ready=1인데 Hold 우선)
 
-## Out of Scope (이번 스프린트 손대지 말 것)
-- `DepositDecider.Decide`는 NotImplementedException 스텁 유지(9 RED가 성공 신호). M1 로직 구현 금지.
-- 스켈레톤 로직/시그니처 변경 금지: Models.cs, DepositDecider.cs, DepositDeciderTests.cs, Program.cs(Api), Dtos.cs, appsettings.json, PlcGateway.cs, Sim3ds/Program.cs, Entities.cs — 내용 변경 0
-  (허용 편집: dotnet CLI가 .csproj에 기록하는 참조/패키지 항목 + 새 Wcs.sln 뿐)
-- DTO 정정(A1/A2/A3/A7)=M3, Sim3ds 동작(B1/B2)=M2, 판정 경계 테스트(C1~C3)=M1, EF Core=M4, Windows Service/Serilog=M5
-- 새 테스트 케이스 추가 금지(총 10건 고정: Decide 9 + Wire 1)
-- Directory.Build.props / 중앙 패키지 관리 도입 금지(검증에서 기각된 항목)
+## Out of Scope (손대지 말 것)
+- `Models.cs`(PlcSnapshot/DepositDecision/DenyReason/RegisterMap) 시그니처 변경 금지 — 그대로 사용.
+- IF-08 `allowed=true → reason="READY"` 와이어 주입은 **M3**(API 계층). M1은 `DenyReason.ToWire` 무변경.
+- API/DTO(M3), PlcGateway, Sim3ds, Data 무변경.
+- 표에 없는 동작 추가 금지(예: Decide가 TgtFloor 클리어, Hold/Offline 중 쓰기, agvFloor 외 값 기입).
+- `Wcs.Core`의 의존성 0 유지(프로젝트 참조·패키지 추가 금지).
 
 ## Detected Project Type: Backend/API
-근거: src/Wcs.Api가 ASP.NET Core 서버 진입점(Program.cs의 WebApplication + app.MapPost 핸들러 3종) + 클래스 라이브러리(Core/PlcGateway/Data) + xUnit 테스트. 브라우저 UI 트리 없음.
+(M1의 변경 표면은 `Wcs.Core` 순수 판정 로직 + xUnit 단위 테스트. HTTP 엔드포인트 없음 — 검증은 단위 테스트 실행.)
 
-## Evaluation Criteria (Backend/API)
-1. **Architecture (★★★)**: 참조 그래프가 지정 방향과 정확히 일치, 순환·잉여 참조 0. Wcs.Core 프로젝트 참조 0개. Wcs.Sim3ds는 프로젝트 참조 없음(FluentModbus 패키지만). sln에 정확히 6개 프로젝트.
-2. **Craft (★★)**: 패키지가 올바른 프로젝트에만(FluentModbus가 Core/Api/Data로 누출 안 됨, 테스트 패키지는 Wcs.Tests에만). 배선으로 인한 빌드 경고 0. TargetFramework net10.0 유지.
-3. **Functionality (★★)**: `dotnet build Wcs.sln` exit 0. `dotnet test`가 xUnit 러너 로드 → Total 10 / Failed 9(Decide의 NotImplementedException) / Passed 1(Wire_Strings_AreStable).
+## Evaluation Criteria
+1. **정확성(★★★)**: `DepositDeciderTests`의 Decide 9케이스 + 신규 C1~C3 전부 GREEN, `Wire_Strings_AreStable` 회귀 없음(GREEN 유지). 전체 `dotnet test` 0 실패.
+2. **순수성(★★★)**: `Decide`는 순수 함수 — I/O·DI·정적 가변 상태·시간/난수 의존 없음. `Wcs.Core` 의존성 0 유지.
+3. **스펙 충실(★★)**: SPEC §2 표 7행과 정확히 일치, 우선순위 순서 정확. 표에 없는 동작 0.
+4. **장인성(★★)**: 표를 그대로 읽히는 분기/스위치, 죽은 코드·중복 없음, 기존 코딩 컨벤션 일치.
 
 ## Completion Conditions (전부 필수)
-- C-1. `Wcs.sln`이 루트에 존재하고 6개 프로젝트를 나열
-- C-2. `dotnet build Wcs.sln` exit 0(솔루션 전체 그린)
-- C-3. `dotnet test` 실행됨(러너 로드 — "no test host" 아님) + 요약 Passed=1, Failed=9, Total=10
-- C-4. 통과 1건은 `Wire_Strings_AreStable`; 실패 9건은 Decide 케이스가 **NotImplementedException**으로 실패(컴파일 에러·단언 실패 아님)
-- C-5. 참조 그래프·패키지 배치가 Scope와 정확히 일치(.csproj 검사로 확인)
-- C-6. 스켈레톤 로직 무변경 — 스켈레톤 .cs/.json의 `git diff`에 내용 편집 없음(.csproj 참조/패키지 추가 + 새 .sln만 diff에 등장)
+- C-1. `dotnet build Wcs.sln` exit 0.
+- C-2. `dotnet test` → **0 실패**(기존 Decide 9 + Wire 1 + 신규 C1~C3 전부 GREEN). `--filter Decider`도 전부 GREEN.
+- C-3. `Decide`가 순수 함수 — I/O/DI/가변 정적 상태 없음. `Wcs.Core.csproj`에 참조·패키지 추가 0.
+- C-4. 변경 파일은 `src/Wcs.Core/DepositDecider.cs` + `tests/Wcs.Tests/DepositDeciderTests.cs` **둘 뿐**. `Models.cs` 등 기타 무변경(`git diff` 확인).
+- C-5. 표에 없는 동작 없음 — 특히 Hold/Offline 입력에서 `WriteTgtFloor=false`, Decide가 TgtFloor를 클리어하지 않음.
 
-## Verification Scenarios (Backend/API)
-이번 스프린트의 변경 표면은 솔루션/빌드 배선이며, 3개 엔드포인트는 501 스텁(M3 영역, 호출 안 함). 검증 대상을 빌드/테스트 툴체인 수준으로 둔다. N=3.
+## Verification Scenarios
+M1의 검증 표면은 단위 테스트(판정 로직). HTTP 엔드포인트는 이 스프린트에 없음(M3).
 
-**엔드포인트(추적용 — M0에서 실행 안 함)**: POST /api/v1/destination-query(IF-05), /deposit-permission(IF-08), /deposit-report(IF-10) — 전부 501 스텁, 무변경.
+- **V1 (build)**: `dotnet build Wcs.sln` → exit 0, 경고/오류 0. 증거=빌드 요약 인용.
+- **V2 (full test GREEN)**: `dotnet test` → `실패: 0`, 전체 케이스 GREEN(기존 10 + 신규 C1~C3). 증거=러너 요약 원문.
+- **V3 (경계 케이스 충실)**: `dotnet test --filter Decider` 전부 GREEN, 그리고 C1·C2·C3가 실제로 추가됐고 기대값(위 Scope)대로 통과함을 테스트 소스로 확인.
 
-**검증 대상 (V1~V3)**
-- V1 (build): `dotnet build Wcs.sln` → exit 0, "Build succeeded", 에러 0. 증거=빌드 요약 인용.
-- V2 (test runner + RED/GREEN): `dotnet test` → xUnit 러너 로드, 요약 "Failed: 9, Passed: 1, Total: 10". (프로세스 exit는 9 RED 설계상 비0이 정상 — **요약 형태로 판정**.) 증거=러너 요약 원문 인용.
-- V3 (failure-mode): `dotnet test --filter Decider` → Decide 9건이 **System.NotImplementedException**으로 실패, Wire_Strings_AreStable은 이 필터 실패 집합에 없음. 증거=Decide 케이스 예외 타입 라인 + Wire 통과 라인 인용.
+**Error cases (Evaluator 적극 배제)**
+- E1: `Decide`에 I/O·DI·정적 가변 상태·DateTime.Now/Random 등 비순수 요소 도입 → FAIL
+- E2: 기존 테스트 회귀(특히 `Wire_Strings_AreStable`) 또는 일부 Decide 케이스 여전히 RED → FAIL
+- E3: 표 밖 동작 — Hold/Offline에서 `WriteTgtFloor=true`, Decide가 TgtFloor 클리어, 우선순위 어긋남 → FAIL
+- E4: `DepositDecider.cs`·테스트 파일 외 변경(Models.cs 등) 또는 `Wcs.Core`에 참조/패키지 추가 → FAIL
+- E5: C1~C3 미추가 또는 기대값 불일치 → FAIL
 
-**Error cases (Evaluator가 적극 배제할 것)**
-- E1: net10.0 SDK 불일치로 빌드 실패 → TargetFramework가 여전히 net10.0인지 확인(silent 변경 금지)
-- E2: `dotnet test` "No test is available"/러너 없음 → 테스트 패키지 오배치 → FAIL
-- E3: Decide가 컴파일 에러 또는 단언 실패로 실패(NotImplementedException 아님) → 스켈레톤 변경됨 → FAIL
-- E4: Passed≠1 또는 Failed≠9 (Decide 구현됨/테스트 가감) → 범위 위반 → FAIL
-- E5: 잉여·잘못된 프로젝트 참조 또는 패키지 누출(예: Core에 FluentModbus, Core가 타 프로젝트 참조) → FAIL
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints-touched list, happy-path-per-endpoint, error-cases-per-endpoint). All slots filled: yes.
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (unit-test build / full-suite GREEN / boundary-case fidelity; HTTP happy·error-path N/A — no endpoints this sprint, deferred to M3). All slots filled: yes.
