@@ -1,4 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />
+    <ProjectReference Include="..\Wcs.PlcGateway\Wcs.PlcGateway.csproj" />
+    <ProjectReference Include="..\Wcs.Data\Wcs.Data.csproj" />
+  </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

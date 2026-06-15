@@ -1,4 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FluentModbus" Version="5.3.2" />
+  </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
