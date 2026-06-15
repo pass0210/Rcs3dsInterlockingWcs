@@ -95,6 +95,45 @@ public class DepositDeciderTests
         Assert.False(d.WriteTgtFloor);
     }
 
+    // C1: 행1 경계 — TgtFloor≠0(이동완료 후 잔류) 상태에서도 층 일치·Ready=1이면 허가, 쓰기 없음
+    [Fact]
+    public void C1_Row1_TgtFloorResidual_StillAllows()
+    {
+        // TgtFloor=1(잔류)이지만 이미 CurFloor==agvFloor==1, Ready=1 → 허가, TgtFloor 건드리지 않음
+        var d = DepositDecider.Decide(Snap(ready: true, cur: 1, tgt: 1), agvFloor: 1, WcsHold.None);
+        Assert.True(d.Allowed);
+        Assert.Equal(DenyReason.None, d.Reason);
+        Assert.False(d.WriteTgtFloor);
+    }
+
+    // C2: 행4/6/7 — Hold(Full/Paused) 또는 Offline이면 Ready=0·TgtFloor==0이어도 쓰기 금지
+    [Theory]
+    [InlineData(true,  WcsHold.Full,   DenyReason.Full)]
+    [InlineData(true,  WcsHold.Paused, DenyReason.Paused)]
+    [InlineData(false, WcsHold.None,   DenyReason.Offline)]
+    public void C2_HoldOrOffline_BlocksTgtFloorWrite(bool online, WcsHold hold, DenyReason expected)
+    {
+        // ready:false, cur:2, tgt:0 → TgtFloor 쓰기 조건(`TgtFloor==0 && Ready==0`)을 충족하지만
+        // Hold/Offline이 선행 우선순위로 차단 → WriteTgtFloor=false
+        var snap = new PlcSnapshot(0, 0, 0, 0, CFlag: false, RFlag: false, Ready: false,
+            CurFloor: 2, TgtFloor: 0, Online: online, At: DateTimeOffset.UtcNow);
+        var d = DepositDecider.Decide(snap, agvFloor: 1, hold);
+        Assert.False(d.Allowed);
+        Assert.Equal(expected, d.Reason);
+        Assert.False(d.WriteTgtFloor);
+    }
+
+    // C3: 행6 강한 경계 — 층 일치·Ready=1이어도 Hold가 우선, WriteTgtFloor=false
+    [Fact]
+    public void C3_HoldOverridesReadyAndFloorMatch()
+    {
+        // CurFloor==agvFloor==1, Ready=1, TgtFloor=0 → 행1 조건 충족하지만 Hold=Full이 우선
+        var d = DepositDecider.Decide(Snap(ready: true, cur: 1, tgt: 0), agvFloor: 1, WcsHold.Full);
+        Assert.False(d.Allowed);
+        Assert.Equal(DenyReason.Full, d.Reason);
+        Assert.False(d.WriteTgtFloor);
+    }
+
     // 와이어 포맷 — API 응답 reason 문자열 고정
     [Fact]
     public void Wire_Strings_AreStable()

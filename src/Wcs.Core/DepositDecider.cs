@@ -11,7 +11,38 @@ public static class DepositDecider
 {
     public static DepositDecision Decide(PlcSnapshot snap, int agvFloor, WcsHold hold)
     {
-        // TODO(M1): docs/SPEC.md §2 판정 표 구현. 테스트가 GREEN이 될 때까지.
-        throw new NotImplementedException("M1: DepositDecider.Decide — see docs/SPEC.md §2");
+        // 우선순위 1: Offline (행7)
+        if (!snap.Online)
+            return DepositDecision.Deny(DenyReason.Offline);
+
+        // 우선순위 2: Hold — Full / Paused (행6). TgtFloor 쓰기 금지.
+        if (hold == WcsHold.Full)
+            return DepositDecision.Deny(DenyReason.Full);
+        if (hold == WcsHold.Paused)
+            return DepositDecision.Deny(DenyReason.Paused);
+
+        // 우선순위 3: Ready / 층 비교 (행1~5)
+        if (snap.Ready)
+        {
+            if (snap.CurFloor == agvFloor)
+            {
+                // 행1: Online && Hold=None && Ready=1 && CurFloor==agvFloor → 허가 (TgtFloor 무관)
+                return DepositDecision.Allow();
+            }
+            else
+            {
+                // 행2/3: Ready=1 && CurFloor≠agvFloor
+                // TgtFloor==0이면 agvFloor 기입(행2), 아니면 핑퐁 차단(행3)
+                int? write = snap.TgtFloor == 0 ? agvFloor : null;
+                return DepositDecision.Deny(DenyReason.WrongFloor, write);
+            }
+        }
+        else
+        {
+            // 행4/5: Ready=0 (분류 중·이동 중)
+            // TgtFloor==0이면 복귀 선기입(행4), 아니면 쓰기 없음(행5)
+            int? write = snap.TgtFloor == 0 ? agvFloor : null;
+            return DepositDecision.Deny(DenyReason.Busy, write);
+        }
     }
 }
