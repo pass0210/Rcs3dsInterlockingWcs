@@ -1,4 +1,4 @@
-# DB 스키마 스펙 (M4 구현 기준) — wcs_erd.html과 동기
+# DB 스키마 스펙 (M4 구현 기준) — 이 문서가 DB 스키마의 단일 진실(원본 HTML 없음)
 
 ## 설계 원칙 (위반 금지)
 1. PK는 전부 대리키 `id bigint identity`. 자연키(p_id, chute_no, order_no…)는 UNIQUE 인덱스.
@@ -41,6 +41,7 @@
   · 빈 슈트 판정 = RUNNING 오더의 dest_assigned_at~closed_at 점유 윈도우(별도 테이블 불필요). 할당 우선순위(층/구역/라운드로빈)는 Core 전략+설정
 - `order_item` — id, order_id FK, barcode, planned_qty, reserved_qty, sorted_qty, UQ(order_id,barcode)
   · IF-05 OK: reserved_qty+=qty + piece 삽입 = 한 트랜잭션 / IF-10·12 확정: reserved→sorted 이동
+  · **IF-05 NG**(IF-16 통합 — 응답이 NG여도 투입 기록은 남긴다): piece를 status=DENIED로 삽입(예약 차감 없음) + piece_event(IF05_REQ/RES) 기록 = 한 트랜잭션
 
 ### 실행·이력
 - `piece` — id, p_id, is_active, barcode, qty, deposited_at datetime2 NULL(IF-10 시점·사실), destination_id FK, order_item_id FK NULL(예약 라인 — SUM(piece.qty)==order_item 정합성 검증용), agv_id FK NULL, induction_id FK NULL,
