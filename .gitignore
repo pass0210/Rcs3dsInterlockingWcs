@@ -4,3 +4,5 @@ obj/
 .vs/
 appsettings.*.local.json
 logs/
+.claude/ports.local.json
+.env.local
