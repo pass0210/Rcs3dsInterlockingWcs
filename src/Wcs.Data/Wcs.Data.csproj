@@ -2,6 +2,17 @@
   <ItemGroup>
     <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- EF Core SQL Server provider (운영) -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.5" />
+    <!-- EF Core SQLite provider (개발·테스트) -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.5" />
+    <!-- EF Core Design/Tools — 마이그레이션 생성 -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
