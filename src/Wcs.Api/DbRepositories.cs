@@ -11,16 +11,17 @@ namespace Wcs.Api;
 // 단방향 참조(Wcs.Api → Wcs.Data) 안에서 공존.
 //
 // 절대규칙:
-//   - QueryDestination: 예약차감+piece삽입(+AUTO) = 단일 DB 트랜잭션
-//   - RecordDeposit: piece 상태 전이 = 단일 트랜잭션, 멱등(중복 pId 무해)
+//   - QueryDestination: 예약차감+piece삽입+IF05_REQ/RES(+AUTO) = 단일 DB 트랜잭션 (MINOR-6)
+//   - RecordDeposit: piece 상태 전이 = 단일 트랜잭션, 멱등(부분 유니크 위반 catch → false)
 //   - ICellSelector: cell_assignment 기반 점유/해제 = 트랜잭션
 //   - IAgvFloorResolver: agv.floor DB 조회 — appsettings 런타임 조회 0
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>
 /// EF Core 기반 오더·목적지 리포지토리.
-/// IF-05 OK 시: 예약차감 + piece 삽입 + AUTO 슈트 배정(해당 시) = 단일 트랜잭션.
-/// IF-05 NG 시: piece(status=DENIED) 삽입 + piece_event = 단일 트랜잭션 (예약 차감 0).
+/// IF-05 OK 시: 예약차감 + piece 삽입 + IF05_REQ/IF05_RES piece_event + AUTO 슈트 배정(해당 시) = 단일 트랜잭션.
+/// IF-05 NG 시: piece(status=DENIED, destination_id=NULL) 삽입 + IF05_REQ/IF05_RES piece_event = 단일 트랜잭션.
+/// NG destination_id=NULL: 임의 fallback 제거(MINOR-5 nullable FK).
 /// </summary>
 public sealed class EfOrderRepository : IOrderRepository
 {
@@ -31,9 +32,12 @@ public sealed class EfOrderRepository : IOrderRepository
         _db = db;
     }
 
-    public (string Result, int? ChuteNo, string Reason, DestinationType? DestType) QueryDestination(
-        int pId, int agvNo, string barcode, int inductionNo, int qty)
+    public (string Result, int? ChuteNo, string Reason, DestinationType? DestType, long? DestinationId) QueryDestination(
+        int pId, int agvNo, string barcode, int inductionNo, int qty, string? clientTs)
     {
+        // timeStamp 백필: 파싱 성공 → effective, 실패·누락 → UtcNow (Scope-3)
+        var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
+
         // ── 오더 항목 조회 (바코드 → order_item → wcs_order → destination) ──
         var item = _db.OrderItems
             .Include(i => i.Order)
@@ -45,8 +49,8 @@ public sealed class EfOrderRepository : IOrderRepository
 
         if (item is null)
         {
-            RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST");
-            return ("NG", null, "NO_DEST", null);
+            RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST", clientTs, effective);
+            return ("NG", null, "NO_DEST", null, null);
         }
 
         var order = item.Order;
@@ -55,24 +59,24 @@ public sealed class EfOrderRepository : IOrderRepository
         if (order.Status == OrderStatus.COMPLETED)
         {
             RecordDenied(pId, agvNo, barcode, inductionNo, qty, "COMPLETED",
-                item, order.Destination);
-            return ("NG", null, "COMPLETED", ToDestType(order.Destination));
+                clientTs, effective, item, order.Destination);
+            return ("NG", null, "COMPLETED", ToDestType(order.Destination), null);
         }
 
         // PAUSED: destination status PAUSED
         if (order.Destination?.Status == DestStatus.PAUSED)
         {
             RecordDenied(pId, agvNo, barcode, inductionNo, qty, "PAUSED",
-                item, order.Destination);
-            return ("NG", null, "PAUSED", ToDestType(order.Destination));
+                clientTs, effective, item, order.Destination);
+            return ("NG", null, "PAUSED", ToDestType(order.Destination), null);
         }
 
         // OVER: reserved_qty + qty > planned_qty
         if (item.ReservedQty + qty > item.PlannedQty)
         {
             RecordDenied(pId, agvNo, barcode, inductionNo, qty, "OVER",
-                item, order.Destination);
-            return ("NG", null, "OVER", ToDestType(order.Destination));
+                clientTs, effective, item, order.Destination);
+            return ("NG", null, "OVER", ToDestType(order.Destination), null);
         }
 
         // ── 목적지 결정 ─────────────────────────────────────────────────────
@@ -100,8 +104,8 @@ public sealed class EfOrderRepository : IOrderRepository
 
             if (dest is null)
             {
-                RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST", item, null);
-                return ("NG", null, "NO_DEST", null);
+                RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST", clientTs, effective, item, null);
+                return ("NG", null, "NO_DEST", null, null);
             }
 
             destId     = dest.Id;
@@ -114,15 +118,15 @@ public sealed class EfOrderRepository : IOrderRepository
             if (!dest.IsActive || dest.Status != DestStatus.NORMAL)
             {
                 RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST",
-                    item, dest);
-                return ("NG", null, "NO_DEST", ToDestType(dest));
+                    clientTs, effective, item, dest);
+                return ("NG", null, "NO_DEST", ToDestType(dest), null);
             }
             chuteNo = dest.ChuteNo;
         }
 
         var destApiType = ToDestType(dest);
 
-        // ── 트랜잭션: 예약차감 + piece 삽입 + AUTO 배정 반영 ────────────────
+        // ── 트랜잭션: 예약차감 + piece 삽입 + IF05_REQ/RES piece_event + AUTO 배정 반영 ─
         using var tx = _db.Database.BeginTransaction();
         try
         {
@@ -171,18 +175,28 @@ public sealed class EfOrderRepository : IOrderRepository
                 AgvId         = agv?.Id,
                 InductionId   = induction?.Id,
                 Status        = PieceStatus.RESERVED,
+                ClientTs      = clientTs,          // RCS 원문 보존
                 CreatedAt     = now,
                 UpdatedAt     = now,
             };
             _db.Pieces.Add(piece);
             _db.SaveChanges();
 
-            // piece_event: IF05_RES
+            // piece_event: IF05_REQ + IF05_RES — 같은 트랜잭션 (MINOR-6)
+            _db.PieceEvents.Add(new PieceEvent
+            {
+                PieceId   = piece.Id,
+                EventType = PieceEventType.IF05_REQ,
+                Reason    = "NORMAL",
+                ClientTs  = clientTs,
+                At        = effective,
+            });
             _db.PieceEvents.Add(new PieceEvent
             {
                 PieceId   = piece.Id,
                 EventType = PieceEventType.IF05_RES,
                 Reason    = "NORMAL",
+                ClientTs  = clientTs,
                 At        = now,
             });
             _db.SaveChanges();
@@ -195,23 +209,14 @@ public sealed class EfOrderRepository : IOrderRepository
             throw;
         }
 
-        return ("OK", chuteNo, "NORMAL", destApiType);
-    }
-
-    public DestinationType? GetDestType(int pId)
-    {
-        var piece = _db.Pieces
-            .Include(p => p.Destination)
-            .Where(p => p.PId == pId && p.IsActive)
-            .OrderByDescending(p => p.Id)
-            .FirstOrDefault();
-
-        return ToDestType(piece?.Destination);
+        return ("OK", chuteNo, "NORMAL", destApiType, destId);
     }
 
     // ── NG piece 삽입 헬퍼 (IF-16: NG여도 piece DENIED 기록) ──────────────
+    // MINOR-5: destination_id=NULL(nullable FK) — 임의 fallback 제거.
     private void RecordDenied(int pId, int agvNo, string barcode, int inductionNo,
-        int qty, string reason, DataOrderItem? item = null, DataDestination? dest = null)
+        int qty, string reason, string? clientTs, DateTime effective,
+        DataOrderItem? item = null, DataDestination? dest = null)
     {
         using var tx = _db.Database.BeginTransaction();
         try
@@ -229,11 +234,7 @@ public sealed class EfOrderRepository : IOrderRepository
             var agv       = _db.Agvs.FirstOrDefault(a => a.AgvNo == agvNo);
             var induction = _db.Inductions.FirstOrDefault(i => i.InductionNo == inductionNo);
 
-            // dest가 없으면 첫 번째 활성 목적지로 fallback (스키마 NOT NULL 제약)
-            long destId = dest?.Id
-                ?? item?.Order.DestinationId
-                ?? _db.Destinations.OrderBy(d => d.Id).First().Id;
-
+            // MINOR-5: destination_id nullable FK — dest 없으면 null(임의 fallback 제거)
             var piece = new Piece
             {
                 PId           = pId,
@@ -241,23 +242,34 @@ public sealed class EfOrderRepository : IOrderRepository
                 Barcode       = barcode,
                 Qty           = qty,
                 DepositedAt   = null,
-                DestinationId = destId,
+                DestinationId = dest?.Id,   // MINOR-5: null 허용(NG DENIED)
                 OrderItemId   = item?.Id,
                 AgvId         = agv?.Id,
                 InductionId   = induction?.Id,
                 Status        = PieceStatus.DENIED,
+                ClientTs      = clientTs,
                 CreatedAt     = now,
                 UpdatedAt     = now,
             };
+
             _db.Pieces.Add(piece);
             _db.SaveChanges();
 
-            // piece_event: IF05_RES (NG)
+            // piece_event: IF05_REQ + IF05_RES — 같은 트랜잭션 (MINOR-6)
+            _db.PieceEvents.Add(new PieceEvent
+            {
+                PieceId   = piece.Id,
+                EventType = PieceEventType.IF05_REQ,
+                Reason    = reason,
+                ClientTs  = clientTs,
+                At        = effective,
+            });
             _db.PieceEvents.Add(new PieceEvent
             {
                 PieceId   = piece.Id,
                 EventType = PieceEventType.IF05_RES,
                 Reason    = reason,
+                ClientTs  = clientTs,
                 At        = now,
             });
             _db.SaveChanges();
@@ -278,149 +290,137 @@ public sealed class EfOrderRepository : IOrderRepository
             DestType.SORTER_3D => DestinationType.Sorter3D,
             _                  => null,
         };
+
+    // ── timeStamp 백필 헬퍼 ────────────────────────────────────────────────
+    /// <summary>
+    /// RCS timeStamp 파싱 ("yyyy-MM-dd HH:mm:ss" 로컬).
+    /// 성공 시 UTC 변환 반환, 실패·null → null(→ 호출자 UtcNow 사용).
+    /// </summary>
+    private static DateTime? ParseTimestamp(string? ts)
+    {
+        if (string.IsNullOrWhiteSpace(ts)) return null;
+        return DateTime.TryParseExact(ts, "yyyy-MM-dd HH:mm:ss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var dt)
+            ? dt.ToUniversalTime()
+            : null;
+    }
 }
 
 /// <summary>
 /// EF Core 기반 투입 기록.
 /// IF-10: piece 상태 전이(RESERVED→DEPOSITED) + piece_event = 단일 트랜잭션.
-/// 멱등: 이미 DEPOSITED 이상이면 false 반환(무해).
-///
-/// SQLite 동시성 주의: SQLite는 단일 writer만 허용한다.
-/// 테스트 환경에서 in-memory 공유 연결로 병렬 IF-10이 들어오면 BUSY 오류 발생.
-/// _recordLock으로 RecordDeposit 직렬화 — M3 InMemoryDepositRecorder의 lock(_lock) 패턴 유지.
-/// 프로덕션(SQL Server)에서는 DB 레벨 트랜잭션 격리로 충분하지만 lock을 추가해도 무해.
+/// 멱등: 부분 유니크 위반(UniqueConstraintException) catch → false 반환.
+/// static _recordLock 제거 — DB 레벨 부분 유니크로 진성 멱등 보장(MAJOR-1).
 /// </summary>
 public sealed class EfDepositRecorder : IDepositRecorder
 {
     private readonly WcsDbContext _db;
-
-    // SQLite in-memory 공유 연결에서 병렬 IF-10 동시 쓰기 시 BUSY 오류 방지.
-    // M3 InMemoryDepositRecorder의 lock(_lock) 패턴과 동일.
-    private static readonly object _recordLock = new();
 
     public EfDepositRecorder(WcsDbContext db)
     {
         _db = db;
     }
 
-    public void RecordDestinationQuery(
-        int pId, int agvNo, string barcode, int inductionNo,
-        int? chuteNo, int qty, DepositStatus status, string reason)
+    public bool RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs)
     {
-        // EfOrderRepository.QueryDestination에서 이미 piece + piece_event(IF05_RES) 삽입됨.
-        // 이 메서드는 호출자(Program.cs)의 계약을 충족하기 위해 존재.
-        // piece가 있으면 IF05_REQ 이벤트 추가 — 없으면 무시.
-        var piece = _db.Pieces
-            .Where(p => p.PId == pId && p.IsActive)
-            .OrderByDescending(p => p.Id)
-            .FirstOrDefault();
+        // timeStamp 백필 (Scope-3): 파싱 성공 → effective, 실패·누락 → UtcNow
+        var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
 
-        if (piece is null) return;
-
-        // 이미 IF05_REQ가 있으면 중복 방지
-        if (_db.PieceEvents.Any(e => e.PieceId == piece.Id && e.EventType == PieceEventType.IF05_REQ))
-            return;
-
-        var now = DateTime.UtcNow;
-        _db.PieceEvents.Add(new PieceEvent
+        // ── 멱등 체크 + 상태 전이 — 단일 트랜잭션 ─────────────────────────
+        // static _recordLock 제거 — piece 부분 유니크 + catch로 진성 멱등 보장(MAJOR-1)
+        using var tx = _db.Database.BeginTransaction();
+        try
         {
-            PieceId   = piece.Id,
-            EventType = PieceEventType.IF05_REQ,
-            Reason    = reason,
-            At        = now,
-        });
-        _db.SaveChanges();
-    }
+            var piece = _db.Pieces
+                .Where(p => p.PId == pId && p.IsActive)
+                .OrderByDescending(p => p.Id)
+                .FirstOrDefault();
 
-    public bool RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty)
-    {
-        // SQLite 단일 writer 제약: 병렬 IF-10 직렬화 (M3 lock(_lock) 패턴 유지).
-        lock (_recordLock)
-        {
-            // ── 멱등 체크 + 상태 전이 — 단일 트랜잭션 ─────────────────────────
-            using var tx = _db.Database.BeginTransaction();
-            try
+            // 신규 pId(IF-05 없이 IF-10 먼저 도착 — 비정상이나 멱등 허용)
+            if (piece is null)
             {
-                var piece = _db.Pieces
-                    .Where(p => p.PId == pId && p.IsActive)
-                    .OrderByDescending(p => p.Id)
-                    .FirstOrDefault();
-
-                // 신규 pId(IF-05 없이 IF-10 먼저 도착 — 비정상이나 멱등 허용)
-                if (piece is null)
-                {
-                    var dest = _db.Destinations
-                        .FirstOrDefault(d => d.ChuteNo == chuteNo && d.IsActive);
-                    if (dest is null)
-                    {
-                        tx.Rollback();
-                        return false; // 목적지 없으면 기록 불가
-                    }
-
-                    var now2 = DateTime.UtcNow;
-                    piece = new Piece
-                    {
-                        PId           = pId,
-                        IsActive      = true,
-                        Barcode       = barcode,
-                        Qty           = qty ?? 0,
-                        DepositedAt   = now2,
-                        DestinationId = dest.Id,
-                        Status        = PieceStatus.DEPOSITED,
-                        CreatedAt     = now2,
-                        UpdatedAt     = now2,
-                    };
-                    _db.Pieces.Add(piece);
-                    _db.SaveChanges();
-
-                    _db.PieceEvents.Add(new PieceEvent
-                    {
-                        PieceId   = piece.Id,
-                        EventType = PieceEventType.IF10_RES,
-                        Reason    = "REPORTED_DIRECT",
-                        At        = now2,
-                    });
-                    _db.SaveChanges();
-                    tx.Commit();
-                    return true;
-                }
-
-                // 이미 DEPOSITED 이상 → 멱등(중복)
-                if (piece.Status is PieceStatus.DEPOSITED or PieceStatus.CELL_ASSIGNED
-                                  or PieceStatus.LOADED)
+                var dest = _db.Destinations
+                    .FirstOrDefault(d => d.ChuteNo == chuteNo && d.IsActive);
+                if (dest is null)
                 {
                     tx.Rollback();
-                    return false;
+                    return false; // 목적지 없으면 기록 불가
                 }
 
-                // DENIED piece는 IF-10 도달 시도 → 멱등 false
-                if (piece.Status == PieceStatus.DENIED)
+                var now2 = DateTime.UtcNow;
+                piece = new Piece
                 {
-                    tx.Rollback();
-                    return false;
-                }
-
-                // 상태 전이: RESERVED/QUERIED/PERMITTED → DEPOSITED
-                var now3 = DateTime.UtcNow;
-                piece.Status      = PieceStatus.DEPOSITED;
-                piece.DepositedAt = now3;
-                piece.UpdatedAt   = now3;
+                    PId           = pId,
+                    IsActive      = true,
+                    Barcode       = barcode,
+                    Qty           = qty ?? 0,
+                    DepositedAt   = effective,
+                    DestinationId = dest.Id,
+                    Status        = PieceStatus.DEPOSITED,
+                    ClientTs      = clientTs,
+                    CreatedAt     = now2,
+                    UpdatedAt     = now2,
+                };
+                _db.Pieces.Add(piece);
+                _db.SaveChanges();
 
                 _db.PieceEvents.Add(new PieceEvent
                 {
                     PieceId   = piece.Id,
                     EventType = PieceEventType.IF10_RES,
-                    At        = now3,
+                    Reason    = "REPORTED_DIRECT",
+                    ClientTs  = clientTs,
+                    At        = effective,
                 });
                 _db.SaveChanges();
                 tx.Commit();
                 return true;
             }
-            catch
+
+            // 이미 DEPOSITED 이상 → 멱등(중복)
+            if (piece.Status is PieceStatus.DEPOSITED or PieceStatus.CELL_ASSIGNED
+                              or PieceStatus.LOADED)
             {
                 tx.Rollback();
-                throw;
+                return false;
             }
+
+            // DENIED piece는 IF-10 도달 시도 → 멱등 false
+            if (piece.Status == PieceStatus.DENIED)
+            {
+                tx.Rollback();
+                return false;
+            }
+
+            // 상태 전이: RESERVED/QUERIED/PERMITTED → DEPOSITED
+            var now3 = DateTime.UtcNow;
+            piece.Status      = PieceStatus.DEPOSITED;
+            piece.DepositedAt = effective;
+            piece.ClientTs    = clientTs;   // 원문 보존
+            piece.UpdatedAt   = now3;
+
+            _db.PieceEvents.Add(new PieceEvent
+            {
+                PieceId   = piece.Id,
+                EventType = PieceEventType.IF10_RES,
+                ClientTs  = clientTs,
+                At        = effective,
+            });
+            _db.SaveChanges();
+            tx.Commit();
+            return true;
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // piece 부분 유니크 위반 → 신규 piece insert 경합만 백스톱(동시 동일 pId 1건만 전이)
+            tx.Rollback();
+            return false;
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
         }
     }
 
@@ -432,21 +432,31 @@ public sealed class EfDepositRecorder : IDepositRecorder
              p.Status == PieceStatus.CELL_ASSIGNED ||
              p.Status == PieceStatus.LOADED));
 
-    /// <summary>pId에 해당하는 목적지 종류 반환 — IF-10 → IF-11 판단용.</summary>
-    public DestinationType? GetDestType(int pId)
-    {
-        var piece = _db.Pieces
-            .Include(p => p.Destination)
-            .Where(p => p.PId == pId && p.IsActive)
-            .OrderByDescending(p => p.Id)
-            .FirstOrDefault();
+    // ── 헬퍼 ─────────────────────────────────────────────────────────────────
 
-        return piece?.Destination?.DestType switch
-        {
-            DestType.CHUTE     => DestinationType.Chute,
-            DestType.SORTER_3D => DestinationType.Sorter3D,
-            _                  => null,
-        };
+    /// <summary>timeStamp 파싱 — 실패·null → null.</summary>
+    private static DateTime? ParseTimestamp(string? ts)
+    {
+        if (string.IsNullOrWhiteSpace(ts)) return null;
+        return DateTime.TryParseExact(ts, "yyyy-MM-dd HH:mm:ss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var dt)
+            ? dt.ToUniversalTime()
+            : null;
+    }
+
+    /// <summary>DbUpdateException이 유니크 제약 위반인지 확인. 에러 코드 기반(메시지 문자열 의존 금지).</summary>
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+    {
+        // SQLite: SqliteExtendedErrorCode == 2067 (SQLITE_CONSTRAINT_UNIQUE)
+        if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqe)
+            return sqe.SqliteExtendedErrorCode == 2067;
+
+        // SQL Server: SqlException.Number 2601(dup key row) 또는 2627(dup unique constraint)
+        if (ex.InnerException is Microsoft.Data.SqlClient.SqlException sqse)
+            return sqse.Number == 2601 || sqse.Number == 2627;
+
+        return false;
     }
 }
 
