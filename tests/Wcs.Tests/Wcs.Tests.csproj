@@ -3,6 +3,8 @@
     <ProjectReference Include="..\..\src\Wcs.Core\Wcs.Core.csproj" />
     <ProjectReference Include="..\..\src\Wcs.PlcGateway\Wcs.PlcGateway.csproj" />
     <ProjectReference Include="..\..\src\Wcs.Sim3ds\Wcs.Sim3ds.csproj" />
+    <!-- M3: WebApplicationFactory 통합 테스트용 -->
+    <ProjectReference Include="..\..\src\Wcs.Api\Wcs.Api.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
@@ -11,6 +13,8 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <!-- WebApplicationFactory: ASP.NET Core 통합 테스트 호스트 -->
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.5" />
   </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
