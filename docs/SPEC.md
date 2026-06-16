@@ -17,7 +17,9 @@
 
 D4는 한 워드 — 한 비트만 바꿀 땐 D4 읽기→비트 수정→쓰기(RMW). 쓰기는 단일 큐에서만.
 
-## 2. IF-08 투입 가부 판정 (Wcs.Core.DepositDecider — 순수 함수)
+## 2. IF-08 투입 가부 판정
+
+### 2-A. SORTER_3D 경로 (Wcs.Core.DepositDecider — 순수 함수)
 입력: PlcSnapshot(레지스터+Online), agvFloor(int), WcsHold(None/Full/Paused)
 우선순위: Offline → Full/Paused → Ready/층 비교
 
@@ -33,6 +35,20 @@ D4는 한 워드 — 한 비트만 바꿀 땐 D4 읽기→비트 수정→쓰기
 
 TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=agvFloor || Ready==0)` — 단 Hold/Offline이면 항상 안 씀.
 클리어: WCS는 절대 안 함. PLC가 분류 시작(Ready 1→0) 시 0으로(도착 시엔 CurFloor만 기입·TgtFloor 유지).
+
+### 2-B. CHUTE 경로 (M4-P2a 신설)
+입력: WcsHold(IChuteCapacityService.GetHold) — PLC 스냅샷·agvFloor 미사용, TgtFloor 쓰기 없음.
+
+| 조건 | allowed | reason |
+|---|---|---|
+| destination 미존재 또는 비활성 | false | PAUSED |
+| destination.Status == PAUSED | false | PAUSED |
+| hold == Full | false | FULL |
+| hold == Paused (용량 집계) | false | PAUSED |
+| hold == None (정상) | true | READY |
+
+FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RESERVED/PERMITTED)qty >= work_full_qty`
+(cur_qty 컬럼 없음 — 집계는 piece 테이블이 단일 진실. 인메모리 캐시: ChuteCapacityService 싱글톤)
 
 ## 3. API (WCS=서버, RCS=클라이언트, 응답 3s 한계)
 공통 필드: pId(int 1~30000, RCS 부여), agvNo, barcode, inductionNo, chuteNo, qty, timeStamp("yyyy-MM-dd HH:mm:ss" 로컬)
@@ -101,9 +117,17 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 - IF-10 멱등은 in-process `static readonly object _recordLock`에 의존. 단일 프로세스 내에서만 유효.
   다중 인스턴스(로드밸런서) 배포 시 이중 기록·IF-11 이중 트리거 가능. P1 범위 밖 — P2에서 DB 레벨 진성 멱등으로 전환.
 
-**P2 정리 대상**
-- [MAJOR-1] 다중 인스턴스 멱등: `piece`에 부분 유니크 인덱스 `(p_id) WHERE status IN ('DEPOSITED','CELL_ASSIGNED','LOADED') AND is_active=1` + 위반 catch → 단일 인스턴스 lock 제거. P2.
-- [MINOR-2] RowVersion+XminRowVersion 이중 물리 컬럼 — 비활성 분기는 `Ignore()`로 처리하지 않고 두 컬럼이 DB에 모두 존재. P2에서 비활성 provider 분기 컬럼은 `Ignored()` 처리로 정리.
-- [MINOR-4] 셀 배정 `(cell_id) WHERE released_at IS NULL` 유니크 인덱스 부재 — 동시 이중 셀 할당 잠재. P2에서 인덱스 추가.
-- [MINOR-5] IF-05 NG(DENIED) piece의 destination FK: 현재 임의 목적지로 fallback — nullable FK 또는 UNROUTED sentinel 목적지로 교체. P2.
-- [MINOR-6] `IF05_REQ` 이벤트가 `IF05_RES` 뒤 별도 트랜잭션(`RecordDestinationQuery`)에서 삽입됨 — P2에서 `QueryDestination` 트랜잭션에 합치고 `RecordDestinationQuery` 인터페이스 메서드 제거 권고.
+**P2a 완료 항목 (M4-P2a, 2026-06-16)**
+- ✅ [MAJOR-1] `piece` 부분 유니크 `(p_id) WHERE is_active=1 AND status IN ('DEPOSITED','CELL_ASSIGNED','LOADED')` + UniqueConstraintException catch → false 반환. `static _recordLock` 제거.
+- ✅ [MINOR-2] `Ignore(propertyName)` 적용 — 이중 물리 컬럼 실제 제거. SQLite: `RowVersion(byte[]?)` Ignore, SQL Server: `XminRowVersion(int)` Ignore. 마이그레이션 DropColumn 포함.
+- ✅ [MINOR-4] `cell_assignment` `(cell_id) WHERE released_at IS NULL` 부분 유니크 인덱스 추가.
+- ✅ [MINOR-5] IF-05 NG(DENIED) piece `destination_id`: nullable FK — 미매칭 시 null(0 fallback 제거).
+- ✅ [MINOR-6] `IF05_REQ` + `IF05_RES` 이벤트를 `QueryDestination` 단일 트랜잭션에서 삽입. `RecordDestinationQuery` 인터페이스 메서드 제거.
+- ✅ [Scope-1] IF-08 SORTER_3D / CHUTE 분기 — ISorterGatewayRegistry 단일 진입점, CHUTE 경로 hold만 판정.
+- ✅ [Scope-2] ChuteCapacityService 싱글톤 — FULL/PAUSED 인메모리 집계, IHostedService 기동 시 DB 복원.
+- ✅ [Scope-3] timeStamp 백필 `"yyyy-MM-dd HH:mm:ss"` 파싱, UtcNow 폴백. ClientTs 원문 보존.
+- ✅ [Scope-9] `CancellationToken.None` → `IHostApplicationLifetime.ApplicationStopping`. GetDestType 다운캐스트 제거. InMemory* 구현체+POCO 제거(인터페이스 유지).
+- ✅ [Migration] P2a_PieceNullableDestId_UniqueIndexes_RowVersionIgnore 마이그레이션 (SQLite·SqlServer) 추가·적용. DropColumn(RowVersion×5·SQLite / XminRowVersion×5·SqlServer) 포함.
+
+**P2b 이관 대상 (미완)**
+- 다중 소터(N대) 라우팅: ISorterGatewayRegistry P2b에서 실제 destination.id→gateway 맵으로 교체.

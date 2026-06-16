@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Wcs.Api;
 using Wcs.Core;
 using Wcs.Data;
@@ -322,8 +323,9 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
     [Fact]
     public async Task VS3_If08_WrongFloor_AllowedFalseWrongFloor_TgtFloorWritten()
     {
+        // P2a: SORTER_3D(chuteNo=30) 경로에서 층 불일치 테스트.
+        // chuteNo=30은 SORTER_3D → Decide(PLC 스냅샷) 경로.
         // 사전조건: Ready=1, CurFloor=1, TgtFloor=0, agvNo=2 → agvFloor=2(매핑) → 층 불일치
-        // IClassFixture 공유 팩토리: 이전 테스트 TgtFloor 잔류 방지를 위해 스냅샷 조건에 TgtFloor=0 포함
         _factory.FakeMaster.SetReady(true);
         _factory.FakeMaster.SetCurFloor(1);
         _factory.FakeMaster.SetTgtFloor(0); // TgtFloor=0 → WriteTgtFloor 조건 충족
@@ -332,7 +334,8 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         await WaitForSnapshotAsync(_factory,
             snap => snap.Ready && snap.CurFloor == 1 && snap.TgtFloor == 0, 5000);
 
-        var req = new { pId = 3002, chuteNo = 2, agvNo = 2, timeStamp = (string?)null };
+        // chuteNo=30 → SORTER_3D 경로 → agvFloor 산출 + Decide
+        var req = new { pId = 3002, chuteNo = 30, agvNo = 2, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -355,14 +358,16 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
     [Fact]
     public async Task VS4_If08_ReadyZero_AllowedFalseBusy()
     {
-        // Ready=0 설정
+        // P2a: SORTER_3D(chuteNo=30) 경로에서 Ready=0 → BUSY 테스트.
+        // chuteNo=30 → SORTER_3D → Decide(PLC 스냅샷) 경로.
         _factory.FakeMaster.SetReady(false);
         _factory.FakeMaster.SetTgtFloor(0);
         _factory.FakeMaster.SetCurFloor(1);
 
         await WaitForSnapshotAsync(_factory, snap => !snap.Ready, 3000);
 
-        var req = new { pId = 4001, chuteNo = 1, agvNo = 1, timeStamp = (string?)null };
+        // chuteNo=30 → SORTER_3D 경로 → agvFloor 산출 + Decide
+        var req = new { pId = 4001, chuteNo = 30, agvNo = 1, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -389,11 +394,12 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
     [Fact]
     public async Task VS4_If08_UnknownAgvNo_Returns400()
     {
-        // agvNo=99는 매핑 없음 → 400
-        var req = new { pId = 4002, chuteNo = 1, agvNo = 99, timeStamp = (string?)null };
+        // P2a: SORTER_3D(chuteNo=30) 경로에서 agvNo=99(매핑없음) → 400 테스트.
+        // CHUTE 경로는 agvFloor 조회 없음. SORTER_3D 경로만 agvFloor 산출 → 매핑 없으면 400.
+        var req = new { pId = 4002, chuteNo = 30, agvNo = 99, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-        _out.WriteLine("[VS-4] agvNo=99(매핑없음) → 400 확인");
+        _out.WriteLine("[VS-4] agvNo=99(매핑없음) SORTER_3D 경로 → 400 확인");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -624,20 +630,17 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         _out.WriteLine($"[CONCUR-1] {concurrency}건 병렬 IF-10 모두 200 OK 확인");
 
         // IF-11 트리거 결과 관찰 대기 (백그라운드 핸드셰이크 처리 시간)
-        // CellAssign이 최대 1회만 발생해야 함 — 셀 1개(CellNo=1)만 점유
-        // 간단 검증: C_Flag 상승은 최대 1회 → 현재 C_Flag가 0 또는 1 (2 이상 불가)
-        // 추가 정량 검증: InMemoryDepositRecorder에서 직접 확인
+        // CellAssign이 최대 1회만 발생해야 함 — cell_assignment 부분 유니크로 구조적 보장(EfCellSelector)
+        // piece 부분 유니크 + UniqueConstraintViolation catch → DB 레벨 진성 멱등(EfDepositRecorder)
         using var scope    = _factory.Services.CreateScope();
         var       recorder = scope.ServiceProvider.GetRequiredService<IDepositRecorder>();
 
-        // HasDepositRecord가 true이면 정확히 1건만 기록됨을 의미
+        // HasDepositRecord가 true이면 DB에 piece row 1건 존재 (8병렬 중 1건만 성공)
         Assert.True(recorder.HasDepositRecord(testPId),
             "IF-10 동시 다수 호출 → pId 기록 존재(최소 1건)");
 
-        // CellSelector: 셀이 점유(최대 1개)됐는지 확인
-        // InMemoryCellSelector는 직접 접근이 어려우므로 C_Flag 상승으로 트리거 확인
-        // CellAssign이 2회 이상이면 C_Flag가 다시 set되는데, 핸드셰이크가 순서대로 처리됨
-        // → 단순 로그 확인으로 충분: 핸드셰이크 결과는 로그에 "IF-11 핸드셰이크 완료" 1건
+        // CellSelector: EfCellSelector + cell_assignment (cell_id WHERE released_at IS NULL) 부분 유니크.
+        // CellAssign 이중 시도 시 UniqueConstraintViolation으로 차단 — 구조적 보장.
 
         _out.WriteLine($"[CONCUR-1] 기록 존재={recorder.HasDepositRecord(testPId)} — 멱등 원자성 확인");
         _out.WriteLine("[CONCUR-1] IF-10 동시성 멱등 회귀 가드 PASS");
@@ -660,6 +663,239 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         var resp = await _client.PostAsJsonAsync("/api/v1/destination-query", req);
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         _out.WriteLine("[MINOR-1] qty=-5 → 400 확인");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // P2a 신규 테스트 (VS-P2a-3/4/5/8)
+    // ════════════════════════════════════════════════════════════════════════
+
+    // VS-P2a-3: IF-08 CHUTE 경로 — hold=None(READY) / PAUSED status / 비활성(PAUSED)
+    [Fact]
+    public async Task P2a_If08_Chute_HoldNone_Allowed()
+    {
+        // chuteNo=1 (CHUTE, Active, NORMAL status) → hold=None → READY
+        var req  = new { pId = 10001, chuteNo = 1, agvNo = 1, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositPermissionResponse>();
+        Assert.NotNull(body);
+        Assert.True(body.Allowed, "CHUTE·Active·NORMAL → allowed=true");
+        Assert.Equal("READY", body.Reason);
+        _out.WriteLine($"[P2a-3] CHUTE hold=None → allowed={body.Allowed} reason={body.Reason}");
+    }
+
+    [Fact]
+    public async Task P2a_If08_Chute_PausedStatus_NotAllowed()
+    {
+        // chuteNo=6 (CHUTE, PAUSED status — DbSeeder 시드) → hold=Paused → not allowed
+        var req  = new { pId = 10002, chuteNo = 6, agvNo = 1, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositPermissionResponse>();
+        Assert.NotNull(body);
+        Assert.False(body.Allowed, "CHUTE·PAUSED status → not allowed");
+        Assert.Equal("PAUSED", body.Reason);
+        _out.WriteLine($"[P2a-3] CHUTE PAUSED → allowed={body.Allowed} reason={body.Reason}");
+    }
+
+    [Fact]
+    public async Task P2a_If08_UnknownChute_NotAllowedPaused()
+    {
+        // chuteNo=999 (미존재) → destination 없음 → PAUSED
+        var req  = new { pId = 10003, chuteNo = 999, agvNo = 1, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositPermissionResponse>();
+        Assert.NotNull(body);
+        Assert.False(body.Allowed, "미존재 chuteNo → not allowed");
+        Assert.Equal("PAUSED", body.Reason);
+        _out.WriteLine($"[P2a-3] 미존재 chuteNo=999 → allowed={body.Allowed} reason={body.Reason}");
+    }
+
+    // VS-P2a-4: FULL 계산 — OnReserved/OnDeposited/OnCleared 경로 통합 검증.
+    // IChuteCapacityService에 직접 접근하여 qty 누적 → FULL 진입 → OnCleared → NORMAL 복귀.
+    // work_full_qty=100(시드 기본). 대용량 qty(100 이상)로 한 번에 FULL 조건 충족.
+    // qty>1 피스 케이스 포함 (COUNT 아님 — qty 합산임을 검증).
+    [Fact]
+    public async Task P2a_If08_Chute_Full_ThenCleared_Normal()
+    {
+        // 1. DB에서 chuteNo=5 목적지 Id 조회 (IClassFixture 충돌 방지를 위해 chuteNo=5 사용)
+        using var scope     = _factory.Services.CreateScope();
+        var       db        = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+        var       capacity  = scope.ServiceProvider.GetRequiredService<IChuteCapacityService>();
+
+        var dest5 = db.Destinations.First(d => d.ChuteNo == 5 && d.DestType == Wcs.Data.DestType.CHUTE);
+        var detail5 = db.ChuteDetails.First(cd => cd.DestinationId == dest5.Id);
+        var workFullQty = detail5.WorkFullQty; // 기본 100
+
+        // 2. FULL 직전 상태 확인 (hold=None)
+        var holdBefore = capacity.GetHold(dest5.Id);
+        Assert.Equal(WcsHold.None, holdBefore);
+
+        // 3. qty>1 단일 OnReserved로 FULL 도달 (COUNT 아님·qty 합산 검증)
+        // workFullQty=100이므로 qty=100(in-flight) → Full
+        capacity.OnReserved(dest5.Id, workFullQty);
+
+        var holdFull = capacity.GetHold(dest5.Id);
+        Assert.Equal(WcsHold.Full, holdFull);
+        _out.WriteLine($"[P2a-4] OnReserved(qty={workFullQty}) → Full confirmed");
+
+        // 4. IF-08: FULL → allowed=false·reason=FULL
+        var req  = new { pId = 10050, chuteNo = 5, agvNo = 1, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositPermissionResponse>();
+        Assert.NotNull(body);
+        Assert.False(body.Allowed, "FULL 조건 → allowed=false");
+        Assert.Equal("FULL", body.Reason);
+        _out.WriteLine($"[P2a-4] IF-08 FULL: allowed={body.Allowed} reason={body.Reason}");
+
+        // 5. OnCleared → DB 영속화 + 인메모리 집계 비움 → NORMAL 복귀
+        await capacity.OnCleared(dest5.Id);
+        var holdAfterClear = capacity.GetHold(dest5.Id);
+        Assert.Equal(WcsHold.None, holdAfterClear);
+
+        // 6. IF-08 재호출: NORMAL → READY
+        var req2  = new { pId = 10051, chuteNo = 5, agvNo = 1, timeStamp = (string?)null };
+        var resp2 = await _client.PostAsJsonAsync("/api/v1/deposit-permission", req2);
+
+        Assert.Equal(HttpStatusCode.OK, resp2.StatusCode);
+        var body2 = await resp2.Content.ReadFromJsonAsync<DepositPermissionResponse>();
+        Assert.NotNull(body2);
+        Assert.True(body2.Allowed, "비움 후 NORMAL → allowed=true");
+        Assert.Equal("READY", body2.Reason);
+        _out.WriteLine($"[P2a-4] OnCleared → READY: allowed={body2.Allowed} reason={body2.Reason}");
+    }
+
+    // 회귀 가드: OnCleared 후 InitializeFromDbAsync 재실행 시 NORMAL 유지 (MAJOR-1/MAJOR-2 수정 증명)
+    // 재시작 시나리오: OnCleared → last_cleared_at DB 영속화됨 →
+    //   InitializeFromDbAsync가 deposited_at > last_cleared_at 필터로 재집계 → FULL 아님.
+    // 버그 조건: DB 영속화 없으면 재시작 후 old piece qty 재합산 → FULL 복귀.
+    [Fact]
+    public async Task P2a_Chute_ClearPersisted_AfterReinitialize_StillNormal()
+    {
+        // 1. chuteNo=4 CHUTE 목적지 사용 (IClassFixture 충돌 방지)
+        using var scope    = _factory.Services.CreateScope();
+        var       db       = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+        var       capacity = scope.ServiceProvider.GetRequiredService<IChuteCapacityService>();
+
+        var dest4 = db.Destinations.First(d => d.ChuteNo == 4 && d.DestType == Wcs.Data.DestType.CHUTE);
+
+        // 2. FULL 조건 달성 (OnReserved + OnDeposited 각 절반)
+        var detail4     = db.ChuteDetails.First(cd => cd.DestinationId == dest4.Id);
+        var workFullQty = detail4.WorkFullQty; // 기본 100
+
+        capacity.OnReserved(dest4.Id, workFullQty / 2);
+        capacity.OnDeposited(dest4.Id, workFullQty / 2); // InFlight → Deposited
+        capacity.OnReserved(dest4.Id, workFullQty / 2);  // 나머지 InFlight 추가 → TotalQty >= workFullQty
+        Assert.Equal(WcsHold.Full, capacity.GetHold(dest4.Id));
+
+        // 3. DB에 DEPOSITED piece 삽입 (초기화 재실행 시 합산 대상 확인용)
+        //    now 이전 시각으로 deposited_at 기록 — last_cleared_at보다 이전이 되도록
+        var pieceBeforeClear = new Wcs.Data.Piece
+        {
+            PId           = 19001,
+            IsActive      = true,
+            Barcode       = "REGRESS-TEST",
+            Qty           = workFullQty,
+            Status        = Wcs.Data.PieceStatus.DEPOSITED,
+            DepositedAt   = DateTime.UtcNow.AddMinutes(-10), // 비움 이전 시각
+            DestinationId = dest4.Id,
+            CreatedAt     = DateTime.UtcNow,
+            UpdatedAt     = DateTime.UtcNow,
+        };
+        db.Pieces.Add(pieceBeforeClear);
+        await db.SaveChangesAsync();
+
+        // 4. OnCleared → DB에 last_cleared_at 영속화 + 인메모리 리셋
+        await capacity.OnCleared(dest4.Id);
+        Assert.Equal(WcsHold.None, capacity.GetHold(dest4.Id));
+
+        // 5. InitializeFromDbAsync 직접 재실행 (재시작 시뮬레이션)
+        //    private 메서드이므로 IHostedService.StartAsync 경유
+        //    WebApplicationFactory에서 서비스를 재시작할 수 없으므로
+        //    ChuteCapacityService를 reflection으로 접근해 내부 재초기화 호출.
+        //    대안: IChuteCapacityService의 concrete type을 cast 후 내부 메서드 직접 호출.
+        //    → IHostedService.StartAsync 재실행 (CancellationToken.None로 안전)
+        var hostedService = scope.ServiceProvider.GetRequiredService<IChuteCapacityService>()
+            as IHostedService;
+        Assert.NotNull(hostedService);
+        await hostedService.StartAsync(CancellationToken.None);
+
+        // 6. 재초기화 후 FULL 아님 확인 (MAJOR-1/MAJOR-2 fix: last_cleared_at 이전 piece 제외)
+        var holdAfterReinit = capacity.GetHold(dest4.Id);
+        Assert.Equal(WcsHold.None, holdAfterReinit);
+
+        _out.WriteLine($"[회귀가드] OnCleared+재초기화 후 hold={holdAfterReinit} — FULL 복귀 없음 확인");
+    }
+
+    // VS-P2a-5: timeStamp 백필 — "yyyy-MM-dd HH:mm:ss" 파싱·UtcNow 폴백
+    [Fact]
+    public async Task P2a_If05_TimeStampParsed_UtcFallback()
+    {
+        // timeStamp 있음 → 파싱 성공·OK
+        var req1 = new
+        {
+            pId        = 10100,
+            agvNo      = 1,
+            barcode    = "TEST-BARCODE-1",
+            inductionNo = 1,
+            qty        = 1,
+            timeStamp  = "2026-06-16 09:30:00"
+        };
+        var resp1 = await _client.PostAsJsonAsync("/api/v1/destination-query", req1);
+        Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
+        var body1 = await resp1.Content.ReadFromJsonAsync<DestinationQueryResponse>();
+        Assert.Equal("OK", body1!.Result);
+        _out.WriteLine($"[P2a-5] timeStamp 파싱 OK: {req1.timeStamp}");
+
+        // timeStamp null → UtcNow 폴백·정상 응답
+        var req2 = new
+        {
+            pId        = 10101,
+            agvNo      = 1,
+            barcode    = "TEST-BARCODE-1",
+            inductionNo = 1,
+            qty        = 1,
+            timeStamp  = (string?)null
+        };
+        var resp2 = await _client.PostAsJsonAsync("/api/v1/destination-query", req2);
+        Assert.Equal(HttpStatusCode.OK, resp2.StatusCode);
+        var body2 = await resp2.Content.ReadFromJsonAsync<DestinationQueryResponse>();
+        Assert.Equal("OK", body2!.Result);
+        _out.WriteLine($"[P2a-5] timeStamp=null → UtcNow 폴백 OK");
+    }
+
+    // VS-P2a-8: NG DENIED piece destination_id nullable — unknown barcode → 500 없음
+    [Fact]
+    public async Task P2a_If05_UnknownBarcode_NullableDest_No500()
+    {
+        // 미매칭 바코드 → NG DENIED 기록. piece.destination_id=null (MINOR-5).
+        // 이전 버전: dest?.Id ?? 0 → FK 위반 → 500. 수정 후: null → 200 NG.
+        var req = new
+        {
+            pId        = 10200,
+            agvNo      = 1,
+            barcode    = "BARCODE-NEVER-EXISTS-P2A",
+            inductionNo = 1,
+            qty        = 1,
+            timeStamp  = "2026-06-16 10:00:00"
+        };
+        var resp = await _client.PostAsJsonAsync("/api/v1/destination-query", req);
+
+        // 500 아님(MINOR-5 nullable FK 수정 증명)
+        Assert.NotEqual(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
+        Assert.NotNull(body);
+        Assert.Equal("NG", body.Result);
+        Assert.Null(body.ChuteNo);
+        _out.WriteLine($"[P2a-8] unknown barcode → NG·chuteNo=null·500없음 result={body.Result}");
     }
 
     // ════════════════════════════════════════════════════════════════════════

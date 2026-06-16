@@ -1,3 +1,121 @@
+# Sprint Feedback — S-M4-P2a (IF-08 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱 + 이관 정리)
+
+## CODE REVIEW FIX (4-Tier Step 4.5) — APPROVED (GROUND TRUTH 재검증)
+
+독립 코드리뷰 MAJOR 2 + MINOR 3 수정 재검증. 핵심: 코드리뷰가 내 APPROVED 이후 FULL 영속화 결함을 잡았고, 수정이 견고함.
+
+- **MAJOR-1 OnCleared DB 영속화** — FIXED. `void`→`Task`. 락 밖에서 `chute_detail.last_cleared_at=UtcNow` + `destination_event(CLEARED)` append + SaveChangesAsync(durable) → 그 후 _rwLock 진입·인메모리 리셋(I/O 락 밖, 순서 정확). 프로덕션 호출부 없음(clear는 운영 액션·후속 결선) → `Task` 시그니처 fire-and-forget 위험 0. 테스트 호출부 2곳 모두 `await`.
+- **MAJOR-2 InitializeFromDbAsync 필터** — FIXED. piece⋈chute_detail JOIN + `deposited_at == null || last_cleared_at == null || deposited_at > last_cleared_at`. 재시작 시 비움 이전 piece 재합산 방지(ERD §7 부합).
+- **회귀 가드** `P2a_Chute_ClearPersisted_AfterReinitialize_StillNormal` — 진성 테스트. FULL 달성 → deposited_at(-10min, 비움 이전) qty=100 piece 삽입 → OnCleared(영속화) → IHostedService.StartAsync 재실행(재시작 시뮬) → GetHold==None 단언. MAJOR-1/2 없으면 step6에서 FULL 복귀로 실패 — 버그를 정확히 가드.
+- **MINOR-1 에러코드 전환** — FIXED. 문자열 매칭 제거, SQLite `SqliteExtendedErrorCode==2067` / SQL Server `Number==2601||2627` 타입드 예외. Evaluator 정량 프로브 8병렬 5회 depositedRows=1·cellAssign=1 — 멱등 백스톱 불변.
+- **MINOR-2 코멘트** — FIXED. "진성 멱등"→"신규 piece insert 경합만 백스톱"(UPDATE-in-place는 트랜잭션 직렬화+상태 재확인이 처리한다는 정확한 기술).
+- **MINOR-3 dead code** — FIXED. IF-08 핸들러에서 미사용 `IPlcGateway gateway` 파라미터 + `?? gateway.Latest` fallback 제거, `snap is null`→OFFLINE 응답(null-safe·동작 개선). SORTER_3D 경로 회귀 0.
+
+**재검증 결과**: build 경고0/오류0. `dotnet test` **51/51 GREEN 4회 연속**(=50 + 회귀가드 1). split 불변(Decider15/PlcGatewayIntegration9/RtuTransport4 + ApiIntegration 23). 양 provider pending 0(엔티티 무변경). `git diff HEAD -- src/Wcs.Core/`=0. 변경 범위=Api/Data/Migrations 스냅샷뿐(Core/PlcGateway/Sim3ds 0). Evaluator 임시 프로브 삭제 완료.
+
+→ 코드리뷰 결함 0 확인. **APPROVE — 머지 가능.**
+
+---
+
+## STATUS: APPROVED (Rev.2 — 2 iterations)
+
+Rev.2 GROUND TRUTH 재검증 완료 — F1~F4 전부 해소 확인, 회귀 0, 이전 PASS 항목 불변.
+
+### Rev.2 — F1~F4 해소 증거 (Evaluator 직접 재실행)
+- **F1 경고0**: `dotnet build --no-incremental` → **경고 0개 / 오류 0개**. ChuteCapacityService.cs L150-155
+  `.Where(x=>x.DestinationId != null).ToDictionary(x=>x.DestinationId!.Value, ...)` — CS8714 제거. DENIED(null dest) 제외도 의미상 정확.
+- **F2 VS-P2a-4 FULL**: `P2a_If08_Chute_Full_ThenCleared_Normal` 신규 — GetHold=None → OnReserved(qty=workFullQty=100, qty>1 단일 합산)
+  → GetHold=**Full** → IF-08 chuteNo=5 → **allowed=false·reason=FULL** → OnCleared → GetHold=**None** → IF-08 → **allowed=true·READY**.
+  ChuteCapacityService FULL 집계가 서비스 API + IF-08 엔드포인트 양쪽으로 실제 실행됨(시드 chuteNo=5 CHUTE+chute_detail WorkFullQty=100 확인).
+- **F3 죽은코드 제거**: Repositories.cs는 이제 `DestinationType` enum + 인터페이스 4종만. InMemory* 구현체 4종 + POCO(OrderItem/ChuteInfo/
+  CellInfo/DepositRecord) + DepositStatus enum 전부 삭제(grep 0). 스테일 CONCUR1 주석 정정.
+- **F4 이중 물리 컬럼 실제 제거**: WcsDbContext.cs ConfigureConcurrency가 `e.Ignore(propertyName)` 사용 — SQLite는 RowVersion,
+  SQL Server는 XminRowVersion 물리 컬럼 제거. P2a_..._RowVersionIgnore 마이그레이션 = DropColumn(RowVersion×5·SQLite /
+  XminRowVersion×5·SqlServer) + 부분유니크 CreateIndex(올바른 [IsActive]/[Status]·[ReleasedAt] 필터) + nullable FK.
+  **양 provider has-pending-model-changes = "No changes"**. SPEC §7-C 문구도 "Ignore()로 실제 제거"로 정정(주장=코드 일치).
+
+### 회귀·핵심 재확인 (Rev.2)
+- `dotnet test` **50/50 GREEN 4회 연속**(=49 기존 + 1 신규 FULL). split 불변(Decider15/PlcGatewayIntegration9/RtuTransport4),
+  ApiIntegration 21→22(신규 1 추가만).
+- **VS-P2a-6 멱등 재입증(F4 DropColumn 후 회귀 확인)**: Evaluator 정량 프로브(8병렬 동일 pId) **5회 연속 depositedRows=1·
+  cellAssignCount=1(IF-11 ≤1)** — RowVersion 컬럼 제거가 진성 멱등에 영향 0(예상대로 부분유니크+트랜잭션 직렬화 의존).
+- **E1 Core 무변경**: `git diff HEAD -- src/Wcs.Core/` 0줄(전 상태). PlcGateway·Sim3ds 0. **E6** develop 직접 커밋 0(HEAD=M4-P1 머지, 작업물 uncommitted).
+- 프로브 임시 파일 삭제 완료 — working tree는 generator 변경만 잔존.
+
+→ Completion Conditions 전부 충족. **APPROVED.** (Evaluator 임시 검증 프로브 외 working tree 오염 0.)
+
+---
+
+## (Rev.1 기록 — 보존) STATUS: FAIL (재제출 요청)
+
+Evaluator GROUND TRUTH 검증(직접 재빌드·재실행·소스 검사, 생성자 요약 불신) 결과. 핵심 구현(IF-08 분기,
+멱등 DB 백스톱, 마이그레이션 동기, Core 무변경)은 견고하나, 계약 필수 항목 2건 미충족 + Scope 1건 누락 + 문서 1건 부정확.
+
+### FAIL 항목 (expected vs actual)
+
+**F1. [BLOCKING] 빌드 경고 2개 — Evaluation Criteria #1 위반 (경고0 필수)**
+- Expected: `dotnet build` 경고 0 / 오류 0 (계약 §Evaluation Criteria 1, CLAUDE.md "Never ignore errors/warnings").
+- Actual: `dotnet build Wcs.sln --no-incremental` → **경고 2개**(오류 0):
+  ```
+  src/Wcs.Api/ChuteCapacityService.cs(149,29): warning CS8714: 'long?'가 'TKey'의 'notnull' 제약 위반
+  src/Wcs.Api/ChuteCapacityService.cs(150,29): warning CS8714: (동일)
+  ```
+- 원인: MINOR-5로 `Piece.DestinationId`가 `long?`이 되며 `GroupBy(p=>p.DestinationId).Select(g=>g.Key)` 키가 `long?`.
+  그 결과 `depositedQtys.ToDictionary(x=>x.DestinationId,...)`/`inFlightQtys.ToDictionary(...)`가 `long?` 키로 제약 위반.
+- 수정: 집계 쿼리에서 `p.DestinationId != null` 필터 후 `.Value`(또는 `g.Key!.Value`)로 키 사용. DEPOSITED/RESERVED/
+  PERMITTED는 항상 destination 보유 → 의미 변화 0. (generator가 "동작 무해"로 인지했으나, 계약은 경고0 명시 — 무해해도 불가.)
+
+**F2. VS-P2a-4 (FULL) — 검증 시나리오 부재 (계약 필수 슬롯 미충족)**
+- Expected: work_full_qty=N 도달 시 FULL → 비움 후 NORMAL 복귀 → 피스 qty>1(COUNT 아님) 입증 테스트 (계약 VS-P2a-4, Criteria 4).
+- Actual: `ChuteCapacityService`(GetHold Full 분기·OnReserved/OnDeposited/OnCleared) 테스트 **0건**. grep 확인 —
+  테스트 코드에 `IChuteCapacityService`/`ChuteCapacityService`/`OnDeposited`/capacity `GetHold` 참조 0.
+  `P2a_If08_Chute_PausedStatus`는 `destination.status==PAUSED`(DB 필드)만 검증 — 인메모리 FULL 집계 경로 전혀 미실행.
+- 결과: FULL 기능이 구현은 됐으나 회귀로 보호되지 않음("이름만 통과" 리스크 — 집계가 깨져도 49/49 GREEN 유지).
+- 수정: WorkFullQty 작은 슈트(별도 시드)로 IF-05 예약 누적→FULL(allowed=false/reason=FULL)→비움(OnCleared)→NORMAL 복귀를
+  검증하는 통합 테스트 추가. qty>1 피스 1건으로 FULL 도달(COUNT 아님) 케이스 포함. (현 시드 WorkFullQty=100은 도달 불가값.)
+
+**F3. Scope #9 — InMemory* 죽은 클래스 미제거 (계약 IN 범위 누락)**
+- Expected: "InMemory* 죽은 클래스 제거"(계약 Scope IN 9).
+- Actual: `src/Wcs.Api/Repositories.cs`에 `InMemoryOrderRepository`(L161)·`InMemoryDepositRecorder`(L229)·
+  `InMemoryCellSelector`(L267)·`ConfigAgvFloorResolver`(L326) + POCO(`ChuteInfo`/`CellInfo`/`OrderItem`/`DepositRecord`) 잔존.
+  Program.cs는 `Ef*`만 DI 등록 → 이 클래스들은 production/test 어디서도 인스턴스화 0인 죽은 코드.
+  (ApiIntegrationTests.cs:634,643은 주석 내 이름 언급뿐 / DbSeeder:272 `new OrderItem`은 `Wcs.Data.OrderItem` 엔티티로 다른 NS.)
+- 수정: 죽은 InMemory* 구현체 + POCO 모델 제거(인터페이스 4종은 유지). 스테일 주석(테스트 634/643)도 정리.
+
+**F4. [문서 부정확] SPEC §7-C MINOR-2 주장 ≠ 실제 코드**
+- 주장(docs/SPEC.md §7-C): "MINOR-2 SQL Server 비활성 분기 RowVersion `ValueGeneratedNever()` 적용 — 물리 컬럼 이중 생성 방지."
+  (계약 Scope #6: "비활성 provider 분기 RowVersion `Ignore()`(이중 물리 컬럼 제거)")
+- Actual(WcsDbContext.cs:594-615): `ValueGeneratedNever()`/`IsRequired(false)`는 물리 컬럼을 **제거하지 않음**. 코드 주석
+  자체가 인정 — SQLite "물리 컬럼이 여전히 생성됨"(L601), SQL Server "물리 컬럼은 마이그레이션 호환성 위해 유지"(L613).
+  RowVersion+XminRowVersion 이중 물리 컬럼이 양 테이블에 그대로 존재 → 계약 Scope #6 "이중 물리 컬럼 제거" 미달성.
+- 수정: (a) `Ignore()`로 실제 제거하거나, (b) 제거가 비현실적이면 SPEC §7-C를 "물리 컬럼 유지(런타임 미사용)"로 정확히
+  정정 + 계약 Scope #6 사용자 재조정. 현재처럼 "제거"로 기술하는 것은 부정확.
+
+### PASS 항목 (이미 견고 — 재작업 불요)
+- **E1 Core 무변경**: `git diff HEAD -- src/Wcs.Core/` = 0줄(committed/staged/working/untracked 전부). PlcGateway·Sim3ds 변경 0.
+- **VS-P2a-2 소터**: chuteNo=30 SORTER_3D→Decide(Ready/층). VS3_WrongFloor(WRONG_FLOOR+TgtFloor=2)·VS4_ReadyZero(BUSY) GREEN.
+- **VS-P2a-3 슈트**: hold만 판정(None→READY/PAUSED status→PAUSED/미존재→PAUSED), TgtFloor 쓰기 경로 없음.
+- **VS-P2a-5 timeStamp**: ParseTimestamp("yyyy-MM-dd HH:mm:ss")→UTC, null/실패→UtcNow. client_ts 원문 보존. 영속 경로 로컬 Now 0
+  (PlcGateway/Sim3ds의 DateTimeOffset.Now는 P2a 미변경·범위 밖 monotonic 타임스탬프).
+- **VS-P2a-6 멱등 DB 백스톱 (핵심)**: `_recordLock` 선언 0(주석만). EVALUATOR 정량 프로브(8병렬 동일 pId, **5회 연속**):
+  **depositedRows=1·cellAssignCount=1(IF-11 ≤1)** 일관 — lock 없이 진성 멱등 성립 empirically 입증.
+  (단, 본 코드 CONCUR1 테스트는 "≥1 기록·전부 200"만 단언해 exactly-once를 정량 검증하지 않음 — 회귀 보강 권고, FAIL 사유 아님.)
+- **VS-P2a-7 셀 유니크**: `UQ_cell_assignment_cell_active (CellId) WHERE \"ReleasedAt\"/[ReleasedAt] IS NULL` 양 provider 마이그레이션 실재.
+- **VS-P2a-8 NG nullable FK**: `RecordDenied`에서 `DestinationId = dest?.Id`(임의 fallback 제거). P2a_If05_UnknownBarcode_NullableDest_No500 GREEN.
+- **VS-P2a-9 마이그레이션 동기**: 양 provider `has-pending-model-changes`="No changes". P2a 증분에 piece(`UQ_piece_pid_active_status`,
+  status IN 필터) + cell_assignment 부분 유니크 CreateIndex. SQL Server 구 `[is_active]`→`[IsActive]` 버그 교정 확인.
+- **VS-P2a-10 종료토큰·정리**: IF-10 핸드셰이크 `lifetime.ApplicationStopping`(Program.cs:332). IF05_REQ/RES 단일 트랜잭션,
+  `RecordDestinationQuery` grep 0, `GetDestType` grep 0.
+- **회귀**: `dotnet test` 49/49 GREEN **4회 연속**. split 불변(Decider15/PlcGatewayIntegration9/RtuTransport4),
+  ApiIntegration 16→21(신규 5만 추가, 기존 단언 보존). VS3/VS4 chuteNo 1→30 변경은 P2a 분기상 필수·단언 내용 동일.
+- **E6**: branch=feat/m4-p2-domain, develop 직접 커밋 0(작업물 전부 uncommitted working tree).
+
+### 재제출 시 필수
+F1(경고0) + F2(FULL 검증 테스트) + F3(InMemory* 죽은 코드 제거) 수정. F4는 코드로 실제 제거하거나 SPEC §7-C 문구 정확 정정
+(+ 계약 Scope #6 재조정 필요 시 사용자 확인). 수정 후 빌드 경고0·`dotnet test` 회귀0 4회 연속 재증명. 재제출 시 "Implementation complete" 신호.
+
+---
+
 # Sprint Feedback — S-M4-P1 (EF Core 영속화 + 리포지토리 DB 교체)
 
 ## 판정 (코드리뷰 BLOCKING 픽스 재검증): APPROVED (유지)

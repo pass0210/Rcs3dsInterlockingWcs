@@ -2,6 +2,25 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-M4-P2a (IF-08 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱 + 이관 정리) — APPROVED (2026-06-16, 2 iterations)
+
+- **"이름만 통과" 가드 — 인메모리 집계는 전용 시나리오 없으면 미검증**: Rev.1 FAIL 핵심은 FULL 집계(ChuteCapacityService)가
+  구현됐으나 테스트 0건 → 49/49 GREEN이어도 FULL 경로는 한 줄도 실행 안 됨. PAUSED-status 테스트(destination.status DB 필드)는
+  FULL 집계와 무관. Rev.2에서 `P2a_If08_Chute_Full_ThenCleared_Normal`(OnReserved(qty=workFullQty)→GetHold=Full→IF-08 FULL→
+  OnCleared→GetHold=None→IF-08 READY, qty 합산·COUNT 아님)로 해소. → 기능 슬롯마다 "그 코드가 실제로 실행되는 단언"이 있는지 확인.
+- **멱등 DB 백스톱은 코드 테스트의 약한 단언을 Evaluator 정량 프로브로 보강해 입증**: 본 코드 CONCUR1은 "≥1 기록·전부 200"만 단언 —
+  exactly-once를 증명 못 함. Evaluator가 임시 프로브(8병렬 후 실제 DB 행 카운트: depositedRows==1, cell_assignment<=1)를
+  Rev.1·Rev.2 각 5회 실행해 lock-free 진성 멱등을 ground-truth로 확정. F4의 RowVersion DropColumn 후에도 멱등 불변 재확인.
+  → static lock 제거형 멱등은 "전부 200"이 아니라 "DB에 정확히 1행"을 직접 세야 한다.
+- **경고0은 무해해도 차단**: F1 CS8714(long? ToDictionary 키, MINOR-5 nullable FK 파생)는 동작 무해하나 계약 Criteria #1 경고0 위반.
+  `.Where(x=>x.DestinationId!=null).ToDictionary(x=>x.DestinationId!.Value,...)`로 해소. → "동작 무해"는 경고 잔존의 면죄부 아님.
+- **이중 물리 컬럼 제거는 ValueGeneratedNever()가 아니라 Ignore()+DropColumn 마이그레이션**: Rev.1은 `ValueGeneratedNever()`로
+  "이중 컬럼 방지"를 주장했으나 물리 컬럼은 그대로 생성됨(코드 주석도 인정). Rev.2에서 `e.Ignore(propertyName)` + 양 provider
+  DropColumn(RowVersion×5/XminRowVersion×5) 마이그레이션으로 실제 제거 + SPEC §7-C 문구 정정. has-pending-model-changes 양쪽 "No changes" 재확인.
+  → 문서 주장은 실제 스키마(마이그레이션 산출물)와 대조. provider 분기 컬럼 제거는 Ignore()여야 물리 제거.
+- **Core 무변경 가드 유효**: 도메인 분기(슈트/소터·hold 산출)를 API 계층에서만 수행, Decide/Models/ToWire 시그니처 불변.
+  git diff HEAD -- src/Wcs.Core/ = 0줄(committed/staged/working/untracked 전부). PlcGateway·Sim3ds도 0 — 종료토큰조차 Program.cs에서 주입.
+
 ## S-M4-P1 (EF Core 영속화 + 리포지토리 DB 교체) — APPROVED (2026-06-16, 1 iteration to pass)
 
 - **회귀 0 인프라 교체의 강한 가드 충족**: M3 44 테스트가 단언·코드 변경 0으로 GREEN 유지(4회 연속, split 15/9/4/16 불변).
@@ -125,3 +144,11 @@
 - **동작 무변경 인프라 교체 입증법**: 보호 파일(Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs) `git diff` 0바이트 + 기존 44 테스트 단언·split 불변(15/9/4/16) 4회 연속 GREEN. Program.cs는 DI 교체만.
 - **테스트 DB 동시성**: named in-memory SQLite(`Mode=Memory;Cache=Shared`)로 각 DbContext 독립 연결·같은 DB 공유 → 중첩 트랜잭션 오류 회피. 멱등은 트랜잭션 + static lock(P1 단일 인스턴스 가정 — SPEC §7-C).
 - [CODE-REVIEW] sprint=S-M4-P1 critical=1 major=1 minor=4 iter=1 opus=yes (독립 Opus가 BLOCKING 적발: 이중 provider 마이그레이션 무효(스냅샷 1개·SQL Server가 diff라 신규 DB 생성 불가). 기능 44/44 GREEN였으나 테스트가 EnsureCreated로 마이그레이션 미사용 → 미검출. fix-only 1 iter 해소: provider별 마이그레이션 어셈블리 분리 + 깨끗한 베이스라인 재생성(각 16 CreateTable·스냅샷 provider-정확·pending 0). MAJOR-1(멱등 다중인스턴스 DB 백스톱)+MINOR-2/4/5/6은 P2로 SPEC §7-C 기록. 재검증 RESOLVED, 44/44, 테이블 정확히 16. 비차단: 테스트 teardown ObjectDisposedException(기존 하네스 artifact, 테스트 실패 아님))
+
+## S-M4-P2a (IF-08 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱) — APPROVED 핵심 피드백
+
+- **IF-08 목적지 타입 분기는 API 계층에서**: chuteNo→destination(dest_type) 조회 후 SORTER_3D→그 소터 게이트웨이 스냅샷+`Decide(snap,agvFloor,hold)` / CHUTE→hold만(층·Ready·TgtFloor 쓰기 없음, None→READY/Full→FULL/Paused→PAUSED/비활성→PAUSED). **Wcs.Core(Decide·Models) 무변경** — hold만 산출해 주입. destination.id 단일 진입점(ISorterGatewayRegistry)으로 P2b 멀티소터 확장점 선확보.
+- **FULL 인메모리 집계의 영속화 함정(코드리뷰 MAJOR 2)**: 기능 테스트가 단일 프로세스 인메모리만 보면 **재시작 정확성 버그**가 가려진다. (1) 비움(OnCleared)은 인메모리 리셋만이 아니라 **chute_detail.last_cleared_at + destination_event(CLEARED)를 DB에 영속화**해야 함(ERD §7/§14). (2) 기동 재구성(InitializeFromDb)은 **`deposited_at>last_cleared_at` 필터**를 반드시 적용(없으면 비움 이전 piece 재합산→FULL 복귀). 둘은 복합(영속화돼야 필터가 의미). 검증=재시작 시뮬레이션(DB에 FULL piece 삽입→OnCleared→StartAsync 재실행→NORMAL 단언) 회귀 테스트 필수.
+- **멱등 DB 백스톱(static lock 제거)**: piece 부분 유니크 `(p_id) WHERE is_active=1 AND status IN(활성3)` + **위반 catch는 provider 에러코드로**(SQLite SqliteExtendedErrorCode==2067 / SQL Server Number 2601·2627) — 메시지 문자열 매칭 금지(비영어 서버·타 인덱스 오판). 부분 유니크는 신규 piece insert 경합만 백스톱(RESERVED→DEPOSITED 업데이트는 write lock+status 재확인이 직렬화). 8병렬 동일 pId lock-free 정량 프로브(depositedRows=1·cellAssign=1) 5회로 입증.
+- [CODE-REVIEW] sprint=S-M4-P2a critical=0 major=2 minor=3 iter=1 opus=yes (독립 Opus가 FULL 집계 재시작 정확성 MAJOR 2건 적발: OnCleared 비움 미영속화→재시작 FULL 복귀, InitializeFromDb deposited_at>last_cleared_at 필터 누락→과다 집계. 기능 50/50 GREEN였으나 단일프로세스 인메모리만 봐서 미검출. fix-only 1 iter 해소: OnCleared DB 영속화(last_cleared_at+destination_event, 스코프 트랜잭션, 락 밖 I/O) + 필터 추가 + 재시작 회귀 테스트. MINOR: 멱등 catch 에러코드화·주석 정정·죽은 fallback 제거. 재검증 RESOLVED, 51/51 4회, Core diff 0. wcs_dev.db는 .gitignore 처리.)
+- **메타 교훈(3회째 반복)**: M2 off-lock·M3 IF-10 멱등·M4-P1 마이그레이션·M4-P2a FULL 영속화 — 전부 기능 Evaluator GREEN 통과 후 4-Tier 독립 코드리뷰가 적발. **인메모리/단일프로세스 테스트는 재시작·동시성·실DB 경로를 구조적으로 못 본다 → 독립 리뷰 필수.**
