@@ -75,3 +75,27 @@
 - **문서 동기화 동일 커밋**: 전송 확정은 코드뿐 아니라 SPEC §7-A(전송 확정 신설, 舊 §7-A→§7-B 이동)·CLAUDE.md
   다이어그램(Modbus TCP→RTU/TCP) 정정이 같은 변경에 포함돼야 통과. `git diff --name-only`로 SPEC.md·CLAUDE.md 동반 확인.
 - [CODE-REVIEW] sprint=S-RTU critical=0 major=0 minor=4 iter=0 opus=yes (독립 Opus — 추상화 경계·M2 동시성 invariant 보존(모든 _master 트랜잭션 _clientLock 내, off-lock Disconnect는 태스크 종료 후만)·양 어댑터 계약 일치·자원 정리 전부 APPROVE, BLOCKING/MAJOR 0)
+
+---
+
+## M3 (API IF-05/08/10 + S-RTU MINOR 4) — APPROVED 핵심 피드백
+
+- **READY는 Core 변경이 아니라 API 계층 주입으로**: Core `DenyReason.None => null`(Models.cs)을 절대 건드리지 말 것.
+  허가 사유 문자열 "READY"는 엔드포인트에서 `decision.Allowed ? "READY" : decision.Reason.ToWire()`로 주입.
+  통과 기준: `git status` src/Wcs.Core 무수정 + 소스에서 주입 지점 1곳 확인. Core 수정은 통과해도 FAIL.
+- **M4 경계는 DB 참조 0으로 입증**: `grep "Wcs.Data|DbContext|EntityFramework|UseSqlServer|UseSqlite" src/Wcs.Api`가
+  주석 외 0건이어야 함(ProjectReference·using·인스턴스화 모두). 기준정보(오더·목적지·예약·셀·agvFloor)는 인터페이스+
+  인메모리 구현으로, 교체점 1지점. Wcs.Api.csproj에서 Wcs.Data ProjectReference 제거 동반.
+- **IHostedService 결선이 M2 수동 Start/Stop을 안 깨야**: PlcPollingService를 직접 BackgroundService로 바꾸지 말고
+  어댑터(PlcPollingHostedAdapter)로 브리지 — 수동 StartAsync/StopAsync 경로 보존 → M2 통합테스트 9건 회귀 0.
+- **fire-and-forget는 예외 삼킴 금지**: IF-08 SetTgtFloor 큐 투입·IF-10 핸드셰이크 트리거는 응답 완료 대기 X(fire-and-forget)
+  이되, `.ContinueWith`로 IsFaulted 로깅 필수. 즉시 OK 반환(핸드셰이크 완료 대기 안 함)이 계약.
+- **DTO는 원본 HTML(wcs_rcs_interface_kr.html)이 진실**: IF-05 agvNo 포함, IF-08 timeStamp/IF-10 qty·timeStamp는
+  HTML 요청 표에 없으므로 nullable 선택필드(RCS 미전송 허용). NG는 chuteNo=null 직렬화. 가부는 result/allowed 필드(HTTP 200),
+  검증실패만 400. JSON은 STJ 기본 camelCase로 와이어 정합.
+- **타이밍 민감 통합테스트 flaky 배제**: 백그라운드 큐/핸드셰이크 관찰(C_Flag 상승, TgtFloor 기입)은 고정 sleep이 아니라
+  WaitForSnapshot/WaitForRegister 폴링으로 동기화. 검증 시 ApiIntegration 단독 다회 연속 GREEN 재확인(이번 6회).
+- **MINOR 정리는 동작 변경 0 입증**: 엔디안 필드화는 기본값을 구동작(BigEndian)과 동일하게, sleep 제거는 선행 동기화가
+  대체함을 주석으로, sync Read fail-loud는 async 경로만 사용됨을 확인 후. `git diff`로 4건 실재 + 동작 무변경 확인.
+- [CODE-REVIEW] sprint=M3 critical=0 major=1 minor=5 iter=1 opus=yes (독립 Opus가 BLOCKING급 MAJOR 적발: IF-10 멱등 check-then-act 경쟁 → 동시 같은 pId면 IF-11 이중 트리거·셀 이중 할당. 기능 41/41 GREEN였으나 동시성 테스트 부재로 미검출. fix-only 1 iter 해소: RecordDeposit lock 원자화 + IF-11 트리거를 RecordDeposit 반환값으로 단일화(선검사 제거) + CONCUR1(8병렬 동일 pId) 회귀. 함께: IF-05 qty<=0 가드. M4 등재: 죽은 GetDestType·다운캐스트·CancellationToken.None·단일트리거 직접 카운터. 재검증 RESOLVED, 44/44)
+- **메타 교훈(반복 확인)**: M2 off-lock·M3 IF-10 멱등 모두 기능 Evaluator GREEN을 통과했으나 4-Tier 독립 코드리뷰가 동시성 결함을 적발. 공유 가변 상태·핸드셰이크 트리거가 있으면 동시성 회귀 테스트 + 독립 리뷰 필수.

@@ -1,63 +1,77 @@
-# Sprint Contract — S-RTU (Modbus 전송 추상화 + RTU 어댑터)
+# Sprint Contract — M3 (API 3종: IF-05 / IF-08 / IF-10) + S-RTU MINOR 4건 정리
 
 ## Goal
-Modbus **TCP 전용**으로 하드코딩된 PLC 통신 계층을 **전송 추상화**로 교체해, 동일 애플리케이션 로직
-(판정·C/R 핸드셰이크·단일 쓰기 큐·D4 RMW·OFFLINE)을 **RTU(시리얼)·TCP 양쪽**에서 설정만으로 선택 구동.
-현장 1차 타깃 = **Modbus RTU(RS-485)**, TCP는 시뮬레이터·SAT·일부 장비 병행 유지.
-
-통찰: Modbus는 RTU·TCP 애플리케이션 계층 동일(FC03/06/16, D0~D6). 판정엔진·핸드셰이크·단일 쓰기 큐·RMW·OFFLINE은
-전송 무관 — 재사용. **전송 계층(클라이언트 생성·연결·read/write)만 인터페이스 뒤로 분리·교체.** `_clientLock` 단일
-트랜잭션 직렬화는 RTU 단일 버스 제약(한 버스=한 번에 한 트랜잭션)과 정합 — 보존.
-
-토폴로지(확정): **소터마다 독립 버스/포트**(포트당 소터 1대, 다중 슬레이브 경합 없음). WCS=마스터/3DS=슬레이브.
-본 스프린트는 **단일 소터 추상화 + N대 확장 여지**까지. 다중 소터 라우팅(목적지→소터)은 M3/M4 — 안 함.
-
-## 사전 검증 (Planner가 설치 패키지에서 직접 확인 — 추측 아님)
-FluentModbus **5.3.2** (`…/fluentmodbus/5.3.2/lib/netstandard2.1/FluentModbus.xml`):
-- `ModbusRtuClient` 제공(BaudRate·Parity·StopBits·Connect(port)·IsConnected). read/write는 공유 기반 `ModbusClient`에 정의 — `ReadHoldingRegistersAsync<T>(unitId,start,count,ct)`·`WriteSingleRegisterAsync(unitId,...)`·`WriteMultipleRegistersAsync<T>(unitId,...)` **TCP·RTU 동일 시그니처** → PlcGateway 호출부 1:1 대응.
-- `ModbusRtuServer` 제공(슬레이브 시뮬레이션 가능).
-- **핵심**: `IModbusRtuSerialPort` 공개 인터페이스 + `ModbusRtuClient.Initialize(IModbusRtuSerialPort,...)` / `ModbusRtuServer.Start(IModbusRtuSerialPort)` → **물리 COM·com0com 없이 in-memory fake serial 쌍**으로 실제 RTU 클라↔서버 in-process 왕복(CI 가능). **RTU 자동 테스트 리스크 해소.**
+501 스텁(`Program.cs`)을 **실제 HTTP 엔드포인트 3종**으로 교체. RCS(클라)→WCS(서버) REST/JSON — IF-05 목적지 조회 / IF-08 투입 가부 / IF-10 투입 보고.
+M1·M2·S-RTU 완성 자산(판정 `DepositDecider`·게이트웨이 `IPlcGateway` 스냅샷·단일 쓰기 큐·`HandshakeOrchestrator`·전송 추상화)을 **API 계층에 DI 결선**해 라이브 IF-08 판정 + IF-10→IF-11 트리거까지 통합.
+M3 본질: 완성된 하부 위에 **(1) HTTP 표면, (2) DB 없이(메모리 우선) 오더·목적지·예약·셀 기준정보를 인터페이스 뒤에 두어 M4에서 DB로 교체**. 판정 로직·전송 추상화는 **동작 변경 0**(READY는 API 계층 주입, 전송은 설정/DI). 부수: S-RTU 코드리뷰 MINOR 4건 정리.
 
 ## Implementation Scope (WHAT)
-**(A) 전송 추상화** `IModbusMaster`(가칭, src/Wcs.PlcGateway/ 신규): IsConnected/Connect()/Disconnect()/Dispose + ReadHoldingRegisters(FC03, D0~D6 일괄, unitIdentifier) + WriteSingle(FC06)/WriteMultiple(FC16, unitIdentifier). unitId·엔디안은 어댑터가 설정으로 관리(기본 UnitId=1·BigEndian = 현 TCP 동작 보존). **PlcPollingService·HandshakeOrchestrator는 `ModbusTcpClient` 직접 의존 제거, `IModbusMaster`에만 의존.** `_clientLock` 직렬화 유지(폴·쓰기·RMW·Disconnect/재연결 전부 임계구역 — IT-4b 불변).
-**(B) TCP 어댑터**: 기존 ModbusTcpClient 1:1 래핑(IPEndPoint Host/Port·BigEndian·타임아웃·재연결 의미 보존). **M2 통합테스트 IT-1~5·3c·4b 단언·코드 변경 없이 GREEN(회귀 0 필수).**
-**(C) RTU 어댑터**: ModbusRtuClient 래핑 — COM 포트·Baud·Parity·Stop·(Handshake)·Read/WriteTimeout·unitId 전부 설정값(하드코딩 금지). OFFLINE 전이가 RTU 예외(시리얼 타임아웃·IO)에서도 동작하도록 소켓 전용 분기 의존 제거.
-**(D) 설정·팩토리**: appsettings `Plc:Transport` = `Tcp`|`Rtu`. **키 미지정 시 기본값 = `Rtu`(현장 우선 — 사용자 확정).** TCP=Host/Port, RTU=PortName/Baud/Parity/Stop/UnitId. `IModbusMaster` 생성 팩토리(설정→어댑터). 설정 스키마는 **소터별 독립 전송 N 확장 표현 가능**, 단 런타임은 단일 소터까지만 구현(경계 명시).
-  - **회귀 보존(중요)**: 기본이 Rtu이므로 기존 M2 TCP 통합 테스트(IT-1~5·3c·4b)는 **명시적으로 `Transport=Tcp`(또는 TCP 어댑터 직접 주입)로 구성**해 그대로 GREEN 유지. 커밋되는 `appsettings.json`은 dev/시뮬레이터가 `dotnet run`으로 동작하도록 전송값을 **명시**(혼동 방지) — 현장 배포 설정에서 Rtu.
-**(E) Sim3ds**(P-RTU-3 확정 — 테스트 전용 RTU 서버): 기존 TCP 경로·시그니처 **불변**(IT 회귀). RTU 검증은 **테스트 인프라(ModbusRtuServer + in-memory fake serial)**로만 — SimServer 본체는 TCP 유지.
-**(F) 문서**: SPEC §7/§7-A "TCP vs RTU" → 확정(RTU 우선+TCP, 전송 추상화, 소터별 독립 포트, 마스터/슬레이브) 갱신 + CLAUDE.md 다이어그램 `Modbus TCP`→`Modbus RTU/TCP` 정정. **코드와 같은 커밋.**
+**(A) DTO 정정 `Dtos.cs`** (원본 HTML·SPEC §3·§7-B 정렬)
+- IF-05 `DestinationQueryRequest`: **`AgvNo` 추가**(최종 pId·agvNo·barcode·inductionNo·qty·timeStamp).
+- IF-05 `DestinationQueryResponse`: OK reason 주석 NORMAL·BUSY·FULL·PAUSED / NG OVER·COMPLETED·NO_DEST·OFFLINE. NG 시 chuteNo **null 포함** 직렬화.
+- IF-08 `DepositPermissionRequest`: 원본 pId·chuteNo·agvNo. timeStamp는 **nullable 선택필드**(`string? = null`).
+- IF-08 `DepositPermissionResponse`: allowed=true→reason="READY" 주석.
+- IF-10 `DepositReportRequest`: 원본 pId·barcode·chuteNo·agvNo. qty·timeStamp **nullable 선택필드**.
 
-## Out of Scope
-Wcs.Core 판정 로직 변경 / M3 API·DTO / M4 영속화 / M5 운영 / 다중 소터 라우팅·N대 동시 런타임(스키마만 N, 구현 1대) / 물리 시리얼 하드웨어 의존 테스트(in-memory fake serial로 대체).
+**(B) 메모리 기준정보 리포지토리 (M4 교체점) `Wcs.Api/` 신규** — DB 없이 IF-05·IF-11 구동, 인터페이스+시드:
+- `IOrderRepository`: 바코드/오더 매칭·목적지 조회·상태 판단(OVER/COMPLETED/NO_DEST/OFFLINE)·OK 시 예약 차감(중복 배정 방지).
+- `IDepositRecorder`(IF-16 통합): IF-05 OK/NG **양쪽 투입 기록**(NG=DENIED 상당). M4서 piece/piece_event DB로.
+- `ICellSelector`(IF-11): ①활성 셀 재사용 →②소속 빈 셀 →③없으면 FULL 요소.
+- `IAgvFloorResolver`: agvNo→층, **M3는 설정 `Floors:AgvNoToFloor`**, M4서 agv.floor로. 매핑 없는 agvNo는 명시적 거부(추측 금지).
+- 인메모리 상태 thread-safe.
+
+**(C) 엔드포인트 `Program.cs`** (501→실제, minimal API)
+- IF-05: 검증(pId 1~30000·필수)→오더 매칭→목적지·상태→(NULL이면 빈 슈트 AUTO, 없으면 NG·NO_DEST)→OK chuteNo+reason+예약차감 / NG reason+chuteNo=null. OK·NG **무관 투입기록**. 200(가부는 result 필드)/400.
+- IF-08: 검증→`IPlcGateway.Latest`(논블로킹)→`IAgvFloorResolver` agvFloor→`DepositDecider.Decide`→WriteTgtFloor면 `EnqueueAsync(SetTgtFloor)` **완료 대기 X**→allowed=true→**reason="READY" 주입**(Core 무변경)/false→`Reason.ToWire()`. 즉시 200/400.
+- IF-10: 검증→**멱등**(pId 중복 무해)→투입기록→3D(SORTER_3D)면 `ICellSelector`+`HandshakeOrchestrator` **IF-11 트리거**(슈트는 트리거 없음). **즉시 OK 반환**, 핸드셰이크는 백그라운드(완료 추적 M4). 200/400.
+
+**(D) DI 배선 `Program.cs`+`appsettings.json`**: Plc/Timing 바인딩 → `ModbusMasterFactory.Create`→`IModbusMaster` / `PlcWriteQueue` 싱글톤 / `PlcPollingService`를 `IPlcGateway`+**IHostedService 기동**(M2 수동 Start/Stop·통합테스트 호환 유지 — 회귀 0) / `HandshakeOrchestrator` / 인메모리 리포지토리 시드 / `Floors:AgvNoToFloor`. **Wcs.Data DbContext는 M4 — 안 함.** appsettings `Plc:Transport`는 명시값(dev/sim=Tcp) 유지, 키 추가만.
+
+**(E) S-RTU 코드리뷰 MINOR 4건 정리**(동작 변경 0): (1)ModbusRtuMaster fake-mode Connect 명명(`_externallyOwnedPort`)+XML 주석 (2)RtuTransportTests.cs:98 Task.Delay(50) 제거 (3)FakeSerialPort sync Read fail-loud/문서화 (4)ModbusRtuMaster 엔디안 필드 통일(기본 BigEndian).
+
+**(F) 테스트 `Wcs.Tests.csproj`+신규**: `Wcs.Api` ProjectReference + `Microsoft.AspNetCore.Mvc.Testing` 추가, `public partial class Program` 노출. WebApplicationFactory로 IF-05/08/10 검증, IF-08 라이브는 Sim3ds 상대 실제 스냅샷.
+
+## Out of Scope (M4 경계 명시)
+M4 영속화 일체(Wcs.Data EF Core·엔티티·마이그레이션·16테이블·DB 시드 — M3는 인메모리 인터페이스+시드까지) / agvFloor DB 단일진실 전환(M3 설정 기반, 추상화만 마련) / S1~S9·FULL 정밀계산·오더완료 계산(M4) / 판정 로직(Wcs.Core) 동작 변경(READY API 주입) / 전송 추상화·핸드셰이크 로직 변경(결선만) / M5 운영 / 다중 소터 라우팅 / 인증·pId 정책(RCS Q 대기).
 
 ## Detected Project Type: Backend/API
-HTTP 엔드포인트는 M3. 검증 표면 = 단위/통합 테스트(추상화 위 PlcGateway 로직 + TCP 회귀 + RTU fake-serial 라이브 왕복).
+실제 HTTP 엔드포인트 생성 — WebApplicationFactory 통합 테스트로 검증.
+
+| 엔드포인트 | happy | error | 상태코드 |
+|---|---|---|---|
+| IF-05 destination-query | OK·chuteNo·reason∈{NORMAL,BUSY,FULL,PAUSED}·예약차감·기록 | NG·reason∈{OVER,COMPLETED,NO_DEST,OFFLINE}·chuteNo=null·NG여도 기록 / 검증실패 | 200(가부=result) / 400 |
+| IF-08 deposit-permission | allowed=true·reason="READY" | false·WRONG_FLOOR(+SetTgtFloor 큐)/BUSY/FULL/PAUSED/OFFLINE / 검증실패 | 200(가부=allowed) / 400 |
+| IF-10 deposit-report | OK; 3D면 IF-11 트리거 | 중복 pId 멱등 OK / 검증실패 | 200 / 400 |
 
 ## Evaluation Criteria
-1. **추상화 경계(★★★)**: `IModbusMaster`가 M2 사용 표면을 정확·최소 포착. PlcGateway·HandshakeOrchestrator에 구상 타입(`ModbusTcpClient`/`ModbusRtuClient`) 직접 참조 0(grep, 어댑터·팩토리에만). 절대규칙 #1·`_clientLock` 직렬화 구조 보존.
-2. **회귀 안전(★★★)**: M2 IT-1~5·3c·4b **변경 없이 GREEN**. TCP 어댑터가 기존 동작 보존.
-3. **RTU 정합(★★)**: FluentModbus 5.3.2 실제 API로 동작(추측 API 0). 시리얼 파라미터·UnitId 전부 설정. RTU 예외에서 OFFLINE 전이. fake-serial RTU 왕복으로 C/R + R_Seq 대사 입증.
-4. **장인성·설정(★★)**: 하드코딩 0, 예외 안 삼킴, 스키마 N 확장형, 테스트 결정성(고정 sleep 금지), 문서 동기화 완료.
+1. **엔드포인트 정합(★★★)**: 원본 HTML·SPEC §3 필드·reason·경로 일치(IF-05 agvNo, IF-08/10 원본필드+nullable, allowed=true→READY API 주입, NG chuteNo null).
+2. **판정 재사용 무변경(★★★)**: Decide 결과 그대로 매핑, Core(ToWire(None)=null) 무변경, 라이브 스냅샷 판정, WriteTgtFloor면 큐 투입(완료 대기 X).
+3. **M4 경계(★★★)**: 오더·목적지·예약·셀·agvFloor 인터페이스 뒤+인메모리 시드. Wcs.Data·EF Core 참조 0(grep). 교체점 1지점.
+4. **회귀 0(★★★)**: 기존 28(Decider 15+M2 9+RTU 4) 단언·코드 변경 없이 GREEN, split 감소 없음. Core·PlcGateway 로직 무변경(MINOR 4 제외).
+5. **IF-10→IF-11 트리거(★★)**: 3D 보고 시 핸드셰이크 트리거 관찰, 슈트는 트리거 0.
+6. **장인성·설정(★★)**: 하드코딩 0, 예외 안 삼킴, thread-safe, MINOR 4 정리(동작 0).
 
 ## Completion Conditions (전부 필수)
-- `dotnet build Wcs.sln` 성공 / `dotnet test Wcs.sln` 전부 GREEN. (막히면 Bash로 `cd "<절대경로>" && dotnet ...` — S-M1 교훈. Wcs.sln 클래식 — S-M0 교훈.)
-- **M2 회귀 0(명시)**: M1 Decider 15 + M2 통합 8(IT-1·2a·2b·3a·3b·3c·4·4b·5)이 단언·코드 변경 없이 GREEN, split 수 감소 없음.
-- 동시성/직렬화 변경 포함 → **`dotnet test` 4회 연속 GREEN**(결정성) + **독립 코드리뷰**(M2 off-lock 같은 구조적 동시성 결함은 기능 테스트가 못 잡음 — 메타 교훈).
-- `ModbusTcpClient` 직접 참조가 PlcPollingService·HandshakeOrchestrator에 0건(grep). 모든 트랜잭션 `_clientLock` 통과(M2 검증법 재적용).
-- 하드코딩 시간/시리얼 값 0. Wcs.Core·Wcs.Api(appsettings 제외)·Wcs.Data 무변경.
-- SPEC §7/§7-A 확정 갱신 + CLAUDE.md 다이어그램 정정이 코드와 같은 커밋에.
+- `dotnet build Wcs.sln` 성공 / `dotnet test Wcs.sln` 전부 GREEN(막히면 Bash). **기존 28 회귀 0(명시)** + 신규 통합테스트로 총계 증가.
+- WebApplicationFactory류 자동 통합테스트: IF-05/08/10 happy·error + IF-08 라이브(Sim3ds 스냅샷→Decide→큐→응답) + IF-10→IF-11 트리거. 비결정 요소는 수회 연속 GREEN.
+- IHostedService 결선이 M2 수동 Start/Stop 경로를 안 깸(회귀 0). DB(Wcs.Data) 참조 0. Core·전송·핸드셰이크 로직 무변경(MINOR 4=명명/주석/엔디안필드/sleep제거, 동작 0).
+- DTO 원본 정렬(agvNo·nullable·READY 주석·NG null). 하드코딩 0.
+- **커밋 전 `git rev-parse --abbrev-ref HEAD`로 `feat/m3-api` 확인**(lessons.md 2026-06-16 — develop 직접 커밋 0).
 
 ## Verification Scenarios (자동화)
-- **VT-1 TCP 회귀(필수)**: IT-1~5·3c·4b 전부 GREEN — 추상화 도입 후에도 C/R·R_Seq==C_Seq·OFFLINE·재연결 무손상 불변.
-- **VT-2 RTU 라이브 왕복**: in-memory fake `IModbusRtuSerialPort` 쌍으로 실제 ModbusRtuClient(WCS) ↔ 실제 ModbusRtuServer(슬레이브). C/R 1건 성공 + R_Seq==C_Seq + RMW 비트 보존 + 단일 큐 직렬화.
-- **VT-3 전송 선택**: `Plc:Transport=Tcp/Rtu` → 해당 어댑터 생성 + RTU 시리얼 파라미터 전달을 팩토리 단위 테스트로 단언.
-- **VT-4 추상화 단위 테스트**: 인메모리 fake `IModbusMaster`로 PlcGateway 로직(스냅샷·큐·RMW·OFFLINE) 전송 무관 검증.
-- **VT-5 RTU OFFLINE 전이**: RTU fake serial 단절/무응답 → 연속 실패 후 Online=false, 재개 시 true. 예외 안 삼킴.
+- VS-1 IF-05 happy: 시드 매칭→200 OK·chuteNo·NORMAL·예약차감·기록.
+- VS-2 IF-05 error: 미존재/할당불가→NG·chuteNo null·NG여도 기록 / pId범위·필드누락→400.
+- VS-3 IF-08 라이브(핵심): Sim3ds 연결, 다른 층 agvNo→false·WRONG_FLOOR+TgtFloor 기입 관찰→이동완료 후 재호출→true·**READY**.
+- VS-4 IF-08 분기: Ready=0→BUSY / OFFLINE 스냅샷→OFFLINE / 검증실패→400 / WriteTgtFloor=false면 큐 투입 0.
+- VS-5 IF-10 happy+멱등: 슈트 보고→OK, 같은 pId 재보고→OK 상태무변경.
+- VS-6 IF-10→IF-11(핵심): 3D 목적지 보고→핸드셰이크 셀지정 트리거 관찰 / 슈트→트리거 0(대조).
+- VS-7 회귀: 기존 28 전부 GREEN.
 
-## 미확정·리스크
-- (RTU 테스트 — 해소) in-memory fake serial로 CI 자동화 가능(확인 완료). 방식은 P-RTU-1 확정.
-- (엔디안/UnitId) 현장 VEICHI 실측 전 — 설정값 노출, 기본=현 TCP(BigEndian·UnitId 1) 회귀 보존. 변경 시 설정만.
-- (RTU 타임아웃·프레임 침묵) FluentModbus 기본/설정 위임, 현장 실측 전 appsettings 기본.
-- (P1/P2/P3) M2 방침 그대로 무변경.
+## 미확정 처리 (추측 금지)
+- IF-08 timeStamp / IF-10 qty·timeStamp: nullable 선택필드, RCS 미전송 허용(§7-B 확정 대기).
+- WcsHold FULL/PAUSED: M3 기본 None + 기준정보 PAUSED만, **FULL 계산 M4**.
+- agvNo 매핑 누락: 명시적 거부(추측 금지).
+- IF-10→IF-11 완료추적·piece상태·알람·sorter_command: **M4**. M3는 트리거까지.
+- IF-05 OFFLINE 소스·RCS Q1~7·레지스터 주소·P1/P2/P3: M2/SPEC §7 무변경.
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (transport-selection config / TCP live-roundtrip regression / RTU adapter live-roundtrip via fake serial). All slots filled: yes. FluentModbus 5.3.2 RTU API pre-verified (ModbusRtuClient·ModbusRtuServer·IModbusRtuSerialPort). RTU test risk resolved (in-memory fake serial).
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 7 (IF-05 happy/error, IF-08 happy/error+live, IF-10 happy/idempotent+IF-11 trigger, regression). All slots filled: yes. M3 메모리/M4 경계 선 그음, Core·전송·핸드셰이크 무변경, 28 회귀 0, WebApplicationFactory 전제, MINOR 4 포함 — 전부 반영.
