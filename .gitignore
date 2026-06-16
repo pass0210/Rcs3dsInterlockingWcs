@@ -6,3 +6,6 @@ appsettings.*.local.json
 logs/
 .claude/ports.local.json
 .env.local
+*.db
+*.db-shm
+*.db-wal
