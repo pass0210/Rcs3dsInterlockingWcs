@@ -2,6 +2,25 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-M4-P1 (EF Core 영속화 + 리포지토리 DB 교체) — APPROVED (2026-06-16, 1 iteration to pass)
+
+- **회귀 0 인프라 교체의 강한 가드 충족**: M3 44 테스트가 단언·코드 변경 0으로 GREEN 유지(4회 연속, split 15/9/4/16 불변).
+  보호 파일(Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs + 3개 테스트 파일) git diff 0바이트.
+  ApiIntegrationTests 변경은 WebApplicationFactory 배선(앵커 SQLite·EnsureCreated·DbSeeder)에만 한정, Assert 0줄 변경.
+  → "동작 무변경 + 데이터만 DB로 영속화" 계약의 본질을 git diff 격리 + 단언 불변으로 입증하는 패턴이 유효.
+- **provider 분기는 마이그레이션 산출물로 검증**: piece 유니크(SQLite 일반 UNIQUE vs SQL Server filtered `[is_active]=1`)와
+  rowversion 분기가 두 Initial 마이그레이션 파일에 실재. 소스 OnModelCreating의 `IsSqlite` 분기만이 아니라 생성 SQL까지 대조.
+- **CONCUR 동시성은 단독 다회 실행으로 flaky 배제**: 8병렬 동일 pId IF-10 → CONCUR1 단독 5회 GREEN.
+  static `_recordLock` + 트랜잭션 내 멱등 상태체크가 "정확히 1건 전이 + IF-11 ≤1"를 보장(첫 호출만 true→트리거).
+- **재사용 교훈 — static lock의 운영 함의**: 테스트(named in-memory SQLite 단일 writer) 직렬화엔 적합하나
+  프로세스 전역 lock은 운영 SQL Server에서 전 투입기록 병목. 정합성 가드로는 DB 유니크 제약/트랜잭션 격리가 정석(P2 정리).
+- **재사용 교훈 — 멀티 provider 마이그레이션 스냅샷 분리**: provider별 output-dir만 나누고 ModelSnapshot은 1개를
+  공유하면 마지막 생성 provider로 덮여(여기선 SqlServer가 Sqlite 폴더의 스냅샷을 점유) 향후 증분 마이그레이션이 손상.
+  → 멀티 provider는 스냅샷도 provider별로 분리하거나 별도 MigrationsAssembly 권장. 단, Initial 2개는 각각 정상이고
+     테스트가 EnsureCreated로 마이그레이션을 우회하므로 현재 영향 0 — MINOR(P2).
+- **죽은 코드 잔존은 scope OUT 명시 시 PASS**: 구 InMemory* 리포지토리가 파일로 남아도 Program.cs DI에서 인스턴스화 0이면
+  "프로덕션 경로 제거" 충족. "죽은 코드 정리→P2" scope OUT 명문화 덕에 비차단. grep로 production 참조 0 확인이 판정 근거.
+
 ## S-M0 (솔루션 구성 + 빌드 그린) — APPROVED (2026-06-15, 1 iteration to pass)
 
 - **핵심 교훈 (M0-1)**: SDK 10.0.300에서 `dotnet new sln -n <Name>`은 클래식 `.sln`이 아니라
@@ -99,3 +118,10 @@
   대체함을 주석으로, sync Read fail-loud는 async 경로만 사용됨을 확인 후. `git diff`로 4건 실재 + 동작 무변경 확인.
 - [CODE-REVIEW] sprint=M3 critical=0 major=1 minor=5 iter=1 opus=yes (독립 Opus가 BLOCKING급 MAJOR 적발: IF-10 멱등 check-then-act 경쟁 → 동시 같은 pId면 IF-11 이중 트리거·셀 이중 할당. 기능 41/41 GREEN였으나 동시성 테스트 부재로 미검출. fix-only 1 iter 해소: RecordDeposit lock 원자화 + IF-11 트리거를 RecordDeposit 반환값으로 단일화(선검사 제거) + CONCUR1(8병렬 동일 pId) 회귀. 함께: IF-05 qty<=0 가드. M4 등재: 죽은 GetDestType·다운캐스트·CancellationToken.None·단일트리거 직접 카운터. 재검증 RESOLVED, 44/44)
 - **메타 교훈(반복 확인)**: M2 off-lock·M3 IF-10 멱등 모두 기능 Evaluator GREEN을 통과했으나 4-Tier 독립 코드리뷰가 동시성 결함을 적발. 공유 가변 상태·핸드셰이크 트리거가 있으면 동시성 회귀 테스트 + 독립 리뷰 필수.
+
+## S-M4-P1 (EF Core 영속화 + 리포지토리 DB 교체) — APPROVED 핵심 피드백
+
+- **EF Core 이중 provider 마이그레이션 함정(BLOCKING 교훈)**: 한 DbContext는 마이그레이션 어셈블리당 ModelSnapshot **1개**만 갖는다. SQLite·SQL Server 마이그레이션을 같은 프로젝트에 폴더만 나눠 넣으면 나중 생성분이 스냅샷을 덮어써 한쪽이 베이스라인이 아닌 diff(AlterColumn)가 되고 **신규 DB 생성 불가**. 테스트가 EnsureCreated면 이 결함이 가려진다(영향 0). 해법: **provider별 별도 마이그레이션 어셈블리**(Wcs.Migrations.Sqlite·SqlServer) + 각자 IDesignTimeDbContextFactory로 MigrationsAssembly 고정. 검증: `dotnet ef migrations has-pending-model-changes`가 양 provider "No changes" + 각 Initial이 16 CreateTable.
+- **동작 무변경 인프라 교체 입증법**: 보호 파일(Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs) `git diff` 0바이트 + 기존 44 테스트 단언·split 불변(15/9/4/16) 4회 연속 GREEN. Program.cs는 DI 교체만.
+- **테스트 DB 동시성**: named in-memory SQLite(`Mode=Memory;Cache=Shared`)로 각 DbContext 독립 연결·같은 DB 공유 → 중첩 트랜잭션 오류 회피. 멱등은 트랜잭션 + static lock(P1 단일 인스턴스 가정 — SPEC §7-C).
+- [CODE-REVIEW] sprint=S-M4-P1 critical=1 major=1 minor=4 iter=1 opus=yes (독립 Opus가 BLOCKING 적발: 이중 provider 마이그레이션 무효(스냅샷 1개·SQL Server가 diff라 신규 DB 생성 불가). 기능 44/44 GREEN였으나 테스트가 EnsureCreated로 마이그레이션 미사용 → 미검출. fix-only 1 iter 해소: provider별 마이그레이션 어셈블리 분리 + 깨끗한 베이스라인 재생성(각 16 CreateTable·스냅샷 provider-정확·pending 0). MAJOR-1(멱등 다중인스턴스 DB 백스톱)+MINOR-2/4/5/6은 P2로 SPEC §7-C 기록. 재검증 RESOLVED, 44/44, 테이블 정확히 16. 비차단: 테스트 teardown ObjectDisposedException(기존 하네스 artifact, 테스트 실패 아님))

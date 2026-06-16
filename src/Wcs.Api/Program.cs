@@ -1,6 +1,8 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Wcs.Api;
 using Wcs.Core;
+using Wcs.Data;
 using Wcs.PlcGateway;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -50,59 +52,42 @@ builder.Services.AddSingleton<HandshakeOrchestrator>(sp =>
     return new HandshakeOrchestrator(gw, opt, log);
 });
 
-// ── 인메모리 리포지토리 + 시드 (M4 교체점 — Wcs.Data DbContext 없음) ─────────
-builder.Services.AddSingleton<InMemoryDepositRecorder>(); // DestType 저장 기능 포함
-builder.Services.AddSingleton<IDepositRecorder>(sp => sp.GetRequiredService<InMemoryDepositRecorder>());
+// ── WcsDbContext 등록 (M4 — appsettings에서 provider·연결문자열 선택) ────────
+// 절대규칙 8: 연결문자열·provider 하드코딩 금지.
+var dbProvider         = builder.Configuration["Database:Provider"] ?? "Sqlite";
+var connectionString   = builder.Configuration.GetConnectionString("WcsDb")
+                         ?? "Data Source=wcs.db";
 
-builder.Services.AddSingleton<IOrderRepository>(sp =>
+builder.Services.AddDbContext<WcsDbContext>(opts =>
 {
-    // 시드: 슈트 기준정보
-    var chutes = new List<ChuteInfo>
-    {
-        new() { ChuteNo = 1, IsEnabled = true, Capacity = 100, CurrentQty = 0 },
-        new() { ChuteNo = 2, IsEnabled = true, Capacity = 100, CurrentQty = 0 },
-        new() { ChuteNo = 3, IsEnabled = true, Capacity = 100, CurrentQty = 0 },
-        new() { ChuteNo = 4, IsEnabled = true, Capacity = 100, CurrentQty = 0 },
-        new() { ChuteNo = 5, IsEnabled = true, Capacity = 100, CurrentQty = 0 },
-    };
-    // 시드: 오더 기준정보
-    // M3 테스트용 — 실제 오더는 M4에서 API·DB로 관리
-    var orders = new List<OrderItem>
-    {
-        new() { Barcode = "TEST-BARCODE-1", OrderNo = "ORD-001", DestType = DestinationType.Chute,    ChuteNo = 1, TotalQty = 50 },
-        new() { Barcode = "TEST-BARCODE-2", OrderNo = "ORD-002", DestType = DestinationType.Chute,    ChuteNo = 2, TotalQty = 30 },
-        new() { Barcode = "TEST-BARCODE-3", OrderNo = "ORD-003", DestType = DestinationType.Sorter3D, ChuteNo = 3, TotalQty = 20 },
-        new() { Barcode = "TEST-BARCODE-AUTO", OrderNo = "ORD-004", DestType = DestinationType.Chute, ChuteNo = null, TotalQty = 10 },  // AUTO 배정
-        new() { Barcode = "TEST-BARCODE-PAUSED", OrderNo = "ORD-005", DestType = DestinationType.Chute, ChuteNo = 2, TotalQty = 10, IsPaused = true },
-    };
-    return new InMemoryOrderRepository(orders, chutes);
-});
+    if (dbProvider.Equals("SqlServer", StringComparison.OrdinalIgnoreCase))
+        // 마이그레이션 어셈블리: Wcs.Migrations.SqlServer (독립 ModelSnapshot — provider별 분리)
+        opts.UseSqlServer(connectionString,
+            sql => sql.MigrationsAssembly("Wcs.Migrations.SqlServer")
+                      .MigrationsHistoryTable("__EFMigrationHistory"));
+    else
+        // 마이그레이션 어셈블리: Wcs.Migrations.Sqlite (독립 ModelSnapshot — provider별 분리)
+        opts.UseSqlite(connectionString,
+            sqlite => sqlite.MigrationsAssembly("Wcs.Migrations.Sqlite")
+                            .MigrationsHistoryTable("__EFMigrationHistory"));
+}, ServiceLifetime.Scoped);
 
-builder.Services.AddSingleton<ICellSelector>(sp =>
-{
-    // 시드: 3D Sorter 셀 기준정보 (슈트 3번 소속)
-    var cells = new List<CellInfo>
-    {
-        new() { CellNo = 1, SorterChuteNo = 3, IsEnabled = true, IsOccupied = false },
-        new() { CellNo = 2, SorterChuteNo = 3, IsEnabled = true, IsOccupied = false },
-        new() { CellNo = 3, SorterChuteNo = 3, IsEnabled = true, IsOccupied = false },
-    };
-    return new InMemoryCellSelector(cells);
-});
+// ── 4 인터페이스 EF Core 구현 바인딩 (M4 교체점 1지점) ───────────────────────
+// InMemory* 프로덕션 경로 제거 — DB 구현으로 교체.
+builder.Services.AddScoped<EfDepositRecorder>();
+builder.Services.AddScoped<IDepositRecorder>(sp => sp.GetRequiredService<EfDepositRecorder>());
+builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
+builder.Services.AddScoped<ICellSelector,    EfCellSelector>();
+builder.Services.AddScoped<IAgvFloorResolver, EfAgvFloorResolver>();
 
-// ── agvNo→층 매핑 (M3 설정 기반, M4에서 agv.floor 단일 진실 전환) ────────────
-builder.Services.AddSingleton<IAgvFloorResolver>(sp =>
-{
-    // appsettings Floors:AgvNoToFloor — 하드코딩 금지(절대규칙 7)
-    var section = builder.Configuration.GetSection("Floors:AgvNoToFloor");
-    var map     = section.Get<Dictionary<string, int>>()
-                  ?? new Dictionary<string, int>();
-    return new ConfigAgvFloorResolver(map);
-});
-
-// ── Wcs.Data DbContext는 M4 — 여기에 없어야 함 ────────────────────────────
+// ── agvNo→층 설정은 시드 전용으로 강등 — 런타임 조회는 agv.floor DB ─────────
+// IAgvFloorResolver는 EfAgvFloorResolver(DB)로 교체. appsettings 매핑은 시드에서만 사용.
 
 var app = builder.Build();
+
+// ── 개발/테스트: 마이그레이션 + 시드 자동 적용 (테스트 배선용) ───────────────
+// 운영 기동 자동 Migrate()는 M5 — P1은 테스트에서만 적용(WebApplicationFactory 주입).
+// 프로덕션에서는 이 블록이 호출되지 않음(테스트 WebApplicationFactory가 재정의).
 
 // ════════════════════════════════════════════════════════════════════════════
 // (C) 엔드포인트
@@ -139,10 +124,6 @@ app.MapPost("/api/v1/destination-query", (
         req.PId, req.AgvNo, req.Barcode, req.InductionNo,
         chuteNo, req.Qty, status, reason);
 
-    // DestType 저장 (IF-10에서 3D 목적지 여부 판단에 사용)
-    if (destType.HasValue && recorder is InMemoryDepositRecorder imr)
-        imr.SetDestType(req.PId, destType.Value);
-
     log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason={Reason}",
         req.PId, req.Barcode, result, chuteNo, reason);
 
@@ -171,22 +152,19 @@ app.MapPost("/api/v1/deposit-permission", (
     if (agvFloor is null)
         return Results.BadRequest(new
         {
-            error = $"agvNo={req.AgvNo}에 대한 층 매핑이 없습니다. Floors:AgvNoToFloor 설정을 확인하세요."
+            error = $"agvNo={req.AgvNo}에 대한 층 매핑이 없습니다. agv 테이블을 확인하세요."
         });
 
     // ── PLC 스냅샷(논블로킹) → DepositDecider.Decide ─────────────────────────
     var snap = gateway.Latest;
 
-    // M3: WcsHold.None 기본 + 기준정보 PAUSED만(IOrderRepository 통해 판단하면 되나
-    // Decide는 순수함수이므로 여기서 hold를 WcsHold.None으로 고정. FULL=M4)
+    // M3·P1: WcsHold.None 기본 — FULL/PAUSED 계산은 P2
     var hold     = WcsHold.None;
     var decision = DepositDecider.Decide(snap, agvFloor.Value, hold);
 
     // ── WriteTgtFloor면 큐 투입 (완료 대기 X — API 3s 한계 분리) ─────────────
     if (decision.WriteTgtFloor)
     {
-        // ValueTask는 await 필요하나 "완료 대기 X" → fire-and-forget
-        // ConfigureAwait(false) + 예외는 background 로그로
         _ = writeQueue.EnqueueAsync(new PlcWrite.SetTgtFloor(decision.TgtFloorValue))
                        .AsTask()
                        .ContinueWith(t =>
@@ -229,9 +207,7 @@ app.MapPost("/api/v1/deposit-report", (
         return Results.BadRequest(new { error = "chuteNo는 양수여야 합니다." });
 
     // ── 투입 기록 + 멱등 (원자 결합) ─────────────────────────────────────────
-    // RecordDeposit이 check-then-act를 lock으로 원자화 — true=신규 기록, false=중복(멱등).
-    // HasDepositRecord 선검사를 별도로 두지 않는다: 선검사 후 RecordDeposit 사이에 다른
-    // 스레드가 삽입하면 둘 다 통과해 IF-11을 2회 트리거하는 경쟁이 발생하기 때문.
+    // RecordDeposit이 check-then-act를 트랜잭션으로 원자화 — true=신규 기록, false=중복(멱등).
     var isNewRecord = recorder.RecordDeposit(req.PId, req.Barcode, req.ChuteNo, req.AgvNo, req.Qty);
 
     if (!isNewRecord)
@@ -241,9 +217,10 @@ app.MapPost("/api/v1/deposit-report", (
     }
 
     // ── 3D 목적지면 IF-11 트리거 (백그라운드, 즉시 OK 반환) ─────────────────
-    var destType = recorder is InMemoryDepositRecorder imr
-                   ? imr.GetDestType(req.PId)
-                   : null;
+    // EfDepositRecorder.GetDestType으로 DB 조회 — InMemoryDepositRecorder 다운캐스트 제거.
+    DestinationType? destType = null;
+    if (recorder is EfDepositRecorder efRecorder)
+        destType = efRecorder.GetDestType(req.PId);
 
     if (destType == DestinationType.Sorter3D)
     {
@@ -254,7 +231,6 @@ app.MapPost("/api/v1/deposit-report", (
         {
             int selectedCell = cellNo.Value;
             // IF-11 핸드셰이크: 즉시 OK 반환, 핸드셰이크는 백그라운드
-            // 완료 추적·결과 기록은 M4
             _ = handshake.ExecuteAsync(selectedCell, CancellationToken.None)
                 .ContinueWith(t =>
                 {

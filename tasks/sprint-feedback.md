@@ -1,3 +1,90 @@
+# Sprint Feedback — S-M4-P1 (EF Core 영속화 + 리포지토리 DB 교체)
+
+## 판정 (코드리뷰 BLOCKING 픽스 재검증): APPROVED (유지)
+
+코드리뷰 BLOCKING(provider별 마이그레이션 베이스라인 분리) 수정 ground truth 재검증. 직전 APPROVED의 MINOR-1(스냅샷 위생)이 BLOCKING으로 승격되어 처리됨 — 결함 해소 확인.
+
+### BLOCKING 해소 증거 (직접 재실행)
+- **구조 분리**: `src/Wcs.Migrations.Sqlite/`·`src/Wcs.Migrations.SqlServer/` 신규 어셈블리 각각 독립 ModelSnapshot 보유.
+  구 `src/Wcs.Data/Migrations/`·`WcsDbContextFactory.cs` **삭제 확인**(ls 부재). Program.cs MigrationsAssembly가 provider별("Wcs.Migrations.Sqlite"/"Wcs.Migrations.SqlServer")로 분기. Wcs.Api.csproj 두 ProjectReference 추가. Wcs.sln 2 프로젝트 추가.
+- **스냅샷 provider 정합**: SQLite 스냅샷 = `UQ_piece_pid_is_active`(일반 unique), UseIdentityColumns 0, HasFilter 0. SQL Server 스냅샷 = `UseIdentityColumns` + `UQ_piece_pid_where_active` HasFilter("[is_active] = 1"). 더 이상 한 스냅샷이 양 provider를 점유하지 않음(직전 결함의 정확한 해소).
+- **스냅샷=모델 일치(핵심)**: `dotnet ef migrations has-pending-model-changes` 양 provider 모두 **"No changes have been made to the model since the last migration"** — 스냅샷이 모델과 완전 동기. 향후 증분 마이그레이션 손상 위험 제거.
+- **마이그레이션 적용 가능(DB update surrogate)**: `dotnet ef migrations script` 양 provider 정상 생성.
+  - SQL Server(idempotent): 17 CREATE TABLE(16 도메인 + __EFMigrationHistory), 16 ERD 테이블 전부, `rowversion` 컬럼, `CREATE UNIQUE INDEX [UQ_piece_pid_where_active] ON [piece] ([PId]) WHERE [is_active] = 1`(필터드).
+  - SQLite: 17 CREATE TABLE, `CREATE UNIQUE INDEX "UQ_piece_pid_is_active" ON "piece" ("PId","IsActive")`(일반), 필터 WHERE 0건. provider 분기가 생성 DDL에 실재.
+  - 두 Initial 마이그레이션 AlterColumn 0(베이스라인 깨끗).
+- **회귀 0**: build 경고0/오류0(신규 2 어셈블리 포함). `dotnet test` **4회 연속 44/44 GREEN**, split 불변(15/9/4/16).
+- **보호 파일 무수정 유지**: Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs git diff 0바이트.
+- **문서**: docs/SPEC.md §7-C 신설 — 단일 인스턴스 가정 명문화 + MAJOR-1(다중 인스턴스 멱등=부분 유니크 인덱스로 static lock 대체)·MINOR P2 이관 목록 기록. 직전 MINOR-3(static lock 운영 병목) 추적 항목으로 정식 이관됨.
+
+→ BLOCKING 해소, 회귀 0, 동작 무변경 유지. **APPROVED 유지.** 잔여 MINOR-2(양 provider RowVersion+XminRowVersion 잉여 컬럼)·MAJOR-1(static lock→부분 유니크)는 SPEC §7-C로 P2 추적 — 비차단.
+
+---
+
+## 판정: APPROVED
+
+Evaluator GROUND TRUTH 재검증(소스 직접 검사 + dotnet 직접 재실행, 생성자 요약 불신).
+build exit 0(경고 0/오류 0). SDK 10.0.300. 브랜치 `feat/m4-p1-persistence`(develop 직접 0).
+전 시나리오 PASS — 동작 무변경 인프라 교체 + 회귀 0 강한 가드 충족.
+
+### VS-P1-1 회귀(필수) — PASS
+- expected: `dotnet test Wcs.sln` 4회 연속 44/44, split 불변(Decider 15/PlcGatewayIntegration 9/RtuTransport 4/ApiIntegration 16).
+  보호 파일(Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs·DepositDeciderTests·PlcGatewayIntegration·RtuTransport) git diff 무변경. ApiIntegration은 시드/배선만, 단언 불변.
+- actual: **4회 연속 44/44 GREEN, 실패 0, ~3s**(flaky 0). split 직접 필터 확인 — Decider 15 / PlcGatewayIntegration 9 / RtuTransport 4 / ApiIntegration 16 = 44 정확 일치.
+  `git diff --stat`로 보호 7개 surface(Wcs.Core, PlcGateway.cs, HandshakeOrchestrator.cs, Dtos.cs, DepositDeciderTests, PlcGatewayIntegrationTests, RtuTransportTests) **diff 0바이트** 확인.
+  ApiIntegrationTests.cs diff = 57 insert/4 delete, 전부 `FakeModbusWebApplicationFactory`(앵커 SQLite 연결·EnsureCreated·DbSeeder 배선)에 한정. `git diff | grep Assert` → **단언 변경 0줄**. VS-1~7·CONCUR1·MINOR1 본문 무변경.
+
+### VS-P1-2 ERD 16 대조 — PASS
+- WcsDbContext DbSet 16개 ↔ ERD 16테이블 1:1(destination·cell·cell_assignment·agv·printer·chute_detail·induction·work_batch·wcs_order·order_item·piece·piece_event·sorter_command·plc_event·alarm·destination_event). 누락/추가 0.
+- 대리키 `Id`(bigint identity, ValueGeneratedOnAdd) 전부. 자연키 UNIQUE(ChuteNo·AgvNo·PrinterNo·InductionNo·(WorkDate,BatchNo,WaveNo)·(WorkBatchId,OrderNo)·(OrderId,Barcode)·(DestinationId,CellNo)). chute_detail PK=FK(1:1, ValueGeneratedNever).
+- enum 12종 전부 `HasConversion<string>()` + MaxLength. 이력 테이블(piece_event·plc_event·destination_event) 네비게이션 단방향·UPDATE 경로 없음(append-only). 상태 테이블 row_version/updated_at, created_at UTC(시드·리포 전부 DateTime.UtcNow).
+- piece 필터드 유니크: SQLite=UNIQUE(PId,IsActive) / SQL Server=HasFilter("[is_active] = 1") provider 분기(소스 L361-376).
+
+### VS-P1-3 provider 분기 — PASS
+- SQLite로 실제 테스트 구동(EnsureCreated 기반 in-memory SQLite, 44 GREEN). 마이그레이션 양쪽 생성:
+  - Migrations/Sqlite/20260616065821_Initial.cs: `UQ_piece_pid_is_active`(일반 UNIQUE), `Sqlite:Autoincrement`, XminRowVersion=INTEGER.
+  - Migrations/SqlServer/20260616065853_InitialSqlServer.cs: `UQ_piece_pid_where_active` filter:"[is_active] = 1", RowVersion type:rowversion, UseIdentityColumns.
+- piece 유니크/rowversion provider 분기가 마이그레이션 산출물에 실재 확인.
+
+### VS-P1-4 IF-05 트랜잭션 — PASS
+- EfOrderRepository.QueryDestination: OK 경로가 `BeginTransaction`(L126) 안에서 reserved_qty+=qty + 기존 활성 piece 비활성(p_id 순환) + piece(RESERVED) 삽입 + piece_event(IF05_RES) → Commit, catch Rollback+throw. 원자.
+- AUTO: destination NULL 오더에서 빈 슈트(CHUTE·NORMAL·IsActive·RUNNING 미점유) 할당 + dest_assign_type=AUTO + WAITING→RUNNING 전이 + 예약을 동일 트랜잭션(L132-143). 빈 슈트 없으면 NG·NO_DEST.
+
+### VS-P1-5 IF-05 NG(IF-16) — PASS
+- RecordDenied: 미존재/COMPLETED/PAUSED/OVER/비활성목적지 → piece(status=DENIED) + piece_event(IF05_RES,reason) 단일 트랜잭션, **예약 차감 0**(ReservedQty 미변경). 와이어는 200 NG·chuteNo=null(VS-2·VS2_Paused GREEN) — M3 동일.
+
+### VS-P1-6 IF-10 멱등 DB + CONCUR — PASS
+- EfDepositRecorder.RecordDeposit: 단일 트랜잭션 내 활성 piece 조회 → 이미 DEPOSITED/CELL_ASSIGNED/LOADED면 Rollback+false(멱등) / DENIED면 Rollback+false / RESERVED·QUERIED·PERMITTED → DEPOSITED 전이 + piece_event(IF10_RES) → Commit+true.
+- 동시성: `static readonly object _recordLock` + `lock(_recordLock)`로 프로세스 전역 직렬화(테스트 named in-memory SQLite Mode=Memory;Cache=Shared 단일 writer 정합). 첫 호출만 true → Program.cs는 isNewRecord==true에서만 IF-11 트리거 → **IF-11 ≤1 보장**(논리 입증).
+- 실증: 전체 4회 + **CONCUR1 단독 5회 연속 GREEN, flaky 0**. 8병렬 동일 pId 전부 200 OK + HasDepositRecord==true.
+
+### VS-P1-7 셀 배정 DB — PASS
+- EfCellSelector.SelectCell: 트랜잭션 내 ①같은 오더(바코드) 활성 assignment(ReleasedAt==null) 재사용 → ②빈 셀(미점유·Enabled) 할당+cell_assignment 삽입 → ③없으면 null. ReleaseCell: ReleasedAt=now. 빈 셀 없으면 Program.cs가 IF-11 트리거 생략(VS6_Chute 대조 GREEN) — M3 동일.
+
+### VS-P1-8 agv.floor 단일진실 — PASS
+- EfAgvFloorResolver.Resolve: `_db.Agvs.FirstOrDefault(AgvNo==agvNo && Enabled)?.Floor`. appsettings Floors:AgvNoToFloor 런타임 조회 경로 0(grep — DbSeeder 시드 전용·주석만). 매핑 없으면 null→IF-08 400(VS4_UnknownAgvNo GREEN).
+
+### VS-P1-9 동작 무변경 종합 — PASS
+- IF-08 라이브: WcsHold.None 고정(L160) 단일 게이트웨이 Decide. allowed/READY/WRONG_FLOOR·BUSY·TgtFloor 기입(VS-3a/3b/VS-4) M3 동일. 핸드셰이크 C/R 무변경(보호 파일 diff 0).
+
+### Error cases (적극 배제) — 전부 통과
+- **E1 동작 변경 0**: git status로 Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs·Dtos.cs **무수정**(diff 0). P1=인프라 교체뿐.
+- **E2 범위 침범 0**: IF-08 목적지 분기 없음(WcsHold.None), FULL/PAUSED 계산 없음, 멀티소터 레지스트리 없음, timeStamp 백필 없음(client_ts·created_at 컬럼만 생성=허용), S1~S9 없음. appsettings 변경=Database/ConnectionStrings 추가만.
+- **E3 교체점**: Program.cs DI에 InMemory*/ConfigAgvFloorResolver 0 — Ef* 4종만 바인딩. Wcs.Api→Wcs.Data ProjectReference 복원 확인. (구 Repositories.cs는 잔존하나 어디서도 인스턴스화 0 = 죽은 코드, "죽은 코드 정리→P2" scope OUT대로 허용.)
+- **E4 ERD 위반 0**: 16테이블 정합, 대리키 전부, 이력 UPDATE 경로 없음, enum string 변환 누락 0.
+- **E5 트랜잭션 누락 0**: IF-05 OK/NG·IF-10·셀 배정/해제 전부 BeginTransaction~Commit/Rollback 원자. CONCUR1 동시성 회귀 테스트 실재·5회 GREEN.
+- **E6 하드코딩 0**: provider·연결문자열 appsettings(Program.cs L57-59), 시간값 Timing 섹션. (design-time factory의 localdb 문자열은 마이그레이션 생성 전용·런타임 비경로 — 허용.)
+- **E7 자동 Migrate 0**: Program.cs에 .Migrate()/.MigrateAsync() 없음(주석만). 테스트는 EnsureCreated. M5 이연 준수.
+
+### MINOR (비차단 — P2/후속 권고)
+1. **마이그레이션 스냅샷 위생**: ModelSnapshot 파일이 단 1개(`Migrations/Sqlite/WcsDbContextModelSnapshot.cs`)인데 내용은 **SQL Server**(UseIdentityColumns + filtered index `UQ_piece_pid_where_active`). 두 provider가 한 스냅샷을 공유해 SQL Server 생성분으로 덮인 상태. 현재 영향 없음(커밋된 두 Initial 마이그레이션은 각각 정상, 테스트는 EnsureCreated로 마이그레이션 우회). 그러나 향후 SQLite 증분 마이그레이션은 잘못된 스냅샷과 diff → 손상 위험. provider별 스냅샷 분리 권장.
+2. **컬럼 이중화**: row_version 분기에서 SQLite도 RowVersion(BLOB) + XminRowVersion(INT) 둘 다, SQL Server도 둘 다 물리 컬럼 생성("한 쪽만 매핑"과 미세 불일치). 미사용 잉여 컬럼이라 기능 무해. 한 쪽 Ignore 권장.
+3. **static lock 운영 함의**: `_recordLock`이 프로세스 전역이라 운영 SQL Server에서도 모든 IF-10 투입 기록이 단일 모니터로 직렬화 → 처리량 병목. 정합성/테스트 결정성엔 무해하나(소스 주석도 인지), 운영 경로는 DB 유니크 제약/트랜잭션 격리로 대체 권장(P2).
+
+→ Completion Conditions(회귀 0·16엔티티·provider 분기·교체점·트랜잭션·무변경·agv.floor·하드코딩 0·feature 브랜치) 전부 충족. **FULL PASS.** MINOR 3건은 P2 정리 대상.
+
+---
+
 # Sprint Feedback — S-RTU (Modbus 전송 추상화 + RTU 어댑터)
 
 ## 판정: APPROVED

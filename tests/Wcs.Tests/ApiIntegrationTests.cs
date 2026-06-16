@@ -1,10 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Threading;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Wcs.Api;
 using Wcs.Core;
+using Wcs.Data;
 using Wcs.PlcGateway;
 using Xunit;
 using Xunit.Abstractions;
@@ -28,20 +31,70 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
     /// <summary>테스트에서 직접 레지스터를 조작하기 위해 공개.</summary>
     public FakeModbusMasterForApi FakeMaster { get; } = new();
 
-    protected override void ConfigureWebHost(
-        Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
+    // ── Named in-memory SQLite: shared cache 모드로 여러 연결이 같은 DB를 공유 ──
+    // Mode=Memory;Cache=Shared: 각 DbContext가 독립 연결을 열면서도 같은 named DB를 사용.
+    //   → "단일 연결 공유"의 중첩 트랜잭션 오류(SqliteConnection does not support nested
+    //     transactions)를 방지. 각 연결이 독립 트랜잭션을 가질 수 있음.
+    // 팩토리 생명주기 동안 DB를 유지하기 위해 앵커 연결 1개를 열어둠.
+    private static readonly string _dbName = $"WcsTest_{Guid.NewGuid():N}";
+    private readonly Microsoft.Data.Sqlite.SqliteConnection _anchorConnection;
+
+    public FakeModbusWebApplicationFactory()
+    {
+        // 앵커 연결: 팩토리가 살아있는 동안 named in-memory DB를 유지.
+        _anchorConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={_dbName};Mode=Memory;Cache=Shared");
+        _anchorConnection.Open();
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureServices(services =>
         {
             // IModbusMaster 교체 — FakeModbusMasterForApi 주입
-            // 기존 싱글톤 등록을 제거하고 fake로 교체
             var descriptor = services.SingleOrDefault(
                 d => d.ServiceType == typeof(IModbusMaster));
             if (descriptor is not null)
                 services.Remove(descriptor);
-
             services.AddSingleton<IModbusMaster>(FakeMaster);
+
+            // ── WcsDbContext를 named in-memory SQLite로 교체 (M4 테스트 배선) ────
+            // 프로덕션 WcsDbContext 등록 제거 후 테스트용 SQLite로 교체.
+            var dbDescriptors = services
+                .Where(d => d.ServiceType == typeof(DbContextOptions<WcsDbContext>)
+                         || d.ServiceType == typeof(WcsDbContext))
+                .ToList();
+            foreach (var d in dbDescriptors)
+                services.Remove(d);
+
+            // 각 DbContext가 독립 연결을 가져 중첩 트랜잭션 오류를 방지.
+            // Cache=Shared 모드: 동일 named DB를 여러 연결이 접근 가능.
+            var connStr = $"Data Source={_dbName};Mode=Memory;Cache=Shared";
+            services.AddDbContext<WcsDbContext>(opts =>
+                opts.UseSqlite(connStr,
+                    sqlite => sqlite.CommandTimeout(30))
+                    .ConfigureWarnings(w => w.Ignore(
+                        Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)),
+                ServiceLifetime.Scoped);
+
+            // ── 스키마 생성 + 시드 (앵커 연결 기반 WcsDbContext로 실행) ─────────
+            // EnsureCreated()로 스키마를 즉시 생성(마이그레이션 히스토리 충돌 우회).
+            var dbOpts = new DbContextOptionsBuilder<WcsDbContext>()
+                .UseSqlite(_anchorConnection)
+                .ConfigureWarnings(w => w.Ignore(
+                    Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning))
+                .Options;
+            using var db = new WcsDbContext(dbOpts);
+            db.Database.EnsureCreated();
+            DbSeeder.Seed(db, new Dictionary<string, int> { ["1"] = 1, ["2"] = 2 });
         });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _anchorConnection.Dispose();
+        base.Dispose(disposing);
     }
 }
 

@@ -1,5 +1,115 @@
 # Sprint Log
 
+## CODE REVIEW FIX (M4-P1)
+
+### [BLOCKING] provider별 독립 마이그레이션 어셈블리 분리
+
+**문제**: `Wcs.Data` 단일 어셈블리에서 두 provider의 마이그레이션을 관리하면 EF가 `WcsDbContextModelSnapshot`을 1개만 유지 — SQL Server 마이그레이션이 SQLite 스냅샷 위 AlterColumn 278개의 diff가 되어 빈 DB에서 `database update` 즉시 실패.
+
+**수정**:
+- `src/Wcs.Migrations.Sqlite/` 신규 프로젝트 — SQLite provider 전용 마이그레이션 어셈블리, 독립 `WcsDbContextModelSnapshot` + `SqliteDesignTimeFactory`
+- `src/Wcs.Migrations.SqlServer/` 신규 프로젝트 — SQL Server provider 전용 마이그레이션 어셈블리, 독립 `WcsDbContextModelSnapshot` + `SqlServerDesignTimeFactory`
+- `src/Wcs.Data/Migrations/` 기존 폴더 전체 삭제
+- `src/Wcs.Data/WcsDbContextFactory.cs` 삭제 (각 마이그레이션 어셈블리로 factory 이전)
+- `src/Wcs.Api/Program.cs` `MigrationsAssembly("Wcs.Data")` → `"Wcs.Migrations.Sqlite"` / `"Wcs.Migrations.SqlServer"` 분기 수정
+- `src/Wcs.Api/Wcs.Api.csproj` 두 마이그레이션 어셈블리 ProjectReference 추가
+- `Wcs.sln` 두 신규 프로젝트 추가
+
+**마이그레이션 재생성 결과 (깨끗한 베이스라인)**:
+```
+SQLite  Initial: CreateTable 16개, AlterColumn 0개 — SQLite 타입(INTEGER/TEXT/BLOB), UNIQUE(p_id, is_active)
+SqlSvr  Initial: CreateTable 16개, AlterColumn 0개 — rowversion, filtered index WHERE [is_active]=1
+```
+
+**migrations script 검증**:
+```
+SQLite  script: CREATE TABLE 17개(포함 __EFMigrationHistory)
+SqlSvr  script: CREATE TABLE 17개, CREATE UNIQUE INDEX ... WHERE [is_active] = 1
+```
+
+### [P2 이관] docs/SPEC.md §7-C 기록 완료
+단일 인스턴스 가정 명문화 + MAJOR-1 다중인스턴스 멱등 / MINOR-2,4,5,6 P2 정리 대상 기록.
+
+### 빌드·테스트 결과 (4회 연속)
+
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln (4회 연속):
+  RUN 1: 통과! 실패:0 통과:44 전체:44
+  RUN 2: 통과! 실패:0 통과:44 전체:44
+  RUN 3: 통과! 실패:0 통과:44 전체:44
+  RUN 4: 통과! 실패:0 통과:44 전체:44
+```
+
+---
+
+## IMPLEMENTATION COMPLETE (M4-P1)
+
+### Sprint: S-M4-P1 (EF Core 퍼시스턴스 — 기준정보·오더·투입 이력)
+
+### 구현 범위
+
+**신규 파일**
+- `src/Wcs.Data/Entities.cs` — 12 enum + 16 entity 클래스 (ERD.md 16테이블 1:1)
+  - provider 분기: `[Timestamp] byte[]? RowVersion` (SQL Server) + `int XminRowVersion` (SQLite) 동시 선언
+  - `Piece`: `int PId`, `bool IsActive`, navigation to Destination/OrderItem/Agv/Induction
+- `src/Wcs.Data/WcsDbContext.cs` — `WcsDbContext : DbContext`
+  - 16 DbSet, `IsSqlite`/`IsSqlServer` 프로바이더 판별
+  - `ConfigureConcurrency<T>`: provider 분기 동시성 토큰 설정
+  - `ConfigurePiece`: SQLite UNIQUE(p_id,is_active) vs SQL Server filtered unique index `(p_id) WHERE is_active=1`
+- `src/Wcs.Data/WcsDbContextFactory.cs` — `WcsDesignTimeFactory` (단일, `WCS_PROVIDER` env var)
+- `src/Wcs.Data/Migrations/Sqlite/20260616065821_Initial.cs` — SQLite 초기 마이그레이션
+- `src/Wcs.Data/Migrations/SqlServer/...` — SQL Server 초기 마이그레이션
+- `src/Wcs.Data/DbSeeder.cs` — M3 인메모리 시드 동등 데이터
+  - Destinations: ChuteNo 1-5 (CHUTE) + ChuteNo 30 (SORTER_3D) + ChuteNo 6 (PAUSED)
+  - Cells: CellNo 1-3 (SORTER_3D 목적지)
+  - AGVs: agvNo=1→floor=1, agvNo=2→floor=2
+  - WcsOrder "SEED" + ORD-001~005 (TEST-BARCODE-1~5)
+- `src/Wcs.Api/DbRepositories.cs` — 4개 인터페이스 EF Core 구현
+  - `EfOrderRepository`: IF-05 OK = 예약차감+piece삽입+AUTO배정 단일 트랜잭션
+  - `EfDepositRecorder`: IF-10 = piece RESERVED→DEPOSITED 멱등 트랜잭션 + `static readonly object _recordLock` (CONCUR1 직렬화)
+  - `EfCellSelector`: cell_assignment 재사용·빈셀할당·해제
+  - `EfAgvFloorResolver`: agv.floor DB 단일 진실 (appsettings 런타임 조회 제거)
+
+**변경 파일**
+- `src/Wcs.Data/Wcs.Data.csproj` — EF Core SqlServer 9.0.5, Sqlite 9.0.5, Design 9.0.5 추가
+- `src/Wcs.Api/Wcs.Api.csproj` — Wcs.Data ProjectReference 복원
+- `src/Wcs.Api/Program.cs` — InMemory* DI → EF Core 등록 교체, IF-10 EfDepositRecorder.GetDestType 사용
+- `src/Wcs.Api/appsettings.json` — `Database.Provider`, `ConnectionStrings.WcsDb` 추가
+- `tests/Wcs.Tests/Wcs.Tests.csproj` — Wcs.Data ProjectReference 추가
+- `tests/Wcs.Tests/ApiIntegrationTests.cs` — `FakeModbusWebApplicationFactory` EF Core 배선
+  - Named in-memory SQLite (`Mode=Memory;Cache=Shared`) 전환: 각 DbContext 독립 연결, 중첩 트랜잭션 오류 방지
+  - 앵커 연결 1개로 팩토리 생명주기 동안 DB 유지
+  - `EnsureCreated()` + `DbSeeder.Seed()` 로 스키마+시드 초기화
+
+**무수정 파일 (git status 확인)**
+- `Wcs.Core/` — 무수정
+- `src/Wcs.PlcGateway/PlcGateway.cs` — 무수정
+- `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` — 무수정
+- `src/Wcs.Api/Dtos.cs` — 무수정
+
+### 핵심 이슈 해결
+
+**CONCUR1 SQLite 중첩 트랜잭션**
+- 원인: 단일 `_sharedConnection`을 모든 Scoped DbContext가 공유 → 병렬 `BeginTransaction()` → `SqliteConnection does not support nested transactions`
+- 해결: Named in-memory SQLite (`Data Source=WcsTestXxx;Mode=Memory;Cache=Shared`) 전환
+  + `EfDepositRecorder` `static readonly object _recordLock` 추가 (M3 `lock(_lock)` 패턴)
+
+### 빌드·테스트 결과 (4회 연속)
+
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln (4회 연속):
+  RUN 1: 통과! 실패:0 통과:44 전체:44
+  RUN 2: 통과! 실패:0 통과:44 전체:44
+  RUN 3: 통과! 실패:0 통과:44 전체:44
+  RUN 4: 통과! 실패:0 통과:44 전체:44
+```
+
+---
+
 ## CODE REVIEW FIX (M3)
 
 ### 수정 내역 (코드리뷰 MAJOR + MINOR)

@@ -94,3 +94,16 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 - **C_Flag=1 대기 타임아웃**: R쪽과 달리 상한·알람 미정의(무한 대기 위험). appsettings 설정값 + 초과 시 알람/상태 재확인 — 3DS 협의.
 - **TgtFloor 잔류 해소**: 이동만 완료·투입 없이 AGV 이탈 시 TgtFloor≠0 영구 잔류 → 타 층 영구 WRONG_FLOOR. 해소책(PLC 무투입 N분 자체 클리어 / WCS 운영자 수동 리셋=절대규칙 3 예외 명문화) — 3DS 협의. S4 시나리오에 기대동작 정의.
 - **레지스터 시작 주소**: D0~D4는 3DS 제공 맵 기반, D5·D6은 본 협의 신설. D영역↔Modbus 주소 오프셋 포함 현장 확정 — 변경 시 RegisterMap 상수만 수정.
+
+### 7-C. M4-P1 코드리뷰 P2 이관 항목 (2026-06-16)
+
+**P1 가정 명문화 — 단일 인스턴스 배포**
+- IF-10 멱등은 in-process `static readonly object _recordLock`에 의존. 단일 프로세스 내에서만 유효.
+  다중 인스턴스(로드밸런서) 배포 시 이중 기록·IF-11 이중 트리거 가능. P1 범위 밖 — P2에서 DB 레벨 진성 멱등으로 전환.
+
+**P2 정리 대상**
+- [MAJOR-1] 다중 인스턴스 멱등: `piece`에 부분 유니크 인덱스 `(p_id) WHERE status IN ('DEPOSITED','CELL_ASSIGNED','LOADED') AND is_active=1` + 위반 catch → 단일 인스턴스 lock 제거. P2.
+- [MINOR-2] RowVersion+XminRowVersion 이중 물리 컬럼 — 비활성 분기는 `Ignore()`로 처리하지 않고 두 컬럼이 DB에 모두 존재. P2에서 비활성 provider 분기 컬럼은 `Ignored()` 처리로 정리.
+- [MINOR-4] 셀 배정 `(cell_id) WHERE released_at IS NULL` 유니크 인덱스 부재 — 동시 이중 셀 할당 잠재. P2에서 인덱스 추가.
+- [MINOR-5] IF-05 NG(DENIED) piece의 destination FK: 현재 임의 목적지로 fallback — nullable FK 또는 UNROUTED sentinel 목적지로 교체. P2.
+- [MINOR-6] `IF05_REQ` 이벤트가 `IF05_RES` 뒤 별도 트랜잭션(`RecordDestinationQuery`)에서 삽입됨 — P2에서 `QueryDestination` 트랜잭션에 합치고 `RecordDestinationQuery` 인터페이스 메서드 제거 권고.
