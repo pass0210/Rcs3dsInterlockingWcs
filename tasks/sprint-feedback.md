@@ -1,3 +1,56 @@
+# Sprint Feedback — S-RTU (Modbus 전송 추상화 + RTU 어댑터)
+
+## 판정: APPROVED
+
+GROUND TRUTH 재검증(소스 직접 검사 + dotnet 직접 재실행, 요약 불신). 전 시나리오 PASS.
+
+### VT-1 TCP 회귀 (필수) — PASS
+- expected: 기존 M1 15 + M2 통합 9(IT-1·2a·2b·3a·3b·3c·4·4b·5)이 단언·코드 변경 없이 GREEN, split 감소 없음.
+- actual: `dotnet test Wcs.sln` **4회 연속 28/28 GREEN, 실패 0, ~2s**(flaky/데드락 없음).
+  `--list-tests` 카운트 = Decider 15(Row1~7 Theory 전개 + C1·C2×3·C3 + Wire) + 통합 9 + RTU 4 = 28.
+  M2 IT 9건 전부 메서드명·split 유지(IT3c·IT4b 포함). `PlcGatewayIntegrationTests.cs`는 `git diff` 무변경 —
+  2인수 편의 생성자 `new PlcPollingService(_gwOpt, _queue)`(→내부 ModbusTcpMaster)로 TCP 경로 회귀 0.
+
+### VT-2 RTU 라이브 왕복 — PASS
+- expected: in-memory fake `IModbusRtuSerialPort` 쌍으로 실제 ModbusRtuClient↔ModbusRtuServer 왕복, C/R 성공·R_Seq==C_Seq·RMW 비트 보존·단일 큐.
+- actual: `VT2_RtuFakeSerial_LiveRoundtrip` 245ms 실 왕복. 콘솔 증거: `RTU GW Online=True` /
+  `C_Flag=1 CCellNo=5 CSeq=1`(CellAssign FC16+RMW 왕복) / `R_Flag=1 RSeq=1==CSeq=1`(대사) / ClearR 후 R_Flag=0.
+  RMW 보존: `Assert.True(snapC.Ready)` — C_Flag set 후 Ready 비트 보존. 빈 단언 아님(소스 L88-116 확인).
+  단일 큐: 모든 쓰기 `gw.EnqueueAsync` 경유, PlcGateway RunWriteConsumer 단일 컨슈머.
+
+### VT-3 전송 선택 팩토리 — PASS
+- expected: Tcp→TcpMaster, Rtu→RtuMaster, 미지정→Rtu(기본), 시리얼 파라미터 전달.
+- actual: `Assert.IsType<ModbusTcpMaster>`(Tcp) / `<ModbusRtuMaster>`(Rtu) / `new PlcTransportOptions()` 기본→RtuMaster /
+  bad value→`InvalidOperationException`. 4분기 전부 통과. 시리얼 파라미터는 팩토리 `CreateRtu`가 PortName·Baud·
+  Parity·Stop·timeouts·UnitId 전부 전달(ModbusMasterFactory.cs L94-103)→생성자가 client에 세팅(ModbusRtuMaster.cs L45-52),
+  빌드+VT-2 실통신(UnitId=1)으로 구조 검증. 기본값=Rtu 정합 확인(E4).
+
+### VT-4 추상화 단위 테스트 — PASS
+- FakeModbusMaster 주입으로 PlcGateway 로직 전송 무관 검증: CellAssign→C_Flag=1·CCellNo=7·CSeq=42·Ready 보존(RMW),
+  R 세팅→RSeq=42, ClearR→R_Flag=0. 실 단언.
+
+### VT-5 RTU OFFLINE 전이 — PASS
+- FakeSerialPort `SimulateClose=true`→ReadAsync/WriteAsync에서 IOException→연속 실패→Online=false, 복구→true.
+  콘솔: 초기 Online→OFFLINE→복구 Online. 예외 안 삼킴.
+
+### Error cases 배제
+- **E1 추상화 누수 0**: `grep "ModbusTcpClient|ModbusRtuClient" src/Wcs.PlcGateway` → 어댑터(TcpMaster·RtuMaster)와
+  IModbusMaster 주석에만 등장. PlcGateway.cs·HandshakeOrchestrator.cs 구상 타입 직접 참조 0건.
+- **E2 직렬화 회귀 0**: PlcGateway 모든 Modbus 트랜잭션(폴 읽기 L208-222 / 쓰기·RMW L309-362 / Disconnect·재연결
+  L257-259)이 `_clientLock` 임계구역 통과. off-lock `_master` 접근은 StopAsync·DisposeAsync(태스크 await 완료 후
+  단일스레드) 뿐. 데드락 없음(finally Release, RMW 재획득 없음). 4회 연속 GREEN로 결정성 입증.
+- **E3/E4 회귀**: M2 IT 9건 GREEN, TCP 어댑터가 BigEndian·ReadTimeout·재연결 의미 보존. 미지정=Rtu, 기존 TCP는 명시 Tcp 구성으로 회귀 0.
+- **E5 하드코딩/범위**: 시리얼/시간 매직넘버 0(전부 PlcTransportOptions·PlcGatewayOptions 설정). `git diff` 코드 변경 =
+  PlcGateway.cs·appsettings.json 뿐. Wcs.Core·Wcs.Api(*.cs)·Wcs.Data·HandshakeOrchestrator·DepositDeciderTests·
+  M2 IT 파일 무변경. appsettings는 키 추가만(WriteTimeoutMs 값·존재 유지).
+- **E6 문서 동기화**: SPEC §7-A 신설(RTU 우선+TCP·추상화 완료·소터별 독립 포트·마스터/슬레이브·RTU 예외 OFFLINE·
+  fake serial CI), 舊 §7-A→§7-B 이동. CLAUDE.md 다이어그램 `Modbus TCP`→`Modbus RTU/TCP` 정정. 코드와 함께 커밋 가능 상태.
+- **E7 RTU 예외→OFFLINE**: PlcGateway L243-247 isHardEx에 IOException·TimeoutException + InnerException 포함(소켓 전용 분기 비의존). VT-5로 실증.
+
+→ build exit 0(경고 0/오류 0), test 4회 28/28 GREEN, 추상화 경계·회귀 안전·RTU 정합·장인성/설정 4기준 충족. FULL PASS.
+
+---
+
 # Sprint Feedback — S-M2 (PLC 게이트웨이 + 시뮬레이터 핸드셰이크)
 
 ## 판정 (재검증 #4 — 코드리뷰 수정 반영): APPROVED (유지)
@@ -193,3 +246,12 @@ PASS.
 ## 참고 (minor, 차단 아님 — 여력 시)
 - `src/Wcs.Sim3ds/Program.cs:13-16` 옵션값(TiltDelay/SortDuration/MoveDuration)이 appsettings 바인딩 없이
   소스 리터럴. 독립 실행 entrypoint라 테스트 표면 밖이나, "설정 주입" 일관성 위해 IConfiguration 바인딩 권장.
+
+---
+
+## Code Review (4-Tier Step 4.5) — APPROVE, MINOR 4건 (비차단 — 다음 스프린트/M3에서 정리)
+독립 Opus 코드리뷰: BLOCKING/MAJOR 0, M2 동시성 invariant 보존 확인. 아래 MINOR는 머지 차단 아님:
+1. `ModbusRtuMaster.Connect/Disconnect` fake-serial 모드 no-op이 TCP 계약과 분기 — 명명(`_externallyOwnedPort`)·XML 주석으로 의도 명시 권장.
+2. `tests/Wcs.Tests/RtuTransportTests.cs:98` `await Task.Delay(50)` 고정 sleep이 "고정 sleep 없음" 주석과 모순 — 선행 `WaitUntilAsync(CFlag)`가 이미 동기화하므로 삭제 가능(무해한 dead weight).
+3. `FakeSerialPort.Read`(sync) 버퍼 없을 때 0 반환 → 동기 경로 사용 시 busy-spin 위험. 현재 async만 사용되나 `NotSupportedException`으로 fail-loud 또는 문서화 권장.
+4. `ModbusRtuMaster.Connect`가 물리 COM 모드에서 BigEndian 하드코딩 — fake ctor는 endianness 파라미터 받음. VEICHI는 BigEndian이라 기능상 정상이나, 엔디안을 필드로 통일 권장(향후 LittleEndian 장비 대비).

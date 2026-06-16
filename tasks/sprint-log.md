@@ -1,5 +1,64 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE (S-RTU)
+
+### 변경·신규 파일
+
+**신규 (src/Wcs.PlcGateway/)**
+- `IModbusMaster.cs` — 전송 추상화 인터페이스 (Scope A)
+- `ModbusTcpMaster.cs` — TCP 어댑터, ModbusTcpClient 1:1 래핑 (Scope B)
+- `ModbusRtuMaster.cs` — RTU 어댑터, ModbusRtuClient + IModbusRtuSerialPort 주입 지원 (Scope C)
+- `ModbusMasterFactory.cs` — PlcTransportOptions + 팩토리 (Scope D)
+
+**수정 (src/Wcs.PlcGateway/)**
+- `PlcGateway.cs` — PlcPollingService: ModbusTcpClient 직접 의존 제거, IModbusMaster 주입. 편의 생성자(2인수)로 회귀 보존. OFFLINE 판단에 TimeoutException 추가(RTU 정합). EnsureConnected/TryReconnect도 IModbusMaster 통해 실행.
+
+**신규 (tests/Wcs.Tests/)**
+- `FakeSerialPort.cs` — in-memory IModbusRtuSerialPort 구현 (System.IO.Pipelines 기반)
+- `RtuTransportTests.cs` — VT-2~5 (RTU 왕복, 팩토리, fake master, OFFLINE 전이)
+
+**수정 (설정·문서)**
+- `src/Wcs.Api/appsettings.json` — Plc:Transport=Tcp 명시(dev/sim), RTU 파라미터 추가
+- `docs/SPEC.md` — §7 TCP vs RTU → 확정(RTU 우선+TCP, 전송 추상화) / §7-A 전송 확정 신설 / 舊 §7-A → §7-B로 이동
+- `CLAUDE.md` — 다이어그램 `Modbus TCP` → `Modbus RTU/TCP` 정정
+
+**무변경**: HandshakeOrchestrator.cs, Wcs.Core, Wcs.Data, Wcs.Sim3ds
+
+---
+
+### grep 결과 — ModbusTcpClient 직접 참조 0건 확인
+
+```
+PlcGateway.cs:           직접 참조 없음 (OK)
+HandshakeOrchestrator.cs: 직접 참조 없음 (OK)
+```
+
+---
+
+### dotnet test 4회 연속 결과 요약
+
+```
+Run 1: 통과 28/28  실패 0  2s
+Run 2: 통과 28/28  실패 0  2s
+Run 3: 통과 28/28  실패 0  2s
+Run 4: 통과 28/28  실패 0  2s
+```
+
+VT-1(TCP 회귀) = IT-1·2a·2b·3a·3b·3c·4·4b·5 + M1 Decider 15건 포함
+VT-2(RTU fake-serial): ModbusRtuClient↔ModbusRtuServer via FakeSerialPort, C/R + R_Seq==C_Seq + RMW + 단일큐
+VT-3(팩토리): Tcp→ModbusTcpMaster, Rtu→ModbusRtuMaster, 미지정→ModbusRtuMaster, 오류값→예외
+VT-4(fake master): FakeModbusMaster 주입으로 PlcGateway 로직 전송 무관 단위 검증
+VT-5(RTU OFFLINE): FakeSerialPort.SimulateClose=true → IOException → OFFLINE, 복구 후 Online=true
+
+---
+
+### 문서 갱신 요약
+
+- SPEC §7: "TCP(502) vs RTU" 항목 삭제 → §7-A 신설(RTU 우선+TCP 확정, 전송 추상화 완료, 소터별 독립 포트, 마스터/슬레이브 확정)
+- CLAUDE.md 다이어그램 `--Modbus TCP-->` → `--Modbus RTU/TCP-->` 정정
+
+---
+
 ## CODE REVIEW FIX (M2)
 
 ### 수정 내역 (4-Tier Step 4.5 코드리뷰 BLOCKING + MINOR)
