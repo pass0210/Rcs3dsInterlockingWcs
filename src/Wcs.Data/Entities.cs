@@ -282,7 +282,7 @@ public sealed class Piece
     public string      Barcode      { get; set; } = string.Empty;
     public int         Qty          { get; set; }
     public DateTime?   DepositedAt  { get; set; }  // IF-10 시점(사실)
-    public long        DestinationId { get; set; } // FK → destination
+    public long?       DestinationId { get; set; } // FK → destination NULL(NG DENIED — MINOR-5)
     public long?       OrderItemId  { get; set; }  // FK → order_item NULL(예약 라인)
     public long?       AgvId        { get; set; }  // FK → agv NULL
     public long?       InductionId  { get; set; }  // FK → induction NULL

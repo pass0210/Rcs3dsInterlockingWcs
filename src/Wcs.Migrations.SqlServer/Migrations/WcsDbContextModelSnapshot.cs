@@ -152,7 +152,10 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CellId");
+                    b.HasIndex("CellId")
+                        .IsUnique()
+                        .HasDatabaseName("UQ_cell_assignment_cell_active")
+                        .HasFilter("[ReleasedAt] IS NULL");
 
                     b.HasIndex("OrderId");
 
@@ -230,9 +233,6 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
-
-                    b.Property<int>("XminRowVersion")
-                        .HasColumnType("int");
 
                     b.HasKey("Id");
 
@@ -342,9 +342,6 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
 
-                    b.Property<int>("XminRowVersion")
-                        .HasColumnType("int");
-
                     b.HasKey("Id");
 
                     b.HasIndex("OrderId", "Barcode")
@@ -380,7 +377,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<DateTime?>("DepositedAt")
                         .HasColumnType("datetime2");
 
-                    b.Property<long>("DestinationId")
+                    b.Property<long?>("DestinationId")
                         .HasColumnType("bigint");
 
                     b.Property<long?>("InductionId")
@@ -411,9 +408,6 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
 
-                    b.Property<int>("XminRowVersion")
-                        .HasColumnType("int");
-
                     b.HasKey("Id");
 
                     b.HasIndex("AgvId");
@@ -425,8 +419,8 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasIndex("PId")
                         .IsUnique()
-                        .HasDatabaseName("UQ_piece_pid_where_active")
-                        .HasFilter("[is_active] = 1");
+                        .HasDatabaseName("UQ_piece_pid_active_status")
+                        .HasFilter("[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED')");
 
                     b.HasIndex("Status")
                         .HasDatabaseName("IX_piece_status");
@@ -661,9 +655,6 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<long>("WorkBatchId")
                         .HasColumnType("bigint");
 
-                    b.Property<int>("XminRowVersion")
-                        .HasColumnType("int");
-
                     b.HasKey("Id");
 
                     b.HasIndex("DestinationId");
@@ -718,9 +709,6 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.Property<DateOnly>("WorkDate")
                         .HasColumnType("date");
-
-                    b.Property<int>("XminRowVersion")
-                        .HasColumnType("int");
 
                     b.HasKey("Id");
 
@@ -817,9 +805,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Pieces")
-                        .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .HasForeignKey("DestinationId");
 
                     b.HasOne("Wcs.Data.Induction", "Induction")
                         .WithMany()
