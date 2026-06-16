@@ -255,3 +255,102 @@ PASS.
 2. `tests/Wcs.Tests/RtuTransportTests.cs:98` `await Task.Delay(50)` 고정 sleep이 "고정 sleep 없음" 주석과 모순 — 선행 `WaitUntilAsync(CFlag)`가 이미 동기화하므로 삭제 가능(무해한 dead weight).
 3. `FakeSerialPort.Read`(sync) 버퍼 없을 때 0 반환 → 동기 경로 사용 시 busy-spin 위험. 현재 async만 사용되나 `NotSupportedException`으로 fail-loud 또는 문서화 권장.
 4. `ModbusRtuMaster.Connect`가 물리 COM 모드에서 BigEndian 하드코딩 — fake ctor는 endianness 파라미터 받음. VEICHI는 BigEndian이라 기능상 정상이나, 엔디안을 필드로 통일 권장(향후 LittleEndian 장비 대비).
+
+---
+
+# Sprint Feedback — M3 (API 3종 IF-05/08/10 + S-RTU MINOR 4건)
+
+## 판정: APPROVED
+
+GROUND TRUTH 재검증(소스 직접 검사 + dotnet 직접 재실행, 요약 불신). 전 시나리오 PASS. 빌드 경고 0/오류 0.
+
+### VS-7 회귀 (필수) — PASS
+- expected: 기존 28(Decider 15 + PlcGateway 9 + RTU 4)이 단언·코드 변경 없이 GREEN, split 감소 없음.
+- actual: `dotnet test Wcs.sln` **3회 연속 41/41 GREEN, 실패 0, ~2s**. 카운트 분해 직접 확인 —
+  Decider 15 / PlcGatewayIntegration 9 / RtuTransport 4 = 28 회귀 0, + ApiIntegration(신규) 13 = 41.
+- 비결정 요소 배제: 타이밍 민감 ApiIntegration(VS-3 WrongFloor 큐 관찰, VS-6 C_Flag 핸드셰이크 관찰)을
+  **추가 3회 연속 13/13 GREEN**로 재확인(총 6회). flaky 없음.
+- `git status`: src/Wcs.Core, src/Wcs.PlcGateway/PlcGateway.cs, HandshakeOrchestrator.cs 전부 **변경 없음**(무수정 확인).
+
+### VS-1/2 IF-05 — PASS
+- happy(VS1): 시드 TEST-BARCODE-1 매칭 → 200 OK·chuteNo=1·reason=NORMAL. 예약차감(`order.ReservedQty += qty`,
+  Repositories.cs:219)·투입기록(`recorder.RecordDestinationQuery`, Program.cs:135) 소스 실재 확인.
+- error(VS2): 미존재 바코드 → 200 NG·chuteNo=null·NO_DEST(Repositories.cs:186). PAUSED 시드 → NG·PAUSED(:194).
+  NG여도 기록 — `recorder.RecordDestinationQuery`가 검증 후 OK/NG 무관 호출(Program.cs:132~137). pId=0 → 400(:123).
+- 필드누락(barcode 공백) → 400(Program.cs:125).
+
+### VS-3 IF-08 라이브 — PASS (핵심)
+- WrongFloor(VS3b): agvNo=2→agvFloor=2(설정 Floors:AgvNoToFloor "2":2), CurFloor=1 불일치 → allowed=false·WRONG_FLOOR,
+  TgtFloor=0이라 WriteTgtFloor=true → 큐 SetTgtFloor(2) fire-and-forget(Program.cs:183-194) → FakeMaster.TgtFloor=2 폴링 관찰.
+- 층일치(VS3a): agvNo=1→floor1=CurFloor1, Ready=1 → allowed=true·**reason="READY"**.
+- READY 주입 검증: `decision.Allowed ? "READY" : decision.Reason.ToWire()`(Program.cs:199) — API 계층 주입.
+  Core `Models.cs:58 DenyReason.None => null` 무변경(`git status` Core 무수정) — Core ToWire(None)=null 유지 확인.
+
+### VS-4 IF-08 분기 — PASS
+- Ready=0 → allowed=false·BUSY(Decider 행4/5, DepositDecider.cs:45). OFFLINE 스냅샷 → OFFLINE(Decider 우선순위1).
+- pId=-1 → 400(:161). agvNo=99(매핑없음) → 400(floorResolver.Resolve→null, Program.cs:168). 검증실패만 400.
+- WriteTgtFloor 분기: Allow 경로(VS3a happy)는 WriteTgtFloor=false → 큐 투입 없음(Decider Allow()=false, Models.cs:71).
+  큐 투입은 decision.WriteTgtFloor일 때만(Program.cs:183) — fire-and-forget, API 응답 완료 대기 X 확인.
+
+### VS-5 IF-10 happy+멱등 — PASS
+- 슈트 보고 → 200 OK. 같은 pId 재보고 → `HasDepositRecord`(Program.cs:229) true → 즉시 OK·상태무변경(멱등).
+  `RecordDeposit`이 IsReported 플래그로 중복 무해 처리(Repositories.cs:270-278).
+
+### VS-6 IF-10→IF-11 트리거 — PASS (핵심)
+- 3D 목적지(TEST-BARCODE-3, Sorter3D): IF-05에서 DestType 저장(Program.cs:140) → IF-10 보고 시 GetDestType==Sorter3D →
+  CellSelector.SelectCell → HandshakeOrchestrator.ExecuteAsync 백그라운드 트리거(Program.cs:243-266) → C_Flag=1 폴링 관찰.
+- 슈트 목적지(TEST-BARCODE-2, Chute): 트리거 분기 미진입 → C_Flag 변동 없음(대조 확인).
+- IF-10 즉시 OK: 핸드셰이크는 `_ = handshake.ExecuteAsync(...)` fire-and-forget, 응답은 즉시 Results.Ok(:280) — 완료 대기 X.
+
+### Error cases (적극 배제) — 전부 통과
+- E1 M4 경계: `grep "Wcs.Data|DbContext|EntityFramework|UseSqlServer|UseSqlite"` src/Wcs.Api → **주석 3건만, using/ProjectReference/인스턴스화 0**.
+  오더·목적지·예약·셀·agvFloor 전부 인터페이스+인메모리(Repositories.cs). Wcs.Api.csproj에서 Wcs.Data ProjectReference 제거 확인.
+- E2 Core 변경: `git status` src/Wcs.Core **무수정**. READY는 API 계층 주입(Program.cs:199), Core 판정/ToWire 불변.
+- E3 DTO 정합: 원본 HTML(wcs_rcs_interface_kr.html) 대조 — IF-05 agvNo 있음(:119,145), IF-08/10 timeStamp·qty nullable,
+  NG chuteNo null(:155), allowed=true reason="READY"(:171). DTO(Dtos.cs) 전 필드 일치. JSON camelCase(STJ 기본)로 와이어 정합.
+- E4 전송/핸드셰이크 무변경: PlcGateway.cs·HandshakeOrchestrator.cs `git status` 무수정. IHostedService 결선은
+  PlcPollingHostedAdapter(Program.cs:296) 신규 어댑터로 — PlcPollingService.StartAsync/StopAsync 수동 경로 보존(M2 IT 9건 회귀 0).
+- E5 MINOR 4건: `git diff` 실재 확인 — (1)ModbusRtuMaster `_externallyOwnedPort` 명명+XML주석 (2)RtuTransportTests VT-2
+  Task.Delay(50) 제거+주석 (3)FakeSerialPort sync Read→NotSupportedException fail-loud+문서 (4)ModbusRtuMaster `_endianness`
+  필드 통일(기본 BigEndian=구동작 동일). 4건 모두 동작 변경 0.
+- E6 하드코딩/스레드안전: appsettings.json에 시간(Timing)·포트(Plc)·매핑(Floors:AgvNoToFloor "1":1,"2":2) 전부 설정.
+  소스 리터럴 시간값 0. 인메모리 상태 thread-safe(InMemoryOrderRepository/CellSelector=lock, DepositRecorder=ConcurrentDictionary).
+  예외 안 삼킴(fire-and-forget는 ContinueWith로 IsFaulted 로깅).
+- E7 응답 계약: IF-05 가부=result, IF-08 가부=allowed (HTTP 200). 검증실패만 400. allowed=true→reason="READY".
+
+## 비차단 관찰 (M4 권고, 차단 아님)
+- IF-08의 WcsHold가 Program.cs:179에서 `WcsHold.None` 고정 — 계약 §70(FULL=M4, PAUSED 기준정보만)대로 의도된 M3 범위.
+  IF-05는 IsPaused 시드로 PAUSED 반환하나 IF-08은 항상 None 적용. M4에서 IOrderRepository/3DS 점유 기반 hold 산출 결선 필요.
+- `IOrderRepository.GetDestType`(Repositories.cs:228)이 항상 null 반환 — 실 DestType은 DepositRecorder.GetDestType로 우회.
+  인터페이스에 죽은 메서드가 남음(주석으로 명시됨). M4 EF 교체 시 정리 권장.
+
+---
+
+# Sprint Feedback — M3 코드리뷰 픽스 재검증 (IF-10 멱등 원자성 + IF-05 qty 가드)
+
+## 판정: APPROVED (재확인)
+
+GROUND TRUTH 재검증(소스 직접 검사 + dotnet 직접 재실행). 빌드 경고 0/오류 0. 전 시나리오 PASS.
+
+### MAJOR — IF-10 멱등 원자성 — PASS
+- expected: check-then-act 경쟁 제거. 같은 새 pId로 IF-10 동시 다수 → 기록 1건·IF-11 트리거 ≤1회·전부 200 OK.
+- actual(소스): `InMemoryDepositRecorder.RecordDeposit`(Repositories.cs:272-318)이 TryGetValue→IsReported RMW→TryAdd→
+  rare-path 재확인 전 구간을 `lock (_lock)`로 원자화. IF-10 핸들러(Program.cs:235)는 `HasDepositRecord` 선검사를
+  **제거**하고 `RecordDeposit` 반환값(`isNewRecord`)만으로 IF-11 트리거 결정 — 선검사~기록 사이 삽입 경쟁 창 소멸.
+- actual(테스트): CONCUR1(8건 병렬 IF-10, Barrier 동기화)이 전부 200 OK + HasDepositRecord==true. 단일 스레드만
+  `true` 반환 → IF-11 블록 1회 진입 보장(RecordDeposit lock+TryAdd 구조). **CONCUR1 단독 5회 연속 GREEN — flaky 0.**
+- 비차단 관찰: CONCUR1은 "기록 ≥1·전부 OK"까지만 단언(정확히 1건 카운트·트리거 1회 직접 단언 아님). 단일-트리거
+  보장은 RecordDeposit 반환 계약에 있어 회귀 가드로 충분. RecordDestinationQuery(IF-05)가 lock 밖 `_records[pId]=`
+  write라 IF-05⇄IF-10 진성 동시 시 미세 창이 남으나, 정상 흐름(IF-05 선행)+rare-path 재확인으로 완화됨. M4 EF 트랜잭션 시 정리.
+
+### MINOR — IF-05 qty<=0 가드 — PASS
+- expected: qty<=0 → 400 즉시(예약 차감 음수로 ReservedQty 손상 방지).
+- actual: Program.cs:128 `if (req.Qty <= 0) return Results.BadRequest(...)` — 오더 매칭·예약차감 전 fail-loud.
+  MINOR1_ZeroQty_400(qty=0)·MINOR1_NegativeQty_400(qty=-5) 둘 다 400 단언 GREEN.
+
+### 회귀/flaky — PASS
+- `dotnet test Wcs.sln` **3회 연속 44/44 GREEN, 실패 0**. 카운트 분해: Decider 15 / PlcGatewayIntegration 9 /
+  RtuTransport 4 = 기존 28 회귀 0, + ApiIntegration 16(기존 13 + CONCUR1·MINOR1×2 = 3 신규) = 44.
+- 변경 범위 한정: `git status` — 픽스로 변경된 소스는 Program.cs·Repositories.cs·ApiIntegrationTests.cs뿐.
+  src/Wcs.Core·PlcGateway.cs·HandshakeOrchestrator.cs **무수정 유지**(E2/E4 회귀 0). DTO·전송·핸드셰이크 무변경.
+- 진성 동시성 테스트(CONCUR1) 단독 5회 + 전체 3회 = 비결정 요소 안정성 확인.

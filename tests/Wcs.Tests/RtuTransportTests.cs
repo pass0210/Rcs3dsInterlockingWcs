@@ -95,7 +95,8 @@ public class RtuTransportTests : IAsyncDisposable
 
         // ── 서버 측: C 읽고 R 기입 시뮬레이션 (슬레이브 동작) ───────────────
         // 실제 Sim3ds 없이 직접 서버 레지스터를 조작
-        await Task.Delay(50); // WCS 쓰기 처리 대기
+        // 고정 sleep 없음: 앞의 WaitUntilAsync(() => gw.Latest.CFlag) 가 C_Flag=1 동기화를 완료했으므로
+        // 여기서 추가 대기 불필요. (S-RTU MINOR-2 정리)
 
         // 서버가 C 읽기(폴링에서 C_Flag 확인 완료), R 세팅
         SetServerR(rtuServer, UnitId, rCellNo: 5, rSeq: cSeq);

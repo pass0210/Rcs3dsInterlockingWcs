@@ -49,24 +49,16 @@ public sealed class FakeSerialPort : IModbusRtuSerialPort, IAsyncDisposable
     public void Open()  => _isOpen = true;
     public void Close() => _isOpen = false;
 
-    public int Read(byte[] buffer, int offset, int count)
-    {
-        // 동기 읽기: PipeReader.TryRead()로 최대한 읽음
-        if (_readPipe.Reader.TryRead(out var result))
-        {
-            int read = 0;
-            foreach (var seg in result.Buffer)
-            {
-                int toCopy = Math.Min(seg.Length, count - read);
-                seg.Slice(0, toCopy).Span.CopyTo(buffer.AsSpan(offset + read, toCopy));
-                read += toCopy;
-                if (read >= count) break;
-            }
-            _readPipe.Reader.AdvanceTo(result.Buffer.GetPosition(read));
-            return read;
-        }
-        return 0;
-    }
+    /// <summary>
+    /// 동기 읽기 — 현재 구현에서는 사용되지 않는다(FluentModbus는 ReadAsync 경로만 사용).
+    /// 만약 동기 경로로 호출된다면 데이터 없을 때 0을 반환해 호출자 busy-spin을 유발할 수 있으므로,
+    /// 명시적으로 <see cref="NotSupportedException"/>을 던져 fail-loud 처리한다.
+    /// 동기 읽기가 필요한 경우에는 ReadAsync를 사용하거나 이 구현을 확장할 것. (S-RTU MINOR-3)
+    /// </summary>
+    public int Read(byte[] buffer, int offset, int count) =>
+        throw new NotSupportedException(
+            "FakeSerialPort: 동기 Read는 지원하지 않습니다. ReadAsync를 사용하세요. " +
+            "(busy-spin 방지 — S-RTU MINOR-3)");
 
     public async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token)
     {

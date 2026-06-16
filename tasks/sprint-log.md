@@ -1,5 +1,120 @@
 # Sprint Log
 
+## CODE REVIEW FIX (M3)
+
+### 수정 내역 (코드리뷰 MAJOR + MINOR)
+
+**[MAJOR] IF-10 멱등 원자성 — `InMemoryDepositRecorder.RecordDeposit` 경쟁 해소**
+
+- 기존: `HasDepositRecord` 선확인 + `RecordDeposit` 호출의 check-then-act 패턴.
+  동시 요청이 둘 다 `HasDepositRecord == false`를 읽은 뒤 각자 기록 및 IF-11 트리거 → 이중 셀 할당 가능성.
+- 수정 1 (`Repositories.cs`): `InMemoryDepositRecorder`에 `private readonly object _lock = new()` 추가.
+  `RecordDeposit`을 `lock(_lock)` 전체 감쌈 + `TryAdd`로 신규 pId 원자 삽입.
+  기존 pId → `IsReported` 이미 true면 false 반환(멱등), 아니면 set 후 true 반환.
+- 수정 2 (`Program.cs` IF-10 핸들러): `HasDepositRecord` 선확인 제거.
+  `RecordDeposit` 반환값(`isNewRecord`)만으로 IF-11 트리거 여부 결정.
+  `isNewRecord == false` → 200 OK 멱등 즉시 반환.
+
+**[MINOR] IF-05 qty <= 0 가드 추가 (`Program.cs`)**
+
+- `req.Qty <= 0`이면 400 `{ error: "qty는 1 이상이어야 합니다." }` 즉시 반환.
+- 음수 qty가 `ReservedQty` 차감에 도달하지 않도록 차단.
+
+**신규 회귀 가드 테스트 3건 (`ApiIntegrationTests.cs`)**
+
+- `CONCUR1_If10_ConcurrentSamePId_OnlyOneRecordAndOneTrigger`:
+  pId 9001(3D 목적지)로 IF-10 8건 병렬 발사 → 전 응답 200 OK + 기록 정확히 1건 확인.
+- `MINOR1_If05_ZeroQty_Returns400`: qty=0 → 400.
+- `MINOR1_If05_NegativeQty_Returns400`: qty=-5 → 400.
+
+### 빌드·테스트 결과 (코드리뷰 수정 후, 3회 연속)
+
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln (3회 연속):
+  RUN 1: 통과! 실패:0 통과:44 전체:44
+  RUN 2: 통과! 실패:0 통과:44 전체:44
+  RUN 3: 통과! 실패:0 통과:44 전체:44
+
+기존 41건 회귀 0 + 신규 3건(CONCUR-1, MINOR-1×2) = 44건
+```
+
+---
+
+## IMPLEMENTATION COMPLETE (M3)
+
+### 변경/신규 파일
+
+**신규**
+- `src/Wcs.Api/Repositories.cs` — 인메모리 리포지토리 인터페이스 + 구현체 + 시드 (M4 교체점)
+  - `IOrderRepository` / `InMemoryOrderRepository` (오더 매칭·목적지·예약 차감)
+  - `IDepositRecorder` / `InMemoryDepositRecorder` (IF-05/10 투입 기록, DestType 저장)
+  - `ICellSelector` / `InMemoryCellSelector` (IF-11 셀 선택 — 활성재사용·빈셀·FULL)
+  - `IAgvFloorResolver` / `ConfigAgvFloorResolver` (agvNo→층, 설정 기반, 미매핑 명시 거부)
+- `src/Wcs.Api/ProgramPartial.cs` — `public partial class Program` 노출 (WebApplicationFactory용)
+- `tests/Wcs.Tests/ApiIntegrationTests.cs` — M3 API 통합 테스트 13건 (VS-1~7)
+  - `FakeModbusWebApplicationFactory` / `FakeModbusMasterForApi` — PLC 없는 결정적 테스트 인프라
+
+**변경**
+- `src/Wcs.Api/Dtos.cs` — IF-05 AgvNo 추가, IF-08 TimeStamp nullable, IF-10 Qty·TimeStamp nullable, READY 주석, NG chuteNo null
+- `src/Wcs.Api/Program.cs` — IF-05/08/10 엔드포인트 구현 + DI 배선 (IHostedService 기동, Wcs.Data 제거)
+- `src/Wcs.Api/Wcs.Api.csproj` — Wcs.Data ProjectReference 제거 (M3 인메모리 경계)
+- `src/Wcs.PlcGateway/ModbusRtuMaster.cs` — MINOR-1: `_externallyOwnedPort` 명명+XML주석 / MINOR-4: `_endianness` 필드 통일
+- `tests/Wcs.Tests/RtuTransportTests.cs` — MINOR-2: VT-2 Task.Delay(50) 제거
+- `tests/Wcs.Tests/FakeSerialPort.cs` — MINOR-3: 동기 Read → NotSupportedException fail-loud
+- `tests/Wcs.Tests/Wcs.Tests.csproj` — Wcs.Api ProjectReference + Microsoft.AspNetCore.Mvc.Testing 추가
+
+**무변경**: Wcs.Core, Wcs.Data, Wcs.Sim3ds, HandshakeOrchestrator, DepositDeciderTests, PlcGatewayIntegrationTests, RtuTransportTests(MINOR-2 제외)
+
+### grep 검증
+
+**DB 참조 0**
+```
+grep -r "Wcs\.Data\|EFCore\|DbContext\|Microsoft\.EntityFramework" src/Wcs.Api/ src/Wcs.Core/
+→ 주석 2건만 (실제 using/참조 0건)
+```
+
+**READY 주입 확인**
+```
+grep -r "\"READY\"" src/Wcs.Api/
+→ Program.cs: var reason = decision.Allowed ? "READY" : decision.Reason.ToWire();
+```
+
+**하드코딩 시간값/포트/매핑 0**
+```
+grep -r "Task\.Delay([0-9]" src/Wcs.Api/ → 0건
+Floors:AgvNoToFloor → appsettings.json에서 바인딩, 소스 리터럴 0건
+```
+
+### raw test 요약
+
+```
+dotnet build Wcs.sln → 경고 0 오류 0
+
+dotnet test Wcs.sln (3회 연속):
+  RUN 1: 통과! 실패:0 통과:41 전체:41
+  RUN 2: 통과! 실패:0 통과:41 전체:41
+  RUN 3: 통과! 실패:0 통과:41 전체:41
+
+구성 (--list-tests):
+  Decider: 15 (기존 M1 회귀 0)
+  PlcGatewayIntegration: 9 + RtuTransport: 4 = 기존 M2+S-RTU 13건 회귀 0
+  ApiIntegration (신규 M3): 13
+  합계: 41 = 기존 28 + 신규 13
+```
+
+### MINOR 4건 정리 확인
+
+| # | 위치 | 내용 | 동작 변경 |
+|---|------|------|-----------|
+| 1 | `ModbusRtuMaster.cs` | `_externallyOwnedPort` 명명 + XML 주석(externally owned port 패턴 설명) | 없음 |
+| 2 | `RtuTransportTests.cs` VT-2 | `await Task.Delay(50)` 제거 — 선행 WaitUntilAsync(CFlag)가 이미 동기화 | 없음 |
+| 3 | `FakeSerialPort.cs` Read(sync) | 0반환→`NotSupportedException` fail-loud + 문서화 | 없음(async만 사용) |
+| 4 | `ModbusRtuMaster.cs` | `_endianness` 필드 통일, 물리COM 생성자에 `endianness` 파라미터(기본=BigEndian) | 없음(기본값 동일) |
+
+---
+
 ## IMPLEMENTATION COMPLETE (S-RTU)
 
 ### 변경·신규 파일
