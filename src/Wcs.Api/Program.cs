@@ -52,6 +52,17 @@ builder.Services.AddSingleton<HandshakeOrchestrator>(sp =>
     return new HandshakeOrchestrator(gw, opt, log);
 });
 
+// ── ISorterGatewayRegistry — destination.id 단일 진입점 (P2a: 단일 소터) ────
+builder.Services.AddSingleton<ISorterGatewayRegistry>(sp =>
+    new SingleSorterGatewayRegistry(sp.GetRequiredService<IPlcGateway>()));
+
+// ── ChuteCapacityService 싱글톤 (FULL/PAUSED 인메모리 집계) ──────────────────
+builder.Services.AddSingleton<ChuteCapacityService>();
+builder.Services.AddSingleton<IChuteCapacityService>(sp =>
+    sp.GetRequiredService<ChuteCapacityService>());
+builder.Services.AddHostedService<ChuteCapacityService>(sp =>
+    sp.GetRequiredService<ChuteCapacityService>());
+
 // ── WcsDbContext 등록 (M4 — appsettings에서 provider·연결문자열 선택) ────────
 // 절대규칙 8: 연결문자열·provider 하드코딩 금지.
 var dbProvider         = builder.Configuration["Database:Provider"] ?? "Sqlite";
@@ -98,11 +109,10 @@ var app = builder.Build();
 // 응답: 200 {result,chuteNo,reason} / 400(검증 실패)
 // 가부는 result 필드(200), 검증 실패만 400
 app.MapPost("/api/v1/destination-query", (
-    DestinationQueryRequest      req,
-    IOrderRepository             orders,
-    IDepositRecorder             recorder,
-    IAgvFloorResolver            floorResolver,
-    ILogger<Program>             log) =>
+    DestinationQueryRequest  req,
+    IOrderRepository         orders,
+    IChuteCapacityService    capacity,
+    ILogger<Program>         log) =>
 {
     // ── 검증 ────────────────────────────────────────────────────────────────
     if (req.PId is < 1 or > 30000)
@@ -114,15 +124,13 @@ app.MapPost("/api/v1/destination-query", (
         return Results.BadRequest(new { error = "qty는 1 이상이어야 합니다." });
 
     // ── 오더 매칭 → 목적지·상태 판정 → OK 시 예약 차감 ─────────────────────
-    var (result, chuteNo, reason, destType) =
-        orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty);
+    // timeStamp 백필: clientTs 원문 전달 (EfOrderRepository 내부에서 파싱)
+    var (result, chuteNo, reason, destType, destId) =
+        orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty, req.TimeStamp);
 
-    var status = result == "OK" ? DepositStatus.Ok : DepositStatus.Denied;
-
-    // ── OK·NG 무관 투입 기록 (IF-16 통합) ────────────────────────────────────
-    recorder.RecordDestinationQuery(
-        req.PId, req.AgvNo, req.Barcode, req.InductionNo,
-        chuteNo, req.Qty, status, reason);
+    // ── FULL/PAUSED 인메모리 집계: IF-05 OK 예약 반영 ──────────────────────
+    if (result == "OK" && destId.HasValue && destType == DestinationType.Chute)
+        capacity.OnReserved(destId.Value, req.Qty);
 
     log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason={Reason}",
         req.PId, req.Barcode, result, chuteNo, reason);
@@ -134,11 +142,17 @@ app.MapPost("/api/v1/destination-query", (
 // 요청: pId·chuteNo·agvNo (timeStamp nullable 선택필드)
 // 응답: 200 {allowed,reason} / 400(검증 실패)
 // 가부는 allowed 필드(200), 검증 실패만 400
+//
+// Scope-1: chuteNo → destination → dest_type 분기
+//   SORTER_3D: 게이트웨이 스냅샷 + WcsHold → Decide(snap, agvFloor, hold)
+//   CHUTE: hold만 판정(NORMAL/Full/Paused/비활성→PAUSED) — TgtFloor 쓰기 없음
 app.MapPost("/api/v1/deposit-permission", (
     DepositPermissionRequest req,
-    IPlcGateway              gateway,
+    ISorterGatewayRegistry   sorterRegistry,
+    IChuteCapacityService    capacity,
     IAgvFloorResolver        floorResolver,
     PlcWriteQueue            writeQueue,
+    WcsDbContext             db,
     ILogger<Program>         log) =>
 {
     // ── 검증 ────────────────────────────────────────────────────────────────
@@ -147,43 +161,108 @@ app.MapPost("/api/v1/deposit-permission", (
     if (req.ChuteNo <= 0)
         return Results.BadRequest(new { error = "chuteNo는 양수여야 합니다." });
 
-    // ── agvFloor 산출 (agvNo → 층) ──────────────────────────────────────────
-    var agvFloor = floorResolver.Resolve(req.AgvNo);
-    if (agvFloor is null)
-        return Results.BadRequest(new
-        {
-            error = $"agvNo={req.AgvNo}에 대한 층 매핑이 없습니다. agv 테이블을 확인하세요."
-        });
+    // ── chuteNo → destination 조회 ─────────────────────────────────────────
+    var dest = db.Destinations
+        .FirstOrDefault(d => d.ChuteNo == req.ChuteNo && d.IsActive);
 
-    // ── PLC 스냅샷(논블로킹) → DepositDecider.Decide ─────────────────────────
-    var snap = gateway.Latest;
-
-    // M3·P1: WcsHold.None 기본 — FULL/PAUSED 계산은 P2
-    var hold     = WcsHold.None;
-    var decision = DepositDecider.Decide(snap, agvFloor.Value, hold);
-
-    // ── WriteTgtFloor면 큐 투입 (완료 대기 X — API 3s 한계 분리) ─────────────
-    if (decision.WriteTgtFloor)
+    if (dest is null)
     {
-        _ = writeQueue.EnqueueAsync(new PlcWrite.SetTgtFloor(decision.TgtFloorValue))
-                       .AsTask()
-                       .ContinueWith(t =>
-                       {
-                           if (t.IsFaulted)
-                               log.LogError(t.Exception, "[IF-08] SetTgtFloor 큐 투입 예외");
-                       }, TaskScheduler.Default);
+        // 비활성·미존재 슈트 → PAUSED 매핑(SPEC §2 비활성→PAUSED)
+        log.LogWarning("[IF-08] pId={PId} chuteNo={ChuteNo} — 목적지 없음(비활성/미존재) → PAUSED",
+            req.PId, req.ChuteNo);
+        return Results.Ok(new DepositPermissionResponse(false, "PAUSED"));
     }
 
-    // ── 응답 생성 ────────────────────────────────────────────────────────────
-    // allowed=true → reason="READY" API 계층 주입 (Core ToWire(None)=null 무변경)
-    // allowed=false → reason=ToWire() 사유 문자열
-    var reason = decision.Allowed ? "READY" : decision.Reason.ToWire();
+    if (dest.DestType == DestType.SORTER_3D)
+    {
+        // ── SORTER_3D 경로: 게이트웨이 스냅샷 + WcsHold → Decide ────────────
+        // agvFloor 산출 (agvNo → 층)
+        var agvFloor = floorResolver.Resolve(req.AgvNo);
+        if (agvFloor is null)
+            return Results.BadRequest(new
+            {
+                error = $"agvNo={req.AgvNo}에 대한 층 매핑이 없습니다. agv 테이블을 확인하세요."
+            });
 
-    log.LogInformation(
-        "[IF-08] pId={PId} agvNo={AgvNo} agvFloor={Floor} → allowed={Allowed} reason={Reason} WriteTgtFloor={Write}",
-        req.PId, req.AgvNo, agvFloor, decision.Allowed, reason, decision.WriteTgtFloor);
+        // 게이트웨이 스냅샷(논블로킹) — destination.id 단일 진입점(P2a 단일 소터, P2b N대 확장점)
+        var snap = sorterRegistry.GetLatest(dest.Id);
+        if (snap is null)
+        {
+            log.LogWarning("[IF-08] destinationId={Id} 소터 게이트웨이 없음 → OFFLINE", dest.Id);
+            return Results.Ok(new DepositPermissionResponse(false, "OFFLINE"));
+        }
 
-    return Results.Ok(new DepositPermissionResponse(decision.Allowed, reason));
+        // FULL/PAUSED 인메모리 집계 → WcsHold 산출
+        // 소터는 capacity 서비스 대신 빈 셀 유무로 FULL 판정(ChuteCapacityService는 CHUTE 전용)
+        // P2a: WcsHold.None — 소터 FULL은 셀 선택기에서 판단(핸드셰이크 후)
+        var hold = WcsHold.None;
+
+        var decision = DepositDecider.Decide(snap, agvFloor.Value, hold);
+
+        // ── WriteTgtFloor면 큐 투입 (완료 대기 X — API 3s 한계 분리) ─────────
+        if (decision.WriteTgtFloor)
+        {
+            _ = writeQueue.EnqueueAsync(new PlcWrite.SetTgtFloor(decision.TgtFloorValue))
+                           .AsTask()
+                           .ContinueWith(t =>
+                           {
+                               if (t.IsFaulted)
+                                   log.LogError(t.Exception, "[IF-08] SetTgtFloor 큐 투입 예외");
+                           }, TaskScheduler.Default);
+        }
+
+        // 응답 생성: allowed=true → reason="READY" (API 계층 주입)
+        var reason3d = decision.Allowed ? "READY" : decision.Reason.ToWire();
+
+        log.LogInformation(
+            "[IF-08/SORTER] pId={PId} agvNo={AgvNo} agvFloor={Floor} → allowed={Allowed} reason={Reason} WriteTgtFloor={Write}",
+            req.PId, req.AgvNo, agvFloor, decision.Allowed, reason3d, decision.WriteTgtFloor);
+
+        return Results.Ok(new DepositPermissionResponse(decision.Allowed, reason3d));
+    }
+    else
+    {
+        // ── CHUTE 경로: hold만 판정 — agvFloor·TgtFloor 쓰기 없음 ────────────
+        // SPEC §2/§3: 슈트는 층 이동·Ready 판정 없음.
+        // 비활성 슈트 → PAUSED, FULL 조건 → FULL, PAUSED status → PAUSED, NORMAL → READY
+        WcsHold hold;
+
+        if (!dest.IsActive)
+        {
+            // 비활성 슈트 → PAUSED 매핑
+            hold = WcsHold.Paused;
+        }
+        else
+        {
+            // FULL/PAUSED 인메모리 집계에서 hold 산출
+            hold = capacity.GetHold(dest.Id);
+        }
+
+        bool   allowed;
+        string reason;
+
+        switch (hold)
+        {
+            case WcsHold.Full:
+                allowed = false;
+                reason  = "FULL";
+                break;
+            case WcsHold.Paused:
+                allowed = false;
+                reason  = "PAUSED";
+                break;
+            default: // WcsHold.None
+                allowed = true;
+                reason  = "READY";
+                break;
+        }
+
+        log.LogInformation(
+            "[IF-08/CHUTE] pId={PId} chuteNo={ChuteNo} hold={Hold} → allowed={Allowed} reason={Reason}",
+            req.PId, req.ChuteNo, hold, allowed, reason);
+
+        return Results.Ok(new DepositPermissionResponse(allowed, reason));
+    }
 });
 
 // ── IF-10 투입 보고 ──────────────────────────────────────────────────────────
@@ -195,7 +274,11 @@ app.MapPost("/api/v1/deposit-report", (
     DepositReportRequest     req,
     IDepositRecorder         recorder,
     ICellSelector            cellSelector,
+    IChuteCapacityService    capacity,
+    IOrderRepository         orders,
+    WcsDbContext             db,
     HandshakeOrchestrator    handshake,
+    IHostApplicationLifetime lifetime,
     ILogger<Program>         log) =>
 {
     // ── 검증 ────────────────────────────────────────────────────────────────
@@ -208,7 +291,9 @@ app.MapPost("/api/v1/deposit-report", (
 
     // ── 투입 기록 + 멱등 (원자 결합) ─────────────────────────────────────────
     // RecordDeposit이 check-then-act를 트랜잭션으로 원자화 — true=신규 기록, false=중복(멱등).
-    var isNewRecord = recorder.RecordDeposit(req.PId, req.Barcode, req.ChuteNo, req.AgvNo, req.Qty);
+    // static _recordLock 제거 — piece 부분 유니크 + catch로 진성 멱등 보장(MAJOR-1).
+    var isNewRecord = recorder.RecordDeposit(
+        req.PId, req.Barcode, req.ChuteNo, req.AgvNo, req.Qty, req.TimeStamp);
 
     if (!isNewRecord)
     {
@@ -216,11 +301,26 @@ app.MapPost("/api/v1/deposit-report", (
         return Results.Ok(new DepositReportResponse("OK"));
     }
 
-    // ── 3D 목적지면 IF-11 트리거 (백그라운드, 즉시 OK 반환) ─────────────────
-    // EfDepositRecorder.GetDestType으로 DB 조회 — InMemoryDepositRecorder 다운캐스트 제거.
-    DestinationType? destType = null;
-    if (recorder is EfDepositRecorder efRecorder)
-        destType = efRecorder.GetDestType(req.PId);
+    // ── 목적지 타입 조회 → FULL 집계 반영 + IF-11 트리거 ─────────────────────
+    // Scope-9: EfDepositRecorder 다운캐스트 제거 — DB 직접 조회로 대체
+    var dest = db.Destinations
+        .FirstOrDefault(d => d.ChuteNo == req.ChuteNo && d.IsActive);
+
+    var destType = dest?.DestType switch
+    {
+        DestType.CHUTE     => DestinationType.Chute,
+        DestType.SORTER_3D => DestinationType.Sorter3D,
+        _                  => (DestinationType?)null,
+    };
+
+    // ── FULL/PAUSED 인메모리 집계: IF-10 투입 반영 ────────────────────────────
+    if (dest is not null && destType == DestinationType.Chute)
+    {
+        // piece.qty는 IF-05 등록값 — DB에서 조회 (req.Qty가 없을 수 있음)
+        var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive);
+        var qty   = piece?.Qty ?? req.Qty ?? 1;
+        capacity.OnDeposited(dest.Id, qty);
+    }
 
     if (destType == DestinationType.Sorter3D)
     {
@@ -231,7 +331,8 @@ app.MapPost("/api/v1/deposit-report", (
         {
             int selectedCell = cellNo.Value;
             // IF-11 핸드셰이크: 즉시 OK 반환, 핸드셰이크는 백그라운드
-            _ = handshake.ExecuteAsync(selectedCell, CancellationToken.None)
+            // Scope-9: CancellationToken.None → IHostApplicationLifetime.ApplicationStopping
+            _ = handshake.ExecuteAsync(selectedCell, lifetime.ApplicationStopping)
                 .ContinueWith(t =>
                 {
                     if (t.IsCompletedSuccessfully)
