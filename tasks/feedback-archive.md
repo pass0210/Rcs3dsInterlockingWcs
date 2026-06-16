@@ -54,3 +54,24 @@
   TCS)도 제거 — 실제 테스트는 폴링 대기(WaitUntilAsync) 사용이라 불필요했음.
 - [CODE-REVIEW] sprint=S-M2 critical=0 major=1 minor=4 iter=1 opus=yes (독립 Opus 코드리뷰어가 BLOCKING 1건 적발: off-lock _client.Disconnect 경쟁 — 폴 catch의 TryReconnect가 _clientLock 밖에서 실행돼 쓰기 트랜잭션과 소켓 경합. 기능 테스트 24/24 GREEN였지만 구조적으로 못 잡는 동시성 버그. fix-only 1 iter로 해소: Disconnect를 _clientLock 임계구역으로 + IT-4b(단절-중-핸드셰이크) 회귀 가드 추가. minor 4: 죽은 TCS 동기화 코드·"BackgroundService" 주석·InjectNoResponse 주석·IT-3c 과대명명 — 함께 정리. 재검증 RESOLVED, _client. 전 사용처 락 보호 확인, 데드락 없음)
 - **메타 교훈**: 기능 Evaluator APPROVED ≠ 코드리뷰 통과. 4-Tier 코드리뷰가 테스트·기능검증이 구조적으로 못 잡는 동시성 결함을 머지 전 한 겹 더 걸러냄. 동시성 코드는 반드시 독립 리뷰.
+
+## S-RTU (Modbus 전송 추상화 + RTU 어댑터) — APPROVED (2026-06-16, 1 iteration to pass)
+
+- **전송 추상화 경계 검증법**: 구상 타입 누수 0을 `grep "ModbusTcpClient|ModbusRtuClient" src/Wcs.PlcGateway`로
+  ground truth 확인 — 어댑터(TcpMaster·RtuMaster)·인터페이스 주석에만 등장, PlcPollingService·HandshakeOrchestrator
+  직접 참조 0이어야 통과. 인터페이스(IModbusMaster)가 M2 사용 표면(IsConnected/Connect/Disconnect/Dispose +
+  FC03 일괄읽기 + FC06/FC16)을 최소·정확 포착.
+- **회귀 0 보존 패턴(기본값 변경 시)**: 기본 전송이 Rtu로 바뀌어도 기존 TCP 통합 테스트는 2인수 편의 생성자
+  `new PlcPollingService(opt, queue)`(내부 ModbusTcpMaster 생성)로 명시 TCP 경로 유지 → M2 IT 파일 `git diff`
+  무변경으로 회귀 0 입증. dev/sim용 appsettings는 `Transport=Tcp` 명시(혼동 방지), 현장 배포만 Rtu.
+- **물리 하드웨어 없는 RTU 라이브 테스트**: FluentModbus `IModbusRtuSerialPort` 공개 인터페이스를 in-memory
+  Pipe 쌍(FakeSerialPort)으로 구현 → 실제 ModbusRtuClient↔ModbusRtuServer in-process 왕복(CI 가능, COM/com0com 불필요).
+  `SimulateClose=true`로 ReadAsync/WriteAsync에서 IOException 유발 → OFFLINE 전이 실증. 빈 단언 아님 — C_Flag·
+  CSeq·R_Seq 대사·RMW Ready 보존을 콘솔 출력과 함께 단언.
+- **전송 무관 OFFLINE 전이**: 소켓 전용 예외 분기에 의존하지 말 것. isHardEx = SocketException ∪ IOException ∪
+  TimeoutException ∪ InnerException(소켓·IO)로 확장해야 RTU 시리얼 타임아웃·IO에서도 OFFLINE 전이. VT-5로 실증.
+- **직렬화 불변(RTU 정합)**: RTU 단일 버스 제약(한 버스=한 트랜잭션)이 M2 `_clientLock` 단일 직렬화와 정합 —
+  추상화 후에도 폴·쓰기·RMW·Disconnect/재연결 전부 임계구역 통과 유지. 동시성 변경 → 4회 연속 GREEN로 결정성 확인.
+- **문서 동기화 동일 커밋**: 전송 확정은 코드뿐 아니라 SPEC §7-A(전송 확정 신설, 舊 §7-A→§7-B 이동)·CLAUDE.md
+  다이어그램(Modbus TCP→RTU/TCP) 정정이 같은 변경에 포함돼야 통과. `git diff --name-only`로 SPEC.md·CLAUDE.md 동반 확인.
+- [CODE-REVIEW] sprint=S-RTU critical=0 major=0 minor=4 iter=0 opus=yes (독립 Opus — 추상화 경계·M2 동시성 invariant 보존(모든 _master 트랜잭션 _clientLock 내, off-lock Disconnect는 태스크 종료 후만)·양 어댑터 계약 일치·자원 정리 전부 APPROVE, BLOCKING/MAJOR 0)

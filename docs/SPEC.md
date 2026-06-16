@@ -72,9 +72,21 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 - agvFloor **산출 방법은 확정**(agvNo→층 매핑; 원본 §4 "agvFloor 필드 제거"). **매핑 테이블 값**만 현장 확정 — M3 설정→M4 agv.floor 단일 진실 전환
 - RCS Q1~Q7 회신 대기(HTTP 클라이언트 사양, pId 초기화 정책, 인증 등)
 - PLC측: Ready=0에 이동 중 포함 / TgtFloor 분류 시작 클리어 — 3DS 담당 확정 대기
-- R_Flag 타임아웃 실측값, TCP(502) vs RTU
+- R_Flag 타임아웃 실측값은 현장 실측 후 appsettings 조정
 
-### 7-A. 하네스 검증(2026-06)에서 도출 — RCS/3DS 확정 대기
+### 7-A. 전송 방식 확정 (S-RTU 스프린트 2026-06 반영)
+
+**전송 확정**: 현장 1차 타깃 = **Modbus RTU(RS-485)**. TCP는 시뮬레이터·SAT·일부 장비 병행 유지.
+
+- **RTU 우선 + TCP 병행**: `Plc:Transport` = `Rtu`(기본, 미지정 시) | `Tcp`. 설정 1줄로 교체.
+- **전송 추상화 완료**: `IModbusMaster` 인터페이스(src/Wcs.PlcGateway/IModbusMaster.cs) — 판정 엔진·핸드셰이크·단일 쓰기 큐·RMW·OFFLINE은 전송 무관하게 재사용. TCP 어댑터(`ModbusTcpMaster`), RTU 어댑터(`ModbusRtuMaster`), 팩토리(`ModbusMasterFactory`) 구현 완료.
+- **소터별 독립 포트(토폴로지 확정)**: 소터마다 독립 버스/포트(포트당 소터 1대, 다중 슬레이브 경합 없음). 설정 스키마는 소터별 독립 전송 N 확장 표현 가능 — 런타임은 단일 소터(M3/M4에서 N대 라우팅 추가 예정).
+- **WCS = Modbus 마스터 / 3DS PLC = 슬레이브**: RTU·TCP 모두 동일.
+- **RTU 시리얼 파라미터**: PortName·BaudRate·Parity·StopBits·ReadTimeoutMs·WriteTimeoutMs·UnitId — 전부 appsettings(하드코딩 금지). 기본값은 현장 실측 전 TCP 동작 보존(BigEndian·UnitId=1).
+- **OFFLINE 전이**: RTU 예외(IOException·TimeoutException)에서도 TCP와 동일하게 OFFLINE 전이(소켓 전용 분기 제거).
+- **RTU 자동 테스트**: in-memory fake `IModbusRtuSerialPort` 쌍(`FakeSerialPort`)으로 CI 자동화(물리 COM 불필요 확인).
+
+### 7-B. 하네스 검증(2026-06)에서 도출 — RCS/3DS 확정 대기
 - **API 필드 정렬(HTML 우선 적용함)**: IF-08은 timeStamp 없음 / IF-10은 qty·timeStamp 없음(qty=IF-05 등록값). WCS 감사용 timeStamp가 필요하면 DTO에 **nullable 선택필드**로 두고 RCS 미전송 허용 — RCS 확정.
 - **IF-08 allowed=true reason="READY"**: 원본 §6 사유코드는 READY 명시. API 계층에서 주입(Core ToWire(None)=null 유지). RCS가 reason 파싱 여부 확인.
 - **IF-05 NG 시 chuteNo**: null 포함 vs 키 생략 직렬화 정책(원본이 혼용). 권장=null 포함(STJ 기본). RCS 파서 전제 확인.

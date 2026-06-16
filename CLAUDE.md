@@ -4,8 +4,8 @@
 목적지(슈트 또는 3D Sorter)에 전량 틸트한다. WCS는 가운데에서 양쪽을 중재한다.
 
 ```
-[RCS(AGV)] --HTTP/JSON--> [WCS(이 프로젝트)] --Modbus TCP--> [3D Sorter PLC(VEICHI)]
-   클라이언트                 API서버 + Modbus 마스터              슬레이브
+[RCS(AGV)] --HTTP/JSON--> [WCS(이 프로젝트)] --Modbus RTU/TCP--> [3D Sorter PLC(VEICHI)]
+   클라이언트                 API서버 + Modbus 마스터                슬레이브
 ```
 
 ## 절대 규칙 (위반 금지)
