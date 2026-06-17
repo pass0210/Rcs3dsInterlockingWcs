@@ -1,5 +1,56 @@
 # Sprint Log
 
+## CODE REVIEW FIX (M4-P2a)
+
+### 코드리뷰 수정 내역 (Step 4.5)
+
+**[MAJOR-1] OnCleared DB 영속화 — 재시작 시 FULL 복귀 버그 수정**
+- 문제: `ChuteCapacityService.OnCleared`가 인메모리만 리셋하고 DB에 `last_cleared_at`을 기록하지 않음.
+  재시작 시 `InitializeFromDbAsync`가 비움 이전 piece까지 합산 → FULL로 복귀.
+- 수정: `OnCleared`를 `async Task`로 변경. `IServiceScopeFactory` 스코프 사용.
+  DB 트랜잭션: (a) `chute_detail.last_cleared_at = UtcNow` + (b) `destination_event(CLEARED)` append.
+  락 밖에서 DB 쓰기 완료 후 `_rwLock` 진입하여 인메모리 리셋 — I/O 중 락 보유 금지 원칙 준수.
+- `IChuteCapacityService.OnCleared` 인터페이스 시그니처 `void` → `Task` 변경.
+- `ApiIntegrationTests.cs`: `capacity.OnCleared(...)` → `await capacity.OnCleared(...)`.
+
+**[MAJOR-2] InitializeFromDbAsync deposited_at > last_cleared_at 필터 누락 수정**
+- 문제: deposited qty 쿼리가 `chute_detail` JOIN 없이 전체 DEPOSITED piece를 합산.
+  비움 이전 piece가 재집계에 포함되어 잘못된 FULL 판정 유발.
+- 수정: `db.Pieces.Join(db.ChuteDetails, ...)` 추가. 필터:
+  `deposited_at == null || last_cleared_at == null || deposited_at > last_cleared_at`.
+  null 양쪽 통과 → 비움 이력 없거나 투입 시각 미기록 piece 포함(안전 방향).
+
+**[회귀 가드 테스트] P2a_Chute_ClearPersisted_AfterReinitialize_StillNormal 추가**
+- 시나리오: (1) FULL 달성 + DB에 과거 DEPOSITED piece 삽입 →
+  (2) `OnCleared` → DB 영속화 →
+  (3) `IHostedService.StartAsync` 재실행(재시작 시뮬레이션) →
+  (4) `GetHold == WcsHold.None` (FULL 복귀 없음) 단언.
+- MAJOR-1/MAJOR-2 동시 수정 증명. 기존 단순 인메모리 경로 테스트(`P2a_If08_Chute_Full_ThenCleared_Normal`)와 직교.
+
+**[MINOR-1] IsUniqueConstraintViolation 에러코드 방식으로 교체**
+- 문제: 메시지 문자열 매칭은 로케일·언어·인덱스 이름 변경에 취약.
+- 수정: SQLite `SqliteExtendedErrorCode == 2067` (SQLITE_CONSTRAINT_UNIQUE),
+  SQL Server `SqlException.Number == 2601 || 2627` 에러코드 기반으로 전환.
+
+**[MINOR-2] DbRepositories.cs L416 코멘트 수정**
+- 수정 전: "MAJOR-1: piece 부분 유니크 위반 → 진성 멱등"
+- 수정 후: "piece 부분 유니크 위반 → 신규 piece insert 경합만 백스톱"
+  (부분 유니크 범위를 과장하는 표현 제거)
+
+**[MINOR-3] Program.cs IF-08 핸들러 dead code 제거**
+- 제거: 미사용 `IPlcGateway gateway` 파라미터.
+- 제거: `?? gateway.Latest` fallback (P2a registry는 항상 단일 소터 반환, 도달 불가 경로).
+- 추가: `snap is null` → OFFLINE 응답 (null-safe 처리 + P2b 확장 시 안전망).
+
+### 빌드·테스트 결과 (코드리뷰 수정 4회 연속)
+```
+dotnet build → 경고 0 / 오류 0
+dotnet test ×4: 실패:0 통과:51 전체:51
+Wcs.Core git diff: 0바이트 (무변경 확인)
+```
+
+---
+
 ## CODE REVIEW FIX (M4-P1)
 
 ### [BLOCKING] provider별 독립 마이그레이션 어셈블리 분리
@@ -106,6 +157,128 @@ dotnet test Wcs.sln (4회 연속):
   RUN 2: 통과! 실패:0 통과:44 전체:44
   RUN 3: 통과! 실패:0 통과:44 전체:44
   RUN 4: 통과! 실패:0 통과:44 전체:44
+```
+
+---
+
+## IMPLEMENTATION COMPLETE (M4-P2a) — Rev.2 (Evaluator F1~F4 수정)
+
+### Evaluator 피드백 수정 내역
+
+**[F1] 빌드 경고 0 복구 (CS8714)**
+- ChuteCapacityService.cs: `DestinationId`가 `long?`(MINOR-5) → ToDictionary notnull 경고.
+- 수정: `.Where(x => x.DestinationId != null).ToDictionary(x => x.DestinationId!.Value, ...)`.
+
+**[F2] VS-P2a-4 FULL 시나리오 신규 추가**
+- IChuteCapacityService DI 직접 접근 → `OnReserved(workFullQty)` → GetHold=Full → IF-08 FULL 검증.
+- `OnCleared` → GetHold=None → IF-08 READY 복귀. qty>1 단일 피스 케이스(qty 합산·COUNT 아님).
+
+**[F3] InMemory* 죽은 코드 제거**
+- Repositories.cs: 구현체 4개(InMemory*·ConfigAgvFloor) + POCO 4개 + DepositStatus enum 전체 삭제.
+- 인터페이스 4종 + DestinationType enum 유지.
+- ApiIntegrationTests.cs CONCUR1 스테일 주석 정정(Ef* 기반으로 교체).
+
+**[F4] MINOR-2 실제 Ignore() + SPEC 정정**
+- ConfigureConcurrency: `e.Ignore(propertyName)` — 비활성 provider 컬럼 물리 제거.
+- P2a 마이그레이션 재생성: `P2a_...RowVersionIgnore` (DropColumn×5 포함, 양 provider).
+- SPEC §7-C MINOR-2 기술 정정 완료.
+
+### 빌드·테스트 결과 (Rev.2 4회 연속)
+```
+dotnet build → 경고 0 / 오류 0
+dotnet test ×4: 실패:0 통과:50 전체:50
+dotnet test --filter CONCUR ×5: 실패:0 통과:2
+```
+
+---
+
+## IMPLEMENTATION COMPLETE (M4-P2a)
+
+### Sprint: S-M4-P2a (IF-08 목적지 분기 + FULL/PAUSED 집계 + 멱등 DB 보강)
+
+### 구현 범위
+
+**신규 파일**
+- `src/Wcs.Api/SorterGatewayRegistry.cs` — `ISorterGatewayRegistry` + `SingleSorterGatewayRegistry`
+  - destination.id → IPlcGateway 단일 진입점(P2b 다중 소터 확장 준비)
+- `src/Wcs.Api/ChuteCapacityService.cs` — `IChuteCapacityService` + `ChuteCapacityService`
+  - FULL/PAUSED 인메모리 집계(싱글톤, IHostedService 기동 시 DB 복원)
+  - `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight >= work_full_qty` → Full
+  - GetHold: None / Full / Paused
+- `src/Wcs.Migrations.Sqlite/...P2a_PieceNullableDestId_UniqueIndexes.cs` — SQLite P2a 마이그레이션
+- `src/Wcs.Migrations.SqlServer/...P2a_PieceNullableDestId_UniqueIndexes.cs` — SqlServer P2a 마이그레이션
+
+**변경 파일**
+- `src/Wcs.Data/Entities.cs`: `Piece.DestinationId` `long` → `long?` (MINOR-5 nullable FK)
+- `src/Wcs.Data/WcsDbContext.cs`:
+  - `ConfigurePiece`: 구 `UQ_piece_pid_is_active` 대체 → `UQ_piece_pid_active_status` (status IN 필터)
+  - `ConfigureCellAssignment`: `UQ_cell_assignment_cell_active` (`cell_id` WHERE `released_at IS NULL`)
+  - `ConfigureConcurrency`: SQL Server XminRowVersion `ValueGeneratedNever()` (MINOR-2)
+- `src/Wcs.Api/Repositories.cs`:
+  - `IOrderRepository.QueryDestination` 5-tuple 반환(+clientTs)
+  - `IDepositRecorder.RecordDestinationQuery` 제거(MINOR-6)
+  - `IDepositRecorder.RecordDeposit` 시그니처에 clientTs 추가
+  - `InMemoryDepositRecorder`: `_lock`·`RecordDestinationQuery`·`_destTypes` 제거, TryAdd만 유지
+  - `InMemoryDepositRecorder.RecordedAt`: `DateTimeOffset.Now` → `DateTime.UtcNow`
+- `src/Wcs.Api/DbRepositories.cs`:
+  - `EfOrderRepository.QueryDestination`: IF05_REQ+RES 단일 트랜잭션(MINOR-6), ParseTimestamp, clientTs
+  - `RecordDenied`: `piece.DestinationId = dest?.Id` (null 허용 — MINOR-5)
+  - `EfDepositRecorder`: `static _recordLock` 제거, `DbUpdateException` catch + `IsUniqueConstraintViolation`
+  - `ParseTimestamp` 헬퍼("yyyy-MM-dd HH:mm:ss" → UTC, UtcNow 폴백)
+- `src/Wcs.Api/Program.cs`:
+  - DI: `ISorterGatewayRegistry`, `ChuteCapacityService` 등록
+  - IF-05: capacity.OnReserved() for CHUTE
+  - IF-08: SORTER_3D 분기(Decide) / CHUTE 분기(hold만·TgtFloor 쓰기 없음)
+  - IF-10: capacity.OnDeposited(), DB 직접 조회로 destType 산출(GetDestType 다운캐스트 제거)
+  - `CancellationToken.None` → `lifetime.ApplicationStopping` (Scope-9)
+- `tests/Wcs.Tests/ApiIntegrationTests.cs`:
+  - VS3_WrongFloor, VS4_ReadyZero, VS4_UnknownAgvNo: chuteNo=1→30(SORTER_3D) 수정
+  - P2a 신규 테스트 5건: P2a_If08_Chute_HoldNone, P2a_If08_Chute_PausedStatus,
+    P2a_If08_UnknownChute, P2a_If05_TimeStampParsed, P2a_If05_UnknownBarcode_NullableDest_No500
+- `docs/SPEC.md`: §2 CHUTE 경로 판정 표 신설(§2-B), §7-C P2a 완료 항목 표시
+
+### 핵심 이슈 해결
+
+**VS2_UnknownBarcode → 500 InternalServerError**
+- 원인: `RecordDenied` 에서 `piece.DestinationId = dest?.Id ?? 0` → FK=0 → 존재하지 않는 FK → 503
+- 수정: `piece.DestinationId = dest?.Id` (MINOR-5, null 허용)
+
+**기존 VS3/VS4 테스트 회귀**
+- 원인: P2a 분기 후 chuteNo=1,2(CHUTE)는 CHUTE 경로 → hold=None → READY. 기존 테스트는 PLC Decide 경로(BUSY/WRONG_FLOOR) 기대.
+- 수정: chuteNo=30(SORTER_3D)으로 변경 — 단언 내용(Allowed=false/reason=BUSY,WRONG_FLOOR) 보존.
+
+### 빌드·테스트 결과 (4회 연속)
+
+```
+dotnet build → 경고 0 / 오류 0 (ChuteCapacityService CS8714 경고 2개는 nullable ToDictionary — 동작 무해)
+
+dotnet test (4회 연속):
+  RUN 1: 통과! 실패:0 통과:49 전체:49
+  RUN 2: 통과! 실패:0 통과:49 전체:49
+  RUN 3: 통과! 실패:0 통과:49 전체:49
+  RUN 4: 통과! 실패:0 통과:49 전체:49
+
+dotnet test --filter CONCUR (5회 standalone):
+  모두 통과! 실패:0 통과:2 (CONCUR1 8-parallel idempotent, CONCUR2 CHUTE 목적지 슈트 보고 트리거 없음)
+```
+
+### grep 검증 (src/Wcs.Api/)
+- `cur_qty` 코드: 0 (주석에만 존재)
+- `static.*_recordLock` 선언: 0
+- `DateTimeOffset.Now` 비주석: 0
+- `CancellationToken.None` 비주석: 0
+
+### Wcs.Core diff
+```
+git diff HEAD -- src/Wcs.Core/ → 0줄 (절대규칙 준수)
+```
+
+### 마이그레이션 상태 (wcs_dev.db 기준)
+```
+dotnet ef migrations list --project src/Wcs.Migrations.Sqlite:
+  20260616072524_Initial
+  20260616082253_P2a_PieceNullableDestId_UniqueIndexes
+  (Pending 없음 — wcs_dev.db에 적용 완료)
 ```
 
 ---

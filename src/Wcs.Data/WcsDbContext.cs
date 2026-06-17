@@ -145,6 +145,23 @@ public class WcsDbContext : DbContext
             e.Property(x => x.ReleasedAt).IsRequired(false);
             e.Property(x => x.CreatedAt).IsRequired();
 
+            // MINOR-4: (cell_id) WHERE released_at IS NULL 부분 유니크 — 동시 이중 셀 점유 방지
+            if (IsSqlite)
+            {
+                e.HasIndex(x => x.CellId)
+                 .IsUnique()
+                 .HasFilter("\"ReleasedAt\" IS NULL")
+                 .HasDatabaseName("UQ_cell_assignment_cell_active");
+            }
+            else
+            {
+                // SQL Server: 물리 컬럼명 PascalCase
+                e.HasIndex(x => x.CellId)
+                 .IsUnique()
+                 .HasFilter("[ReleasedAt] IS NULL")
+                 .HasDatabaseName("UQ_cell_assignment_cell_active");
+            }
+
             e.HasOne(x => x.Cell)
              .WithMany(x => x.Assignments)
              .HasForeignKey(x => x.CellId);
@@ -357,22 +374,25 @@ public class WcsDbContext : DbContext
             e.Property(x => x.PId).IsRequired();
             e.Property(x => x.IsActive).IsRequired();
 
-            // provider 분기: filtered unique(SQL Server) vs 일반 unique(SQLite)
+            // MAJOR-1: 멱등 DB 백스톱 — 부분 유니크 인덱스 (p_id) WHERE is_active=1 AND status IN (...)
+            // static _recordLock 대체 — DB 레벨 진성 멱등 보장.
+            // ※ 교정: SQL Server filtered index 컬럼명은 물리 PascalCase(IsActive) 사용.
             if (IsSqlite)
             {
-                // SQLite: 일반 UNIQUE(p_id, is_active) — filtered index 미지원
-                e.HasIndex(x => new { x.PId, x.IsActive })
+                // SQLite: expression index (EF HasFilter로 WHERE 조건 표현)
+                // SQLite는 partial index에서 컬럼명 대소문자 구분 없음
+                e.HasIndex(x => x.PId)
                  .IsUnique()
-                 .HasDatabaseName("UQ_piece_pid_is_active");
+                 .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED')")
+                 .HasDatabaseName("UQ_piece_pid_active_status");
             }
             else
             {
-                // SQL Server: filtered unique index (p_id) WHERE is_active=1
-                // EF Core HasFilter로 설정
+                // SQL Server: filtered unique index — 물리 컬럼명 PascalCase 사용(교정)
                 e.HasIndex(x => x.PId)
                  .IsUnique()
-                 .HasFilter("[is_active] = 1")
-                 .HasDatabaseName("UQ_piece_pid_where_active");
+                 .HasFilter("[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED')")
+                 .HasDatabaseName("UQ_piece_pid_active_status");
             }
 
             // 보조 인덱스
@@ -389,7 +409,8 @@ public class WcsDbContext : DbContext
             e.Property(x => x.Barcode).HasMaxLength(200).IsRequired();
             e.Property(x => x.Qty).IsRequired();
             e.Property(x => x.DepositedAt).IsRequired(false);
-            e.Property(x => x.DestinationId).IsRequired();
+            // MINOR-5: destination_id nullable FK (NG DENIED 시 NULL — 임의 fallback 제거)
+            e.Property(x => x.DestinationId).IsRequired(false);
             e.Property(x => x.OrderItemId).IsRequired(false);
             e.Property(x => x.AgvId).IsRequired(false);
             e.Property(x => x.InductionId).IsRequired(false);
@@ -403,9 +424,11 @@ public class WcsDbContext : DbContext
 
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
+            // MINOR-5: destination_id nullable FK
             e.HasOne(x => x.Destination)
              .WithMany(x => x.Pieces)
-             .HasForeignKey(x => x.DestinationId);
+             .HasForeignKey(x => x.DestinationId)
+             .IsRequired(false);
             e.HasOne(x => x.OrderItem)
              .WithMany(x => x.Pieces)
              .HasForeignKey(x => x.OrderItemId)
@@ -559,8 +582,10 @@ public class WcsDbContext : DbContext
     // ────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// provider 분기: SQL Server는 rowversion 사용, SQLite는 int XminRowVersion 사용.
-    /// rowversion 컬럼은 SQLite에서 지원 안 함 → SQLite에서는 ignored.
+    /// MINOR-2: provider 분기 — 활성 provider 동시성 토큰 설정, 비활성 provider 컬럼 Ignore.
+    /// - SQLite: XminRowVersion IsConcurrencyToken, RowVersion Ignore(물리 컬럼 미생성).
+    /// - SQL Server: RowVersion IsRowVersion, XminRowVersion Ignore(물리 컬럼 미생성).
+    /// Ignore(propertyName)으로 이중 물리 컬럼 제거 — 비활성 provider 컬럼은 스키마에 생성되지 않음.
     /// </summary>
     private void ConfigureConcurrency<T>(
         Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<T> e,
@@ -568,21 +593,25 @@ public class WcsDbContext : DbContext
         System.Linq.Expressions.Expression<Func<T, int>> xminExpr)
         where T : class
     {
+        // expression에서 프로퍼티명 추출 (Ignore 오버로드가 string을 요구)
+        var rowVersionName = ((System.Reflection.MemberInfo)
+            ((System.Linq.Expressions.MemberExpression)rowVersionExpr.Body).Member).Name;
+        var xminName = ((System.Reflection.MemberInfo)
+            ((System.Linq.Expressions.MemberExpression)xminExpr.Body).Member).Name;
+
         if (IsSqlite)
         {
-            // SQLite: int 동시성 토큰
+            // SQLite: int 동시성 토큰 활성화, byte[]? RowVersion 컬럼은 물리 제거
             e.Property(xminExpr).IsConcurrencyToken();
-            // rowversion 컬럼은 SQLite에서 무시
-            e.Property(rowVersionExpr).IsRequired(false);
+            e.Ignore(rowVersionName);   // MINOR-2: 비활성 provider 컬럼 물리 제거
         }
         else
         {
-            // SQL Server: rowversion
+            // SQL Server: rowversion 활성화, int XminRowVersion 컬럼은 물리 제거
             e.Property(rowVersionExpr)
              .IsRowVersion()
              .IsRequired(false);
-            // XminRowVersion은 SQL Server에서 ignored
-            e.Property(xminExpr).ValueGeneratedNever();
+            e.Ignore(xminName);         // MINOR-2: 비활성 provider 컬럼 물리 제거
         }
     }
 }
