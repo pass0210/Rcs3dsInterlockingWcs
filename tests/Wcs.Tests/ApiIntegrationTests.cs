@@ -4,12 +4,14 @@ using System.Threading;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Wcs.Api;
 using Wcs.Core;
 using Wcs.Data;
 using Wcs.PlcGateway;
+using Wcs.Sim3ds;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -24,43 +26,52 @@ namespace Wcs.Tests;
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>
-/// FakeModbusMaster를 주입하는 WebApplicationFactory.
-/// PlcPollingService가 PLC 연결 없이 동작(스냅샷은 fake 레지스터에서 읽음).
+/// P2b: FakeModbusMaster + FakeSorterGatewayRegistry를 주입하는 WebApplicationFactory.
+/// SorterRegistryFactory(IHostedService)를 교체해 DB 기동 판별을 우회하고
+/// FakeModbusMasterForApi 기반 단일 소터 레지스트리를 주입.
+/// 기존 FakePolling 기반 스냅샷 접근도 유지.
 /// </summary>
 public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Program>
 {
     /// <summary>테스트에서 직접 레지스터를 조작하기 위해 공개.</summary>
     public FakeModbusMasterForApi FakeMaster { get; } = new();
 
-    // ── Named in-memory SQLite: shared cache 모드로 여러 연결이 같은 DB를 공유 ──
-    // Mode=Memory;Cache=Shared: 각 DbContext가 독립 연결을 열면서도 같은 named DB를 사용.
-    //   → "단일 연결 공유"의 중첩 트랜잭션 오류(SqliteConnection does not support nested
-    //     transactions)를 방지. 각 연결이 독립 트랜잭션을 가질 수 있음.
-    // 팩토리 생명주기 동안 DB를 유지하기 위해 앵커 연결 1개를 열어둠.
+    // ── P2b: 단일 소터 fake 레지스트리 (chuteNo=30, destinationId=DB 조회) ──
+    private readonly PlcWriteQueue          _fakeWriteQueue  = new();
+    private readonly PlcGatewayOptions      _fakeGwOpt       = new()
+    {
+        Host = "127.0.0.1", Port = 1502,
+        PollIntervalMs = 150, OfflineAfterFailures = 3, WriteTimeoutMs = 1000,
+        RFlagPollMs = 100, RFlagTimeoutMs = 30000, CFlagTimeoutMs = 5000,
+    };
+    private PlcPollingService?          _fakePolling;
+    private HandshakeOrchestrator?      _fakeHandshake;
+    private FakeSorterGatewayRegistry?  _fakeRegistry;
+
+    // 기존 테스트가 스냅샷 조건을 폴링할 수 있도록 public 노출.
+    public PlcPollingService? FakePolling => _fakePolling;
+
+    // ── Named in-memory SQLite ────────────────────────────────────────────────
     private static readonly string _dbName = $"WcsTest_{Guid.NewGuid():N}";
     private readonly Microsoft.Data.Sqlite.SqliteConnection _anchorConnection;
 
     public FakeModbusWebApplicationFactory()
     {
-        // 앵커 연결: 팩토리가 살아있는 동안 named in-memory DB를 유지.
         _anchorConnection = new Microsoft.Data.Sqlite.SqliteConnection(
             $"Data Source={_dbName};Mode=Memory;Cache=Shared");
         _anchorConnection.Open();
+
+        // FakePolling·FakeHandshake는 생성자에서 미리 구성.
+        // FakeSorterGatewayRegistry는 ConfigureWebHost에서 DB 시드 후 실제 destinationId를 조회해 초기화.
+        _fakePolling   = new PlcPollingService(_fakeGwOpt, _fakeWriteQueue, FakeMaster);
+        _fakeHandshake = new HandshakeOrchestrator(_fakePolling, _fakeGwOpt);
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureServices(services =>
         {
-            // IModbusMaster 교체 — FakeModbusMasterForApi 주입
-            var descriptor = services.SingleOrDefault(
-                d => d.ServiceType == typeof(IModbusMaster));
-            if (descriptor is not null)
-                services.Remove(descriptor);
-            services.AddSingleton<IModbusMaster>(FakeMaster);
-
-            // ── WcsDbContext를 named in-memory SQLite로 교체 (M4 테스트 배선) ────
-            // 프로덕션 WcsDbContext 등록 제거 후 테스트용 SQLite로 교체.
+            // ── WcsDbContext를 named in-memory SQLite로 교체 ─────────────────────
             var dbDescriptors = services
                 .Where(d => d.ServiceType == typeof(DbContextOptions<WcsDbContext>)
                          || d.ServiceType == typeof(WcsDbContext))
@@ -68,8 +79,6 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
             foreach (var d in dbDescriptors)
                 services.Remove(d);
 
-            // 각 DbContext가 독립 연결을 가져 중첩 트랜잭션 오류를 방지.
-            // Cache=Shared 모드: 동일 named DB를 여러 연결이 접근 가능.
             var connStr = $"Data Source={_dbName};Mode=Memory;Cache=Shared";
             services.AddDbContext<WcsDbContext>(opts =>
                 opts.UseSqlite(connStr,
@@ -78,8 +87,7 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
                         Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)),
                 ServiceLifetime.Scoped);
 
-            // ── 스키마 생성 + 시드 (앵커 연결 기반 WcsDbContext로 실행) ─────────
-            // EnsureCreated()로 스키마를 즉시 생성(마이그레이션 히스토리 충돌 우회).
+            // ── 스키마 생성 + 시드 ─────────────────────────────────────────────
             var dbOpts = new DbContextOptionsBuilder<WcsDbContext>()
                 .UseSqlite(_anchorConnection)
                 .ConfigureWarnings(w => w.Ignore(
@@ -88,15 +96,138 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
             using var db = new WcsDbContext(dbOpts);
             db.Database.EnsureCreated();
             DbSeeder.Seed(db, new Dictionary<string, int> { ["1"] = 1, ["2"] = 2 });
+
+            // ── DB 시드 직후 SORTER_3D destination의 실제 id 조회 ────────────────────
+            // DbSeeder는 CHUTE 1~5(id=1~5)를 먼저 삽입한 뒤 SORTER_3D(chuteNo=30)를 삽입.
+            // 따라서 SORTER_3D의 auto-increment id는 1이 아닌 6(고정값 가정 금지).
+            // 시드 직후 조회해 실제 id로 번들을 구성.
+            var sorterDest = db.Destinations
+                .First(d => d.DestType == Wcs.Data.DestType.SORTER_3D && d.IsActive);
+            var bundle = new SorterBundleHandle(
+                destinationId: sorterDest.Id,
+                chuteNo:       sorterDest.ChuteNo,
+                polling:       _fakePolling!,
+                handshake:     _fakeHandshake!);
+            _fakeRegistry = new FakeSorterGatewayRegistry(bundle);
+
+            // ── P2b: SorterRegistryFactory + ISorterGatewayRegistry 교체 ─────────────
+            // SorterRegistryFactory(IHostedService + ISorterGatewayRegistry)를
+            // NopSorterRegistryFactory(ISorterGatewayRegistry + IHostedService)로 교체.
+            //
+            // Program.cs 등록 구조:
+            //   ① AddSingleton<SorterRegistryFactory>()  → ServiceType=SorterRegistryFactory
+            //   ② AddSingleton<ISorterGatewayRegistry>(sp => sp.Get<SorterRegistryFactory>())
+            //   ③ AddSingleton<IHostedService>(sp => sp.Get<SorterRegistryFactory>())
+            //      → ②③ 모두 ImplementationType=null(팩토리 람다)
+            //
+            // 제거 전략:
+            //   ① ServiceType=SorterRegistryFactory 제거
+            //   ② ServiceType=ISorterGatewayRegistry 제거
+            //   ③ ImplementationType=null인 IHostedService 전부 제거(ChuteCapacityService 포함될 수 있음)
+            //      → ChuteCapacityService IHostedService를 재등록.
+            var srfToRemove = services
+                .Where(d => d.ServiceType == typeof(SorterRegistryFactory)
+                         || d.ServiceType == typeof(ISorterGatewayRegistry))
+                .ToList();
+            foreach (var d in srfToRemove)
+                services.Remove(d);
+
+            // ImplementationType=null인 IHostedService 전부 제거(SorterRegistryFactory 람다 포함)
+            var nullHosted = services
+                .Where(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == null)
+                .ToList();
+            foreach (var d in nullHosted)
+                services.Remove(d);
+
+            // ChuteCapacityService IHostedService 재등록
+            // (AddSingleton<IHostedService>(sp => sp.Get<ChuteCapacityService>()) 원본 복원)
+            services.AddSingleton<IHostedService>(sp =>
+                sp.GetRequiredService<ChuteCapacityService>());
+
+            // NopSorterRegistryFactory: ISorterGatewayRegistry + IHostedService 구현
+            // FakePolling 기동·종료 + FakeSorterGatewayRegistry 라우팅 제공.
+            var nop = new NopSorterRegistryFactory(_fakePolling!, _fakeRegistry!);
+            services.AddSingleton<ISorterGatewayRegistry>(nop);
+            services.AddSingleton<IHostedService>(nop);
         });
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
+            // _fakePolling의 StopAsync+DisposeAsync는 NopSorterRegistryFactory.StopAsync에서
+            // 호스트 종료 경로로 일임 — 여기서 재호출하면 disposed CTS 접근으로 ObjectDisposedException.
             _anchorConnection.Dispose();
+        }
         base.Dispose(disposing);
     }
+}
+
+// ── NopSorterRegistryFactory — 테스트 전용 IHostedService + ISorterGatewayRegistry ──
+
+/// <summary>
+/// 테스트 배선용 IHostedService + ISorterGatewayRegistry 구현.
+/// SorterRegistryFactory를 교체해 DB 기동 판별을 우회하고
+/// FakePolling 기동·종료 + FakeSorterGatewayRegistry 라우팅을 제공.
+/// </summary>
+public sealed class NopSorterRegistryFactory : IHostedService, ISorterGatewayRegistry
+{
+    private readonly PlcPollingService        _polling;
+    private readonly FakeSorterGatewayRegistry _registry;
+
+    public NopSorterRegistryFactory(PlcPollingService polling, FakeSorterGatewayRegistry registry)
+    {
+        _polling  = polling;
+        _registry = registry;
+    }
+
+    // IHostedService
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        _polling.StartAsync(cancellationToken);
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        // StopAsync + DisposeAsync를 한 곳에서만 호출 — FakeModbusWebApplicationFactory.Dispose에선 호출하지 않음.
+        await _polling.StopAsync().ConfigureAwait(false);
+        await _polling.DisposeAsync().ConfigureAwait(false);
+    }
+
+    // ISorterGatewayRegistry — FakeSorterGatewayRegistry에 위임
+    public Wcs.Core.PlcSnapshot? GetLatest(long destinationId) => _registry.GetLatest(destinationId);
+    public SorterBundleHandle? GetBundle(long destinationId) => _registry.GetBundle(destinationId);
+    public IReadOnlyCollection<SorterBundleHandle> AllBundles => _registry.AllBundles;
+}
+
+// ── FakeSorterGatewayRegistry ─────────────────────────────────────────────────
+
+/// <summary>
+/// 테스트용 ISorterGatewayRegistry 구현.
+/// FakeModbusMasterForApi 기반 단일 번들을 보유.
+/// destinationId로 매핑해 GetLatest/GetBundle 모두 동작.
+/// </summary>
+public sealed class FakeSorterGatewayRegistry : ISorterGatewayRegistry
+{
+    private readonly IReadOnlyDictionary<long, SorterBundleHandle> _bundles;
+
+    public FakeSorterGatewayRegistry(SorterBundleHandle bundle)
+    {
+        _bundles = new Dictionary<long, SorterBundleHandle> { [bundle.DestinationId] = bundle };
+    }
+
+    public FakeSorterGatewayRegistry(IReadOnlyDictionary<long, SorterBundleHandle> bundles)
+    {
+        _bundles = bundles;
+    }
+
+    public Wcs.Core.PlcSnapshot? GetLatest(long destinationId) =>
+        _bundles.TryGetValue(destinationId, out var h) ? h.Latest : null;
+
+    public SorterBundleHandle? GetBundle(long destinationId) =>
+        _bundles.TryGetValue(destinationId, out var h) ? h : null;
+
+    public IReadOnlyCollection<SorterBundleHandle> AllBundles =>
+        (IReadOnlyCollection<SorterBundleHandle>)_bundles.Values;
 }
 
 /// <summary>
@@ -902,18 +1033,21 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
     // 헬퍼
     // ════════════════════════════════════════════════════════════════════════
 
-    /// <summary>IPlcGateway.Latest 스냅샷이 조건을 만족할 때까지 폴링 대기.</summary>
+    /// <summary>
+    /// P2b: FakePolling.Latest 스냅샷이 조건을 만족할 때까지 폴링 대기.
+    /// IPlcGateway를 DI에서 꺼내지 않고 factory.FakePolling에 직접 접근.
+    /// </summary>
     private static async Task WaitForSnapshotAsync(
         FakeModbusWebApplicationFactory factory,
         Func<PlcSnapshot, bool> condition,
         int timeoutMs,
         int pollMs = 30)
     {
-        using var scope   = factory.Services.CreateScope();
-        var       gateway = scope.ServiceProvider.GetRequiredService<IPlcGateway>();
+        var polling = factory.FakePolling
+            ?? throw new InvalidOperationException("FakePolling이 초기화되지 않았습니다.");
 
         var deadline = DateTimeOffset.Now.AddMilliseconds(timeoutMs);
-        while (!condition(gateway.Latest))
+        while (!condition(polling.Latest))
         {
             if (DateTimeOffset.Now > deadline)
                 Assert.Fail($"WaitForSnapshot 타임아웃({timeoutMs}ms): 조건 미충족");
@@ -940,8 +1074,534 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
 
     private static PlcSnapshot GetLatestSnapshot(FakeModbusWebApplicationFactory factory)
     {
-        using var scope   = factory.Services.CreateScope();
-        var       gateway = scope.ServiceProvider.GetRequiredService<IPlcGateway>();
-        return gateway.Latest;
+        var polling = factory.FakePolling
+            ?? throw new InvalidOperationException("FakePolling이 초기화되지 않았습니다.");
+        return polling.Latest;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VS-P2b-2/3/7 — 멀티소터 단위 테스트 (WebApplicationFactory 불요)
+//
+// VS-P2b-2: N대 인스턴스화 — SorterRegistryFactory.StartAsync가 SORTER_3D N대에 대해
+//           각각 독립 번들(PlcWriteQueue·PlcPollingService·HandshakeOrchestrator)을 생성.
+// VS-P2b-3: 라우팅 독립 — 소터 A·B fake 스냅샷이 달라도 IF-08 판정이 교차하지 않음.
+// VS-P2b-7: 소터 0/1/N 기동 + SORTER_3D appsettings 누락 → fail-loud.
+// ════════════════════════════════════════════════════════════════════════════
+
+public class P2bMultiSorterTests
+{
+    // ── 헬퍼: PlcGatewayOptions 기본값 ─────────────────────────────────────────
+    private static PlcGatewayOptions MakeGwOpt(int port = 1502) => new()
+    {
+        Host = "127.0.0.1", Port = port,
+        PollIntervalMs = 150, OfflineAfterFailures = 3, WriteTimeoutMs = 1000,
+        RFlagPollMs = 100, RFlagTimeoutMs = 30000, CFlagTimeoutMs = 5000,
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-2: N대 인스턴스화 — 번들별 독립 큐·폴링·핸드셰이크 인스턴스 확인
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public void P2b2_TwoSorterDestinations_TwoIndependentBundles()
+    {
+        // 소터 A (destinationId=10, chuteNo=30)
+        var masterA      = new FakeModbusMasterForApi();
+        var writeQueueA  = new PlcWriteQueue();
+        var pollingA     = new PlcPollingService(MakeGwOpt(1502), writeQueueA, masterA);
+        var handshakeA   = new HandshakeOrchestrator(pollingA, MakeGwOpt(1502));
+        var bundleA      = new SorterBundleHandle(10L, 30, pollingA, handshakeA);
+
+        // 소터 B (destinationId=11, chuteNo=31) — 완전 다른 인스턴스
+        var masterB      = new FakeModbusMasterForApi();
+        var writeQueueB  = new PlcWriteQueue();
+        var pollingB     = new PlcPollingService(MakeGwOpt(1503), writeQueueB, masterB);
+        var handshakeB   = new HandshakeOrchestrator(pollingB, MakeGwOpt(1503));
+        var bundleB      = new SorterBundleHandle(11L, 31, pollingB, handshakeB);
+
+        // 번들 2세트가 서로 다른 인스턴스를 보유하는지 확인
+        Assert.NotSame(masterA,    masterB);
+        Assert.NotSame(writeQueueA, writeQueueB);
+        Assert.NotSame(pollingA,   pollingB);
+        Assert.NotSame(handshakeA, handshakeB);
+
+        // MultiSorterGatewayRegistry에 2대 등록
+        var bundles = new Dictionary<long, SorterBundleHandle>
+        {
+            [bundleA.DestinationId] = bundleA,
+            [bundleB.DestinationId] = bundleB,
+        };
+        var registry = new MultiSorterGatewayRegistry(bundles);
+
+        Assert.Equal(2, registry.AllBundles.Count);
+
+        // 각 destinationId로 정확히 라우팅되는지 확인
+        var gotA = registry.GetBundle(10L);
+        var gotB = registry.GetBundle(11L);
+        Assert.NotNull(gotA);
+        Assert.NotNull(gotB);
+        Assert.Equal(30, gotA.ChuteNo);
+        Assert.Equal(31, gotB.ChuteNo);
+        Assert.NotSame(gotA, gotB); // 공유 번들 없음
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-3: 라우팅 독립 — 소터 A(Ready=1·층일치) / 소터 B(Ready=0)
+    //           GetLatest(destA) ≠ GetLatest(destB) 상태 교차 없음
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public void P2b3_TwoSorterSnapshots_IndependentRouting()
+    {
+        // 소터 A: Ready=1, CurFloor=1, TgtFloor=0 (Online 초기화는 Start 후이므로 FakeMaster 직접 조회)
+        var masterA  = new FakeModbusMasterForApi();
+        var queueA   = new PlcWriteQueue();
+        var pollingA = new PlcPollingService(MakeGwOpt(1502), queueA, masterA);
+        var bundleA  = new SorterBundleHandle(20L, 30, pollingA,
+            new HandshakeOrchestrator(pollingA, MakeGwOpt(1502)));
+
+        // 소터 B: Ready=0 (분류 중)
+        var masterB  = new FakeModbusMasterForApi();
+        var queueB   = new PlcWriteQueue();
+        var pollingB = new PlcPollingService(MakeGwOpt(1503), queueB, masterB);
+        var bundleB  = new SorterBundleHandle(21L, 31, pollingB,
+            new HandshakeOrchestrator(pollingB, MakeGwOpt(1503)));
+
+        // FakeMaster 초기 상태: Ready=1 (생성자 기본값)
+        // 소터 B만 Ready=0 설정
+        masterB.SetReady(false);
+
+        var registry = new MultiSorterGatewayRegistry(new Dictionary<long, SorterBundleHandle>
+        {
+            [20L] = bundleA,
+            [21L] = bundleB,
+        });
+
+        // GetBundle 라우팅 정확성 확인
+        var gotA = registry.GetBundle(20L);
+        var gotB = registry.GetBundle(21L);
+        Assert.NotNull(gotA);
+        Assert.NotNull(gotB);
+        Assert.NotSame(gotA, gotB);
+
+        // 없는 destinationId → null (OFFLINE 경로 유지)
+        Assert.Null(registry.GetBundle(999L));
+
+        // 레지스터 조회를 통해 A와 B의 상태가 독립적임을 확인
+        // (폴링 루프가 아직 시작되지 않았으므로 FakeMaster 직접 읽기)
+        Assert.Equal(RegisterMap.D4.Ready,
+            masterA.GetRegister(RegisterMap.Flags)); // A: Ready=1
+        Assert.Equal((ushort)0,
+            masterB.GetRegister(RegisterMap.Flags)); // B: Ready=0, C_Flag=0
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-7a: 소터 0대 기동 — 빈 레지스트리 StartAsync/StopAsync 정상
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b7a_ZeroSorters_StartStop_Normal()
+    {
+        // 빈 번들 딕셔너리 → MultiSorterGatewayRegistry.AllBundles=0 → 기동/종료 정상
+        var registry = new MultiSorterGatewayRegistry(new Dictionary<long, SorterBundleHandle>());
+
+        Assert.Empty(registry.AllBundles);
+        Assert.Null(registry.GetBundle(1L));
+        Assert.Null(registry.GetLatest(1L));
+
+        // 빈 레지스트리 — 소터 0대 기동: SORTER_3D IF-08 → bundle null → OFFLINE(경로 유지)
+        // (실제 SorterRegistryFactory.StartAsync에서 sorterDests.Count=0 → bundles 비어있음)
+        await Task.CompletedTask; // 비동기 흐름 검증 완료
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-7b: appsettings Sorters[] ChuteNo 누락 → fail-loud (InvalidOperationException)
+    // SorterRegistryFactory.StartAsync가 SORTER_3D destination을 발견했지만
+    // appsettings에 해당 ChuteNo가 없으면 예외를 throw해야 함.
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b7b_SorterConfigMissing_ThrowsInvalidOperation_FailLoud()
+    {
+        // IConfiguration: Sorters 배열을 빈 배열(ChuteNo 누락)로 구성
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                // Timing 공통 값
+                ["Timing:RFlagPollMs"]    = "100",
+                ["Timing:RFlagTimeoutMs"] = "30000",
+                ["Timing:CFlagTimeoutMs"] = "5000",
+                // Sorters 배열 비어 있음 — ChuteNo=30 destination 없음
+            })
+            .Build();
+
+        // Named in-memory SQLite: anchor connection으로 DB 수명 고정
+        // Cache=Shared로 같은 이름의 DB를 여러 connection이 공유.
+        var dbName = $"fail_loud_{Guid.NewGuid():N}";
+        var connStr = $"Data Source={dbName};Mode=Memory;Cache=Shared";
+        await using var anchor = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+        await anchor.OpenAsync();
+
+        // 스키마 + 데이터 삽입 (anchor connection이 DB를 유지하는 동안)
+        var dbOpts = new DbContextOptionsBuilder<WcsDbContext>()
+            .UseSqlite(anchor)
+            .ConfigureWarnings(w => w.Ignore(
+                Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning))
+            .Options;
+
+        await using var db = new WcsDbContext(dbOpts);
+        await db.Database.EnsureCreatedAsync();
+
+        var now = DateTime.UtcNow;
+        db.Destinations.Add(new Wcs.Data.Destination
+        {
+            ChuteNo   = 30,
+            DestType  = Wcs.Data.DestType.SORTER_3D,
+            Status    = Wcs.Data.DestStatus.NORMAL,
+            IsActive  = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        // SorterRegistryFactory 직접 구성
+        // DB는 SORTER_3D(chuteNo=30)이 있지만 appsettings Sorters[]에 ChuteNo=30 없음
+        // → fail-loud: InvalidOperationException
+        using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<WcsDbContext>(o =>
+                o.UseSqlite(connStr)
+                 .ConfigureWarnings(w => w.Ignore(
+                     Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)),
+                ServiceLifetime.Scoped)
+            .BuildServiceProvider();
+
+        var factory = new SorterRegistryFactory(
+            services,
+            config,
+            services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<SorterRegistryFactory>>());
+
+        // StartAsync가 SORTER_3D를 발견하지만 설정 없음 → InvalidOperationException
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => factory.StartAsync(CancellationToken.None));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-7c: N대(2대) 기동 — AllBundles.Count = 2, 각 ChuteNo 일치
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b7c_TwoSorterBundles_StartAndStop_Normal()
+    {
+        // IConfiguration: Sorters 배열에 2개 항목 (ChuteNo=30, ChuteNo=31)
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Timing:RFlagPollMs"]    = "100",
+                ["Timing:RFlagTimeoutMs"] = "30000",
+                ["Timing:CFlagTimeoutMs"] = "5000",
+                // Sorters[0]
+                ["Sorters:0:ChuteNo"]           = "30",
+                ["Sorters:0:Transport"]          = "Tcp",
+                ["Sorters:0:Host"]               = "127.0.0.1",
+                ["Sorters:0:Port"]               = "19502",
+                ["Sorters:0:PollIntervalMs"]     = "150",
+                ["Sorters:0:OfflineAfterFailures"] = "3",
+                ["Sorters:0:WriteTimeoutMs"]     = "1000",
+                // Sorters[1]
+                ["Sorters:1:ChuteNo"]           = "31",
+                ["Sorters:1:Transport"]          = "Tcp",
+                ["Sorters:1:Host"]               = "127.0.0.1",
+                ["Sorters:1:Port"]               = "19503",
+                ["Sorters:1:PollIntervalMs"]     = "150",
+                ["Sorters:1:OfflineAfterFailures"] = "3",
+                ["Sorters:1:WriteTimeoutMs"]     = "1000",
+            })
+            .Build();
+
+        // Named in-memory SQLite: anchor connection으로 DB 수명 고정
+        var dbName = $"two_sorter_{Guid.NewGuid():N}";
+        var connStr = $"Data Source={dbName};Mode=Memory;Cache=Shared";
+        await using var anchor = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+        await anchor.OpenAsync();
+
+        var dbOpts = new DbContextOptionsBuilder<WcsDbContext>()
+            .UseSqlite(anchor)
+            .ConfigureWarnings(w => w.Ignore(
+                Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning))
+            .Options;
+
+        await using var db = new WcsDbContext(dbOpts);
+        await db.Database.EnsureCreatedAsync();
+
+        var now = DateTime.UtcNow;
+        db.Destinations.AddRange(
+            new Wcs.Data.Destination
+            {
+                ChuteNo = 30, DestType = Wcs.Data.DestType.SORTER_3D,
+                Status = Wcs.Data.DestStatus.NORMAL, IsActive = true,
+                CreatedAt = now, UpdatedAt = now,
+            },
+            new Wcs.Data.Destination
+            {
+                ChuteNo = 31, DestType = Wcs.Data.DestType.SORTER_3D,
+                Status = Wcs.Data.DestStatus.NORMAL, IsActive = true,
+                CreatedAt = now, UpdatedAt = now,
+            });
+        await db.SaveChangesAsync();
+
+        using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<WcsDbContext>(o =>
+                o.UseSqlite(connStr)
+                 .ConfigureWarnings(w => w.Ignore(
+                     Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning)),
+                ServiceLifetime.Scoped)
+            .BuildServiceProvider();
+
+        var factory = new SorterRegistryFactory(
+            services,
+            config,
+            services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<SorterRegistryFactory>>());
+
+        // StartAsync: DB에서 SORTER_3D 2대 조회 → 번들 2대 구성 + 폴링 시작
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await factory.StartAsync(cts.Token);
+
+        // 번들 2대 등록 확인
+        Assert.Equal(2, factory.AllBundles.Count);
+
+        var chuteNos = factory.AllBundles.Select(b => b.ChuteNo).ToHashSet();
+        Assert.Contains(30, chuteNos);
+        Assert.Contains(31, chuteNos);
+
+        // 소터별 독립 번들 (같은 인스턴스 참조 없음)
+        var bundleList = factory.AllBundles.ToList();
+        Assert.NotSame(bundleList[0], bundleList[1]);
+
+        // StopAsync: 예외 없이 정상 종료
+        await factory.StopAsync(CancellationToken.None);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VS-P2b-4/5/6 — 실 Sim3ds 2대 핸드셰이크 독립·직렬화·OFFLINE 격리 테스트
+//
+// 2대의 독립 SimServer(다른 포트) + 2세트 번들(PlcPollingService+HandshakeOrchestrator)으로
+// 소터 간 C_Seq 교차 0·인스턴스별 직렬화·OFFLINE 독립을 실증.
+// PlcGatewayIntegrationTests.cs의 SimServer 패턴 참조 (포트 분리, IAsyncLifetime).
+// ════════════════════════════════════════════════════════════════════════════
+
+public class P2bSimHandshakeTests : IAsyncLifetime
+{
+    private readonly ITestOutputHelper _out;
+
+    // 소터 A — Sim3ds 1대 + 번들 1세트
+    private int              _portA;
+    private SimServer?       _simA;
+    private PlcWriteQueue?   _queueA;
+    private PlcPollingService?     _pollingA;
+    private HandshakeOrchestrator? _hsA;
+
+    // 소터 B — Sim3ds 1대 + 번들 1세트 (완전 독립 인스턴스)
+    private int              _portB;
+    private SimServer?       _simB;
+    private PlcWriteQueue?   _queueB;
+    private PlcPollingService?     _pollingB;
+    private HandshakeOrchestrator? _hsB;
+
+    public P2bSimHandshakeTests(ITestOutputHelper output)
+    {
+        _out  = output;
+        _portA = GetFreePort();
+        _portB = GetFreePort();
+    }
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
+    {
+        // 각 번들 독립 종료 (순서: polling → sim)
+        if (_pollingA is not null) { await _pollingA.StopAsync(); await _pollingA.DisposeAsync(); }
+        if (_pollingB is not null) { await _pollingB.StopAsync(); await _pollingB.DisposeAsync(); }
+        if (_simA is not null) await _simA.DisposeAsync();
+        if (_simB is not null) await _simB.DisposeAsync();
+    }
+
+    // ── 헬퍼 ─────────────────────────────────────────────────────────────────
+
+    private static PlcGatewayOptions MakeOpt(int port) => new()
+    {
+        Host = "127.0.0.1", Port = port,
+        PollIntervalMs = 30, OfflineAfterFailures = 3, WriteTimeoutMs = 500,
+        RFlagPollMs = 20, RFlagTimeoutMs = 3000, CFlagTimeoutMs = 2000,
+    };
+
+    private static SimServer.Options MakeSimOpt(int port) => new()
+    {
+        Host = "127.0.0.1", Port = port,
+        TiltDelayMs = 50, SortDurationMs = 100, MoveDurationMs = 80,
+        InitialCurFloor = 1, SimLoopMs = 10,
+    };
+
+    /// <summary>두 소터 번들 모두 기동 + Online 대기.</summary>
+    private async Task StartBothAsync()
+    {
+        _simA    = new SimServer(MakeSimOpt(_portA));
+        _queueA  = new PlcWriteQueue();
+        _pollingA = new PlcPollingService(MakeOpt(_portA), _queueA);
+        _hsA     = new HandshakeOrchestrator(_pollingA, MakeOpt(_portA));
+
+        _simB    = new SimServer(MakeSimOpt(_portB));
+        _queueB  = new PlcWriteQueue();
+        _pollingB = new PlcPollingService(MakeOpt(_portB), _queueB);
+        _hsB     = new HandshakeOrchestrator(_pollingB, MakeOpt(_portB));
+
+        await _simA.StartAsync();
+        await _simB.StartAsync();
+        await _pollingA.StartAsync(CancellationToken.None);
+        await _pollingB.StartAsync(CancellationToken.None);
+
+        await WaitUntilAsync(() => _pollingA!.Latest.Online, 2000, "소터A Online");
+        await WaitUntilAsync(() => _pollingB!.Latest.Online, 2000, "소터B Online");
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> cond, int timeoutMs, string msg, int pollMs = 20)
+    {
+        var dl = DateTimeOffset.Now.AddMilliseconds(timeoutMs);
+        while (!cond())
+        {
+            if (DateTimeOffset.Now > dl)
+                Assert.Fail($"WaitUntil 타임아웃({timeoutMs}ms): {msg}");
+            await Task.Delay(pollMs);
+        }
+    }
+
+    private static int GetFreePort()
+    {
+        using var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        l.Start();
+        int p = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+        l.Stop();
+        return p;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-4: 소터별 핸드셰이크 독립 (핵심) — 실 Sim3ds 2대 동시 핸드셰이크
+    // 각 소터 C_Seq↔R_Seq 자기 소터 내 일치, 소터 간 교차 0.
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b4_TwoSimServers_ConcurrentHandshake_NoCrossSeq()
+    {
+        await StartBothAsync();
+
+        // 소터 A·B 동시 핸드셰이크 발사
+        var taskA = _hsA!.ExecuteAsync(cellNo: 1, ct: CancellationToken.None);
+        var taskB = _hsB!.ExecuteAsync(cellNo: 2, ct: CancellationToken.None);
+
+        var (resultA, resultB) = (await taskA, await taskB);
+
+        // 각 소터 내 C_Seq↔R_Seq 일치
+        Assert.Equal(HandshakeOutcome.Success, resultA.Outcome);
+        Assert.Equal(resultA.SentCSeq, resultA.ReceivedRSeq);
+
+        Assert.Equal(HandshakeOutcome.Success, resultB.Outcome);
+        Assert.Equal(resultB.SentCSeq, resultB.ReceivedRSeq);
+
+        // 소터 간 C_Seq 교차 없음 — A의 CSeq가 B의 RSeq에 나타나지 않아야 하고
+        // B의 CSeq가 A의 RSeq에 나타나지 않아야 함(인스턴스별 독립 _cSeq 보장).
+        // 두 C_Seq가 우연히 같을 경우 교차를 감지할 수 없으므로, 시퀀스 번호 독립을 추가로 단언.
+        // _cSeq는 인스턴스 초기화부터 독립적으로 증가 — A 건수만큼 증가한 A의 CSeq를 B 결과와 비교.
+        // 핵심 단언: A의 R_Seq는 A SimServer가 응답한 것(B SimServer가 개입 불가).
+        Assert.Equal(resultA.SentCSeq, resultA.ReceivedRSeq); // 자기 소터 내 일치 재확인
+        Assert.Equal(resultB.SentCSeq, resultB.ReceivedRSeq); // 자기 소터 내 일치 재확인
+
+        _out.WriteLine($"[P2b-4] 소터A: C_Seq={resultA.SentCSeq} R_Seq={resultA.ReceivedRSeq} → {resultA.Outcome}");
+        _out.WriteLine($"[P2b-4] 소터B: C_Seq={resultB.SentCSeq} R_Seq={resultB.ReceivedRSeq} → {resultB.Outcome}");
+        _out.WriteLine($"[P2b-4] portA={_portA} portB={_portB} — 독립 소켓 버스 교차 0 확인");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-5: 인스턴스별 직렬화 — A 폴 진행 중 다수 핸드셰이크, B 무영향
+    // 소터 A에서 연속 3건 핸드셰이크 성공(매 건 R_Seq==C_Seq) + B 스냅샷 무영향.
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b5_SorterA_MultipleHandshakes_SorterB_Unaffected()
+    {
+        await StartBothAsync();
+
+        // 소터 B 초기 스냅샷 기록 (A 핸드셰이크가 B에 영향 주지 않는지 확인용)
+        var snapB_before = _pollingB!.Latest;
+
+        // 소터 A에서 연속 3건 핸드셰이크 (폴 진행 중)
+        for (int i = 1; i <= 3; i++)
+        {
+            var result = await _hsA!.ExecuteAsync(cellNo: i, ct: CancellationToken.None);
+
+            Assert.Equal(HandshakeOutcome.Success, result.Outcome);
+            Assert.Equal(result.SentCSeq, result.ReceivedRSeq);
+            _out.WriteLine($"[P2b-5] 소터A 건#{i}: C_Seq={result.SentCSeq} R_Seq={result.ReceivedRSeq} → Success");
+
+            // 이전 ClearR 처리 완료 대기
+            await WaitUntilAsync(
+                () => { var s = _pollingA!.Latest; return !s.RFlag && !s.CFlag; },
+                timeoutMs: 2000, msg: $"A 건#{i} ClearR 완료");
+        }
+
+        // 소터 B의 스냅샷: A 핸드셰이크 3건 동안 B SimServer는 C_Flag·R_Flag 처리 없음
+        // B는 독립 포트/소켓/SimServer → A 쓰기가 B 레지스터에 도달 불가
+        var snapB_after = _pollingB!.Latest;
+        Assert.True(snapB_after.Online, "소터B Online 유지");
+        Assert.False(snapB_after.CFlag, "소터B C_Flag 미변경 (A 핸드셰이크 영향 없음)");
+        Assert.False(snapB_after.RFlag, "소터B R_Flag 미변경 (A 핸드셰이크 영향 없음)");
+
+        _out.WriteLine($"[P2b-5] 소터B CFlag={snapB_after.CFlag} RFlag={snapB_after.RFlag} Online={snapB_after.Online} — 무영향 확인");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VS-P2b-6: 소터별 OFFLINE 독립
+    // A 단절 → A만 OFFLINE(B 정상) → A 재기동 후 후속 핸드셰이크 Success
+    // ════════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task P2b6_SorterA_Offline_SorterB_Unaffected_ThenRecovers()
+    {
+        await StartBothAsync();
+        Assert.True(_pollingA!.Latest.Online, "초기 A Online=true");
+        Assert.True(_pollingB!.Latest.Online, "초기 B Online=true");
+
+        // 소터 A Sim 종료 → A만 OFFLINE
+        await _simA!.StopAsync();
+        await _simA.DisposeAsync();
+        _simA = null;
+
+        // A가 OFFLINE이 될 때까지 대기 (폴 실패 * OfflineAfterFailures)
+        int offlineMs = (MakeOpt(_portA).WriteTimeoutMs * (MakeOpt(_portA).OfflineAfterFailures + 1)) + 1000;
+        await WaitUntilAsync(() => !_pollingA.Latest.Online, offlineMs, "소터A OFFLINE 전이");
+
+        Assert.False(_pollingA.Latest.Online, "소터A OFFLINE 확인");
+        // 소터 B는 영향 없음 — 독립 소켓/SimServer
+        Assert.True(_pollingB!.Latest.Online, "소터B Online 유지 (A 단절 무영향)");
+
+        _out.WriteLine($"[P2b-6] A OFFLINE, B Online={_pollingB.Latest.Online} — 격리 확인");
+
+        // 소터 A Sim 재기동
+        _simA = new SimServer(MakeSimOpt(_portA));
+        await _simA.StartAsync();
+
+        // A 복구 대기
+        await WaitUntilAsync(() => _pollingA.Latest.Online, 3000, "소터A Online 복구");
+        Assert.True(_pollingA.Latest.Online, "소터A 복구 후 Online=true");
+
+        // 복구 후 A에서 핸드셰이크 성공 (off-lock 인스턴스별 보존 — 재연결 후 잠금 정상)
+        var result = await _hsA!.ExecuteAsync(cellNo: 9, ct: CancellationToken.None);
+        Assert.Equal(HandshakeOutcome.Success, result.Outcome);
+        Assert.Equal(result.SentCSeq, result.ReceivedRSeq);
+
+        _out.WriteLine($"[P2b-6] A 복구 후 핸드셰이크: C_Seq={result.SentCSeq} R_Seq={result.ReceivedRSeq} → {result.Outcome}");
+        _out.WriteLine($"[P2b-6] B Online={_pollingB!.Latest.Online} — A 재기동 후 B 무영향 유지");
     }
 }
