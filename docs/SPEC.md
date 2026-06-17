@@ -96,7 +96,7 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 
 - **RTU 우선 + TCP 병행**: `Plc:Transport` = `Rtu`(기본, 미지정 시) | `Tcp`. 설정 1줄로 교체.
 - **전송 추상화 완료**: `IModbusMaster` 인터페이스(src/Wcs.PlcGateway/IModbusMaster.cs) — 판정 엔진·핸드셰이크·단일 쓰기 큐·RMW·OFFLINE은 전송 무관하게 재사용. TCP 어댑터(`ModbusTcpMaster`), RTU 어댑터(`ModbusRtuMaster`), 팩토리(`ModbusMasterFactory`) 구현 완료.
-- **소터별 독립 포트(토폴로지 확정)**: 소터마다 독립 버스/포트(포트당 소터 1대, 다중 슬레이브 경합 없음). 설정 스키마는 소터별 독립 전송 N 확장 표현 가능 — 런타임은 단일 소터(M3/M4에서 N대 라우팅 추가 예정).
+- **소터별 독립 포트(토폴로지 확정)**: 소터마다 독립 버스/포트(포트당 소터 1대, 다중 슬레이브 경합 없음). **M4-P2b에서 N대 라우팅 구현 완료** — 런타임 소터별 번들 N대(IModbusMaster + PlcWriteQueue + PlcPollingService + HandshakeOrchestrator 각 소터별 독립 인스턴스). 소터 목록은 기동 시 DB(destination WHERE dest_type=SORTER_3D AND is_active) 주도로 확정. 설정 스키마는 `Sorters[]` 배열(ChuteNo 키) + 공통 Timing + 소터별 Timing 오버라이드. SORTER_3D destination이 있는데 appsettings Sorters[]에 ChuteNo 항목 없으면 fail-loud(기동 에러).
 - **WCS = Modbus 마스터 / 3DS PLC = 슬레이브**: RTU·TCP 모두 동일.
 - **RTU 시리얼 파라미터**: PortName·BaudRate·Parity·StopBits·ReadTimeoutMs·WriteTimeoutMs·UnitId — 전부 appsettings(하드코딩 금지). 기본값은 현장 실측 전 TCP 동작 보존(BigEndian·UnitId=1).
 - **OFFLINE 전이**: RTU 예외(IOException·TimeoutException)에서도 TCP와 동일하게 OFFLINE 전이(소켓 전용 분기 제거).
