@@ -2,6 +2,28 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-M4-P2b (멀티 소터: 단일 게이트웨이 → 소터별 레지스트리 N대) — APPROVED (2026-06-17, 2 iterations)
+
+- **동시성/격리 스프린트의 핵심 시나리오는 실 인프라로 실증해야 — fake + NotSame 구조 단언은 불충분**: Rev.1 FAIL 핵심은
+  소터별 핸드셰이크 독립(C_Seq 교차 0, VS-P2b-4 "핵심")이 구현은 됐으나 검증이 `FakeModbusMasterForApi` + `NotSame` 구조 단언뿐 —
+  폴 루프조차 미기동이라 실 핸드셰이크 0건. Rev.2에서 `P2bSimHandshakeTests`(IAsyncLifetime, 동적 포트 2개)로 실 SimServer 2대 +
+  번들 2세트를 띄워 동시 ExecuteAsync → 각 소터 SentCSeq==ReceivedRSeq, 독립 소켓 버스로 교차 0(물리 분리)를 실증. → "구현됐다"와
+  "검증됐다"는 다르다. 인스턴스 격리 주장은 실 동시 핸드셰이크로 증명. (단 P2b4의 "C_Seq 우연 일치 시 교차 미감지" 보강 단언은
+  자기일치 중복으로 degenerate — 교차 0의 본질 증거는 포트/소켓 물리 분리. 더 강하게 하려면 한 소터 CSeq를 큰 오프셋으로 초기화해 값 교차도 배제 권장.)
+- **green 테스트도 teardown 예외는 FAIL**: Rev.1은 56/56 통과했으나 매 실행 `Test Class Cleanup Failure: ObjectDisposedException`
+  동반(FakeModbusWebApplicationFactory.Dispose + NopSorterRegistryFactory.StopAsync가 같은 _fakePolling을 3중 Stop/Dispose →
+  PlcGateway.cs:176 disposed CTS 접근). Rev.2에서 폴링 소유권을 NopSorterRegistryFactory.StopAsync 단일 지점으로 통합(Dispose는
+  _anchorConnection만)해 해소. → 단언 PASS ≠ 깨끗한 종료. xUnit cleanup-failure 라인을 grep으로 적극 배제.
+- **소터별 OFFLINE 타임아웃은 설정 유도값으로**: P2b6의 OFFLINE 대기 = WriteTimeoutMs×(OfflineAfterFailures+1)+여유 — 하드코딩 sleep 아님.
+- **flaky 배제는 실 소켓 테스트 standalone 반복으로 확정**: 실 SimServer 기반 P2b4/5/6은 소켓·타이밍 의존이 가장 큼 → 전체 4회 +
+  P2bSimHandshakeTests 단독 5회 GREEN으로 비결정성 0 확인. → 새 통합 테스트의 flaky 위험은 전체 회귀와 별도로 표적 반복.
+- **문서 deliverable 주장은 git status로 검증**: Rev.1 메시지 "SPEC §7-A 정정 완료"는 거짓(파일 무변경). Rev.2에서 L99 실제 정정 +
+  Sorters[] 스키마·DB 주도 판별·fail-loud 명문화. → "정정 완료" 주장은 `git diff docs/`로 대조.
+- **Core/게이트웨이 무변경 + 인스턴스화만 N배 패턴 유효**: src/Wcs.Core·PlcGateway(PlcGateway.cs·HandshakeOrchestrator.cs)·Sim3ds·
+  Data·Migrations git diff 0바이트. 멀티소터화는 SorterRegistryFactory.StartAsync가 소터별 `new PlcWriteQueue/PlcPollingService/
+  HandshakeOrchestrator`를 N개 생성(단일 공유 큐/싱글톤 grep 0, SingleSorterGatewayRegistry 제거)하고 IF-08/IF-10은 chuteNo→dest.Id→
+  GetBundle 라우팅 최소 교체뿐(와이어·Decide 판정 불변)로 달성. → 클래스 본문 무변경 + DI 인스턴스화 N배 + 라우팅 교체 = 멀티화 안전 패턴.
+
 ## S-M4-P2a (IF-08 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱 + 이관 정리) — APPROVED (2026-06-16, 2 iterations)
 
 - **"이름만 통과" 가드 — 인메모리 집계는 전용 시나리오 없으면 미검증**: Rev.1 FAIL 핵심은 FULL 집계(ChuteCapacityService)가
@@ -152,3 +174,12 @@
 - **멱등 DB 백스톱(static lock 제거)**: piece 부분 유니크 `(p_id) WHERE is_active=1 AND status IN(활성3)` + **위반 catch는 provider 에러코드로**(SQLite SqliteExtendedErrorCode==2067 / SQL Server Number 2601·2627) — 메시지 문자열 매칭 금지(비영어 서버·타 인덱스 오판). 부분 유니크는 신규 piece insert 경합만 백스톱(RESERVED→DEPOSITED 업데이트는 write lock+status 재확인이 직렬화). 8병렬 동일 pId lock-free 정량 프로브(depositedRows=1·cellAssign=1) 5회로 입증.
 - [CODE-REVIEW] sprint=S-M4-P2a critical=0 major=2 minor=3 iter=1 opus=yes (독립 Opus가 FULL 집계 재시작 정확성 MAJOR 2건 적발: OnCleared 비움 미영속화→재시작 FULL 복귀, InitializeFromDb deposited_at>last_cleared_at 필터 누락→과다 집계. 기능 50/50 GREEN였으나 단일프로세스 인메모리만 봐서 미검출. fix-only 1 iter 해소: OnCleared DB 영속화(last_cleared_at+destination_event, 스코프 트랜잭션, 락 밖 I/O) + 필터 추가 + 재시작 회귀 테스트. MINOR: 멱등 catch 에러코드화·주석 정정·죽은 fallback 제거. 재검증 RESOLVED, 51/51 4회, Core diff 0. wcs_dev.db는 .gitignore 처리.)
 - **메타 교훈(3회째 반복)**: M2 off-lock·M3 IF-10 멱등·M4-P1 마이그레이션·M4-P2a FULL 영속화 — 전부 기능 Evaluator GREEN 통과 후 4-Tier 독립 코드리뷰가 적발. **인메모리/단일프로세스 테스트는 재시작·동시성·실DB 경로를 구조적으로 못 본다 → 독립 리뷰 필수.**
+
+## S-M4-P2b (멀티 소터: 소터별 게이트웨이 번들 N대) — APPROVED 핵심 피드백
+
+- **확장점 선확보가 무변경 교체를 가능케 함**: P2a에서 `ISorterGatewayRegistry` 단일 진입점 + 번들 인스턴스별 상태(`_clientLock`/`_writeQueue`/`_cSeq`/RFlag 채널이 전부 instance 필드, static 0)를 깔아둬서, P2b는 PlcGateway·HandshakeOrchestrator·Sim3ds **클래스 본문 무변경**으로 DI 팩토리 + 라우팅만으로 N대 확장(git diff 0). 단일 공유 큐 싱글톤 제거→소터별 `new PlcWriteQueue()`.
+- **소터 판별 DB 주도 + 설정 ChuteNo 매칭 + fail-loud**: 기동 시 `dest_type=SORTER_3D` 조회로 소터 목록(단일 진실=DB), 전송 파라미터는 appsettings 소터 배열에서 chute_no로 매칭. SORTER_3D인데 설정 누락→InvalidOperationException(기동 실패, 조용한 스킵 금지). DB 쿼리 실패→Critical 로그+rethrow.
+- **멀티 인스턴스 격리·핸드셰이크 독립 검증법**: 실 Sim3ds **2대를 다른 포트**로 띄워 동시 핸드셰이크 → 각 소터 C_Seq↔R_Seq 교차 0 입증(fake로는 못 잡는 진성 검증). 인스턴스별 직렬화·소터별 OFFLINE 독립도 실소켓으로. 단독 5회 연속 flaky 0.
+- **수명주기 disposal 비대칭(M5 이관)**: 번들이 DI 등록이 아니라 StartAsync 내 수동 생성이라, 종료 시 StopAsync(=Disconnect, 포트 해제)는 하나 `_master/_cts/_clientLock` Dispose는 미호출(관리 객체 누수, 프로세스 종료로 회수·포트는 해제됨). M5 운영(graceful shutdown)에서 SorterRegistryFactory를 IAsyncDisposable로 + 번들별 DisposeAsync(비멱등 StopAsync/DisposeAsync 이중 호출 주의).
+- [CODE-REVIEW] sprint=S-M4-P2b critical=0 major=0 minor=2 iter=0 opus=yes (독립 Opus APPROVE — 인스턴스 격리(static 0·번들별 독립)·F4 disposal 수정 진성(테스트 와이어링 단일 소유)·라우팅 무교차·DB 주도 fail-loud·실소켓 핸드셰이크 독립 진성·동작/스키마 무변경 전부 확인. BLOCKING/MAJOR 0. MINOR 2(M5/정리 이관): ① SorterRegistryFactory 번들 Dispose 누수(종료 시 _master/_cts/_clientLock 미dispose, 포트는 해제됨 — M5 graceful shutdown) ② Program.cs CHUTE !dest.IsActive 죽은 분기(쿼리가 이미 IsActive 필터, 선재 결함·무해). 59/59 4회, 실소켓 5회.)
+- **메타 교훈(코드리뷰 APPROVE 첫 통과)**: P2b는 4-Tier 독립 코드리뷰에서 **BLOCKING/MAJOR 0으로 첫 통과** — P2a가 확장점·인스턴스 격리를 미리 깔아둔 덕. 동시성 표면이라도 "클래스 본문 무변경 + 인스턴스화만" 구조면 결함 표면이 최소화됨.

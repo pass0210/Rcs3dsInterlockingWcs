@@ -1,5 +1,100 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE v2 (M4-P2b — Evaluator FAIL 재작업 후 최종)
+
+### 평가자 FAIL → 재작업 수정 내역 (2차 제출)
+
+**[F1] VS-P2b-4 — 실 Sim3ds 2대 동시 핸드셰이크 독립성 테스트 추가**
+- 결함: P2b4 테스트 부재. FakeModbusMaster만 사용하여 실제 C_Seq↔R_Seq 교차 검증 없음.
+- 수정: `P2bSimHandshakeTests : IAsyncLifetime` 클래스 신규 추가.
+  - 동적 포트 2개 할당(TCP 임의 포트) → SimServer A/B 각 1대 기동.
+  - PlcWriteQueue·PlcPollingService·HandshakeOrchestrator 각 2인스턴스 구성.
+  - `P2b4`: A·B 동시 `ExecuteAsync` → `resultA.SentCSeq == resultA.ReceivedRSeq` && `resultB.SentCSeq == resultB.ReceivedRSeq` — 교차 없음 검증.
+
+**[F2] VS-P2b-5 — 소터A 다회 핸드셰이크 중 소터B 무영향 테스트 추가**
+- 결함: VS-P2b-5 부재.
+- 수정: `P2b5`: 소터A 3회 연속 핸드셰이크 성공, 매 건 `SentCSeq==ReceivedRSeq`, 소터B `CFlag/RFlag` 미변경 검증.
+
+**[F3] VS-P2b-6 — 소터A OFFLINE 격리·복구 테스트 추가**
+- 결함: VS-P2b-6 부재.
+- 수정: `P2b6`: 소터A SimServer 종료 → `_pollingA.Latest.Online==false` 전이 대기 → 소터B `Online==true` 유지 확인 → 소터A SimServer 재기동 → Online 복구 + 후속 핸드셰이크 Success 검증.
+
+**[F4] ObjectDisposedException — 이중 Stop/Dispose 제거**
+- 결함: `FakeModbusWebApplicationFactory.Dispose`에서 `_fakePolling.StopAsync()+DisposeAsync()` 호출 후, 호스트 종료 경로에서 `NopSorterRegistryFactory.StopAsync`가 동일 객체를 재호출 → CTS 이미 disposed.
+- 수정: `FakeModbusWebApplicationFactory.Dispose`에서 polling 중복 호출 제거. `NopSorterRegistryFactory.StopAsync`에서 `StopAsync+DisposeAsync` 단일 소유권으로 통합.
+
+**[SPEC §7-A] §7-A L99 "단일 소터" 문구 정정**
+- 결함: `docs/SPEC.md` §7-A L99 — "런타임은 단일 소터(M3/M4에서 N대 라우팅 추가 예정)" 미정정.
+- 수정: M4-P2b N-소터 구현 완료 사실 반영. DB 주도 판별·소터별 번들·Sorters[] 스키마 명문화.
+
+### 빌드·테스트 결과 (재작업 후 4회 연속)
+
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln (4회 연속):
+  RUN 1: 통과! 실패:0 통과:59 전체:59
+  RUN 2: 통과! 실패:0 통과:59 전체:59
+  RUN 3: 통과! 실패:0 통과:59 전체:59
+  RUN 4: 통과! 실패:0 통과:59 전체:59
+
+신규 테스트 (8개): P2b2/P2b3/P2b4/P2b5/P2b6/P2b7a/P2b7b/P2b7c — 전부 GREEN
+회귀 테스트 (51개): 기존 VS-1~7/CONCUR-1/MINOR/P2a 전부 GREEN
+ObjectDisposedException: 0건 (4회 모두)
+```
+
+---
+
+## IMPLEMENTATION COMPLETE (M4-P2b)
+
+### Sprint: S-M4-P2b (MultiSorter — 단일 게이트웨이 → 소터별 레지스트리 N대)
+
+### 구현 범위
+
+**수정 파일**
+- `src/Wcs.Api/appsettings.json` — 단일 `Plc` 섹션 → `Sorters[]` 배열(N=1 단일 소터 구성 흡수). `ChuteNo`가 DB destination 매칭 키.
+- `src/Wcs.Api/SorterGatewayRegistry.cs` — `SingleSorterGatewayRegistry` 교체: `SorterBundleHandle`·`ISorterGatewayRegistry`·`MultiSorterGatewayRegistry` 신규 구현(N대 routing).
+- `src/Wcs.Api/Program.cs` — `SorterRegistryFactory`(IHostedService+ISorterGatewayRegistry) 추가: 기동 시 DB SORTER_3D 조회 → ChuteNo 매칭 → 소터별 번들 N대 구성 + 폴링 시작. IF-08/IF-10 핸들러는 `ISorterGatewayRegistry.GetBundle(dest.Id)` 경유로 최소 수정.
+- `tests/Wcs.Tests/ApiIntegrationTests.cs` — P2b 테스트 배선: `FakeModbusWebApplicationFactory` 수정(DB 시드 후 실제 SORTER_3D destinationId 동적 조회·`NopSorterRegistryFactory` 교체), 신규 테스트 5개(P2b2/P2b3/P2b7a/P2b7b/P2b7c).
+
+**핵심 아키텍처 변경**
+- `SorterBundleHandle`: destination.id 키, ChuteNo, PlcPollingService, HandshakeOrchestrator를 소터별 독립 인스턴스로 묶음.
+- `SorterRegistryFactory`: `IHostedService + ISorterGatewayRegistry` 구현 — 단일 싱글톤으로 양쪽 인터페이스 제공. StartAsync에서 DB→ChuteNo 매칭→번들 N대 구성.
+- `NopSorterRegistryFactory`: 테스트 전용 교체 — DB 기동 판별 우회 + FakePolling 기동 + FakeSorterGatewayRegistry 라우팅.
+- `FakeSorterGatewayRegistry` + FakeModbusWebApplicationFactory: DB 시드 후 실제 SORTER_3D destination.id 동적 조회(destinationId=1L 하드코딩 제거).
+
+**무변경 확인**
+- `src/Wcs.Core` — git diff 0바이트(판정 엔진 무변경)
+- `src/Wcs.PlcGateway/PlcGateway.cs`, `HandshakeOrchestrator.cs` — 클래스 본문 무변경(인스턴스화만)
+- `src/Wcs.Migrations.Sqlite/`, `src/Wcs.Migrations.SqlServer/`, `src/Wcs.Data/` — git diff 0바이트(스키마 무변경)
+
+### 빌드·테스트 결과 (4회 연속)
+
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln (4회 연속):
+  RUN 1: 통과! 실패:0 통과:56 전체:56
+  RUN 2: 통과! 실패:0 통과:56 전체:56
+  RUN 3: 통과! 실패:0 통과:56 전체:56
+  RUN 4: 통과! 실패:0 통과:56 전체:56
+
+신규 테스트 (5개): P2b2/P2b3/P2b7a/P2b7b/P2b7c — 전부 GREEN
+회귀 테스트 (51개): 기존 VS-1~7/CONCUR-1/MINOR/P2a 전부 GREEN
+```
+
+### grep 검증
+
+```
+단일 공유 PlcWriteQueue 싱글톤: src/Wcs.Api/Program.cs에 AddSingleton<PlcWriteQueue>() 없음
+소터별 독립 큐: SorterRegistryFactory.StartAsync에서 'var writeQueue = new PlcWriteQueue()' — 소터별 인스턴스화
+_clientLock: PlcGateway.cs L111 'private readonly SemaphoreSlim _clientLock = new(1, 1)' — 인스턴스별 독립
+Wcs.Core diff: 0 (판정 엔진 무변경)
+마이그레이션 diff: 0 (스키마 무변경)
+```
+
+---
+
 ## CODE REVIEW FIX (M4-P2a)
 
 ### 코드리뷰 수정 내역 (Step 4.5)

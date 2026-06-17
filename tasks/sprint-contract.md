@@ -1,66 +1,61 @@
-# Sprint Contract — S-M4-P2a (도메인 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱 + 이관 정리)
-> M4 (phase 2a / 3). 사용자 확정 2026-06-16: P2→P2a(도메인·데이터, 단일 게이트웨이)/P2b(멀티 소터) 분할 / 슈트 allowed=hold==None→READY·비활성→PAUSED 매핑(Core enum 변경 금지) / 멱등 DB 백스톱으로 static lock 제거 / NG DENIED FK=**nullable** / 게이트웨이 조회는 destination.id 단일 진입점(P2b 확장점) / v_destination_status 뷰 제외(인메모리만) / SQL Server filtered index 물리 컬럼명 교정.
-> 도메인 모델 확인: destination(chuteNo 주소, dest_type CHUTE|SORTER_3D). SORTER_3D=3D 소터 1대(여러 cell 보유, 층 이동). 일반 CHUTE=소터·셀·층 없음.
+# Sprint Contract — S-M4-P2b (멀티 소터: 단일 게이트웨이 → 소터별 레지스트리 N대)
+> M4 (phase 2b / 3). 전제: P2a APPROVED(51 GREEN). 사용자 확정 2026-06-17: 소터 판별 **DB 주도**(destination.dest_type=SORTER_3D 기동 쿼리) + 설정 키 **ChuteNo**(소터별 전송 파라미터) / 테스트 실 Sim3ds 2대 + fake / Timing 공통+소터별 오버라이드 / 단일 구성은 N=1로 흡수. 소터 라우팅 키 = destination.id.
+> 도메인: SORTER_3D destination 1개 = 3D 소터 1대(여러 cell·층 이동·별도 버스/포트).
 
 ## Goal
-P1이 None으로 미룬 IF-08 결선을 완성한다. **chuteNo→목적지 타입 분기**(SORTER_3D=DepositDecider 경로 / CHUTE=내부 FULL/PAUSED/NORMAL 경로), **ERD §7 FULL/PAUSED 인메모리 집계**(cur_qty 컬럼 금지, piece 단일진실)를 WcsHold로 변환해 IF-08 주입, **timeStamp 백필**(RCS 파싱/실패 시 UtcNow), **MAJOR-1 진성 멱등 DB 백스톱**(piece 부분 유니크 + 위반 catch → static `_recordLock` 제거), **MINOR/이관 정리**. **단일 게이트웨이 전제(멀티 소터 P2b)**. **Wcs.Core(Decide·Models·ToWire) 동작/시그니처 무변경 — 분기는 API 계층, hold만 산출·주입.** 기존 44 회귀 0.
+P2a가 단일 반환으로 둔 `ISorterGatewayRegistry` 진입점 **뒤를 소터별 게이트웨이 번들 N대로 교체**. **기동 시 DB에서 `dest_type=SORTER_3D` destination을 조회해 소터 목록 확정**(단일 진실=DB), 각 소터의 전송 파라미터(RTU 포트/Baud 또는 TCP Host/Port + Timing)는 **appsettings 소터 배열에서 ChuteNo로 매칭**. destination.id별 번들(IModbusMaster + 소터별 PlcWriteQueue + PlcPollingService + HandshakeOrchestrator) 인스턴스화. IF-08/IF-10 라우팅을 chuteNo→destination.id→레지스트리로 일원화하되 **IF-08 핸들러 본문 무변경 목표**. 인스턴스별 `_clientLock`·쓰기 큐·RFlag 채널 보존(off-lock 0·소터 간 경합 0). 소터 0·1·N대 IHostedService Start/Stop. **Wcs.Core 판정 무변경, PlcGateway/HandshakeOrchestrator/Sim3ds 클래스 본문 무변경(인스턴스화만 N배).** 기존 51 회귀 0(소터 1개=P2a 동일).
 
 ## Scope (IN)
-1. **IF-08 목적지 타입 분기(API 계층)**: chuteNo→destination 조회 후 dest_type 분기.
-   - **SORTER_3D**: 게이트웨이 스냅샷(P2a 단일 `IPlcGateway.Latest`) + 산출 WcsHold를 `DepositDecider.Decide(snap, agvFloor, hold)`에 주입. **Decide 호출부 시그니처·반환 그대로.**
-   - **CHUTE(소터·층·Ready 없음)**: hold만 판정 — `hold==None`→allowed=true·reason="READY" / Full→FULL / Paused→PAUSED. **비활성(enabled=false/is_active=false) 슈트→PAUSED 매핑**(기존 DenyReason 내, Core enum 변경 금지). agvFloor·TgtFloor 쓰기 경로 없음(쓰기 큐 미투입).
-   - 게이트웨이 조회 = **destination.id 키 단일 진입점**(`ISorterGatewayRegistry` 가칭, P2a는 단일 반환 — P2b 확장점).
-   - **SPEC §2/§3에 슈트(비소터) IF-08 경로 명문화**(문서 동반).
-2. **FULL/PAUSED 계산(ERD §7)**: 인메모리 집계 서비스(싱글톤) — 기동 시 DB 쿼리로 재구성. `SUM(piece.qty WHERE deposited_at>chute_detail.last_cleared_at) + 이동중 예약 qty ≥ work_full_qty`→Full(피스 qty>1 가능, COUNT 아님). IF-05 예약(+)·IF-10 투입·비움(리셋) 이벤트로 증감. **cur_qty 컬럼 금지**. PAUSED=destination.status. WcsHold 변환해 IF-08·IF-05 주입. (Full+Paused 동시→Full 우선, SPEC §2 Hold 순서.)
-3. **timeStamp 백필**: IF-05/08/10 수신 시 RCS timeStamp 파싱(`"yyyy-MM-dd HH:mm:ss"`), 없거나 실패→**서버 UtcNow**. client_ts엔 원문 보존(파싱 실패해도, ERD §6), effective=파싱값 또는 UtcNow. 로컬 `DateTimeOffset.Now`→`UtcNow` 통일. created_at(UTC) 별도 유지.
-4. **MAJOR-1 멱등 DB 백스톱**: piece 부분 유니크 `(p_id) WHERE is_active=1 AND status IN('DEPOSITED','CELL_ASSIGNED','LOADED')`(SQL Server filtered/SQLite expression). **물리 컬럼명 정확**(현 PascalCase — 아래 ※). `EfDepositRecorder.RecordDeposit`에서 유니크 위반 catch→진성 멱등(중복 false). **static `_recordLock` 제거**. **양 provider 증분 마이그레이션 add**(Wcs.Migrations.Sqlite·SqlServer, ModelSnapshot 갱신, pending 0).
-5. **MINOR-4 셀 배정 유니크**: cell_assignment `(cell_id) WHERE released_at IS NULL` 부분 유니크(동시 이중 점유 차단). 양 provider 마이그레이션.
-6. **MINOR-2 RowVersion 정리**: 비활성 provider 분기 RowVersion `Ignore()`(이중 물리 컬럼 제거).
-7. **MINOR-5 NG DENIED FK = nullable(사용자 확정)**: IF-05 NG piece의 destination_id를 **nullable FK**로(임의 fallback 제거). 스키마·마이그레이션·집계 쿼리 NULL 처리 동반.
-8. **MINOR-6 IF05_REQ 통합**: IF05_REQ piece_event를 QueryDestination 트랜잭션에 통합, RecordDestinationQuery 메서드 제거(IF-05 호출 정리).
-9. **죽은 코드·종료 토큰**: 죽은 GetDestType·다운캐스트→전용 인터페이스, InMemory* 죽은 클래스 제거. 핸드셰이크 `CancellationToken.None`→`IHostApplicationLifetime.ApplicationStopping` 주입.
+1. **소터 판별 = DB 주도**: 기동 시 `destination WHERE dest_type='SORTER_3D' AND is_active` 조회 → 소터 목록(destination.id·chute_no). 각 소터의 전송 파라미터는 appsettings 소터 배열에서 **chute_no로 매칭**. SORTER_3D인데 설정 전송 항목 없으면 **fail-loud**(기동 로그 에러 — 추측 금지).
+2. **소터별 번들 N대(DI 팩토리)**: destination.id별 IModbusMaster(ModbusMasterFactory.Create, 매칭된 전송 설정) + **번들 전용 PlcWriteQueue**(단일 공유 큐 제거 — 절대규칙 #1 소터별 보존) + PlcPollingService + HandshakeOrchestrator. 불변 컬렉션(키=destination.id).
+3. **appsettings: 단일 Plc → 소터 배열** (ChuteNo 키):
+   - 소터별: `ChuteNo` + Transport(Rtu/Tcp) + 전송 파라미터(PortName/BaudRate/… 또는 Host/Port). **Timing은 공통 + 소터별 오버라이드**(공통 Timing 상속, 항목별 덮어쓰기). 하드코딩 0.
+   - 단일 소터 구성도 배열(N=1)로 표현 — 기존 단일 Plc 섹션은 배열로 흡수(별도 레거시 경로 없음).
+4. **`ISorterGatewayRegistry` N대 라우팅**: destination.id→번들. GetLatest(destinationId)는 해당 소터 스냅샷(미존재 시 null→OFFLINE 경로 유지). IF-08 SetTgtFloor 큐 투입·IF-10 핸드셰이크 트리거가 destination.id로 번들 경유(레지스트리가 번들 핸들 제공 — 인터페이스 확장). SingleSorterGatewayRegistry 제거 또는 N=1 흡수.
+5. **라우팅 일원화**: IF-08 chuteNo→destination(조회됨)→dest.Id→번들(스냅샷·SetTgtFloor 큐). **핸들러 본문 무변경 목표**(단일 writeQueue 의존을 번들 경유로 최소 교체만). IF-10 3D 보고→dest.Id 번들 핸드셰이크 트리거. 셀 선택·멱등·FULL 집계 무변경.
+6. **인스턴스별 동시성 불변**: 각 PlcPollingService `_clientLock`이 폴·쓰기·RMW·Disconnect/재연결을 인스턴스별 단일 임계구역 직렬화(M2 off-lock 0 보존). `_cSeq`·RFlag 채널 per-instance. 별도 버스→인스턴스 간 소켓/시리얼 경합 0.
+7. **IHostedService 소터별 Start/Stop**: 번들 N개 PlcPollingService를 기동/종료(ApplicationStopping) 연결. 소터 0(빈)·1·N 전부 정상.
+8. **죽은 코드·문서**: 단일 IPlcGateway/PlcWriteQueue/HandshakeOrchestrator 싱글톤 직접 등록 제거(번들 흡수). SPEC §7-A "런타임 단일 소터" 정정 + 소터 배열 스키마·DB 주도 판별 명문화.
 
-※ **잠재 결함 교정**: 현 SQL Server Initial의 piece 필터드 유니크가 `[is_active]`인데 물리 컬럼은 PascalCase `IsActive` → 실 SQL Server 인덱스 생성 실패(SQLite EnsureCreated라 미검출). P2a에서 물리 컬럼명 일치(또는 snake_case 매핑)로 교정.
+## Scope (OUT) — P3/M5
+- S1~S9 → P3. 보존 퍼지·운영 자동 Migrate() → M5.
+- **스키마 무변경**: destination/cell/piece ERD·마이그레이션 변경 0 → pending 0(증분 add 0). 매핑은 기존 destination 행 사용.
+- **Wcs.Core(Decide·Models·ToWire) 동작/시그니처 변경 0. PlcPollingService·HandshakeOrchestrator·Sim3ds 클래스 본문 변경 0**(인스턴스화·DI·옵션 바인딩만). IF-08/IF-10 와이어 변경 0(라우팅만).
+- CHUTE 경로(ChuteCapacityService·FULL/PAUSED) 무변경.
 
-## Scope (OUT) — P2b/P3 이연
-- **멀티 소터 N대 레지스트리**(소터별 IModbusMaster/PlcPollingService/HandshakeOrchestrator·소터별 버스/포트·appsettings 소터 배열·destination.id 라우팅)→**P2b**. P2a는 단일 게이트웨이, IF-08은 destination.id 단일 진입점으로 호출하되 단일 반환.
-- S1~S9→P3. 보존 퍼지·운영 자동 Migrate()→M5. v_destination_status 물리 뷰 제외(인메모리).
-- **Wcs.Core 판정·전송 추상화·핸드셰이크 동작/시그니처 변경 0**(hold 산출·주입, 종료 토큰 전달뿐).
-
-## Detected Project Type: Backend/API (도메인 결선 + 동시성 멱등 + 스키마 증분)
-검증 = 44 회귀 + IF-08 분기(슈트/소터) + FULL 계산 + timeStamp 백필 + 멱등 DB 백스톱(lock 없이 8병렬 1건) + 이관 정리.
+## Detected Project Type: Backend/API (DI 멀티 인스턴스 + 동시성 인스턴스 격리 + 설정 스키마 + 기동 DB 판별)
+검증 = 51 회귀(소터 1대) + 2+ 소터 라우팅 독립 + 소터별 핸드셰이크 독립(C_Seq) + 인스턴스별 직렬화 + 소터별 OFFLINE 독립 + 소터 0/1/N 기동.
 
 ## Evaluation Criteria
-1. 빌드/테스트: build exit0(경고0/오류0). `dotnet test` 기존 44 회귀 0 + 신규 GREEN, 4회 연속. 기존 split(Decider15/PlcGatewayIntegration9/RtuTransport4) 불변, ApiIntegration 신규 추가만.
-2. **Core 무변경**: git diff src/Wcs.Core 0바이트. PlcGateway/HandshakeOrchestrator는 종료 토큰 외 동작 변경 0.
-3. IF-08 분기: 소터=Decide(층·Ready), 슈트=hold만(NORMAL→READY/Full→FULL/Paused→PAUSED, 비활성→PAUSED, 층 무관·쓰기 큐 0). SPEC §2/§3 문서 동반.
-4. FULL 계산: 누적qty(deposited_at>last_cleared_at)+예약 ≥ work_full_qty→Full, 비움 리셋, qty>1 케이스. cur_qty 컬럼 0(grep).
-5. timeStamp: 파싱→client_ts 원문+effective / 실패·누락→UtcNow. 로컬 Now 잔존 0(grep).
-6. 멱등 DB 백스톱: piece 부분 유니크 양 provider(물리 컬럼명 정확), _recordLock 제거(grep 0), **CONCUR 8병렬 동일 pId lock-free→1건 전이·IF-11 ≤1** 단독 5회 GREEN.
-7. MINOR 정리: cell_assignment 유니크·RowVersion Ignore·NG nullable FK·IF05_REQ 통합(RecordDestinationQuery 제거)·죽은코드·종료토큰 — git diff + 동작 무변경.
-8. 마이그레이션 동기: `has-pending-model-changes` 양 provider "No changes", 증분이 piece·cell_assignment 부분 유니크 CreateIndex 포함.
-9. 하드코딩 0(work_full_qty·시간 appsettings/DB) / 커밋 전 HEAD=feat/m4-p2-domain 확인.
+1. 빌드/테스트: build exit0(경고0/오류0). `dotnet test` 51 회귀 0 + 신규 GREEN, 4회 연속. 기존 split 불변, ApiIntegration 멀티소터 신규만.
+2. **Core·게이트웨이 클래스 무변경**: git diff src/Wcs.Core 0. src/Wcs.PlcGateway/{PlcGateway.cs,HandshakeOrchestrator.cs} 클래스 본문 동작 변경 0(옵션/생성자 시그니처 외). Sim3ds 본문 0.
+3. DB 주도 판별: 기동 시 SORTER_3D destination 조회로 소터 목록. SORTER_3D인데 설정 전송 없으면 fail-loud(기동 에러).
+4. 소터별 번들 N대: destination.id별 IModbusMaster·PlcWriteQueue·PlcPollingService·HandshakeOrchestrator N개 실재. 단일 공유 큐 부재(grep).
+5. 라우팅: chuteNo→destination.id→번들. IF-08 본문 무변경(또는 레지스트리 경유 최소 교체, git diff 입증). 2소터 다른 스냅샷→독립 판정(교차 0).
+6. 인스턴스별 직렬화·off-lock 0: 전 `_clientLock`/`_master` 인스턴스별 임계구역. `_cSeq` 소터별 독립(공유 0).
+7. 소터별 핸드셰이크 독립(핵심): 2 Sim3ds(다른 포트) 동시 핸드셰이크→각 소터 C_Seq↔R_Seq 자기 소터 내 일치, 교차 0. 다회 GREEN.
+8. 소터별 OFFLINE 독립: 한 소터 단절→그 소터 IF-08만 OFFLINE, 타 소터 정상. 재기동 후 후속 핸드셰이크 Success.
+9. 소터 0·1·N 기동 + 스키마 pending 0(양 provider) + 하드코딩 0(포트·Timing 설정) + 커밋 전 HEAD=feat/m4-p2b-multisorter 확인.
 
 ## Completion Conditions (회귀 0)
-- build exit0 / `dotnet test` 44 회귀 0 + 신규 GREEN 4회, split 불변.
-- IF-08 슈트/소터 분기 + SPEC §2/§3 갱신. FULL/PAUSED 인메모리→WcsHold(cur_qty 0). timeStamp 백필+UtcNow 통일.
-- piece·cell_assignment 부분 유니크 양 provider(pending 0), static lock 제거, CONCUR lock-free GREEN.
-- MINOR-2/5/6 + 죽은코드 + 종료토큰. Wcs.Core 무수정. feature 브랜치 커밋.
+- build exit0 / `dotnet test` 51 회귀 0 + 신규 GREEN 4회, split 불변.
+- DB 주도 소터 판별 + ChuteNo 키 설정 매칭(미스매치 fail-loud). destination.id별 번들 N대 + 소터별 큐. 단일 공유 큐·핸드셰이크 싱글톤 제거.
+- IF-08/IF-10 라우팅 + 본문 무변경. 와이어 무변경. 2+ 소터 라우팅·핸드셰이크 독립(C_Seq)·인스턴스별 직렬화·소터별 OFFLINE GREEN. 소터 0/1/N 기동.
+- Wcs.Core·게이트웨이 클래스 본문 무변경. pending 0. SPEC §7-A 정정. feature 브랜치 커밋(HEAD 확인).
+- **독립 코드리뷰 통과**(동시성 표면 — 인스턴스 격리·off-lock 0·소터 간 경합 0).
 
 ## Verification Scenarios
-- **VS-P2a-1 회귀(필수)**: 44 GREEN 4회, Decider/PlcGatewayIntegration/RtuTransport diff 0, ApiIntegration 기존 16 단언 불변.
-- **VS-P2a-2 IF-08 소터**: SORTER_3D→Decide(Ready=1·층일치→READY/층불일치→WRONG_FLOOR+TgtFloor 기입/Ready=0→BUSY). hold=None시 P1 와이어 동일.
-- **VS-P2a-3 IF-08 슈트**: CHUTE→hold만. NORMAL→READY/PAUSED status→PAUSED/FULL 조건→FULL/비활성→PAUSED. **TgtFloor 쓰기 큐 0**.
-- **VS-P2a-4 FULL**: work_full_qty=N → 누적 qty 도달 시 FULL, 비움 후 NORMAL 복귀, 피스 qty>1.
-- **VS-P2a-5 timeStamp**: 정상→client_ts 원문·effective / 누락·"bad"→client_ts 보존+effective=UtcNow. created_at UTC.
-- **VS-P2a-6 멱등 DB 백스톱(핵심)**: 8병렬 동일 pId IF-10 **lock 제거 상태**→1건 DEPOSITED, 나머지 멱등 200, IF-11 ≤1. 단독 5회. _recordLock grep 0.
-- **VS-P2a-7 셀 유니크**: 동시 같은 소터 셀 배정→`(cell_id) WHERE released_at IS NULL` 위반으로 1건만.
-- **VS-P2a-8 NG nullable FK**: IF-05 NG(NO_DEST)→piece DENIED destination_id=NULL. 와이어 P1 동일(NG·chuteNo=null).
-- **VS-P2a-9 마이그레이션 동기**: 양 provider pending 0, 증분에 piece·cell_assignment 부분 유니크.
-- **VS-P2a-10 종료토큰·정리**: 핸드셰이크 ApplicationStopping(CancellationToken.None grep 0), IF05_REQ 트랜잭션 내 1건·RecordDestinationQuery 부재·죽은코드 부재.
+- **VS-P2b-1 회귀(필수)**: 51 GREEN 4회. Decider/PlcGatewayIntegration/RtuTransport diff 0. 소터 1대 구성=P2a 동작 동일.
+- **VS-P2b-2 N대 인스턴스화**: SORTER_3D 2개 + 설정 2개→번들 2세트(각 IModbusMaster·PlcWriteQueue·PlcPollingService·HandshakeOrchestrator). 공유 큐 부재.
+- **VS-P2b-3 라우팅 독립(fake)**: 소터 A·B 다른 fake 스냅샷(A Ready=1·층일치/B Ready=0)→IF-08(destA) READY / IF-08(destB) BUSY. 교차 0.
+- **VS-P2b-4 핸드셰이크 독립(핵심, 실 Sim3ds 2대)**: 다른 포트 Sim3ds 2대 동시 IF-10 3D 보고→각 소터 C_Seq↔R_Seq 자기 소터 내 일치, 교차 0. 다회 GREEN(flaky 배제).
+- **VS-P2b-5 인스턴스별 직렬화**: 소터 A 폴 중 다수 핸드셰이크→A R_Seq==C_Seq 매 건 성공, B 무영향. 4회 연속.
+- **VS-P2b-6 소터별 OFFLINE 독립**: A 단절→A IF-08만 OFFLINE·B 정상. A 재기동 후 후속 핸드셰이크 Success(off-lock 인스턴스별 보존).
+- **VS-P2b-7 소터 0·1·N 기동**: 빈(0대) 기동/종료 정상(SORTER_3D IF-08은 OFFLINE). 1대(P2a 동등). 2+대 StartAsync/StopAsync 전부 호출. SORTER_3D 설정 누락→fail-loud.
+- **VS-P2b-8 스키마·하드코딩**: pending 0(양 provider). 소터별 포트·Timing 설정 주입(하드코딩 grep 0).
 
 ## 미확정 (추측 금지)
-- 이동중 예약 qty = RESERVED/PERMITTED(미투입) 활성 piece qty 합(DENIED/CANCELLED 제외).
-- SQLite 부분 유니크 expression이 EF HasFilter로 정확히 내려가는지 + 물리 컬럼명 검증.
+- 레지스트리 인터페이스 확장 형태: IF-08 본문 무변경 위해 스냅샷+SetTgtFloor enqueue+핸드셰이크 트리거를 destination.id로 제공하는 번들 핸들 반환(권고) vs 별도 메서드 분리 — 구현 시 본문 무변경도 우선해 확정.
+- 기동 DB 판별 타이밍: IHostedService StartAsync에서 SORTER_3D 조회→번들 구성. DB 미가용 시 정책(재시도 vs fail) — 단일 인스턴스·기동 1회라 fail-loud 권고.
 
-> Planner self-check — Backend/API. Scenario slots VS-P2a-1~10(회귀·소터/슈트 분기·FULL·timeStamp·멱등DB·셀유니크·NG FK·마이그레이션·정리). All filled: yes. Core 무변경 + 회귀 0 가드. 멱등 DB 백스톱은 lock-free CONCUR 5회 + 독립 코드리뷰 필수. 사용자 확정(P2 분할·슈트 PAUSED·lock 제거·nullable FK·destination.id 진입점) 반영.
+> Planner self-check — Backend/API. Scenario slots VS-P2b-1~8. All filled: yes. 회귀 0(소터 1대=P2a) + Core/게이트웨이 클래스 무변경 + pending 0. 동시성 표면→독립 코드리뷰 필수. 사용자 확정(DB 주도 판별·ChuteNo 키·실 Sim3ds 2대 테스트·Timing 공통+오버라이드·단일 N=1 흡수) 반영.

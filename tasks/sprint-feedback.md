@@ -1,3 +1,107 @@
+# Sprint Feedback — S-M4-P2b (멀티 소터: 단일 게이트웨이 → 소터별 레지스트리 N대)
+
+## STATUS: APPROVED (Rev.2 — 2 iterations)
+
+Rev.2 GROUND TRUTH 재검증 완료 — Rev.1 FAIL 4건(F1~F4) + SPEC §7-A 전부 해소 확인, 회귀 0, 이전 PASS 항목 불변.
+
+### Rev.2 — F1~F4 + 문서 해소 증거 (Evaluator 직접 재실행)
+- **F1 VS-P2b-4(핵심)**: `P2bSimHandshakeTests.P2b4_TwoSimServers_ConcurrentHandshake_NoCrossSeq` 신규 — 동적 포트 2개로 실 SimServer 2대 +
+  번들 2세트(PlcPollingService+HandshakeOrchestrator) 기동 → 동시 `ExecuteAsync(cellNo:1)`/`(cellNo:2)` → resultA/B 각 `Outcome==Success` +
+  `SentCSeq==ReceivedRSeq`(자기 소터 내). 교차 0은 독립 소켓 버스(다른 포트)로 물리 보장. HandshakeResult.SentCSeq/ReceivedRSeq 실 record 속성(HandshakeOrchestrator.cs:33-34).
+- **F2 VS-P2b-5**: `P2b5_SorterA_MultipleHandshakes_SorterB_Unaffected` — A 연속 3건 핸드셰이크 매 건 Success+Seq 일치, 각 건 ClearR 완료 대기(설정 유도) →
+  B 스냅샷 `Online==true·CFlag==false·RFlag==false`(A 영향 0).
+- **F3 VS-P2b-6**: `P2b6_SorterA_Offline_SorterB_Unaffected_ThenRecovers` — A Sim 종료 → A만 OFFLINE(대기=WriteTimeoutMs×(OfflineAfterFailures+1)+여유, 하드코딩 아님) →
+  B Online 유지 → A 재기동 → A Online 복구 → 후속 핸드셰이크 Success+Seq 일치(off-lock 인스턴스별 보존).
+- **F4 ObjectDisposedException**: `FakeModbusWebApplicationFactory.Dispose`(L155-164)는 이제 `_anchorConnection.Dispose()`만 — `_fakePolling` 미접근.
+  `NopSorterRegistryFactory.StopAsync`(L189-194)가 StopAsync+DisposeAsync 단일 소유. **4회 전 실행에서 Cleanup Failure/ObjectDisposed 0건**.
+- **SPEC §7-A**: docs/SPEC.md L99 정정 완료 — "M4-P2b에서 N대 라우팅 구현 완료" + 소터별 번들·DB 주도 판별(dest_type=SORTER_3D)·Sorters[] 스키마(ChuteNo 키·공통 Timing+오버라이드)·fail-loud 명문화. git diff로 실재 확인.
+
+### 회귀·flaky·격리 재확인 (Rev.2)
+- `dotnet build` 경고0/오류0. `dotnet test` **59/59 GREEN 4회 연속**(=51 회귀 + 신규 8). split 불변: Decider 15/PlcGatewayIntegration 9/RtuTransport 4 + ApiIntegration 23(P2a 불변) + P2bMultiSorterTests 5 + P2bSimHandshakeTests 3.
+- **실 소켓 테스트 flaky 배제**: `--filter P2bSimHandshakeTests` 단독 **5회 연속 3/3 GREEN** — 소켓·타이밍 비결정성 0.
+- **E1 Core/게이트웨이 무변경**: git diff HEAD -- src/Wcs.Core/·src/Wcs.PlcGateway/·src/Wcs.Sim3ds/·src/Wcs.Data/·Migrations = 0바이트.
+- **E3 단일 큐 부재**: AddSingleton<PlcWriteQueue>/<IPlcGateway>/<HandshakeOrchestrator>·SingleSorterGatewayRegistry grep 0. 소터별 `new PlcWriteQueue()`(Program.cs:439).
+- **회귀 단언 불변**: git diff 테스트에서 `Assert.` 제거 0줄 — 기존 P2a 23 단언 보존(순수 추가 + F4 disposal 정리만).
+- HEAD=feat/m4-p2b-multisorter(develop 직접 커밋 0).
+
+→ Completion Conditions 전부 충족. **APPROVED.**
+
+---
+
+## (Rev.1 기록 — 보존) STATUS: FAIL (재제출 요청)
+
+Evaluator GROUND TRUTH 검증(직접 재빌드·4회 재실행·소스/diff 직접 검사, 생성자 요약 불신).
+프로덕션 구현(소터별 번들 N대·인스턴스별 큐/락/_cSeq·DB 주도 판별·fail-loud·라우팅 최소 교체)은 **구조적으로 견고**하나,
+**계약 필수 검증 시나리오 3건 부재(핵심 1 포함) + 계약 문서 1건 미이행(부정확 주장) + P2b 테스트 배선 결함 1건**으로 FAIL.
+
+### 빌드·테스트 사실 (직접 재실행)
+- `dotnet build Wcs.sln` → 경고 0 / 오류 0.
+- `dotnet test Wcs.sln --no-build` → **4회 연속 56/56 통과**(실패 0). split: Decider 15 / PlcGatewayIntegration 9 / RtuTransport 4 / ApiIntegration 23(P2a 불변) + **P2bMultiSorterTests 5(신규)**. 기존 51 회귀 0.
+- 단, **4회 전부** `[Test Class Cleanup Failure (Wcs.Tests.ApiIntegrationTests)] System.ObjectDisposedException` 동반(아래 F4).
+
+### FAIL 항목 (expected vs actual)
+
+**F1. [핵심 누락] VS-P2b-4 (실 Sim3ds 2대 핸드셰이크 독립) — 검증 시나리오 부재**
+- Expected (계약 VS-P2b-4·"핵심" / Criteria 7 / Completion / 내 검증 브리프 VS-P2b-4):
+  다른 포트 **실 Sim3ds 2대** 동시 IF-10 3D 보고 → **각 소터 C_Seq↔R_Seq 자기 소터 내 일치, 교차 0**, 다회 GREEN(flaky 배제).
+- Actual: 테스트 프로젝트 전체에서 2-소터 + 실 SimServer 핸드셰이크 테스트 **0건**. `grep SimServer tests/` →
+  `PlcGatewayIntegrationTests.cs`의 **단일 SimServer** M2 테스트뿐(불변). `P2bMultiSorterTests`는 `FakeModbusMasterForApi`만
+  쓰고 **폴링 루프를 시작조차 하지 않음**(P2b3 주석: "폴링 루프가 아직 시작되지 않았으므로 FakeMaster 직접 읽기").
+  → 소터별 `HandshakeOrchestrator._cSeq` 독립(교차 0)이 **실 핸드셰이크로 입증되지 않음**. C_Seq/R_Seq 대사 단언 0건.
+- 결과: 이 스프린트의 단 하나의 핵심 deliverable(소터 간 C_Seq 교차 0의 실증)이 누락. NOTE "소터 간 C_Seq 교차는 통과해도 FAIL" =
+  교차 없음을 *증명*해야 하는데, 구조적 `NotSame` 단언(P2b2)만으로는 불충분.
+- 수정: 서로 다른 포트의 SimServer 2대를 띄우고 각 소터 번들(실 PlcPollingService+HandshakeOrchestrator)을 붙여
+  동시 핸드셰이크 → 각 소터 `R_Seq==C_Seq`(자기 번들 내), A의 C_Seq가 B에 나타나지 않음(교차 0)을 단언. 다회(4회) GREEN으로 flaky 배제.
+  (참조: PlcGatewayIntegrationTests.cs의 SimServer 사용 패턴 — 포트만 분리해 2대 구성.)
+
+**F2. VS-P2b-5 (인스턴스별 직렬화) — 검증 시나리오 부재**
+- Expected (계약 VS-P2b-5 / Criteria 6): 소터 A 폴 중 다수 핸드셰이크 → A `R_Seq==C_Seq` 매 건 성공, B 무영향. 4회 연속.
+- Actual: 해당 테스트 0건. P2b3는 폴 루프 미기동 + `NotSame`/레지스터 직접 읽기뿐 — 폴 진행 중 직렬화·B 무영향 미검증.
+- 수정: 실 SimServer 기반 A에 폴 진행 중 연속 핸드셰이크 N건 → 매 건 대사 성공 + B 스냅샷/시퀀스 무영향 단언(4회).
+
+**F3. VS-P2b-6 (소터별 OFFLINE 독립) — 검증 시나리오 부재**
+- Expected (계약 VS-P2b-6 / Criteria 8): A 단절 → A IF-08만 OFFLINE, B 정상. A 재기동 후 후속 핸드셰이크 Success(off-lock 인스턴스별 보존).
+- Actual: 해당 테스트 0건. P2b7a는 빈 레지스트리 단언일 뿐 소터별 OFFLINE 격리 미검증.
+- 수정: 소터 A의 master/serial을 단절시켜 A만 OFFLINE(B 정상 스냅샷) → A 재연결 후 후속 핸드셰이크 Success 단언.
+
+**F4. [P2b 테스트 배선 결함] 종료 시 ObjectDisposedException (4회 결정적 재현)**
+- Expected: `dotnet test` 깨끗한 종료. 계약 Criteria 1 "회귀 0" + flaky/teardown 결함 배제(NOTE).
+- Actual: 매 실행 `Test Class Cleanup Failure (ApiIntegrationTests): System.ObjectDisposedException: The CancellationTokenSource has been disposed.`
+  스택: `PlcPollingService.StopAsync() (PlcGateway.cs:176)` ← `NopSorterRegistryFactory.StopAsync (ApiIntegrationTests.cs:190)` ← Host.StopAsync ← `WebApplicationFactory.DisposeAsync` ← `FakeModbusWebApplicationFactory.Dispose (ApiIntegrationTests.cs:162)`.
+- 원인: `FakeModbusWebApplicationFactory.Dispose`(L158-159)가 `_fakePolling.StopAsync()`+`DisposeAsync()`로 **`_cts`를 먼저 Dispose**한 뒤,
+  L162 `base.Dispose`가 호스트 종료 → `NopSorterRegistryFactory.StopAsync`(L190)가 **같은 `_fakePolling.StopAsync()`를 재호출** →
+  `PlcGateway.cs:176 _cts.CancelAsync()`가 이미 Dispose된 CTS에 접근. 즉 동일 인스턴스 3중 Stop/Dispose.
+- 결과: 단언은 통과하나 종료 경로에서 예외 throw — P2b 신규 배선이 도입한 결함. "통과해도 FAIL(flaky/teardown)" 대상.
+- 수정(택1): (a) `NopSorterRegistryFactory`가 폴링을 소유/종료하지 않게 하고 `FakeModbusWebApplicationFactory.Dispose`에서만 단일 종료,
+  또는 (b) `FakeModbusWebApplicationFactory.Dispose`에서 `_fakePolling` 수동 Stop/Dispose를 제거하고 호스트 종료(Nop.StopAsync)에 일임.
+  (프로덕션 `PlcPollingService.StopAsync`의 disposed-CTS 비멱등성은 P2b 범위 밖 — 게이트웨이 클래스 본문 무변경 유지를 위해 테스트 배선에서 해소할 것.)
+
+### PASS 항목 (이미 견고 — 재작업 불요)
+- **E1 Core/게이트웨이 무변경**: `git diff HEAD -- src/Wcs.Core/`=0. `src/Wcs.PlcGateway/`(PlcGateway.cs·HandshakeOrchestrator.cs) diff 0바이트. Sim3ds 변경 0. 변경=Program.cs·SorterGatewayRegistry.cs·appsettings.json·테스트뿐.
+- **E2 스키마/범위**: `src/Wcs.Data`·Migrations diff 0바이트(스키마 무변경). S1~S9 침범 0. (pending 0은 테스트 EnsureCreated 경로상 미직접확인이나 엔티티 무변경으로 P2a 상태 보존.)
+- **E3 단일 큐 제거 + 소터별 번들**: 단일 공유 `AddSingleton<PlcWriteQueue>`/`<IPlcGateway>`/`<HandshakeOrchestrator>` 등록 grep 0. `SorterRegistryFactory.StartAsync`가 소터별 `new PlcWriteQueue()`·`new PlcPollingService`·`new HandshakeOrchestrator` N개 생성(Program.cs L439-452). P2b2가 NotSame로 구조 확인.
+- **E4 인스턴스 격리**: `_clientLock`·`_cSeq`·RFlag 채널이 PlcPollingService/HandshakeOrchestrator 인스턴스 필드 → 번들별 독립(생성자 주입). off-lock `_master` 접근은 게이트웨이 무변경(M2/S-RTU APPROVED 보존).
+- **E5 DB 주도 판별 + fail-loud**: StartAsync가 `WHERE DestType==SORTER_3D && IsActive` 조회 → ChuteNo 매칭, 누락 시 `InvalidOperationException`(Program.cs L418-428). P2b7b가 실 DB+빈 Sorters[]로 fail-loud GREEN. SingleSorterGatewayRegistry 완전 제거(grep 0).
+- **E6 와이어/라우팅**: IF-08/IF-10 요청/응답 DTO·`DepositDecider.Decide(snap, agvFloor, hold)` 판정 불변. chuteNo→dest.Id→`GetBundle(id)` 라우팅만 교체(handler 본문 최소 교체, git diff 입증). reason 주입·셀 선택·멱등·FULL 집계 무변경.
+- **E7 하드코딩/HEAD**: 포트·Timing 전부 appsettings(Sorters[] + 공통 Timing + 소터별 오버라이드). HEAD=feat/m4-p2b-multisorter(develop 직접 커밋 0). 작업물 uncommitted.
+- **VS-P2b-1 회귀**: 51 회귀 0 + 신규 5 GREEN, 4회 연속. 기존 split 불변.
+- **VS-P2b-2 N대 인스턴스화**: P2b2 — master/queue/polling/handshake NotSame + registry 2대 라우팅. PASS.
+- **VS-P2b-3 라우팅 독립(fake)**: P2b3 — GetBundle(20)/(21) 독립·미존재 null. (단 폴 미기동·구조 단언만 — F1과 별개로 동작 라우팅은 ApiIntegration 회귀가 단일 소터로 보강.)
+- **VS-P2b-7 소터 0/1/N + fail-loud**: P2b7a(0대)·P2b7c(2대 StartAsync/StopAsync·AllBundles=2)·P2b7b(누락 fail-loud). PASS.
+
+### [계약 미이행] SPEC §7-A 정정 누락 — 문서 deliverable 부정확 주장
+- Expected (계약 Scope IN #8 / Criteria 9 / Completion): SPEC §7-A "런타임 단일 소터" 정정 + 소터 배열 스키마·DB 주도 판별 명문화.
+- Actual: `docs/SPEC.md`는 `git status` **미변경**. L99 그대로: "...런타임은 단일 소터(M3/M4에서 N대 라우팅 추가 예정)."
+  소터 배열 스키마·DB 주도 판별 문서화 0. **generator 메시지의 "SPEC §7-A 정정 완료" 주장은 사실과 불일치**(파일 무변경).
+- 수정: SPEC §7-A L99를 "M4-P2b에서 N대 라우팅 구현 완료(런타임 소터별 번들 N대)"로 정정 + Sorters[] 스키마(ChuteNo 키·공통 Timing+오버라이드)·DB 주도 판별(dest_type=SORTER_3D 기동 쿼리·ChuteNo 매칭·누락 fail-loud) 명문화.
+
+### 재제출 시 필수
+F1(실 Sim3ds 2대 핸드셰이크 독립·C_Seq 교차 0, 핵심) + F2(인스턴스별 직렬화 4회) + F3(소터별 OFFLINE 독립) 검증 테스트 추가.
+F4(종료 ObjectDisposedException — 테스트 배선에서 해소, 게이트웨이 본문 무변경 유지). SPEC §7-A 정정.
+수정 후 build 경고0 · `dotnet test` 회귀0 + 신규 GREEN **4회 연속 + 종료 예외 0** 재증명. 재제출 시 "Implementation complete" 신호.
+
+---
+
 # Sprint Feedback — S-M4-P2a (IF-08 분기 + FULL/PAUSED + timeStamp + 멱등 DB 백스톱 + 이관 정리)
 
 ## CODE REVIEW FIX (4-Tier Step 4.5) — APPROVED (GROUND TRUTH 재검증)
