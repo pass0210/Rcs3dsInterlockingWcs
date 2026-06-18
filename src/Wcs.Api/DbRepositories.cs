@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Wcs.Data;
+using Wcs.PlcGateway;
 using DataOrderItem   = Wcs.Data.OrderItem;
 using DataDestination = Wcs.Data.Destination;
 
@@ -600,5 +601,161 @@ public sealed class EfAgvFloorResolver : IAgvFloorResolver
     {
         var agv = _db.Agvs.FirstOrDefault(a => a.AgvNo == agvNo && a.Enabled);
         return agv?.Floor;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// EfAlarmSink — alarm 행 삽입 (S-M4-P3 갭 결선)
+// API 계층 한정. 단일 WcsDbContext 스코프로 트랜잭션 기록.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// EF Core 기반 alarm 기록 구현.
+/// code별 alarm 행을 단일 트랜잭션으로 삽입.
+/// OFFLINE 전이당 1건·핸드셰이크 실패당 1건 — 중복 제어는 호출자(API 계층) 책임.
+/// </summary>
+public sealed class EfAlarmSink : IAlarmSink
+{
+    private readonly WcsDbContext _db;
+
+    public EfAlarmSink(WcsDbContext db)
+    {
+        _db = db;
+    }
+
+    public void Append(string code, AlarmSeverity severity, long? pieceId, string message)
+    {
+        using var tx = _db.Database.BeginTransaction();
+        try
+        {
+            var now = DateTime.UtcNow;
+            _db.Alarms.Add(new Alarm
+            {
+                Code      = code,
+                Severity  = severity,
+                PieceId   = pieceId,
+                Message   = message,
+                RaisedAt  = now,
+                AckedAt   = null,
+                CreatedAt = now,
+            });
+            _db.SaveChanges();
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// EfSorterCommandJournal — sorter_command SENT/전이 (S-M4-P3 갭 결선)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// EF Core 기반 sorter_command 저널 구현.
+/// IF-10 핸드셰이크 시작(SENT 행 생성) + 결과 전이(COMPLETED/MISMATCH/TIMEOUT).
+/// piece.status도 함께 전이: LOADED(Success) / MISMATCH / TIMEOUT.
+/// sorter_command.cell_id는 cellNo로 조회한 실제 cell.id 사용.
+/// </summary>
+public sealed class EfSorterCommandJournal : ISorterCommandJournal
+{
+    private readonly WcsDbContext _db;
+
+    public EfSorterCommandJournal(WcsDbContext db)
+    {
+        _db = db;
+    }
+
+    public long CreateSent(long pieceId, long cellId, int cSeq, int cellNo)
+    {
+        using var tx = _db.Database.BeginTransaction();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var cmd = new SorterCommand
+            {
+                PieceId    = pieceId,
+                CellId     = cellId,
+                CSeq       = cSeq,
+                CellNo     = cellNo,
+                CWrittenAt = now,
+                RSeq       = null,
+                RCellNo    = null,
+                RFlagAt    = null,
+                Status     = SorterCommandStatus.SENT,
+                CreatedAt  = now,
+            };
+            _db.SorterCommands.Add(cmd);
+            _db.SaveChanges();
+            tx.Commit();
+            return cmd.Id;
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+    }
+
+    public void Finalize(long commandId, HandshakeResult result)
+    {
+        using var tx = _db.Database.BeginTransaction();
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            // sorter_command 상태 전이
+            // Offline·CFlagTimeout은 DB CHECK(4값: SENT/COMPLETED/MISMATCH/TIMEOUT) 제약상 TIMEOUT으로
+            // 저장하되, message에 실제 사유(Outcome 이름)를 기록해 거짓 분류 방지.
+            var cmd = _db.SorterCommands.Find(commandId);
+            if (cmd is not null)
+            {
+                cmd.Status = result.Outcome switch
+                {
+                    HandshakeOutcome.Success      => SorterCommandStatus.COMPLETED,
+                    HandshakeOutcome.RSeqMismatch => SorterCommandStatus.MISMATCH,
+                    HandshakeOutcome.RFlagTimeout => SorterCommandStatus.TIMEOUT,
+                    HandshakeOutcome.Offline      => SorterCommandStatus.TIMEOUT,  // OFFLINE → TIMEOUT 저장, alarm code로 구분
+                    HandshakeOutcome.CFlagTimeout => SorterCommandStatus.TIMEOUT,  // CFLAG_TIMEOUT → TIMEOUT 저장, alarm code로 구분
+                    _                             => SorterCommandStatus.TIMEOUT,
+                };
+                if (result.Outcome == HandshakeOutcome.Success)
+                {
+                    cmd.RSeq    = result.ReceivedRSeq;
+                    cmd.RCellNo = result.ReceivedRCellNo;
+                    cmd.RFlagAt = now;
+                }
+            }
+
+            // piece.status 전이 (CELL_ASSIGNED/DEPOSITED → LOADED/MISMATCH/TIMEOUT)
+            if (cmd is not null)
+            {
+                var piece = _db.Pieces.Find(cmd.PieceId);
+                if (piece is not null)
+                {
+                    piece.Status    = result.Outcome switch
+                    {
+                        HandshakeOutcome.Success      => PieceStatus.LOADED,
+                        HandshakeOutcome.RSeqMismatch => PieceStatus.MISMATCH,
+                        HandshakeOutcome.RFlagTimeout => PieceStatus.TIMEOUT,
+                        HandshakeOutcome.Offline      => PieceStatus.TIMEOUT,
+                        HandshakeOutcome.CFlagTimeout => PieceStatus.TIMEOUT,
+                        _                             => PieceStatus.TIMEOUT,
+                    };
+                    piece.UpdatedAt = now;
+                }
+            }
+
+            _db.SaveChanges();
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
     }
 }
