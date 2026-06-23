@@ -1,3 +1,5 @@
+using Wcs.PlcGateway;
+
 namespace Wcs.Api;
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -70,4 +72,40 @@ public interface IAgvFloorResolver
     /// 매핑 없으면 null (호출자가 400 Bad Request 처리).
     /// </summary>
     int? Resolve(int agvNo);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// S-M4-P3 갭 결선: alarm · sorter_command 영속화 인터페이스
+// API 계층 한정 — Wcs.PlcGateway는 이 인터페이스를 절대 참조하지 않는다(단방향 경계).
+// ────────────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// 알람 기록 인터페이스 — code별 alarm 행 삽입.
+/// OFFLINE 전이당 1건, 핸드셰이크 실패(MISMATCH/TIMEOUT) 시 1건 기록.
+/// 구현(EfAlarmSink)은 별도 WcsDbContext 스코프에서 트랜잭션으로 삽입.
+/// </summary>
+public interface IAlarmSink
+{
+    /// <summary>alarm 행 1건 기록 (code, severity, pieceId nullable, message).</summary>
+    void Append(string code, Wcs.Data.AlarmSeverity severity, long? pieceId, string message);
+}
+
+/// <summary>
+/// sorter_command 저널 인터페이스 — SENT 생성 + 상태 전이.
+/// IF-10 핸드셰이크 시작 시 SENT 행 생성, 결과에 따라 COMPLETED/MISMATCH/TIMEOUT 전이.
+/// 구현(EfSorterCommandJournal)은 WcsDbContext 스코프로 트랜잭션 처리.
+/// </summary>
+public interface ISorterCommandJournal
+{
+    /// <summary>
+    /// 핸드셰이크 전송 시작 — sorter_command SENT 행 생성.
+    /// 반환값: 생성된 sorter_command.id (이후 Finalize에 사용).
+    /// </summary>
+    long CreateSent(long pieceId, long cellId, int cSeq, int cellNo);
+
+    /// <summary>
+    /// 핸드셰이크 완료 — sorter_command 상태 전이 (COMPLETED/MISMATCH/TIMEOUT).
+    /// result: HandshakeResult 전체, commandId: CreateSent가 반환한 id.
+    /// </summary>
+    void Finalize(long commandId, HandshakeResult result);
 }

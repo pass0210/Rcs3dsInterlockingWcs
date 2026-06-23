@@ -98,6 +98,14 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     private volatile PlcSnapshot _latest =
         new(0, 0, 0, 0, false, false, false, 0, 0, Online: false, DateTimeOffset.MinValue);
 
+    // OFFLINE 전이 알림 이벤트 — Online true→false 시 1회만 발화 (폴마다 반복 금지).
+    // API 계층이 구독해 alarm 1행(전이당 1건) 영속화. 게이트웨이 본문 동작 무변경.
+    public event Action<PlcSnapshot>? OnOfflineTransition;
+
+    // OFFLINE 전이 원자 플래그 — 1=ONLINE(초기), 0=OFFLINE.
+    // Interlocked.Exchange로 동시 호출(폴 루프 + 쓰기 컨슈머)에서 정확히 1회 발화 보장.
+    private int _online = 1;
+
     private readonly PlcGatewayOptions _opt;
     private readonly ILogger<PlcPollingService> _log;
     private readonly PlcWriteQueue _writeQueue;
@@ -170,8 +178,13 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         await Task.Yield();
     }
 
+    private int _stopped;  // 멱등 StopAsync 플래그 (Interlocked)
+
     public async Task StopAsync()
     {
+        // 이중 호출(StopAsync 후 DisposeAsync 내부 StopAsync 재진입) 방어 — Interlocked로 1회만 실행
+        if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
+
         if (_cts is not null)
             await _cts.CancelAsync().ConfigureAwait(false);
 
@@ -179,6 +192,7 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         {
             try { await t!.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
+            catch (Exception) { }  // 폴 루프 내 로거 disposed 등 teardown 경쟁 예외 흡수
         }
         try { _master.Disconnect(); } catch { }
     }
@@ -223,6 +237,8 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
 
                 _latest  = snap;
                 failures = 0;
+                // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
+                Interlocked.Exchange(ref _online, 1);
 
                 // R_Flag 상승 (0→1) 감지
                 if (!prevRFlag && snap.RFlag)
@@ -235,8 +251,12 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
+                // 호스트 종료 시 CTS 취소 → SocketException 경로로 여기 진입 가능.
+                // 이 시점에서 _log(EventLogInternal 등)가 이미 disposed일 수 있으므로
+                // 모든 로깅 호출을 try로 보호해 폴 루프 예외 전파 방지.
                 failures++;
-                _log.LogWarning(ex, "[폴링] 실패 {Cnt}/{Max}", failures, _opt.OfflineAfterFailures);
+                try { _log.LogWarning(ex, "[폴링] 실패 {Cnt}/{Max}", failures, _opt.OfflineAfterFailures); }
+                catch { /* 로거 disposed — 무시 */ }
 
                 // 예외 종류 불문(SocketException·IOException·시리얼 타임아웃 모두) OFFLINE 판단.
                 // TCP: SocketException·IOException / RTU: IOException·TimeoutException
@@ -248,8 +268,8 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
 
                 if (failures >= _opt.OfflineAfterFailures || isHardEx)
                 {
-                    _log.LogError("[폴링] OFFLINE 전이 (연속 실패 {Cnt}회, HardEx={HardEx})",
-                        failures, isHardEx);
+                    try { _log.LogError("[폴링] OFFLINE 전이 (연속 실패 {Cnt}회, HardEx={HardEx})", failures, isHardEx); }
+                    catch { /* 로거 disposed — 무시 */ }
                     PublishOffline();
 
                     // Disconnect는 _clientLock 임계구역 안에서 실행 — 쓰기 컨슈머가 진행 중인
@@ -276,11 +296,17 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     private void PublishOffline()
     {
         var prev = _latest;
-        _latest = new PlcSnapshot(
+        var offlineSnap = new PlcSnapshot(
             prev.CCellNo, prev.CSeq, prev.RCellNo, prev.RSeq,
             prev.CFlag, prev.RFlag, prev.Ready,
             prev.CurFloor, prev.TgtFloor,
             Online: false, At: DateTimeOffset.Now);
+        _latest = offlineSnap;
+
+        // 전이당 1회만 이벤트 발화 — Interlocked CAS로 동시 호출(폴 루프 + 쓰기 컨슈머) 경쟁 원자화.
+        // _online 1→0 교환에 성공한 호출자만 이벤트를 발화해 alarm 중복 방지.
+        if (Interlocked.Exchange(ref _online, 0) == 1)
+            OnOfflineTransition?.Invoke(offlineSnap);
     }
 
     // ── 단일 쓰기 큐 컨슈머 (절대 규칙 #1) ──────────────────────────────────

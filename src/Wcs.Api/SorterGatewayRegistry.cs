@@ -63,6 +63,17 @@ public sealed class SorterBundleHandle
 
     /// <summary>소터 폴링 서비스 종료 (PlcPollingHostedAdapter에서 호출).</summary>
     public Task StopPollingAsync() => _polling.StopAsync();
+
+    // ── P3: OFFLINE 전이 이벤트 구독 지원 ────────────────────────────────────
+    // API 계층이 OFFLINE 전이당 1건 alarm을 기록하기 위해 구독.
+    // PlcPollingService.OnOfflineTransition(전이당 1회 발화)을 그대로 노출.
+
+    /// <summary>
+    /// 이 소터 폴링의 OFFLINE 전이 이벤트에 핸들러 등록.
+    /// PlcPollingService.OnOfflineTransition — Online true→false 시 1회만 발화.
+    /// </summary>
+    public void SubscribeOffline(Action<Wcs.Core.PlcSnapshot> handler)
+        => _polling.OnOfflineTransition += handler;
 }
 
 // ── ISorterGatewayRegistry ───────────────────────────────────────────────────

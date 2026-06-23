@@ -188,8 +188,8 @@ public sealed class NopSorterRegistryFactory : IHostedService, ISorterGatewayReg
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        // StopAsync + DisposeAsync를 한 곳에서만 호출 — FakeModbusWebApplicationFactory.Dispose에선 호출하지 않음.
-        await _polling.StopAsync().ConfigureAwait(false);
+        // DisposeAsync만 호출 — DisposeAsync 내부에서 StopAsync를 포함하므로
+        // 명시적 StopAsync 호출 제거(이중 호출 → ObjectDisposedException 근본 원인).
         await _polling.DisposeAsync().ConfigureAwait(false);
     }
 

@@ -36,9 +36,17 @@ builder.Services.AddDbContext<WcsDbContext>(opts =>
 // ── 4 인터페이스 EF Core 구현 바인딩 ─────────────────────────────────────────
 builder.Services.AddScoped<EfDepositRecorder>();
 builder.Services.AddScoped<IDepositRecorder>(sp => sp.GetRequiredService<EfDepositRecorder>());
-builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
-builder.Services.AddScoped<ICellSelector,    EfCellSelector>();
+builder.Services.AddScoped<IOrderRepository,  EfOrderRepository>();
+builder.Services.AddScoped<ICellSelector,     EfCellSelector>();
 builder.Services.AddScoped<IAgvFloorResolver, EfAgvFloorResolver>();
+
+// ── P3 갭 결선: alarm·sorter_command 영속화 (API 계층 한정) ───────────────────
+// Scoped: 각 HTTP 핸들러 스코프와 WcsDbContext 동일 수명주기.
+// 백그라운드 ContinueWith에서는 IServiceScopeFactory로 별도 스코프 생성해 사용.
+builder.Services.AddScoped<EfAlarmSink>();
+builder.Services.AddScoped<IAlarmSink>(sp => sp.GetRequiredService<EfAlarmSink>());
+builder.Services.AddScoped<EfSorterCommandJournal>();
+builder.Services.AddScoped<ISorterCommandJournal>(sp => sp.GetRequiredService<EfSorterCommandJournal>());
 
 // ── ChuteCapacityService 싱글톤 (FULL/PAUSED 인메모리 집계) ──────────────────
 builder.Services.AddSingleton<ChuteCapacityService>();
@@ -243,6 +251,7 @@ app.MapPost("/api/v1/deposit-report", (
     WcsDbContext             db,
     ISorterGatewayRegistry   sorterRegistry,
     IHostApplicationLifetime lifetime,
+    IServiceScopeFactory     scopeFactory,
     ILogger<Program>         log) =>
 {
     // ── 검증 ────────────────────────────────────────────────────────────────
@@ -296,18 +305,90 @@ app.MapPost("/api/v1/deposit-report", (
 
             if (bundle is not null)
             {
+                // piece.id 조회 (sorter_command 연결 키 — 백그라운드 콜백에서 사용)
+                long pieceId = db.Pieces
+                    .Where(p => p.PId == req.PId && p.IsActive)
+                    .Select(p => p.Id)
+                    .FirstOrDefault();
+
+                // cell.id 조회 (sorter_command.cell_id FK — cellNo로 매핑)
+                long cellId = db.Cells
+                    .Where(c => c.DestinationId == dest.Id && c.CellNo == selectedCell)
+                    .Select(c => c.Id)
+                    .FirstOrDefault();
+
                 // IF-11 핸드셰이크: 번들 핸들 경유 — 소터별 독립 _cSeq·RFlag 채널
+                // P3 결선: ContinueWith에서 sorter_command + alarm 영속화
                 _ = bundle.ExecuteHandshakeAsync(selectedCell, lifetime.ApplicationStopping)
-                    .ContinueWith(t =>
+                    .ContinueWith((Task<Wcs.PlcGateway.HandshakeResult> t) =>
                     {
+                        // ── sorter_command·alarm·piece 상태 영속화 ─────────────────
+                        // 스코프 분리 필수 — 원본 WcsDbContext는 이미 HTTP 요청 스코프 종료.
+                        // ObjectDisposedException 방어: 호스트 종료 후 콜백 실행 시 스코프 생성 불가.
+                        IServiceScope scope;
+                        try
+                        {
+                            scope = scopeFactory.CreateScope();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // 호스트 종료 후 콜백 — 영속화 생략(테스트 teardown 경쟁 조건 방어)
+                            return;
+                        }
+                        using var _ = scope;
+                        var journal   = scope.ServiceProvider.GetRequiredService<ISorterCommandJournal>();
+                        var alarmSink = scope.ServiceProvider.GetRequiredService<IAlarmSink>();
+
                         if (t.IsCompletedSuccessfully)
+                        {
+                            var result = t.Result;
                             log.LogInformation(
                                 "[IF-11] 핸드셰이크 완료: pId={PId} cellNo={CellNo} outcome={Outcome} destId={DestId}",
-                                req.PId, selectedCell, t.Result.Outcome, dest.Id);
+                                req.PId, selectedCell, result.Outcome, dest.Id);
+
+                            // sorter_command SENT → 상태 전이 (한 트랜잭션으로)
+                            if (pieceId > 0 && cellId > 0)
+                            {
+                                try
+                                {
+                                    var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell);
+                                    journal.Finalize(cmdId, result);
+                                }
+                                catch (Exception ex)
+                                {
+                                    log.LogError(ex, "[IF-11] sorter_command 영속화 예외: pId={PId}", req.PId);
+                                }
+
+                                // 실패 시 alarm 기록
+                                if (!result.IsSuccess)
+                                {
+                                    try
+                                    {
+                                        var code = result.Outcome switch
+                                        {
+                                            Wcs.PlcGateway.HandshakeOutcome.RSeqMismatch => "R_SEQ_MISMATCH",
+                                            Wcs.PlcGateway.HandshakeOutcome.RFlagTimeout => "RFLAG_TIMEOUT",
+                                            Wcs.PlcGateway.HandshakeOutcome.Offline      => "OFFLINE",
+                                            Wcs.PlcGateway.HandshakeOutcome.CFlagTimeout => "CFLAG_TIMEOUT",
+                                            _                                             => "RFLAG_TIMEOUT",
+                                        };
+                                        alarmSink.Append(code, Wcs.Data.AlarmSeverity.ERROR, pieceId,
+                                            $"pId={req.PId} cellNo={selectedCell} detail={result.Detail}");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        log.LogError(ex, "[IF-11] alarm 영속화 예외: pId={PId}", req.PId);
+                                    }
+                                }
+                            }
+                        }
                         else if (t.IsFaulted)
+                        {
                             log.LogError(t.Exception,
                                 "[IF-11] 핸드셰이크 예외: pId={PId} cellNo={CellNo} destId={DestId}",
                                 req.PId, selectedCell, dest.Id);
+                        }
+
                         cellSelector.ReleaseCell(selectedCell);
                     }, TaskScheduler.Default);
 
@@ -459,9 +540,41 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                 dest.Id, dest.ChuteNo, cfg.Transport, cfg.Host, cfg.Port);
         }
 
-        // ── 소터별 폴링 서비스 시작 ───────────────────────────────────────────
+        // ── 소터별 폴링 서비스 시작 + OFFLINE 전이 이벤트 구독 ────────────────
+        // P3: OFFLINE 전이당 1건 alarm 영속화 — IServiceScopeFactory 경유 별도 스코프.
+        // 폴링 시작 전에 구독하면 첫 폴 실패도 포착 가능(이벤트는 true→false 전이만 발화).
         foreach (var bundle in bundles.Values)
         {
+            // OFFLINE 이벤트 구독: 전이당 1회만 발화 — API 계층에서 alarm 기록
+            var capturedDestId  = bundle.DestinationId;
+            var capturedChuteNo = bundle.ChuteNo;
+            bundle.SubscribeOffline(offlineSnap =>
+            {
+                // 이 핸들러는 폴 스레드(RunPollLoopAsync)에서 직접 호출된다.
+                // 어떤 예외도 폴 스레드 밖으로 새어나가면 폴링 루프가 영구 종료되므로
+                // scope 생성·DI 해석·Append 전 구간을 단일 try/catch로 감쌈.
+                try
+                {
+                    // IServiceScopeFactory는 싱글톤 — IServiceProvider에서 직접 취득 안전.
+                    var sf = _sp.GetRequiredService<IServiceScopeFactory>();
+                    using var offlineScope = sf.CreateScope();
+                    var sink = offlineScope.ServiceProvider.GetRequiredService<IAlarmSink>();
+                    sink.Append("OFFLINE", Wcs.Data.AlarmSeverity.ERROR, pieceId: null,
+                        $"소터 OFFLINE 전이 — destId={capturedDestId} chuteNo={capturedChuteNo}");
+                    _log.LogWarning("[SorterRegistry] OFFLINE alarm 기록: destId={DestId} chuteNo={ChuteNo}",
+                        capturedDestId, capturedChuteNo);
+                }
+                catch (ObjectDisposedException)
+                {
+                    // 호스트 종료 후 OFFLINE 이벤트 — 영속화 생략(teardown 경쟁 조건 방어)
+                }
+                catch (Exception ex)
+                {
+                    // DB/DI 예외가 폴 스레드를 죽이지 않도록 삼킴 (로깅은 유지)
+                    _log.LogError(ex, "[SorterRegistry] OFFLINE alarm 영속화 예외: destId={DestId}", capturedDestId);
+                }
+            });
+
             await bundle.StartPollingAsync(cancellationToken);
             _log.LogInformation("[SorterRegistry] 소터 폴링 시작: destId={DestId} chuteNo={ChuteNo}",
                 bundle.DestinationId, bundle.ChuteNo);
@@ -476,18 +589,19 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
         if (_registry is null) return;
 
         // 모든 소터 폴링 서비스 종료 (ApplicationStopping)
+        // 호스트 종료 시 로거(EventLogInternal 등)가 먼저 dispose될 수 있어
+        // LogInformation/LogError 자체가 ObjectDisposedException을 던질 수 있음.
+        // teardown 중 로깅 실패가 StopAsync를 중단시키지 않도록 로깅도 try로 보호.
         foreach (var bundle in _registry.AllBundles)
         {
             try
             {
                 await bundle.StopPollingAsync();
-                _log.LogInformation("[SorterRegistry] 소터 폴링 종료: destId={DestId} chuteNo={ChuteNo}",
-                    bundle.DestinationId, bundle.ChuteNo);
             }
             catch (Exception ex)
             {
-                _log.LogError(ex, "[SorterRegistry] 소터 폴링 종료 예외: destId={DestId}",
-                    bundle.DestinationId);
+                try { _log.LogError(ex, "[SorterRegistry] 소터 폴링 종료 예외: destId={DestId}", bundle.DestinationId); }
+                catch { /* 호스트 종료 중 로거 disposed — 로깅 실패 무시 */ }
             }
         }
     }
