@@ -5,6 +5,17 @@ using Wcs.Core;
 using Wcs.Data;
 using Wcs.PlcGateway;
 
+// ── 종료 단계 관찰되지 않은 Task 예외 가드 (프로세스 자기 종료 방지) ──────────
+// 배경: 종속 라이브러리(FluentModbus)의 내부 루프 Task가 종료 시점에 폴트한다 —
+//   ModbusTcpServer accept 루프는 Stop() 시 TcpListener가 대기 중 AcceptTcpClientAsync를
+//   끊으며 SocketException(995, "I/O 작업이 취소되었습니다")으로 폴트하고,
+//   RTU 읽기 루프는 포트 종료 시 IOException/InvalidOperationException으로 폴트한다.
+//   이 Task들은 라이브러리가 await하지 않으므로 관찰되지 않고, GC 시 파이널라이저 스레드가
+//   재던져 프로세스(Windows 서비스 호스트·테스트호스트)를 종료시킨다.
+// 정책: 종료 신호로 명백한 양성 예외(소켓 취소·I/O 취소·dispose 경쟁)만 관찰 처리(SetObserved)하고
+//   반드시 로깅한다. 그 외 예외는 관찰하지 않아 기존 동작을 보존한다(진성 버그는 그대로 노출).
+WcsTeardownGuard.Install();
+
 var builder = WebApplication.CreateBuilder(args);
 // TODO(M5): builder.Host.UseWindowsService(); + Serilog
 
@@ -14,6 +25,16 @@ var builder = WebApplication.CreateBuilder(args);
 
 // ── 공통 Timing 설정 바인딩 ─────────────────────────────────────────────────
 builder.Services.Configure<TimingOptions>(builder.Configuration.GetSection("Timing"));
+
+// ── WcsOptions 바인딩 (운영층 등 도메인 설정 — 하드코딩 금지, 절대규칙 #7) ─────
+builder.Services.Configure<WcsOptions>(builder.Configuration.GetSection("Wcs"));
+
+// ── MVC Controllers (Minimal API → Controller 이관) ──────────────────────────
+// 검증은 컨트롤러 핸들러가 명시적으로 수행(가부는 200+result, 검증 실패만 400) —
+// non-nullable 참조 타입에 대한 [ApiController] 자동 [Required] 추론을 끈다(Minimal API 동작 보존).
+// nullable 선택필드(timeStamp 등)가 누락돼도 자동 400이 발생하지 않게 한다.
+builder.Services.AddControllers(o =>
+    o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true);
 
 // ── WcsDbContext 등록 (appsettings에서 provider·연결문자열 선택) ──────────────
 // 절대규칙 8: 연결문자열·provider 하드코딩 금지.
@@ -39,6 +60,8 @@ builder.Services.AddScoped<IDepositRecorder>(sp => sp.GetRequiredService<EfDepos
 builder.Services.AddScoped<IOrderRepository,  EfOrderRepository>();
 builder.Services.AddScoped<ICellSelector,     EfCellSelector>();
 builder.Services.AddScoped<IAgvFloorResolver, EfAgvFloorResolver>();
+// IF-09 도착 보고 기록 (piece_event IF09_ARRIVAL — 상태 전이 없음)
+builder.Services.AddScoped<IArrivalRecorder,  EfArrivalRecorder>();
 
 // ── P3 갭 결선: alarm·sorter_command 영속화 (API 계층 한정) ───────────────────
 // Scoped: 각 HTTP 핸들러 스코프와 WcsDbContext 동일 수명주기.
@@ -72,348 +95,19 @@ builder.Services.AddSingleton<ISorterGatewayRegistry>(sp =>
 builder.Services.AddSingleton<IHostedService>(sp =>
     sp.GetRequiredService<SorterRegistryFactory>());
 
+// ── IDestinationStatusService — full/ready 단일 산출 경로 (Scope E) ──────────
+// IF-05 NG 필터가 소비 + Phase 2 아웃바운드 푸시 재사용 확장점.
+// 의존(ChuteCapacityService·SorterRegistry·WcsOptions) 전부 싱글톤이므로 싱글톤.
+builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
+
 var app = builder.Build();
 
-// ── 개발/테스트: 마이그레이션 + 시드 자동 적용 (테스트 배선용) ───────────────
-// 운영 기동 자동 Migrate()는 M5 — P1은 테스트에서만 적용(WebApplicationFactory 주입).
-
 // ════════════════════════════════════════════════════════════════════════════
-// (C) 엔드포인트
+// (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10)
+// IF-08 투입 가부 폴링(deposit-permission)은 폐지 — Phase 2 WCS→RCS 푸시로 대체.
+// 개발/테스트 마이그레이션·시드는 WebApplicationFactory가 주입(운영 자동 Migrate는 M5).
 // ════════════════════════════════════════════════════════════════════════════
-
-// ── IF-05 목적지 조회 ────────────────────────────────────────────────────────
-// 요청: pId(1~30000 필수)·agvNo·barcode·inductionNo·qty·timeStamp
-// 응답: 200 {result,chuteNo,reason} / 400(검증 실패)
-app.MapPost("/api/v1/destination-query", (
-    DestinationQueryRequest  req,
-    IOrderRepository         orders,
-    IChuteCapacityService    capacity,
-    ILogger<Program>         log) =>
-{
-    // ── 검증 ────────────────────────────────────────────────────────────────
-    if (req.PId is < 1 or > 30000)
-        return Results.BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
-    if (string.IsNullOrWhiteSpace(req.Barcode))
-        return Results.BadRequest(new { error = "barcode는 필수입니다." });
-    if (req.Qty <= 0)
-        return Results.BadRequest(new { error = "qty는 1 이상이어야 합니다." });
-
-    // ── 오더 매칭 → 목적지·상태 판정 → OK 시 예약 차감 ─────────────────────
-    var (result, chuteNo, reason, destType, destId) =
-        orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty, req.TimeStamp);
-
-    // ── FULL/PAUSED 인메모리 집계: IF-05 OK 예약 반영 ──────────────────────
-    if (result == "OK" && destId.HasValue && destType == DestinationType.Chute)
-        capacity.OnReserved(destId.Value, req.Qty);
-
-    log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason={Reason}",
-        req.PId, req.Barcode, result, chuteNo, reason);
-
-    return Results.Ok(new DestinationQueryResponse(result, chuteNo, reason));
-});
-
-// ── IF-08 투입 가부 ──────────────────────────────────────────────────────────
-// 요청: pId·chuteNo·agvNo (timeStamp nullable 선택필드)
-// 응답: 200 {allowed,reason} / 400(검증 실패)
-//
-// P2b 라우팅: chuteNo → destination.id → ISorterGatewayRegistry.GetBundle(id)
-//   SORTER_3D: 번들 핸들 스냅샷 + WcsHold → Decide(snap, agvFloor, hold)
-//              WriteTgtFloor면 번들 큐 투입(단일 공유 큐 제거 — 소터별 큐 경유)
-//   CHUTE: hold만 판정 — TgtFloor 쓰기 없음
-app.MapPost("/api/v1/deposit-permission", (
-    DepositPermissionRequest req,
-    ISorterGatewayRegistry   sorterRegistry,
-    IChuteCapacityService    capacity,
-    IAgvFloorResolver        floorResolver,
-    WcsDbContext             db,
-    ILogger<Program>         log) =>
-{
-    // ── 검증 ────────────────────────────────────────────────────────────────
-    if (req.PId is < 1 or > 30000)
-        return Results.BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
-    if (req.ChuteNo <= 0)
-        return Results.BadRequest(new { error = "chuteNo는 양수여야 합니다." });
-
-    // ── chuteNo → destination 조회 ─────────────────────────────────────────
-    var dest = db.Destinations
-        .FirstOrDefault(d => d.ChuteNo == req.ChuteNo && d.IsActive);
-
-    if (dest is null)
-    {
-        log.LogWarning("[IF-08] pId={PId} chuteNo={ChuteNo} — 목적지 없음(비활성/미존재) → PAUSED",
-            req.PId, req.ChuteNo);
-        return Results.Ok(new DepositPermissionResponse(false, "PAUSED"));
-    }
-
-    if (dest.DestType == DestType.SORTER_3D)
-    {
-        // ── SORTER_3D 경로: 번들 핸들 스냅샷 + WcsHold → Decide ─────────────
-        // agvFloor 산출 (agvNo → 층)
-        var agvFloor = floorResolver.Resolve(req.AgvNo);
-        if (agvFloor is null)
-            return Results.BadRequest(new
-            {
-                error = $"agvNo={req.AgvNo}에 대한 층 매핑이 없습니다. agv 테이블을 확인하세요."
-            });
-
-        // destination.id → 번들 핸들 조회 (P2b 라우팅: chuteNo→dest.Id→번들)
-        var bundle = sorterRegistry.GetBundle(dest.Id);
-        if (bundle is null)
-        {
-            log.LogWarning("[IF-08] destinationId={Id} 소터 번들 없음 → OFFLINE", dest.Id);
-            return Results.Ok(new DepositPermissionResponse(false, "OFFLINE"));
-        }
-
-        // 번들 스냅샷 조회(논블로킹)
-        var snap = bundle.Latest;
-        if (!snap.Online)
-        {
-            log.LogWarning("[IF-08] destinationId={Id} 소터 OFFLINE", dest.Id);
-            return Results.Ok(new DepositPermissionResponse(false, "OFFLINE"));
-        }
-
-        // P2a: WcsHold.None — 소터 FULL은 셀 선택기에서 판단
-        var hold = WcsHold.None;
-
-        var decision = DepositDecider.Decide(snap, agvFloor.Value, hold);
-
-        // ── WriteTgtFloor면 번들 전용 큐 투입 (단일 공유 큐 제거 — 소터별) ───
-        if (decision.WriteTgtFloor)
-        {
-            _ = bundle.EnqueueSetTgtFloorAsync(decision.TgtFloorValue)
-                       .AsTask()
-                       .ContinueWith(t =>
-                       {
-                           if (t.IsFaulted)
-                               log.LogError(t.Exception, "[IF-08] SetTgtFloor 번들 큐 투입 예외 destinationId={Id}", dest.Id);
-                       }, TaskScheduler.Default);
-        }
-
-        var reason3d = decision.Allowed ? "READY" : decision.Reason.ToWire();
-
-        log.LogInformation(
-            "[IF-08/SORTER] pId={PId} agvNo={AgvNo} agvFloor={Floor} destId={DestId} → allowed={Allowed} reason={Reason} WriteTgtFloor={Write}",
-            req.PId, req.AgvNo, agvFloor, dest.Id, decision.Allowed, reason3d, decision.WriteTgtFloor);
-
-        return Results.Ok(new DepositPermissionResponse(decision.Allowed, reason3d));
-    }
-    else
-    {
-        // ── CHUTE 경로: hold만 판정 — agvFloor·TgtFloor 쓰기 없음 ────────────
-        WcsHold hold;
-
-        if (!dest.IsActive)
-        {
-            hold = WcsHold.Paused;
-        }
-        else
-        {
-            hold = capacity.GetHold(dest.Id);
-        }
-
-        bool   allowed;
-        string reason;
-
-        switch (hold)
-        {
-            case WcsHold.Full:
-                allowed = false;
-                reason  = "FULL";
-                break;
-            case WcsHold.Paused:
-                allowed = false;
-                reason  = "PAUSED";
-                break;
-            default: // WcsHold.None
-                allowed = true;
-                reason  = "READY";
-                break;
-        }
-
-        log.LogInformation(
-            "[IF-08/CHUTE] pId={PId} chuteNo={ChuteNo} hold={Hold} → allowed={Allowed} reason={Reason}",
-            req.PId, req.ChuteNo, hold, allowed, reason);
-
-        return Results.Ok(new DepositPermissionResponse(allowed, reason));
-    }
-});
-
-// ── IF-10 투입 보고 ──────────────────────────────────────────────────────────
-// 요청: pId·barcode·chuteNo·agvNo (qty·timeStamp nullable 선택필드)
-// 응답: 200 {result:"OK"} / 400(검증 실패)
-// 3D 목적지면 번들 핸들의 핸드셰이크를 트리거 (소터별 독립 — 인스턴스별 _cSeq 보존)
-app.MapPost("/api/v1/deposit-report", (
-    DepositReportRequest     req,
-    IDepositRecorder         recorder,
-    ICellSelector            cellSelector,
-    IChuteCapacityService    capacity,
-    IOrderRepository         orders,
-    WcsDbContext             db,
-    ISorterGatewayRegistry   sorterRegistry,
-    IHostApplicationLifetime lifetime,
-    IServiceScopeFactory     scopeFactory,
-    ILogger<Program>         log) =>
-{
-    // ── 검증 ────────────────────────────────────────────────────────────────
-    if (req.PId is < 1 or > 30000)
-        return Results.BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
-    if (string.IsNullOrWhiteSpace(req.Barcode))
-        return Results.BadRequest(new { error = "barcode는 필수입니다." });
-    if (req.ChuteNo <= 0)
-        return Results.BadRequest(new { error = "chuteNo는 양수여야 합니다." });
-
-    // ── 투입 기록 + 멱등 ──────────────────────────────────────────────────────
-    var isNewRecord = recorder.RecordDeposit(
-        req.PId, req.Barcode, req.ChuteNo, req.AgvNo, req.Qty, req.TimeStamp);
-
-    if (!isNewRecord)
-    {
-        log.LogInformation("[IF-10] pId={PId} 중복 보고 — 멱등 OK", req.PId);
-        return Results.Ok(new DepositReportResponse("OK"));
-    }
-
-    // ── 목적지 타입 조회 → FULL 집계 반영 + IF-11 트리거 ─────────────────────
-    var dest = db.Destinations
-        .FirstOrDefault(d => d.ChuteNo == req.ChuteNo && d.IsActive);
-
-    var destType = dest?.DestType switch
-    {
-        DestType.CHUTE     => DestinationType.Chute,
-        DestType.SORTER_3D => DestinationType.Sorter3D,
-        _                  => (DestinationType?)null,
-    };
-
-    // ── FULL/PAUSED 인메모리 집계: IF-10 투입 반영 ───────────────────────────
-    if (dest is not null && destType == DestinationType.Chute)
-    {
-        var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive);
-        var qty   = piece?.Qty ?? req.Qty ?? 1;
-        capacity.OnDeposited(dest.Id, qty);
-    }
-
-    if (destType == DestinationType.Sorter3D && dest is not null)
-    {
-        // 셀 선택
-        var cellNo = cellSelector.SelectCell(req.ChuteNo, req.Barcode);
-
-        if (cellNo.HasValue)
-        {
-            int selectedCell = cellNo.Value;
-
-            // destination.id → 번들 핸들 조회 (P2b: 소터별 독립 핸드셰이크)
-            var bundle = sorterRegistry.GetBundle(dest.Id);
-
-            if (bundle is not null)
-            {
-                // piece.id 조회 (sorter_command 연결 키 — 백그라운드 콜백에서 사용)
-                long pieceId = db.Pieces
-                    .Where(p => p.PId == req.PId && p.IsActive)
-                    .Select(p => p.Id)
-                    .FirstOrDefault();
-
-                // cell.id 조회 (sorter_command.cell_id FK — cellNo로 매핑)
-                long cellId = db.Cells
-                    .Where(c => c.DestinationId == dest.Id && c.CellNo == selectedCell)
-                    .Select(c => c.Id)
-                    .FirstOrDefault();
-
-                // IF-11 핸드셰이크: 번들 핸들 경유 — 소터별 독립 _cSeq·RFlag 채널
-                // P3 결선: ContinueWith에서 sorter_command + alarm 영속화
-                _ = bundle.ExecuteHandshakeAsync(selectedCell, lifetime.ApplicationStopping)
-                    .ContinueWith((Task<Wcs.PlcGateway.HandshakeResult> t) =>
-                    {
-                        // ── sorter_command·alarm·piece 상태 영속화 ─────────────────
-                        // 스코프 분리 필수 — 원본 WcsDbContext는 이미 HTTP 요청 스코프 종료.
-                        // ObjectDisposedException 방어: 호스트 종료 후 콜백 실행 시 스코프 생성 불가.
-                        IServiceScope scope;
-                        try
-                        {
-                            scope = scopeFactory.CreateScope();
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            // 호스트 종료 후 콜백 — 영속화 생략(테스트 teardown 경쟁 조건 방어)
-                            return;
-                        }
-                        using var _ = scope;
-                        var journal   = scope.ServiceProvider.GetRequiredService<ISorterCommandJournal>();
-                        var alarmSink = scope.ServiceProvider.GetRequiredService<IAlarmSink>();
-
-                        if (t.IsCompletedSuccessfully)
-                        {
-                            var result = t.Result;
-                            log.LogInformation(
-                                "[IF-11] 핸드셰이크 완료: pId={PId} cellNo={CellNo} outcome={Outcome} destId={DestId}",
-                                req.PId, selectedCell, result.Outcome, dest.Id);
-
-                            // sorter_command SENT → 상태 전이 (한 트랜잭션으로)
-                            if (pieceId > 0 && cellId > 0)
-                            {
-                                try
-                                {
-                                    var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell);
-                                    journal.Finalize(cmdId, result);
-                                }
-                                catch (Exception ex)
-                                {
-                                    log.LogError(ex, "[IF-11] sorter_command 영속화 예외: pId={PId}", req.PId);
-                                }
-
-                                // 실패 시 alarm 기록
-                                if (!result.IsSuccess)
-                                {
-                                    try
-                                    {
-                                        var code = result.Outcome switch
-                                        {
-                                            Wcs.PlcGateway.HandshakeOutcome.RSeqMismatch => "R_SEQ_MISMATCH",
-                                            Wcs.PlcGateway.HandshakeOutcome.RFlagTimeout => "RFLAG_TIMEOUT",
-                                            Wcs.PlcGateway.HandshakeOutcome.Offline      => "OFFLINE",
-                                            Wcs.PlcGateway.HandshakeOutcome.CFlagTimeout => "CFLAG_TIMEOUT",
-                                            _                                             => "RFLAG_TIMEOUT",
-                                        };
-                                        alarmSink.Append(code, Wcs.Data.AlarmSeverity.ERROR, pieceId,
-                                            $"pId={req.PId} cellNo={selectedCell} detail={result.Detail}");
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        log.LogError(ex, "[IF-11] alarm 영속화 예외: pId={PId}", req.PId);
-                                    }
-                                }
-                            }
-                        }
-                        else if (t.IsFaulted)
-                        {
-                            log.LogError(t.Exception,
-                                "[IF-11] 핸드셰이크 예외: pId={PId} cellNo={CellNo} destId={DestId}",
-                                req.PId, selectedCell, dest.Id);
-                        }
-
-                        cellSelector.ReleaseCell(selectedCell);
-                    }, TaskScheduler.Default);
-
-                log.LogInformation("[IF-10] pId={PId} 3D 보고 → IF-11 트리거: cellNo={CellNo} destId={DestId}",
-                    req.PId, selectedCell, dest.Id);
-            }
-            else
-            {
-                // 번들 없음(OFFLINE) — 셀 즉시 해제
-                cellSelector.ReleaseCell(selectedCell);
-                log.LogWarning("[IF-10] pId={PId} 3D 번들 없음(OFFLINE) — 핸드셰이크 생략", req.PId);
-            }
-        }
-        else
-        {
-            log.LogWarning("[IF-10] pId={PId} 3D 보고 → 빈 셀 없음 (3DS FULL 조건). IF-11 트리거 생략", req.PId);
-        }
-    }
-    else
-    {
-        log.LogInformation("[IF-10] pId={PId} 슈트 보고 → IF-11 트리거 없음", req.PId);
-    }
-
-    return Results.Ok(new DepositReportResponse("OK"));
-});
+app.MapControllers();
 
 app.Run();
 

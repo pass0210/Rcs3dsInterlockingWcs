@@ -48,6 +48,7 @@ public enum PieceStatus
 public enum PieceEventType
 {
     IF05_REQ, IF05_RES, IF08_REQ, IF08_RES,
+    IF09_ARRIVAL,                              // IF-09 도착 보고(기록 전용 — piece 상태 전이 없음)
     IF10_REQ, IF10_RES, DECISION
 }
 

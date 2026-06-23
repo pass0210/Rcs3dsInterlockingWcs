@@ -10,6 +10,12 @@ namespace Wcs.Api;
 public enum DestinationType { Chute, Sorter3D }
 
 /// <summary>
+/// 목적지 가용성 차단 사유(IF-05 상류 필터).
+/// None=배정 가능 / Full·Paused=배정 안 함(NG). FULL/PAUSED 차단을 도착 시점→배정 시점으로 상류 이동.
+/// </summary>
+public enum DestinationBlock { None, Full, Paused }
+
+/// <summary>
 /// 오더·목적지 조회 + 예약 차감.
 /// M4에서 EfOrderRepository가 구현.
 /// </summary>
@@ -17,13 +23,21 @@ public interface IOrderRepository
 {
     /// <summary>
     /// 바코드로 오더 조회 + 목적지/상태 판정 + OK 시 예약 차감.
-    /// IF05_REQ piece_event도 같은 트랜잭션 내 삽입(MINOR-6).
+    /// IF05_REQ/RES piece_event도 같은 트랜잭션 내 삽입(MINOR-6).
+    ///
+    /// 재설계 Phase 1: 목적지 결정 후 예약 직전에 <paramref name="availability"/>를 호출해
+    ///   FULL/PAUSED면 배정하지 않고 NG로 기록한다(상류 필터 — 산출원은 DestinationStatusService).
+    ///   BUSY(분류·이동 중)는 OK(이동시킴) — availability는 FULL/PAUSED만 차단한다.
+    ///
     /// 반환: (result:"OK"|"NG", chuteNo, reason, destType, destinationId).
-    /// OK 시 chuteNo는 오더 지정 또는 AUTO 배정 슈트.
-    /// NG 시 chuteNo=null.
+    /// reason은 내부 기록·로깅용 — RCS 응답에는 포함하지 않는다(IF-05 응답은 {result, chuteNo}).
     /// </summary>
+    /// <param name="availability">
+    /// 결정된 목적지(id, destType)의 차단 사유 산출 — None이면 배정, Full/Paused면 NG.
+    /// </param>
     (string Result, int? ChuteNo, string Reason, DestinationType? DestType, long? DestinationId) QueryDestination(
-        int pId, int agvNo, string barcode, int inductionNo, int qty, string? clientTs);
+        int pId, int agvNo, string barcode, int inductionNo, int qty, string? clientTs,
+        Func<long, DestinationType, DestinationBlock> availability);
 }
 
 /// <summary>
@@ -41,6 +55,22 @@ public interface IDepositRecorder
 
     /// <summary>pId 기록 존재 여부 (IF-10 멱등 확인).</summary>
     bool HasDepositRecord(int pId);
+}
+
+/// <summary>
+/// IF-09 도착 보고 기록 — piece_event(IF09_ARRIVAL) append-only.
+/// 사용자 확정: piece 상태 전이 없음(기록만). RESERVED/PERMITTED 그대로 유지.
+/// M4 재설계에서 EfArrivalRecorder가 구현.
+/// </summary>
+public interface IArrivalRecorder
+{
+    /// <summary>
+    /// IF-09 도착을 piece_event(IF09_ARRIVAL)로 기록한다.
+    /// 활성 piece가 있으면 그 piece에, 없으면(IF-05 없이 도착) 기록 생략(false 반환).
+    /// piece.status는 변경하지 않는다(기록 전용).
+    /// </summary>
+    /// <returns>도착 이벤트를 기록한 piece가 있으면 true, 없으면 false.</returns>
+    bool RecordArrival(int pId, int chuteNo, int agvNo, string? clientTs);
 }
 
 /// <summary>
