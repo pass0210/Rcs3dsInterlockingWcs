@@ -39,6 +39,43 @@ When unsure, start with **Generate-Verify** and escalate to a more complex patte
 - Parallel tasks are separated by module/package boundaries.
 - On merge (fan-in), verify and resolve conflicts before completing.
 
+## Multi-Instance Scaling (Per-Role Fan-out)
+
+The default 3-Tier is **1 Planner / 1 Generator / 1 Evaluator** (Generate-Verify). Any role MAY be scaled to N instances **when a declared trigger condition is met** — scaling is opt-in and condition-gated, never a guess. The default stays 1/1/1; escalate only when the trigger fires. "When unsure, start with Generate-Verify."
+
+**Decision authority — who decides to scale:**
+- **Generator / Evaluator scaling** is declared by the **Planner inside the Sprint Contract** (`Parallel Modules` / `Evaluation Dimensions` fields). The orchestrator reads the declaration and executes the matching pattern. The orchestrator does NOT invent fan-out on its own.
+- **Planner scaling** is decided by the **orchestrator before Phase 1**, since the Planner cannot multiply itself. Heuristic trigger only (below).
+
+**Mechanism — how N instances run (do not deviate):**
+- Parallel generation/planning uses **`Workflow` fan-out/fan-in or parallel subagent dispatch (Agent tool)**, NOT extra Team members. Team Mode's `SendMessage` handoff is bound to the single names `generator`/`evaluator`; adding members breaks routing. The **1:1 Generator↔Evaluator Team loop is preserved** for the iterative fix cycle — only the surrounding generate/evaluate fan-out is parallelized.
+- Parallel file mutation → `isolation: "worktree"` per agent (or strict module partition). Fan-in merges and resolves conflicts before the loop continues.
+
+### Planner — Multi-Candidate (divergent design → synthesis)
+- **Trigger (orchestrator heuristic)**: wide/ambiguous design space, or a high-stakes architectural decision with no obvious single approach. NOT for routine sprints.
+- **Pattern**: spawn N Planner subagents with distinct stances (e.g. MVP-first, risk-first, scalability-first) → one **synthesis Planner subagent** receives all N candidates, judges them, and merges into **exactly one** Sprint Contract. The orchestrator never does the synthesis itself (orchestrator does not plan).
+- **Hard rule**: the user gate sees **one** contract. Candidates MUST converge before the Phase 1→2 user confirmation — never present N contracts. Optionally note "alternatives considered" in one line.
+
+### Generator — Fan-out / Fan-in (parallel module build)
+- **Trigger**: Planner declares 2+ **independent** modules in the Sprint Contract `Parallel Modules` field (module/package-boundary separated, no shared file writes).
+- **Pattern**: one Generator instance per module, run concurrently (worktree-isolated when files could collide) → each implements + runs its own tests → **fan-in**: merge, resolve conflicts, run integration tests, THEN hand off to evaluation.
+- **Hard rules**:
+  - Two Generators MUST NOT write the same file. Partition is by module/package boundary, declared by the Planner.
+  - No fan-in completes with conflicts unresolved or integration tests failing.
+  - Per-module log goes to `tasks/sprint-log/{module}.md`; the orchestrator/fan-in step consolidates a single `## IMPLEMENTATION COMPLETE` summary into `tasks/sprint-log.md` (the handoff marker the Evaluator checks). Parallel writers must not append to the single `sprint-log.md` concurrently.
+
+### Evaluator — Expert Pool (parallel dimension verification)
+- **Trigger**: Planner declares `Evaluation Dimensions` (e.g. functional / security / performance) in the Sprint Contract, or the change touches a security/perf-sensitive surface.
+- **Pattern**: on handoff, spawn one Evaluator per dimension, run concurrently. Each runs the mandatory verification for its dimension and writes `tasks/sprint-feedback/{dimension}.md`. The orchestrator aggregates into `tasks/sprint-feedback.md` (the file the pre-commit hook and Generator read).
+- **Hard rules**:
+  - **APPROVED requires ALL dimensions PASS (AND, not OR).** Any single FAIL → consolidated feedback → Generator fix cycle.
+  - Each dimension still obeys ALL Evaluator rules (fresh evidence, click-through, console capture, port source-of-truth, no infra-skip).
+  - This pool is the **runtime/behavioral** verification layer. It does NOT replace the Step 4.5 `code-reviewer` (static code-quality/security/architecture), which remains a separate post-APPROVED gate. The two layers stay non-overlapping.
+
+### Iteration accounting under scaling
+- The **5-iteration cap and "3 consecutive FAIL → re-plan"** are measured at the **sprint level** (the aggregated verdict per cycle), not per instance. One cycle = one full fan-out generate + one aggregated evaluate; all parallel instances within a cycle count as a single iteration.
+- On aggregated FAIL, the orchestrator MAY re-dispatch **only the failed module(s)/dimension(s)**, not the whole fleet — but the cycle still increments the shared counter by one.
+
 ## Agent/Skill File Structure
 
 Agent roles (Planner / Generator / Evaluator) are defined inline in this file — see the `## Planner`, `## Generator`, `## Evaluator` sections below. Those inline definitions are the canonical source the 3-Tier spawn prompts read from.
@@ -89,7 +126,8 @@ project/
      - `Full-stack` signal: both a browser-facing entry point AND server-side route/controller files live in the same repo.
   2. **Enumerate per-type verification scenarios directly inside the Sprint Contract** using the slots in the Sprint Contract Template. The scenario count N is decided per-sprint from the actual surface area of this sprint's change — the Planner picks N; the harness does not hardcode a minimum. Leaving the slots generic, empty, or at the placeholder failure-marker text is a harness violation, not a stylistic choice.
   3. **Emit the Planner self-check line** at the bottom of the contract in the exact form shown in the template: detected type, required slot count N, the list of slot names actually filled, and an explicit `yes/no` flag for whether all slots are filled. This single line is the Evaluator's one-line sanity check on contract specificity.
-- Output: Planning document (sprint contract including goals, scope, evaluation criteria, detected project type, per-type verification scenarios, and the Planner self-check line)
+- **May declare scaling in the Sprint Contract** (see §Multi-Instance Scaling): list independent `Parallel Modules` (→ Generator fan-out) and/or `Evaluation Dimensions` (→ Evaluator expert pool). Declare only real, boundary-clean partitions and genuinely distinct review dimensions — never pad to look thorough. Omit both when the work is single-module / single-dimension; the default 1/1/1 is the correct answer for routine sprints.
+- Output: Planning document (sprint contract including goals, scope, evaluation criteria, detected project type, per-type verification scenarios, optional scaling declarations, and the Planner self-check line)
 
 ## Generator
 
@@ -201,6 +239,15 @@ project/
 - Implementation Scope: (list of what Generator must do)
 - Evaluation Criteria: (specific criteria + weights for Evaluator to judge)
 - Completion Conditions: (minimum conditions for Evaluator to pass)
+
+- Parallel Modules (optional — enables Generator fan-out; see §Multi-Instance Scaling):
+    List module/package boundaries that can be built CONCURRENTLY with NO shared file writes.
+    Declare only real, boundary-clean partitions — never pad. Each entry = one parallel Generator.
+    Omit or write "N/A (single module)" when the work is not partitionable.
+- Evaluation Dimensions (optional — enables Evaluator expert pool; see §Multi-Instance Scaling):
+    List dimensions to verify in PARALLEL (e.g. functional, security, performance).
+    Each entry = one parallel Evaluator; APPROVED requires ALL to PASS.
+    Omit or write "functional only" for standard single-dimension review.
 
 - Detected Project Type: <Web/UI | Backend/API | Library/CLI | Full-stack>
   (Planner fills exactly one from project signals — not from memory, not from user's phrasing.)
@@ -441,9 +488,13 @@ TeamCreate + Agent spawn + kick-off sequence: see `skills/3tier-start/SKILL.md` 
 The main agent acts as orchestrator. It does not plan, implement, or evaluate.
 
 1. Receive user request
-2. Spawn Planner Subagent → get Sprint Contract
+2. Spawn Planner Subagent → get Sprint Contract. (Optional: if the design space is wide/high-stakes, spawn N Planner candidates + a synthesis Planner per §Multi-Instance Scaling → still one contract.)
 3. Present Sprint Contract to user → get confirmation
-4. Create Team (Generator + Evaluator) → team runs autonomously
+4. Read the contract's scaling declarations (`Parallel Modules` / `Evaluation Dimensions`):
+   - Single-module + single-dimension → create the standard 1/1 Team (Generator + Evaluator).
+   - 2+ Parallel Modules → fan out Generators via `Workflow`/parallel dispatch, fan-in (merge + integration tests), THEN run the Evaluator loop on the merged result.
+   - 2+ Evaluation Dimensions → on handoff, spawn one Evaluator per dimension, aggregate to APPROVED only if ALL pass.
+   - See §Multi-Instance Scaling for hard rules. → team runs autonomously
 5. **Proactive Monitoring (방치 금지)**: 팀 spawn 후 Orchestrator는 능동적으로 점검해야 한다. 유저가 "진행중?" 하고 물어봐야 비로소 확인하는 것은 모니터링 실패다.
    - **점검 타이밍**: Generator 또는 Evaluator의 각 턴이 끝날 때마다 즉시 `tasks/sprint-log.md`와 `tasks/sprint-feedback.md`를 읽는다.
    - **유저 보고**: 매 사이클마다 1줄 요약을 유저에게 보고한다. 형식: `[사이클 N] Generator: 완료/진행중 | Evaluator: PASS/FAIL/대기 — 핵심 내용`
@@ -451,12 +502,12 @@ The main agent acts as orchestrator. It does not plan, implement, or evaluate.
    - **Handoff enforcement**: Generator 턴 종료 후 sprint-log.md에 `## IMPLEMENTATION COMPLETE` 마커가 있는데 Evaluator가 시작하지 않으면 → 즉시 `SendMessage(to: "evaluator", message: "Generator completed. Start evaluation now.")` 전송
    - If iteration count reaches 3: warn user before escalating to Planner
    - User can intervene at any time based on these reports
-6. On 3 consecutive failures: first attempt **Opus promotion of Generator** (once per sprint, guarded by `## OPUS PROMOTION ATTEMPTED` marker in `tasks/sprint-log.md`) → if that also fails → re-spawn Planner Subagent for re-planning → restart team. On 5 total iterations (promotion counts as 1): stop team, report to user. See SKILL.md Step 4 for the full numbered procedure.
+6. On 3 consecutive failures: stop team, re-spawn Planner Subagent for re-planning → restart team with a fresh Sprint Contract. On 5 total iterations: stop team, report to user. All three agents run on the best model (`opus`), so 3 consecutive failures signal a planning problem, not a model-tier gap. See SKILL.md Step 4 for the full procedure.
 7. On approval — **Code Review Pass (4-Tier — code quality gate)** before commit:
    - Evaluator 가 APPROVED 를 작성하면 commit 직전 `Skill({ skill: "superpowers:requesting-code-review" })` 를 발동해 Evaluator 가 보지 않는 영역 (아키텍처·추상화·네이밍·보안·내부 복잡도·가독성·유지보수성) 을 독립 검토한다. Evaluator (사용자 여정·브라우저·lint/tsc·BE/DB diff) 와 영역 비중복.
    - Critical/BLOCKING 결함 발견 → Generator 에게 fix-only 1 iter 추가 (5-iteration cap 에 합산, 별도 카운터 만들지 말 것). fix 후 Step 4 의 evaluator 검증을 다시 받고 Step 4.5 재진입.
    - MAJOR/MINOR 만 있으면 → sprint-feedback.md "Minor" 섹션에 등재 (todo.md 가 아니라 sprint-feedback.md 에 직접 추가, 다음 sprint Generator 가 읽음) 후 commit 진행.
-   - 결과 1줄 메트릭을 `tasks/feedback-archive.md` 에 `[CODE-REVIEW] sprint=<id> critical=N major=M minor=K iter=K opus=yes/no` 형식으로 기록. 형식 spec: `templates/reference/4tier-code-review-metrics.md`.
+   - 결과 1줄 메트릭을 `tasks/feedback-archive.md` 에 `[CODE-REVIEW] sprint=<id> critical=N major=M minor=K iter=K` 형식으로 기록. 형식 spec: `templates/reference/4tier-code-review-metrics.md`.
 8. On final approval: report completion to user with final sprint-feedback.md summary.
 
 #### Orchestrator Push Rule
@@ -503,9 +554,8 @@ Team Agents introduce risks that Subagents don't have. These rules constrain tea
 - All SendMessage content must reference specific Sprint Contract criteria or specific code locations. No vague feedback like "looks good" or "needs improvement."
 
 **Iteration control:**
-- Maximum 5 iterations per Sprint before mandatory escalation to Planner. Prevents infinite fix loops. **Opus promotion attempt counts as 1 iteration** toward this cap — there is no bonus headroom for the promoted Generator.
+- Maximum 5 iterations per Sprint before mandatory escalation to Planner. Prevents infinite fix loops.
 - Each Evaluator feedback must be more specific than the previous — if the same feedback repeats twice, escalate to Planner.
-- Opus promotion may be attempted at most once per sprint (enforced by `## OPUS PROMOTION ATTEMPTED` marker in `tasks/sprint-log.md`). If promotion was already attempted and 3 consecutive failures recur, skip directly to Planner escalation.
 
 **Protected operations:**
 - Neither Generator nor Evaluator may execute: `git push`, `git commit --no-verify`, delete branches, modify `.git/hooks/`, modify `CLAUDE.md`, or modify `tasks/workflow-*.md`.
@@ -520,7 +570,7 @@ Team Agents introduce risks that Subagents don't have. These rules constrain tea
 
 - **Phase 1→2-3**: After user confirms Sprint Contract, orchestrator creates Team (Generator + Evaluator).
 - **Generator ↔ Evaluator**: Direct communication via SendMessage. No orchestrator involvement in the loop.
-- **Escalation**: After 3 consecutive Evaluator rejections, Orchestrator first attempts Opus promotion of Generator (once per sprint); if that also fails → re-spawns Planner. At 5 total iterations (promotion counts as 1) → mandatory user escalation.
+- **Escalation**: After 3 consecutive Evaluator rejections, Orchestrator re-spawns the Planner for re-planning. At 5 total iterations → mandatory user escalation.
 - **Commit**: After Evaluator writes "APPROVED" in sprint-feedback.md, orchestrator runs the Code Review Pass (Orchestrator Role step 7) — only if Code Review produces no Critical/BLOCKING does the orchestrator commit. Critical/BLOCKING → Generator fix-only 1 iter (counted toward 5-iteration cap).
 - **Phase skipping**: Pre-commit hook blocks commits without sprint-feedback.md. Only Evaluator writes sprint-feedback.md.
 
@@ -547,19 +597,14 @@ Plan → Build → Test → Evaluate → Feedback → Fix → Re-evaluate → ..
 - Generator → Evaluator: Change summary + test results + runnable state
 - Evaluator → Generator: Specific feedback in tasks/sprint-feedback.md
 
-- After 3 **consecutive** rejections (PASS resets the counter; non-consecutive FAIL patterns do not trigger promotion), the Orchestrator must first attempt **Opus promotion of Generator** before escalating to the Planner:
-  1. Check `tasks/sprint-log.md` for `## OPUS PROMOTION ATTEMPTED`. If present, promotion is already exhausted for this sprint — go directly to Planner escalation.
-  2. If not present: append `## OPUS PROMOTION ATTEMPTED` to `tasks/sprint-log.md`, shutdown the current Generator, re-spawn with `model: "opus"` (same team/name/prompt), and send kick-off. This attempt counts as 1 iteration toward the 5-iteration cap.
-  3. If the Opus attempt passes → append `- Opus promotion worked on sprint <identifier> (<YYYY-MM-DD HH:mm KST>)` to `tasks/feedback-archive.md`, then commit/teardown normally.
-  4. If the Opus attempt also fails → escalate to the Planner (step below).
-- After Opus promotion fails (or if promotion was already exhausted), escalate to the Planner to re-examine the plan itself.
+- After 3 **consecutive** rejections (PASS resets the counter; non-consecutive FAIL patterns do not trigger re-planning), the Orchestrator stops the team and escalates to the Planner to re-examine the plan itself. All three agents already run on the best model (`opus`), so there is no model-tier fallback — 3 consecutive failures signal a planning problem, not a capability gap.
 - On escalation, the Planner must check:
   - Is the scope too broad? → Split into smaller tasks.
   - Are the assumptions wrong? → Re-verify prerequisites.
   - Are there technical constraints? → Explore alternative approaches.
   - Are the evaluation criteria unrealistic? → Adjust criteria with justification.
 - If still failing after 1 additional attempt post re-planning, report to the user and request a decision. Never enter an infinite loop.
-- **5-iteration cap**: Opus promotion attempt counts as 1 iteration. Total iterations (including promotion) must not exceed 5 before mandatory user escalation.
+- **5-iteration cap**: Total iterations must not exceed 5 before mandatory user escalation.
 
 ## Feedback Management
 

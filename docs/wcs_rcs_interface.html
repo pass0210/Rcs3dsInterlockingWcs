@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WCS ↔ RCS Interface Specification</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5FA; --card:#FFFFFF;
+    --ink:#0F172A; --ink-soft:#475569; --ink-faint:#94A3B8;
+    --line:#E8EAF0; --line-strong:#D7DBE6;
+    --brand:#6366F1; --brand-deep:#4F46E5; --brand-soft:#EEF0FE;
+    --wcs:#F97316; --rcs:#3B82F6;
+    --ok:#10B981; --ng:#EF4444; --wait:#F59E0B;
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Consolas,monospace;
+    --sans:'Pretendard Variable',Pretendard,Inter,-apple-system,system-ui,sans-serif;
+    --sh-sm:0 1px 2px rgba(15,23,42,.04),0 2px 8px rgba(15,23,42,.05);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.6;font-size:14px;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1060px;margin:0 auto;padding:30px clamp(16px,3vw,40px) 72px;}
+  header.doc{padding-bottom:16px;margin-bottom:8px;border-bottom:1px solid var(--line);}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--brand-deep);font-weight:600;}
+  h1{font-size:24px;line-height:1.2;margin:8px 0 4px;letter-spacing:-.02em;font-weight:800;}
+  h1 small{display:block;font-size:13px;font-weight:500;color:var(--ink-soft);margin-top:6px;line-height:1.55;}
+  .actors{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 0;}
+  .ac{font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;}
+  .ac::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+  .ac.rcs{background:#EAF1FE;color:var(--rcs);}
+  .ac.wcs{background:#FEF0E6;color:var(--wcs);}
+  .toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0;}
+  .toc a{font-family:var(--mono);font-size:11px;text-decoration:none;color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:999px;padding:4px 11px;transition:.15s;background:var(--card);}
+  .toc a:hover{border-color:var(--brand);color:var(--brand-deep);background:var(--brand-soft);}
+  section{margin:30px 0 0;scroll-margin-top:14px;}
+  h2{font-size:18px;font-weight:800;margin:0 0 12px;display:flex;align-items:center;gap:11px;letter-spacing:-.01em;}
+  h2 .n{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:9px;padding:3px 9px;box-shadow:var(--sh-sm);}
+  h3{font-size:14.5px;font-weight:700;margin:18px 0 6px;color:var(--ink);display:flex;align-items:center;gap:9px;}
+  h3 .ifid{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--brand-deep);background:var(--brand-soft);border:1px solid #DADCFB;border-radius:6px;padding:1px 7px;}
+  p{margin:7px 0;color:var(--ink-soft);}
+  ul,ol{margin:7px 0;padding-left:21px;color:var(--ink-soft);}
+  li{margin:4px 0;}
+  table{width:100%;border-collapse:separate;border-spacing:0;margin:12px 0;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:var(--sh-sm);}
+  th,td{padding:9px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);}
+  tr:last-child td{border-bottom:none;}
+  th{background:var(--brand-soft);color:var(--brand-deep);font-weight:700;font-size:11.5px;letter-spacing:.02em;border-bottom:1px solid var(--line-strong);}
+  td+td,th+th{border-left:1px solid var(--line);}
+  tbody tr:hover td{background:#FBFBFE;}
+  code{font-family:var(--mono);font-size:12px;background:#F1F5F9;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#334155;}
+  pre{background:#0F172A;color:#E2E8F0;border-radius:11px;padding:12px 15px;overflow-x:auto;font:12px/1.6 var(--mono);margin:8px 0;}
+  pre .c{color:#7DD3FC;} pre .s{color:#86EFAC;} pre .n{color:#FCD34D;}
+  .tag{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;color:var(--rcs);background:#EAF1FE;}
+  .tag::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;}
+  .pill{font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;color:#fff;display:inline-block;}
+  .pill.ok{background:var(--ok);}.pill.ng{background:var(--ng);}.pill.wait{background:var(--wait);}.pill.go{background:var(--rcs);}
+  .note{background:var(--brand-soft);border:1px solid #DADCFB;border-left:3px solid var(--brand);padding:10px 14px;border-radius:0 10px 10px 0;font-size:13px;color:#3E3F73;margin:12px 0;line-height:1.55;}
+  .note b{color:var(--brand-deep);}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0;}
+  .flow .st{font-family:var(--mono);font-size:12px;background:var(--card);border:1px solid var(--line-strong);border-radius:10px;padding:7px 13px;font-weight:600;box-shadow:var(--sh-sm);}
+  .flow .ar{color:var(--brand);font-weight:800;}
+  .ask{background:#FFF;border:1px solid #DADCFB;border-left:4px solid var(--brand);border-radius:0 14px 14px 0;padding:6px 18px 12px;box-shadow:var(--sh-sm);margin:10px 0;}
+  .ask ol{counter-reset:q;list-style:none;padding-left:0;}
+  .ask li{position:relative;padding:9px 0 9px 34px;border-bottom:1px dashed var(--line);color:var(--ink);}
+  .ask li:last-child{border-bottom:none;}
+  .ask li::before{counter-increment:q;content:"Q"counter(q);position:absolute;left:0;top:8px;font:700 10px var(--mono);color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-radius:7px;padding:2px 5px;}
+  .footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);}
+  @media(max-width:680px){.page{padding:20px 13px 50px;}h1{font-size:20px;}}
+
+  /* ===== Print / PDF ===== */
+  @media print{
+    @page{ size:A4 portrait; margin:13mm; }
+    *{ -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
+    html,body{ background:#fff !important; }
+    .page{ max-width:none !important; margin:0 !important; padding:0 !important; }
+    .toc, nav{ display:none !important; }
+    /* §2부터 각 섹션을 새 페이지 상단에서 시작 (첫 섹션 = 표지 아래 유지) */
+    section:not(:first-of-type){ break-before:page; page-break-before:always; }
+    section{ margin-top:0 !important; padding-top:0 !important; }
+    h1,h2,h3{ break-after:avoid; page-break-after:avoid; }
+    h3{ break-before:auto; }
+    tr,th,td,.note,li{ break-inside:avoid; page-break-inside:avoid; }
+    /* 다크 코드블록: 배경 인쇄 + 긴 줄 줄바꿈 + 페이지 경계 분할 금지 */
+    pre{ overflow:visible !important; white-space:pre-wrap !important; word-break:break-word; break-inside:avoid; page-break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="doc">
+    <div class="eyebrow">WCS ↔ RCS · API Interface Specification</div>
+    <h1>WCS ↔ RCS Interface Specification
+      <small>REST / JSON API. RCS calls WCS for destination, arrival &amp; report (IF-05 / IF-09 / IF-10); WCS <b>pushes destination status (IF-08) to RCS</b> on every change. Real-time, per induction (no batch). This document specifies the <b>WCS ↔ RCS interface</b>; endpoints, auth and timing values are examples and open to discussion.</small>
+    </h1>
+    <div class="actors">
+      <span class="ac wcs">WCS — holds orders &amp; destinations (server)</span>
+      <span class="ac rcs">RCS — AGV / robot controller (client)</span>
+    </div>
+    <nav class="toc">
+      <a href="#s1">1 Overview</a><a href="#s2">2 Communication</a><a href="#s3">3 Data Model</a>
+      <a href="#s4">4 Interfaces</a><a href="#s5">5 API Definitions</a><a href="#s6">6 Reason Codes</a>
+      <a href="#s7">7 Flow</a><a href="#s8">8 Timing &amp; Retry</a>
+    </nav>
+  </header>
+
+  <section id="s1">
+    <h2><span class="n">1</span> Overview &amp; Roles</h2>
+    <p>WCS holds the orders and destination assignments. RCS controls the AGVs/robots. At an induction (infeed) point a robot <b>receives the item(s) onto its tray</b>, asks WCS for the destination, drives to that destination (a chute), and <b>tilts the entire tray quantity at once</b> (full tilt — no partial deposit).</p>
+    <ul>
+      <li><b>Two directions.</b> IF-05, IF-09 and IF-10 are RCS→WCS requests (WCS responds). <b>IF-08 is a WCS→RCS push</b> — WCS notifies RCS of each destination's status (a plain chute or a 3D-sorter chute) whenever it changes.</li>
+      <li><b>Arrival notification.</b> When the AGV reaches the chute, RCS sends an <b>arrival report (IF-09)</b>. RCS deposits once the destination is <code>ready</code> in the IF-08 status. (How WCS prepares the 3D sorter internally is not RCS's concern.)</li>
+      <li><b>Real-time, continuous.</b> No batch start/stop. Each item is handled as it arrives at induction.</li>
+      <li><b>Destination = <code>chuteNo</code>.</b> The destination is addressed by a chute number.</li>
+      <li><b>RCS decides deposit locally.</b> Instead of polling for permission, RCS keeps the latest destination status (from IF-08 pushes) and deposits when that destination is <code>ready</code> — otherwise it waits for the next update.</li>
+    </ul>
+  </section>
+
+  <section id="s2">
+    <h2><span class="n">2</span> Communication</h2>
+    <table>
+      <tr><th style="width:150px">Item</th><th>Detail</th></tr>
+      <tr><td>Protocol</td><td>REST over HTTP(S), <code>Content-Type: application/json</code></td></tr>
+      <tr><td>Direction</td><td><b>IF-05 / IF-09 / IF-10</b>: RCS = client, WCS responds. <b>IF-08</b>: WCS = client (pushes status to an RCS endpoint), RCS responds <code>OK</code>.</td></tr>
+      <tr><td>Method</td><td><code>POST</code> for all interfaces (JSON body)</td></tr>
+      <tr><td>Encoding</td><td>UTF-8 JSON</td></tr>
+      <tr><td>Timeout</td><td><code>3 s</code> request timeout (example — to be agreed)</td></tr>
+      <tr><td>Auth</td><td>To be decided (none / API key header / mTLS / etc.)</td></tr>
+      <tr><td>Base URL</td><td>To be provided by WCS (host / IP / port)</td></tr>
+    </table>
+  </section>
+
+  <section id="s3">
+    <h2><span class="n">3</span> Data Model / Fields</h2>
+    <table>
+      <tr><th style="width:140px">Field</th><th style="width:120px">Type</th><th>Description</th></tr>
+      <tr><td><code>pId</code></td><td>integer</td><td>Piece (item) unique ID (assigned by RCS). Range <b>1 – 30000</b>; reset policy (wrap at 30000 or daily) to be agreed. Tracks one piece across all calls.</td></tr>
+      <tr><td><code>agvNo</code></td><td>integer</td><td>Robot (AGV) number</td></tr>
+      <tr><td><code>barcode</code></td><td>string</td><td>Item barcode (from the induction scan)</td></tr>
+      <tr><td><code>inductionNo</code></td><td>integer</td><td>Induction (infeed) point number</td></tr>
+      <tr><td><code>chuteNo</code></td><td>integer</td><td>Destination number — chute number. <b>Also the key of the IF-08 status push</b> (a destination is a plain chute or a 3D-sorter chute)</td></tr>
+      <tr><td><code>qty</code></td><td>integer</td><td>Quantity loaded on the tray (same item; may be &gt; 1)</td></tr>
+      <tr><td><code>timeStamp</code></td><td>string</td><td>Event time — <b>local time</b> format (e.g. <code>2026-06-08 14:30:00</code>)</td></tr>
+      <tr><td><code>ready</code></td><td>bool</td><td>IF-08 status per <code>chuteNo</code> — the only flag sent to RCS. <code>true</code> = the destination can receive now; <code>false</code> = it cannot. For a <b>plain chute</b>: <code>ready = not full and not paused</code>. For a <b>3D-sorter chute</b>: also requires the sorter online, aligned, stopped (not sorting). WCS folds everything into one boolean</td></tr>
+    </table>
+  </section>
+
+  <section id="s4">
+    <h2><span class="n">4</span> Interface List</h2>
+    <table>
+      <tr><th style="width:70px">IF</th><th style="width:200px">Name</th><th style="width:140px">Direction</th><th>Summary</th></tr>
+      <tr><td><code>IF-05</code></td><td>Destination Query</td><td><span class="tag">RCS → WCS</span></td><td>Destination &amp; quantity decision (piece tracking starts)</td></tr>
+      <tr><td><code>IF-08</code></td><td>Destination Status (push)</td><td><span class="tag" style="background:var(--wcs-soft,#FEEAD9);color:#9A3412">WCS → RCS</span></td><td>WCS pushes each destination's status (chute or sorter) on every change; RCS decides deposit by destination readiness</td></tr>
+      <tr><td><code>IF-09</code></td><td>Arrival Report</td><td><span class="tag">RCS → WCS</span></td><td>AGV arrived at the chute (WCS records it / prepares the sorter)</td></tr>
+      <tr><td><code>IF-10</code></td><td>Deposit Report</td><td><span class="tag">RCS → WCS</span></td><td>Report the tilt</td></tr>
+    </table>
+  </section>
+
+  <section id="s5">
+    <h2><span class="n">5</span> API Definitions</h2>
+
+    <h3><span class="ifid">IF-05</span> Destination Query</h3>
+    <p>Proposed: <code>POST /api/v1/destination-query</code>. Called once at the induction scan. WCS records the piece (tracking starts; the record is kept even if the result is NG) and decides the destination and quantity.</p>
+    <table>
+      <tr><th style="width:140px">Request</th><th>Response</th></tr>
+      <tr><td><code>pId</code>, <code>agvNo</code>, <code>barcode</code>, <code>inductionNo</code>, <code>qty</code>, <code>timeStamp</code></td><td><code>result</code> (OK / NG), <code>chuteNo</code> (present when OK; <code>null</code> on NG)</td></tr>
+    </table>
+<pre><span class="c">// request</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"agvNo"</span>: <span class="n">7</span>, <span class="s">"barcode"</span>: <span class="s">"8801234567890"</span>,
+  <span class="s">"inductionNo"</span>: <span class="n">2</span>, <span class="s">"qty"</span>: <span class="n">3</span>, <span class="s">"timeStamp"</span>: <span class="s">"2026-06-08 14:30:00"</span> }
+
+<span class="c">// response — OK</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span> }
+
+<span class="c">// response — NG (no destination right now)</span>
+{ <span class="s">"result"</span>: <span class="s">"NG"</span>, <span class="s">"chuteNo"</span>: <span class="n">null</span> }</pre>
+    <p>On <span class="pill go">OK</span> the RCS drives the AGV to <code>chuteNo</code>. On <span class="pill ng">NG</span> the AGV waits and the call is retried later (see Reason Codes).</p>
+
+    <h3><span class="ifid">IF-08</span> Destination Status (push · WCS → RCS)</h3>
+    <p>Proposed: <code>POST {RCS base}/api/v1/destination-status</code> — endpoint <b>hosted by RCS</b>, WCS is the caller. <b>WCS pushes a destination's status whenever it changes</b> (state-change driven, not periodic). A destination is a plain chute or a 3D-sorter chute — <b>RCS treats them the same</b>. RCS keeps the latest status per <code>chuteNo</code> and, when its AGV is at that chute, deposits as soon as it is <code>ready</code> — otherwise it waits for the next push.</p>
+    <table>
+      <tr><th style="width:230px">Request (WCS → RCS)</th><th>Response (RCS → WCS)</th></tr>
+      <tr><td><code>chuteNo</code>, <code>ready</code>, <code>timeStamp</code></td><td><code>result</code> (OK)</td></tr>
+    </table>
+<pre><span class="c">// request (WCS → RCS · on status change)</span>
+{ <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"ready"</span>: <span class="n">true</span>, <span class="s">"timeStamp"</span>: <span class="s">"2026-06-22 14:30:00"</span> }
+
+<span class="c">// response (RCS → WCS)</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
+    <p><code>ready=true</code> = the destination can receive now (OK); <code>ready=false</code> = it cannot (NG). For a plain chute that means <b>full</b> or <b>paused</b> (which WCS manages); for a 3D-sorter chute also busy / offline / not aligned. WCS folds all of it into one flag, so RCS acts on a single chute-level <code>ready</code> and won't tilt into a full or paused chute. RCS deposits when <code>ready=true</code>; otherwise it holds and waits for the next push.</p>
+
+    <h3><span class="ifid">IF-09</span> Arrival Report</h3>
+    <p>Proposed: <code>POST /api/v1/arrival-report</code>. Sent once when the AGV reaches the destination chute, before depositing. <b>WCS records the arrival</b> and prepares the destination to receive. RCS then waits for that destination to turn <code>ready</code> in the IF-08 status push and deposits.</p>
+    <table>
+      <tr><th style="width:140px">Request</th><th>Response</th></tr>
+      <tr><td><code>pId</code>, <code>chuteNo</code>, <code>agvNo</code>, <code>timeStamp</code></td><td><code>result</code> (OK)</td></tr>
+    </table>
+<pre><span class="c">// request</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"agvNo"</span>: <span class="n">7</span>, <span class="s">"timeStamp"</span>: <span class="s">"2026-06-22 14:30:00"</span> }
+
+<span class="c">// response</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
+    <p>For a chute-only destination (no 3D sorter) WCS simply records the arrival. For a 3D-sorter chute WCS prepares it to receive (internal — no floor info is exchanged with RCS).</p>
+
+    <h3><span class="ifid">IF-10</span> Deposit Report</h3>
+    <p>Proposed: <code>POST /api/v1/deposit-report</code>. Sent after the tilt. The full <code>qty</code> is tilted at once.</p>
+    <table>
+      <tr><th style="width:140px">Request</th><th>Response</th></tr>
+      <tr><td><code>pId</code>, <code>barcode</code>, <code>chuteNo</code>, <code>agvNo</code></td><td><code>result</code> (OK)</td></tr>
+    </table>
+<pre><span class="c">// request</span>
+{ <span class="s">"pId"</span>: <span class="n">1024</span>, <span class="s">"barcode"</span>: <span class="s">"8801234567890"</span>, <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"agvNo"</span>: <span class="n">7</span> }
+
+<span class="c">// response</span>
+{ <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
+  </section>
+
+  <section id="s6">
+    <h2><span class="n">6</span> Reason Codes</h2>
+    <div class="note"><b>IF-05 reasons are internal to WCS</b> — recorded in the WCS piece log and <b>not</b> returned to RCS (RCS sees only <code>result</code>). IF-08 is no longer a permission query but a <b>status push</b>; the table below shows how RCS interprets the pushed destination status.</div>
+    <h3>IF-05 — Destination Query</h3>
+    <table>
+      <tr><th style="width:230px">WCS reason (internal)</th><th style="width:120px">RCS sees</th><th>RCS action</th></tr>
+      <tr><td><code>NORMAL</code></td><td><span class="pill go">OK</span></td><td>Move AGV to <code>chuteNo</code></td></tr>
+      <tr><td><code>BUSY</code> (sorting / moving)</td><td><span class="pill go">OK</span></td><td>Still move to <code>chuteNo</code> — the sorter is busy now but frees up shortly; deposit when it turns <code>ready</code> in the IF-08 status</td></tr>
+      <tr><td><code>FULL / PAUSED</code></td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span></td><td>Hold AGV — destination cannot receive (long block). With no IF-08 permission query, WCS does not hand out a full/paused destination</td></tr>
+      <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span></td><td>Hold AGV (full quantity does not fit one destination yet)</td></tr>
+      <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span></td><td>Hold AGV — no destination (OFFLINE = destination unreachable; alternate / hold)</td></tr>
+    </table>
+    <h3>IF-08 — Destination Status (how RCS interprets the push)</h3>
+    <table>
+      <tr><th style="width:300px">Pushed status</th><th>RCS action</th></tr>
+      <tr><td><code>ready=true</code> (OK)</td><td><span class="pill ok">deposit</span> Proceed to tilt</td></tr>
+      <tr><td><code>ready=false</code> (NG)</td><td><span class="pill wait">wait</span> Destination can't receive now (full / paused; for a sorter also busy / offline) — deposit on a later push when it turns ready</td></tr>
+    </table>
+  </section>
+
+  <section id="s7">
+    <h2><span class="n">7</span> End-to-End Flow</h2>
+    <div class="flow">
+      <span class="st">① Destination Query</span><span class="ar">→</span>
+      <span class="st">② Arrival report (IF-09)</span><span class="ar">→</span>
+      <span class="st">③ Wait for <code>ready</code> (IF-08 status push)</span><span class="ar">→</span>
+      <span class="st">④ Deposit Report</span>
+    </div>
+    <ol>
+      <li><b>① Destination Query</b> — At the scan, RCS calls <code>IF-05</code>. On OK, RCS drives the AGV to <code>chuteNo</code>; on NG, the AGV waits.</li>
+      <li><b>② Arrival report (IF-09)</b> — On reaching the chute, RCS calls <code>IF-09</code>. WCS records the arrival and prepares the sorter to receive.</li>
+      <li><b>③ Ready (IF-08 push)</b> — RCS keeps receiving destination status from WCS. It deposits as soon as that chute is <code>ready=true</code>; otherwise it waits for the next push.</li>
+      <li><b>④ Deposit Report</b> — RCS tilts the full <code>qty</code> at the destination and calls <code>IF-10</code> to report it.</li>
+    </ol>
+  </section>
+
+  <section id="s8">
+    <h2><span class="n">8</span> Timing &amp; Retry <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(example — to be agreed)</span></h2>
+    <table>
+      <tr><th style="width:240px">Item</th><th style="width:120px">Value</th><th>Note</th></tr>
+      <tr><td>IF-08 status push</td><td>on change</td><td>WCS pushes when a destination's state changes (no fixed interval; optional heartbeat — to be agreed)</td></tr>
+      <tr><td>API request timeout</td><td><code>3 s</code></td><td>RCS → WCS response limit</td></tr>
+    </table>
+  </section>
+
+  <div class="footer">WCS ↔ RCS Interface Specification · REST/JSON · RCS calls IF-05/IF-09/IF-10 · WCS pushes IF-08 destination status · Endpoints / auth / timing are examples open to discussion · Internal references: master spec, unified sequence diagram</div>
+</div>
+</body>
+</html>
