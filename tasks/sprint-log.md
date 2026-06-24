@@ -994,3 +994,35 @@ Wcs.Core 소스 impurity(DateTime.Now/Random/File/HttpClient/Console/Task.Run): 
 - `src/Wcs.Api/WcsTeardownGuard.cs` (신규), `src/Wcs.Api/Program.cs`, `src/Wcs.Api/SorterGatewayRegistry.cs`, `src/Wcs.Api/Controllers/RcsController.cs`
 - `tests/Wcs.Tests/TestAssemblyInit.cs` (신규), `tests/Wcs.Tests/ApiIntegrationTests.cs`, `tests/Wcs.Tests/PlcGatewayIntegrationTests.cs`, `tests/Wcs.Tests/ScenarioTests.cs`, `tests/Wcs.Tests/FakeSerialPort.cs`
 - 임시 진단 파일 `tests/Wcs.Tests/_CrashDiag.cs`는 진단 후 삭제됨(잔존 0).
+
+---
+
+## IMPLEMENTATION COMPLETE — Phase 2 (IF-08 아웃바운드 목적지 상태 푸시)
+
+### 결과
+- `dotnet build Wcs.sln` — 경고 0 / 오류 0.
+- `dotnet test Wcs.sln` 전체 — **76/76 GREEN, exit 0**(Phase 1 회귀 0: 기존 70 그대로 + 신규 푸시 6). `--blame-hang-timeout 120s`로 hangdump/sequence 파일 0(teardown 클린).
+- 푸시 테스트(HTTP·타이머·동시성 표적) 단독 **5회 연속 GREEN·exit 0**(flaky 0).
+
+### 신규 컴포넌트 (Wcs.Api)
+- `RcsPushClient.cs` — IF-08 푸시 클라이언트. **IHttpClientFactory 경유**(named client "RcsPush", `new HttpClient(` 직접 생성 0 — grep은 주석뿐). 페이로드 `{chuteNo, ready, timeStamp}`(camelCase, STJ 기본). 엔드포인트 = `{BaseUrl}{Path}`(설정 조합, URL 하드코딩 0). 설정 경유 **지수 백오프 재시도**(기본 3회 1s/2s/4s — 고정 sleep 0). 소진 후 false 반환(실패를 성공으로 간주 안 함 — 확정3). 예외 삼킴 0(Fail-Loud 로깅).
+- `DestinationStatusPusher.cs` — 전이 감지·**전이당 정확히 1회** 푸시 파이프(IHostedService + IDestinationChangeNotifier + IAsyncDisposable). ready = **Phase 1 `DestinationStatusService.Compute` 재사용**(새 판정 0 — Compute 호출 1지점). 변화원 둘이 공통 `Observe→PumpAsync`로 수렴: ① 슈트 `ChuteCapacityService.OnChuteStateChanged` 이벤트 구독 ② 소터 폴링 스냅샷(`bundle.Latest`) 주기 관찰·diff(**게이트웨이 본문 무변경** — Latest 읽기만, 추가 이벤트 노출 0). 동시성 멱등: per-destination `Gate` 락 + `PushInFlight` 플래그로 비원자 check-then-act 배제(P3 교훈) — 중복 0·누락 0. `Computed`/`Acked` 분리로 실패 시 Acked 불변(미알림 유지·복구 재푸시 — 확정3). 부트스트랩(확정5): 기동 시 전 목적지 1회 스냅샷. BaseUrl 미설정(확정4): 경고 후 전체 비활성(크래시 X). 멱등 StopAsync(`Interlocked _stopped`) + CTS 정리 → teardown 클린.
+
+### 변경 파일 (전부 Wcs.Api — 보호 zone 0)
+- `WcsOptions.cs` — `RcsPushOptions`(BaseUrl·Path·RetryCount·RetryBaseDelayMs·RetryMaxDelayMs·HttpTimeoutMs·SorterObserveIntervalMs) 전부 설정화.
+- `appsettings.json` — `Wcs:RcsPush` 섹션(BaseUrl 기본 null = 개발/Sim 비활성, 운영 필수 표기).
+- `ChuteCapacityService.cs` — `OnChuteStateChanged` 이벤트 추가 + 4개 mutation(OnReserved/OnDeposited/OnReservationCancelled/OnCleared) 후 **락 밖** 발화(구독자 예외 흡수·로깅). 기존 집계 동작 무변경.
+- `Program.cs` — named HttpClient + IRcsPushClient + DestinationStatusPusher DI 결선(HostedService + IDestinationChangeNotifier 동일 싱글톤).
+
+### 무변경 가드 (git diff develop)
+- `src/Wcs.PlcGateway/PlcGateway.cs`·`HandshakeOrchestrator.cs`·`src/Wcs.Sim3ds`·`src/Wcs.Core` — **0줄**. 레지스터맵/핸드셰이크/Sim3ds/Core 판정 불변. **추가 이벤트 노출 0**(소터는 기존 `Latest` 관찰만).
+- `RcsController.cs`(인바운드 IF-05/09/10) — **0줄**(회귀 0).
+
+### 신규 검증 테스트 (tests/Wcs.Tests/RcsPushTests.cs — 가짜 RCS 수신 서버)
+`FakeRcsServer`(Kestrel 동적 포트, 거부 토글) + `RcsPushWebApplicationFactory`(BaseUrl·재시도 설정 주입, Pusher 활성 유지)로 실 수신·카운트·raw 본문 단언:
+- VS-PUSH-6/7 부트스트랩 7목적지 1회 + payload 정합({chuteNo,ready,timeStamp} 정확히·full/paused/online 키 부재·timeStamp 포맷).
+- VS-PUSH-1 슈트 전이(true→false→true) 전이당 1건(WaitUntilExact stableCount로 중복 0 가드).
+- VS-PUSH-2/3 소터 전이(false→true→false) 전이당 1건 + **무변화 폴 다수에도 폭주 0**.
+- VS-PUSH-4 동시 16통지 → 전이당 정확히 1건(중복 0·누락 0 멱등).
+- VS-PUSH-5 RCS 거부(503)→재시도 소진(미알림 유지)→복구→재푸시 최신값 도달(확정3).
+- VS-PUSH-8 BaseUrl 미설정→푸시 비활성(수신 0)·IF-05 정상(회귀 0).
