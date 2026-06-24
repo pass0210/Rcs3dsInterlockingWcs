@@ -834,3 +834,163 @@ Wire_Strings_AreStable 1건 GREEN 확인. Wire는 FAIL 집합에 없음.
 
 변경된 파일: `Wcs.sln` (신규) + 각 `.csproj`의 참조/패키지 항목만. 
 스켈레톤 `.cs`/`.json` 파일 내용 편집 없음.
+
+
+# S-RCS-IF-REDESIGN Phase 1 — 인바운드 + 구조 전환
+
+## IMPLEMENTATION COMPLETE
+
+### 변경 요약 (Scope A~G)
+
+**A. 구조 전환 (Minimal API → Controller)**
+- `src/Wcs.Api/Controllers/RcsController.cs` 신설 — `[ApiController] [Route("api/v1")]`:
+  IF-05(`destination-query`)·IF-09(`arrival-report`, 신설)·IF-10(`deposit-report`)를 컨트롤러 액션으로 이관.
+  Program.cs의 인라인 `app.MapPost` 3개 블록 제거 → `AddControllers()` + `MapControllers()`.
+- `AddControllers(o => o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true)`:
+  검증은 컨트롤러 핸들러가 명시 수행(가부 200+result, 검증 실패만 400). non-nullable 참조타입 자동 [Required] 추론 OFF로
+  Minimal API 동작 보존(timeStamp 등 선택필드 누락 시 자동 400 방지).
+- **IF-08 deposit-permission 완전 제거**: 엔드포인트·DTO(`DepositPermissionRequest`/`Response`)·핸들러 분기 0.
+  grep 확인: DTO 타입 0, 라이브 엔드포인트 0. 잔존은 폐지 설명 주석 3건 + 404 부재확인 테스트뿐.
+
+**B. IF-05 응답 reason 제거 + FULL/PAUSED→NG**
+- `DestinationQueryResponse(string Result, int? ChuteNo)` — reason 필드 제거(RCS 미전송).
+- IF-05 상류 FULL/PAUSED 필터: `IOrderRepository.QueryDestination`에 `availability` 델리게이트 추가.
+  목적지 결정 후 예약 직전 `DestinationStatusService.Compute` 산출로 Full/Paused면 NG(예약 안 함)·DENIED 기록.
+  BUSY(분류·이동 중)는 미차단 → OK·이동(도착 후 Phase 2 푸시 ready 시 투입). 내부 사유는 piece_event(IF05_REQ/RES) 유지.
+
+**C. IF-09 도착 보고 신설 + 운영층 고정 정렬**
+- `POST /api/v1/arrival-report` 신설: `{pId,chuteNo,agvNo,timeStamp}` → `{result:"OK"}`.
+- 도착 기록 = piece_event 신규 타입 `IF09_ARRIVAL` (사용자 확정). **piece 상태 전이 없음**(기록만).
+  `IArrivalRecorder`/`EfArrivalRecorder` 신설 — 활성 piece에 append-only.
+- 3D 소터면 운영층(설정 `Wcs:OperationalFloor`, 기본 2)으로 정렬: DepositDecider로 쓸지/값 판단 →
+  번들 전용 큐(`SetTgtFloor`) 경유(절대규칙 #1, 게이트웨이 본문 무변경). 조건 `TgtFloor==0 && (CurFloor≠운영층||Ready==0)`,
+  진행 중·OFFLINE이면 미기입(핑퐁 차단·절대규칙 #2), WCS 클리어 0(절대규칙 #3). fire-and-forget는 ContinueWith IsFaulted 로깅.
+- 슈트 전용 도착: 기록만(무정렬). 미존재/비활성 chuteNo: 200 + 기록만·정렬 스킵(500 금지, 사용자 확정).
+- 운영층 하드코딩 0 — `WcsOptions.OperationalFloor` 단일 설정 지점(grep: 설정 기본값 외 floor-2 리터럴 0).
+
+**D. DepositDecider 재용도 (Wcs.Core, 순수 유지)**
+- `Decide(snap, operationalFloor, hold)` — agvFloor 비교 → operationalFloor 비교. WRONG_FLOOR 소멸 → NotAligned.
+  결과 `DepositDecision(bool Ready, …)` (구 Allowed→Ready). ready = online && CurFloor==운영층 && Ready==1.
+  (a) IF-09 TgtFloor 쓰기 판단 (b) Phase 2 ready 산출 재료. Wcs.Core 의존 0·impurity 0(static·DateTime/Random/IO 0) 유지.
+
+**E. full/ready 단일 산출 함수화 (Phase 2 공용 선확보)**
+- `IDestinationStatusService`/`DestinationStatusService` 신설 — `Compute(destId, destType) → DestinationReadiness(Ready,Full,Paused,Online,Reason)`.
+  슈트: ChuteCapacityService hold. 소터: 게이트웨이 스냅샷 + DepositDecider(ready) 접기.
+  IF-05 NG 필터가 Full/Paused 소비. Ready(접힌 단일 플래그)는 Phase 2 아웃바운드 푸시 재사용 확장점.
+  **푸시 클라이언트는 미구현(Phase 2)** — 개별 full/paused는 외부로 내보내지 않음.
+
+**F. 테스트 재작성** (아래 전환 명세)
+
+**G. HTML 5건 working tree 포함**: docs/ 4 modified + 신규 `wcs_rcs_interface.html` — git status 확인됨.
+
+### DB 마이그레이션
+- `PieceEventType`에 `IF09_ARRIVAL` 추가. event_type은 enum→string(maxLength, **CHECK 제약 없음**)이라 스키마 무변경.
+- 양 provider 마이그레이션 추가(변경 시점 이력 + provider별 스냅샷 동기화):
+  `Wcs.Migrations.Sqlite/...P1_If09Arrival_PieceEvent` + `Wcs.Migrations.SqlServer/...P1_If09Arrival_PieceEvent`
+  (Up/Down 의도적 비어있음 — enum 추가는 컬럼 정의 불변). `has-pending-model-changes` 양쪽 "No changes" 확인.
+
+### 테스트 결과
+- `dotnet build`: 경고 0 / 오류 0.
+- `dotnet test`: **70/70 GREEN**(전 클래스 단독·소그룹 GREEN). `--blame-hang-timeout 90s`로 5회 연속 전체 GREEN(실패 0).
+- 실 Sim 소켓·타이밍 표적(S1/S5/S6/S7/S2-4-9 + P2bSim4/5/6 = 11) 단독 **5회 연속 GREEN**(assertion flaky 0).
+- 무변경 가드: PlcGateway.cs·HandshakeOrchestrator.cs·RegisterMap(Models.cs 내 RegisterMap/PlcSnapshot/FromRegisters 본문)·Sim3ds/SimServer.cs **git diff 0**.
+- Wcs.Core: 의존 0·impurity 0. 마이그레이션 pending 0(양 provider). deposit-permission DTO/엔드포인트 grep 0. 하드코딩 floor-2 grep 0(설정 1지점).
+
+### ⚠ 알려진 사항 — 테스트호스트 종료(teardown) 간헐 행 (Evaluator 주의)
+- 기본 `dotnet test`(플래그 없음)는 **모든 테스트가 PASS한 뒤 테스트호스트 프로세스 종료 단계에서 간헐적으로 행(hang)**한다.
+  단언 실패가 아니라 종료 지연(스택: vstest 통신 루프 대기 + lazy 백그라운드 스레드/폴 루프 정리 지연).
+- **이 행은 본 스프린트가 도입한 것이 아니다** — 커밋된 P3 베이스라인(1501ccd)을 worktree로 띄워 동일 재현 확인(69 통과 후 동일 hangdump).
+  PlcPollingService 폴 루프/IHost disposal 타이밍 의존(무변경 가드 PlcGateway 영역) — 환경적 선재 이슈.
+- 완화: 테스트 팩토리에 비동기 종료 경로(`DisposeAsync` 오버라이드) 추가(부분 효과). 결정적 통과는
+  `dotnet test --blame-hang-timeout 90s`로 보장(5/5 GREEN). 근본 해소는 PlcGateway 폴 루프 정리(무변경 가드)라 Phase 1 범위 밖.
+
+---
+
+## 회귀·전환 명세 (어떤 구 단언이 왜 삭제/유지/재타겟되었는가)
+
+### 삭제/대체 (구 IF-08 폴링 전제 — 폐지)
+- **ApiIntegrationTests VS-3(`VS3_If08_LiveSnapshot...`/`VS3_If08_WrongFloor...`)·VS-4(`VS4_If08_ReadyZero`/`InvalidPId`/`UnknownAgvNo`)**:
+  deposit-permission 호출·allowed/reason(READY/WRONG_FLOOR/BUSY)·TgtFloor 단언 → **삭제**(엔드포인트 폐지).
+  대체: `If08_DepositPermission_Removed_Returns404Or405`(부재 입증) + IF-09 정렬 테스트로 재타겟.
+- **ApiIntegrationTests P2a_If08_Chute_HoldNone/PausedStatus/UnknownChute/Full_ThenCleared**:
+  IF-08 hold 판정(allowed/reason) → **IF-05 상류 필터로 재타겟**:
+  `If05_Chute_Normal_Ok`(NORMAL→OK)·`If05_Chute_Paused_Ng`(PAUSED→NG)·`If05_Chute_Full_ThenCleared_Normal`(FULL→NG, 비움 후 OK).
+  (UnknownChute IF-08는 IF-05에 대응개념 없음 → IF-09 미존재 chuteNo 200 테스트가 미존재-목적지 경로 커버.)
+- **ScenarioTests S5/S6 `SendIf05AndIf10Async`의 IF-08 폴링 단계**: deposit-permission 폴링 루프 제거 →
+  `SendIf05Through10Async`(IF-05 → **IF-09 도착·정렬** → IF-10)로 재작성. 핸드셰이크 DB 단언(MISMATCH/TIMEOUT·alarm) **유지**.
+- **ScenarioTests S1의 IF-08 폴링 루프**: 제거 → IF-09 도착 보고 + 운영층 정렬 대기 + IF09_ARRIVAL piece_event 단언으로 재작성.
+  sorter_command COMPLETED·R_Seq==C_Seq DB 단언 **유지**.
+- **ScenarioTests S8(`S8_Chute_Full_Then_Cleared_Ready`/`Paused_NotAllowed`)**: 구 IF-08 FULL/PAUSED 응답 단언 →
+  `S8_Chute_Full_Then_Cleared_Ok`/`S8_Chute_Paused_Ng`(IF-05 상류 필터 FULL/PAUSED→NG)로 재타겟.
+
+### 재작성 (게이트웨이 직접 — 2층 고정 기준)
+- **ScenarioTests S2/S3/S4/S9 + DepositDeciderTests 전체**: `Decide(snap, agvFloor:X, ...)` → `Decide(snap, operationalFloor:2, ...)`,
+  `.Allowed` → `.Ready`, `DenyReason.WrongFloor` → `DenyReason.NotAligned`, `"WRONG_FLOOR"` → `"NOT_ALIGNED"`.
+  게이트웨이 D6 쓰기·핑퐁 차단·분류 시작 클리어 입증 골격 유지(타임라인 "WCS 쓰기 수신: D6"·"TgtFloor 클리어").
+  S2: 미정렬→운영층 정렬→Ready. S3: BUSY 운영층 복귀 선기입. S4: TgtFloor≠0 핑퐁 차단. S9: 단일 소터 선점·핑퐁.
+
+### 유지 (재활용 — 동작 보존)
+- IF-05 happy(`VS1`: NORMAL→OK·chuteNo) — 단 reason 단언 제거. IF-05 검증(`VS2`: pId 범위·미매칭 NG·PAUSED 시드 NG)·`MINOR1`(qty≤0→400)·`P2a-5`(timeStamp 파싱·UtcNow 폴백)·`P2a-8`(미매칭 NG nullable dest·500 없음).
+- IF-10 happy·멱등(`VS5`)·`CONCUR-1`(8병렬 동일 pId)·IF-11 트리거(`VS6` 3D)·슈트 무트리거(대조) — Controller 이관 후 동작 보존.
+- 핸드셰이크 alarm/sorter_command 영속화(S5/S6)·OFFLINE 전이당 1건(S7, WaitUntilExactAsync stableCount:5) — 게이트웨이 무변경이므로 그대로.
+- P2bMultiSorterTests(P2b2/3/7a/7b/7c)·P2bSimHandshakeTests(P2b4/5/6)·PlcGatewayIntegrationTests·RtuTransportTests — 인프라 레이어, 무변경 유지.
+
+---
+
+## TEARDOWN FIX (Phase 1 재스폰 Generator — 테스트호스트 비정상 종료/행 근본 해소)
+
+### 증상 (인계받은 알려진 결함)
+- `dotnet test` 전체 실행이 **모든 테스트 PASS 후 종료 단계에서 행/크래시** — "활성 테스트 실행이 중단되었습니다. 이유: 테스트 호스트 프로세스 작동이 중단됨". `--blame` 비활성 타임아웃(2분) 경과 후 hangdump+중단. EXIT=124/1. 단언 실패는 0(통과 70).
+- 이전 Generator는 "PlcPollingService 폴 루프/IHost disposal 타이밍 — 환경적 선재 이슈, 범위 밖"으로 판단하고 `--blame-hang-timeout 90s` 우회로 5/5 GREEN 보고. → **우회가 아니라 근본 수정 필요(team-lead 지시).**
+
+### 진단 (dotnet-dump `dumpasync` — 결정적 증거)
+종료 단계의 **parked async 체인**이 행의 정확한 원인:
+```
+PlcPollingService.RunWriteConsumerAsync  ← (1) parked, 종료 안 됨
+ ← PlcPollingService.StopAsync (await _writeTask)
+  ← PlcPollingService.DisposeAsync
+   ← NopSorterRegistryFactory.StopAsync  (또는 prod SorterRegistryFactory.StopAsync)
+    ← Host.StopAsync ← WebApplicationFactory.DisposeAsync ← <test>.DisposeAsync  ← 전체 teardown 정지
+```
+**근본 원인**: `RunWriteConsumerAsync`의 `await foreach (_writeQueue.ReadAllAsync(ct))`가 **빈 채널에 parked된 상태에서 CTS 취소만으로는 깨어나지 않는 타이밍 경쟁**. `StopAsync`가 `_writeTask`를 영원히 await → 호스트 종료 데드락 → 테스트호스트가 응답 불가 → vstest 비활성 타임아웃 abort. **비결정적**(테스트 순서/타이밍 의존) — 그래서 `--blame-hang-timeout` 5/5에서 우연히 안 터졌던 것.
+부차 원인 2건(동시 발견·수정): ① 종속 라이브러리 FluentModbus(ModbusTcpServer accept 루프·RTU 읽기 루프)가 종료 시 `SocketException(995)`/`InvalidOperationException`으로 폴트한 **관찰되지 않은 Task**가 파이널라이저 재던지기 → 프로세스 종료(원래 크래시 22건). ② IF-10 핸드셰이크 `ContinueWith`가 **dispose된 요청 스코프**의 `ICellSelector.ReleaseCell` 호출 → `ObjectDisposedException` 누수.
+
+### 수정 (무변경 가드 100% 준수 — PlcGateway/HandshakeOrchestrator/SimServer/Wcs.Core diff 0)
+1. **결정적 채널 완료(핵심)**: `PlcPollingService`를 종료하는 **모든 PlcWriteQueue 소유처**에서 종료 직전 `_writeQueue.Writer.TryComplete()` 호출 → `RunWriteConsumerAsync`의 `await foreach`가 **결정적으로 정상 종료**(취소 경쟁 회피).
+   - 운영: `src/Wcs.Api/SorterGatewayRegistry.cs` — `SorterBundleHandle`에 `PlcWriteQueue?` 보관, `StopPollingAsync()`가 `Writer.TryComplete()` 후 `_polling.StopAsync()`. `Program.cs` `SorterRegistryFactory.StartAsync`에서 번들에 큐 주입(소터별 단일 큐 — 절대규칙 #1 불변). **WCS 윈도우 서비스 종료 데드락도 동일 해소(운영 가치).**
+   - 테스트: `FakeModbusWebApplicationFactory`·`P2bSimHandshakeTests`·`PlcGatewayIntegrationTests`·`S234_9GatewayScenarioTests`·`S8ApplicationFactory` 각 종료 경로에 `Writer.TryComplete()`.
+2. **WcsTeardownGuard** (`src/Wcs.Api/WcsTeardownGuard.cs`, 신규): 프로세스 1회 등록 `TaskScheduler.UnobservedTaskException` 핸들러. **종료 신호 양성 예외만**(SocketException 995/10004·IOException(소켓/취소)·InvalidOperation(pipe)·OperationCanceled) `SetObserved()`+stderr 1줄 로깅. FluentModbus 내부 루프(라이브러리·무변경 SimServer) 폴트가 파이널라이저에서 프로세스를 죽이지 못하게 호스트 경계에서 차단. 그 외 예외는 미관찰(진성 버그 노출 — Fail Loud 보존). `Program.cs` 최상단 + 테스트 어셈블리 `TestAssemblyInit`(ModuleInitializer)에서 호출(웹 호스트 미기동 RTU 테스트 포괄).
+3. **IF-10 ContinueWith 종료 안전화** (`Controllers/RcsController.cs`): `lifetime.ApplicationStopping` 신호 시 영속화·셀 해제 전체 스킵, 콜백 전체 try 래핑, 셀 해제는 **새 스코프**의 `ICellSelector`로 수행(요청 스코프 dispose 경쟁 차단), 로깅도 `SafeLog`로 teardown throw 흡수.
+4. **FakeSerialPort.DisposeAsync**: `Reader.CompleteAsync` 전에 `CancelPendingRead()` — FluentModbus RTU 읽기 루프의 parked ReadAsync가 "No reading allowed" 폴트 대신 우아 종료.
+5. **FakeModbusWebApplicationFactory : IAsyncLifetime**: xUnit 2.x `IClassFixture`는 픽스처가 IAsyncDisposable이어도 **동기 Dispose()**를 호출 → `WebApplicationFactory.Dispose()` sync-over-async가 `app.Run()` 스레드와 데드락. IAsyncLifetime 구현으로 **비동기 DisposeAsync 경로** 강제. `S8ApplicationFactory.Dispose(bool)`도 동기 `base.Dispose` 제거(IHost 종료는 DisposeAsync에 일임).
+
+### 검증 (raw)
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+전체 dotnet test (no-build) 5회 연속:
+  RUN 1: exit=0 13s abort=0 통과:70 실패:0
+  RUN 2: exit=0  7s abort=0 통과:70 실패:0
+  RUN 3: exit=0  8s abort=0 통과:70 실패:0
+  RUN 4: exit=0  8s abort=0 통과:70 실패:0
+  RUN 5: exit=0  7s abort=0 통과:70 실패:0
+  → "작동이 중단됨" 0건, EXIT=0, 깨끗한 종료 (수정 전 150s+ 행/abort에서 ~8s 클린으로)
+
+타이밍 민감 표적(S1/S5/S6/S7/S234_9/P2bSimHandshake/PlcGatewayIntegration) 단독 5회 연속:
+  TT-RUN 1~5: 전부 exit=0 6~7s abort=0 통과:20 실패:0 (assertion flaky 0)
+```
+
+### 무변경 가드 입증
+```
+git diff 1501ccd(Phase1 직전 베이스라인):
+  src/Wcs.PlcGateway/PlcGateway.cs        → 0 lines
+  src/Wcs.PlcGateway/HandshakeOrchestrator.cs → 0 lines
+  src/Wcs.Sim3ds/SimServer.cs             → 0 lines
+Wcs.Core.csproj PackageReference/ProjectReference: 0 (순수성 유지)
+Wcs.Core 소스 impurity(DateTime.Now/Random/File/HttpClient/Console/Task.Run): 0 (PDB 바이너리만 매치)
+```
+
+### 변경 파일 (이번 teardown 수정분)
+- `src/Wcs.Api/WcsTeardownGuard.cs` (신규), `src/Wcs.Api/Program.cs`, `src/Wcs.Api/SorterGatewayRegistry.cs`, `src/Wcs.Api/Controllers/RcsController.cs`
+- `tests/Wcs.Tests/TestAssemblyInit.cs` (신규), `tests/Wcs.Tests/ApiIntegrationTests.cs`, `tests/Wcs.Tests/PlcGatewayIntegrationTests.cs`, `tests/Wcs.Tests/ScenarioTests.cs`, `tests/Wcs.Tests/FakeSerialPort.cs`
+- 임시 진단 파일 `tests/Wcs.Tests/_CrashDiag.cs`는 진단 후 삭제됨(잔존 0).

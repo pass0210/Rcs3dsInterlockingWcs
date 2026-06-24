@@ -34,7 +34,8 @@ public sealed class EfOrderRepository : IOrderRepository
     }
 
     public (string Result, int? ChuteNo, string Reason, DestinationType? DestType, long? DestinationId) QueryDestination(
-        int pId, int agvNo, string barcode, int inductionNo, int qty, string? clientTs)
+        int pId, int agvNo, string barcode, int inductionNo, int qty, string? clientTs,
+        Func<long, DestinationType, DestinationBlock> availability)
     {
         // timeStamp 백필: 파싱 성공 → effective, 실패·누락 → UtcNow (Scope-3)
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
@@ -126,6 +127,23 @@ public sealed class EfOrderRepository : IOrderRepository
         }
 
         var destApiType = ToDestType(dest);
+
+        // ── IF-05 상류 FULL/PAUSED 필터 (재설계 Phase 1, Scope B) ───────────────
+        // FULL/PAUSED 차단을 도착 시점(폐지된 IF-08)에서 배정 시점(IF-05)으로 상류 이동.
+        // 산출원은 DestinationStatusService(슈트·소터 공용) — availability 델리게이트로 주입.
+        // BUSY(분류·이동 중)는 차단하지 않는다(OK·이동) — availability는 Full/Paused만 반환.
+        // FULL/PAUSED면 예약하지 않고 DENIED로 기록 후 NG.
+        if (destApiType.HasValue && destId.HasValue)
+        {
+            var block = availability(destId.Value, destApiType.Value);
+            if (block != DestinationBlock.None)
+            {
+                var blockReason = block == DestinationBlock.Full ? "FULL" : "PAUSED";
+                RecordDenied(pId, agvNo, barcode, inductionNo, qty, blockReason,
+                    clientTs, effective, item, dest);
+                return ("NG", null, blockReason, destApiType, null);
+            }
+        }
 
         // ── 트랜잭션: 예약차감 + piece 삽입 + IF05_REQ/RES piece_event + AUTO 배정 반영 ─
         using var tx = _db.Database.BeginTransaction();
@@ -297,6 +315,72 @@ public sealed class EfOrderRepository : IOrderRepository
     /// RCS timeStamp 파싱 ("yyyy-MM-dd HH:mm:ss" 로컬).
     /// 성공 시 UTC 변환 반환, 실패·null → null(→ 호출자 UtcNow 사용).
     /// </summary>
+    private static DateTime? ParseTimestamp(string? ts)
+    {
+        if (string.IsNullOrWhiteSpace(ts)) return null;
+        return DateTime.TryParseExact(ts, "yyyy-MM-dd HH:mm:ss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var dt)
+            ? dt.ToUniversalTime()
+            : null;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// EfArrivalRecorder — IF-09 도착 보고 기록 (재설계 Phase 1, Scope C)
+// piece_event(IF09_ARRIVAL) append-only. piece 상태 전이 없음(사용자 확정).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// EF Core 기반 IF-09 도착 보고 기록.
+/// 활성 piece에 piece_event(IF09_ARRIVAL) 1행을 단일 트랜잭션으로 append.
+/// piece.status는 그대로 유지(RESERVED/PERMITTED) — 도착은 기록만 남긴다.
+/// </summary>
+public sealed class EfArrivalRecorder : IArrivalRecorder
+{
+    private readonly WcsDbContext _db;
+
+    public EfArrivalRecorder(WcsDbContext db)
+    {
+        _db = db;
+    }
+
+    public bool RecordArrival(int pId, int chuteNo, int agvNo, string? clientTs)
+    {
+        var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
+
+        // 활성 piece 조회 (IF-05에서 생성된 RESERVED/PERMITTED piece).
+        var piece = _db.Pieces
+            .Where(p => p.PId == pId && p.IsActive)
+            .OrderByDescending(p => p.Id)
+            .FirstOrDefault();
+
+        // IF-05 없이 IF-09 먼저 도착(비정상) — 기록 생략(상태 전이도 없음).
+        if (piece is null)
+            return false;
+
+        using var tx = _db.Database.BeginTransaction();
+        try
+        {
+            _db.PieceEvents.Add(new PieceEvent
+            {
+                PieceId   = piece.Id,
+                EventType = PieceEventType.IF09_ARRIVAL,
+                Reason    = $"chuteNo={chuteNo} agvNo={agvNo}",
+                ClientTs  = clientTs,
+                At        = effective,
+            });
+            _db.SaveChanges();
+            tx.Commit();
+            return true;
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+    }
+
     private static DateTime? ParseTimestamp(string? ts)
     {
         if (string.IsNullOrWhiteSpace(ts)) return null;

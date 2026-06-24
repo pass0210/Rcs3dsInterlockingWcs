@@ -28,19 +28,24 @@ public sealed class SorterBundleHandle
     private readonly PlcPollingService   _polling;
     private readonly HandshakeOrchestrator _handshake;
 
-    // PlcWriteQueue는 PlcPollingService 안에 캡슐화돼 있음.
-    // 외부에서 EnqueueAsync를 호출하려면 IPlcGateway 인터페이스를 경유.
+    // 이 소터 전용 쓰기 큐(절대규칙 #1 소터별 단일 큐). 종료 시 채널을 완료시켜
+    // PlcPollingService의 쓰기 컨슈머 루프(RunWriteConsumerAsync)가 결정적으로 끝나게 한다
+    // (취소 토큰만으로는 빈 채널에 parked된 ReadAllAsync가 깨어나지 않는 타이밍 경쟁이 있어
+    //  StopAsync가 쓰기 태스크를 영원히 await → 호스트 종료 데드락).
+    private readonly PlcWriteQueue?      _writeQueue;
 
     public SorterBundleHandle(
         long                   destinationId,
         int                    chuteNo,
         PlcPollingService      polling,
-        HandshakeOrchestrator  handshake)
+        HandshakeOrchestrator  handshake,
+        PlcWriteQueue?         writeQueue = null)
     {
         DestinationId = destinationId;
         ChuteNo       = chuteNo;
         _polling      = polling;
         _handshake    = handshake;
+        _writeQueue   = writeQueue;
     }
 
     // ── API 계층이 사용하는 세 가지 조작 ─────────────────────────────────────
@@ -62,7 +67,12 @@ public sealed class SorterBundleHandle
     public Task StartPollingAsync(CancellationToken ct) => _polling.StartAsync(ct);
 
     /// <summary>소터 폴링 서비스 종료 (PlcPollingHostedAdapter에서 호출).</summary>
-    public Task StopPollingAsync() => _polling.StopAsync();
+    public Task StopPollingAsync()
+    {
+        // 쓰기 큐 채널을 먼저 완료 → 쓰기 컨슈머가 결정적으로 종료(빈 채널 취소 경쟁 회피).
+        _writeQueue?.Writer.TryComplete();
+        return _polling.StopAsync();
+    }
 
     // ── P3: OFFLINE 전이 이벤트 구독 지원 ────────────────────────────────────
     // API 계층이 OFFLINE 전이당 1건 alarm을 기록하기 위해 구독.

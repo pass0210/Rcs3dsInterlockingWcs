@@ -104,6 +104,12 @@ public sealed class FakeSerialPort : IModbusRtuSerialPort, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // FluentModbus 내부 RTU 읽기 루프가 _readPipe.Reader.ReadAsync에 대기 중일 수 있다.
+        // 그 상태에서 Reader.CompleteAsync를 호출하면 대기 중인 ReadAsync가
+        // InvalidOperationException("No reading allowed")로 폴트되고, 그 Task가 관찰되지 않으면
+        // 파이널라이저 스레드에서 재던져져 (테스트호스트) 프로세스가 종료된다.
+        // 따라서 먼저 대기 중인 읽기를 취소(IsCanceled→ReadAsync가 0 반환)한 뒤 완료한다.
+        _readPipe.Reader.CancelPendingRead();
         await _readPipe.Reader.CompleteAsync().ConfigureAwait(false);
         await _writePipe.Writer.CompleteAsync().ConfigureAwait(false);
     }

@@ -69,6 +69,9 @@ public class PlcGatewayIntegrationTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        // 쓰기 큐 채널을 먼저 완료시켜 RunWriteConsumerAsync가 결정적으로 종료되게 한다
+        // (CTS 취소만으로는 빈 채널 parked ReadAllAsync가 안 깨어나는 타이밍 경쟁 → StopAsync 데드락).
+        _queue?.Writer.TryComplete();
         if (_gw  is not null) await _gw.StopAsync();
         if (_sim is not null) await _sim.StopAsync();
 
