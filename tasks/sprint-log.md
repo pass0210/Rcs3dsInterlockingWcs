@@ -934,3 +934,63 @@ Wire_Strings_AreStable 1건 GREEN 확인. Wire는 FAIL 집합에 없음.
 - IF-10 happy·멱등(`VS5`)·`CONCUR-1`(8병렬 동일 pId)·IF-11 트리거(`VS6` 3D)·슈트 무트리거(대조) — Controller 이관 후 동작 보존.
 - 핸드셰이크 alarm/sorter_command 영속화(S5/S6)·OFFLINE 전이당 1건(S7, WaitUntilExactAsync stableCount:5) — 게이트웨이 무변경이므로 그대로.
 - P2bMultiSorterTests(P2b2/3/7a/7b/7c)·P2bSimHandshakeTests(P2b4/5/6)·PlcGatewayIntegrationTests·RtuTransportTests — 인프라 레이어, 무변경 유지.
+
+---
+
+## TEARDOWN FIX (Phase 1 재스폰 Generator — 테스트호스트 비정상 종료/행 근본 해소)
+
+### 증상 (인계받은 알려진 결함)
+- `dotnet test` 전체 실행이 **모든 테스트 PASS 후 종료 단계에서 행/크래시** — "활성 테스트 실행이 중단되었습니다. 이유: 테스트 호스트 프로세스 작동이 중단됨". `--blame` 비활성 타임아웃(2분) 경과 후 hangdump+중단. EXIT=124/1. 단언 실패는 0(통과 70).
+- 이전 Generator는 "PlcPollingService 폴 루프/IHost disposal 타이밍 — 환경적 선재 이슈, 범위 밖"으로 판단하고 `--blame-hang-timeout 90s` 우회로 5/5 GREEN 보고. → **우회가 아니라 근본 수정 필요(team-lead 지시).**
+
+### 진단 (dotnet-dump `dumpasync` — 결정적 증거)
+종료 단계의 **parked async 체인**이 행의 정확한 원인:
+```
+PlcPollingService.RunWriteConsumerAsync  ← (1) parked, 종료 안 됨
+ ← PlcPollingService.StopAsync (await _writeTask)
+  ← PlcPollingService.DisposeAsync
+   ← NopSorterRegistryFactory.StopAsync  (또는 prod SorterRegistryFactory.StopAsync)
+    ← Host.StopAsync ← WebApplicationFactory.DisposeAsync ← <test>.DisposeAsync  ← 전체 teardown 정지
+```
+**근본 원인**: `RunWriteConsumerAsync`의 `await foreach (_writeQueue.ReadAllAsync(ct))`가 **빈 채널에 parked된 상태에서 CTS 취소만으로는 깨어나지 않는 타이밍 경쟁**. `StopAsync`가 `_writeTask`를 영원히 await → 호스트 종료 데드락 → 테스트호스트가 응답 불가 → vstest 비활성 타임아웃 abort. **비결정적**(테스트 순서/타이밍 의존) — 그래서 `--blame-hang-timeout` 5/5에서 우연히 안 터졌던 것.
+부차 원인 2건(동시 발견·수정): ① 종속 라이브러리 FluentModbus(ModbusTcpServer accept 루프·RTU 읽기 루프)가 종료 시 `SocketException(995)`/`InvalidOperationException`으로 폴트한 **관찰되지 않은 Task**가 파이널라이저 재던지기 → 프로세스 종료(원래 크래시 22건). ② IF-10 핸드셰이크 `ContinueWith`가 **dispose된 요청 스코프**의 `ICellSelector.ReleaseCell` 호출 → `ObjectDisposedException` 누수.
+
+### 수정 (무변경 가드 100% 준수 — PlcGateway/HandshakeOrchestrator/SimServer/Wcs.Core diff 0)
+1. **결정적 채널 완료(핵심)**: `PlcPollingService`를 종료하는 **모든 PlcWriteQueue 소유처**에서 종료 직전 `_writeQueue.Writer.TryComplete()` 호출 → `RunWriteConsumerAsync`의 `await foreach`가 **결정적으로 정상 종료**(취소 경쟁 회피).
+   - 운영: `src/Wcs.Api/SorterGatewayRegistry.cs` — `SorterBundleHandle`에 `PlcWriteQueue?` 보관, `StopPollingAsync()`가 `Writer.TryComplete()` 후 `_polling.StopAsync()`. `Program.cs` `SorterRegistryFactory.StartAsync`에서 번들에 큐 주입(소터별 단일 큐 — 절대규칙 #1 불변). **WCS 윈도우 서비스 종료 데드락도 동일 해소(운영 가치).**
+   - 테스트: `FakeModbusWebApplicationFactory`·`P2bSimHandshakeTests`·`PlcGatewayIntegrationTests`·`S234_9GatewayScenarioTests`·`S8ApplicationFactory` 각 종료 경로에 `Writer.TryComplete()`.
+2. **WcsTeardownGuard** (`src/Wcs.Api/WcsTeardownGuard.cs`, 신규): 프로세스 1회 등록 `TaskScheduler.UnobservedTaskException` 핸들러. **종료 신호 양성 예외만**(SocketException 995/10004·IOException(소켓/취소)·InvalidOperation(pipe)·OperationCanceled) `SetObserved()`+stderr 1줄 로깅. FluentModbus 내부 루프(라이브러리·무변경 SimServer) 폴트가 파이널라이저에서 프로세스를 죽이지 못하게 호스트 경계에서 차단. 그 외 예외는 미관찰(진성 버그 노출 — Fail Loud 보존). `Program.cs` 최상단 + 테스트 어셈블리 `TestAssemblyInit`(ModuleInitializer)에서 호출(웹 호스트 미기동 RTU 테스트 포괄).
+3. **IF-10 ContinueWith 종료 안전화** (`Controllers/RcsController.cs`): `lifetime.ApplicationStopping` 신호 시 영속화·셀 해제 전체 스킵, 콜백 전체 try 래핑, 셀 해제는 **새 스코프**의 `ICellSelector`로 수행(요청 스코프 dispose 경쟁 차단), 로깅도 `SafeLog`로 teardown throw 흡수.
+4. **FakeSerialPort.DisposeAsync**: `Reader.CompleteAsync` 전에 `CancelPendingRead()` — FluentModbus RTU 읽기 루프의 parked ReadAsync가 "No reading allowed" 폴트 대신 우아 종료.
+5. **FakeModbusWebApplicationFactory : IAsyncLifetime**: xUnit 2.x `IClassFixture`는 픽스처가 IAsyncDisposable이어도 **동기 Dispose()**를 호출 → `WebApplicationFactory.Dispose()` sync-over-async가 `app.Run()` 스레드와 데드락. IAsyncLifetime 구현으로 **비동기 DisposeAsync 경로** 강제. `S8ApplicationFactory.Dispose(bool)`도 동기 `base.Dispose` 제거(IHost 종료는 DisposeAsync에 일임).
+
+### 검증 (raw)
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+전체 dotnet test (no-build) 5회 연속:
+  RUN 1: exit=0 13s abort=0 통과:70 실패:0
+  RUN 2: exit=0  7s abort=0 통과:70 실패:0
+  RUN 3: exit=0  8s abort=0 통과:70 실패:0
+  RUN 4: exit=0  8s abort=0 통과:70 실패:0
+  RUN 5: exit=0  7s abort=0 통과:70 실패:0
+  → "작동이 중단됨" 0건, EXIT=0, 깨끗한 종료 (수정 전 150s+ 행/abort에서 ~8s 클린으로)
+
+타이밍 민감 표적(S1/S5/S6/S7/S234_9/P2bSimHandshake/PlcGatewayIntegration) 단독 5회 연속:
+  TT-RUN 1~5: 전부 exit=0 6~7s abort=0 통과:20 실패:0 (assertion flaky 0)
+```
+
+### 무변경 가드 입증
+```
+git diff 1501ccd(Phase1 직전 베이스라인):
+  src/Wcs.PlcGateway/PlcGateway.cs        → 0 lines
+  src/Wcs.PlcGateway/HandshakeOrchestrator.cs → 0 lines
+  src/Wcs.Sim3ds/SimServer.cs             → 0 lines
+Wcs.Core.csproj PackageReference/ProjectReference: 0 (순수성 유지)
+Wcs.Core 소스 impurity(DateTime.Now/Random/File/HttpClient/Console/Task.Run): 0 (PDB 바이너리만 매치)
+```
+
+### 변경 파일 (이번 teardown 수정분)
+- `src/Wcs.Api/WcsTeardownGuard.cs` (신규), `src/Wcs.Api/Program.cs`, `src/Wcs.Api/SorterGatewayRegistry.cs`, `src/Wcs.Api/Controllers/RcsController.cs`
+- `tests/Wcs.Tests/TestAssemblyInit.cs` (신규), `tests/Wcs.Tests/ApiIntegrationTests.cs`, `tests/Wcs.Tests/PlcGatewayIntegrationTests.cs`, `tests/Wcs.Tests/ScenarioTests.cs`, `tests/Wcs.Tests/FakeSerialPort.cs`
+- 임시 진단 파일 `tests/Wcs.Tests/_CrashDiag.cs`는 진단 후 삭제됨(잔존 0).

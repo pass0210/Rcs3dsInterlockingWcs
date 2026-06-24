@@ -1,8 +1,8 @@
 # TODO (sprint 간 추적 — Minor·이연 항목)
 
 ## M5 / CI 이연
-- [ ] [S-RCS-IF-REDESIGN P1] **full `dotnet test` teardown hang(BLOCKING-for-CI)** — 단언 70/70 PASS이나 testhost가 teardown에서 행→run abort→exit 1. 선재(develop @ 1501ccd 동일 재현)·근본원인은 계약 무변경 zone(PlcGateway 폴 루프/IHost disposal). M5 graceful shutdown(SorterRegistryFactory IAsyncDisposable + 번들 DisposeAsync — P2b 교훈)에서 해소. CI는 `--blame-hang-timeout`로 단언 결과는 얻되 exit 1 별도 처리 필요.
-- [ ] [S-RCS-IF-REDESIGN P1] sprint-log.md 문구 정정 — "`--blame-hang-timeout 90s`로 결정적 통과(5/5 GREEN)" → "단언 PASS이나 teardown hang으로 run abort(선재)"가 정확(Evaluator fresh 실측 불일치).
+- [x] [S-RCS-IF-REDESIGN P1] ~~full `dotnet test` teardown hang(BLOCKING-for-CI)~~ **해소됨(PR #12 teardown-fix 커밋)** — SorterBundleHandle.StopPollingAsync가 쓰기 큐 Writer.TryComplete()로 컨슈머 결정적 종료(빈 채널 CTS-only 취소 경쟁 해소). evaluator 6회 연속 exit0·70/70·hangdump0 + 독립 코드리뷰 APPROVE. PlcGateway 본문 무변경(Wcs.Api disposal 결선만).
+- [ ] [정리] 미등록 dead code `PlcPollingHostedAdapter.StopAsync`가 큐 완료 누락(production DI 미등록·P2a 레거시 — SorterRegistryFactory로 대체됨). 제거 또는 동일 complete 추가(라이브 위험 0, 함정 제거용). 독립 코드리뷰 MINOR.
 
 ## 선행 sprint 이연(기록 유지)
 - [ ] [S-M4-P2b] SorterRegistryFactory 번들 Dispose 누수(종료 시 _master/_cts/_clientLock 미dispose, 포트는 해제) — M5 graceful shutdown. ↑ teardown hang과 같은 뿌리.

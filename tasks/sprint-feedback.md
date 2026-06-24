@@ -77,3 +77,41 @@ MAJOR-1/2/3 수정 정확(diff 직접 확인). Fail-Loud 보존(OFFLINE 판정�
 - [MINOR] IF-09 fire-and-forget ContinueWith 로깅 비대칭 (RcsController IF-09 콜백) — IF-10은 SafeLog(try/catch)로 감싸나 IF-09 미적용. teardown 중 로거 throw 시 미관찰 예외 가능하나 WcsTeardownGuard(InvalidOperationException 흡수)로 완화. IF-10과 동일 try/catch 래핑 권고.
 - [MINOR] IAgvFloorResolver dead registration — 2층 고정 정렬로 `.Resolve()` 호출 0. 계약상 "기록용 잔존 허용"이나 정리 권고(이연).
 - teardown hang 독립 귀속 결론: **선재**(신규 수명주기 컴포넌트 0, Phase1은 완화). BLOCKING/MAJOR 0 → 커밋 진행.
+
+---
+
+## TEARDOWN FIX 검증 (Evaluator fresh evidence, 미커밋 working tree, 2026-06-24)
+
+**판정: APPROVED.** Phase 1에서 BLOCKING-for-CI로 등재했던 full-suite teardown hang(testhost abort·exit 1)이 근본 해소됨. 6회 전체 suite(1+5) 전부 EXIT=0·70/70·abort 0건을 직접 실행으로 확인. 단언 약화·hang 은폐 없음. 무변경 가드 유지.
+
+### 검증 대상 (미커밋 diff)
+- `src/Wcs.Api/SorterGatewayRegistry.cs`: `SorterBundleHandle`에 `PlcWriteQueue?` 주입(기본 null) + `StopPollingAsync()`가 `_writeQueue?.Writer.TryComplete()` 선행 후 `_polling.StopAsync()`.
+- `src/Wcs.Api/Program.cs`: `SorterRegistryFactory.StartAsync` 1줄 — 번들 생성 시 동일 `writeQueue` 인스턴스 전달(line 229).
+- 테스트 3파일: `ApiIntegrationTests.cs`(FakeModbusWAF + P2bSimHandshakeTests dispose), `PlcGatewayIntegrationTests.cs`, `ScenarioTests.cs`(S234_9 + S8ApplicationFactory) — 각 종료 경로에 `Writer.TryComplete()`. `S8ApplicationFactory.Dispose(bool)`는 동기 `base.Dispose(disposing)` 제거(IHost 종료를 async DisposeAsync에 일임 — sync-over-async 데드락 회피).
+- `tasks/sprint-log.md` 갱신, `tasks/testrun1~4.log` 삭제.
+
+### 항목별 PASS/FAIL
+
+1. **[PASS] 전체 suite EXIT=0 + abort 0 + 70/70**: `dotnet test Wcs.sln --no-build` → `통과! 실패:0 통과:70 건너뜀:0 전체:70`, `TEST_EXIT=0`. "테스트 호스트 프로세스 작동이 중단됨"/abort/exit 1 미발생.
+2. **[PASS] ≥5회 연속 전체 suite 클린**: 5회 연속 전부 EXIT=0·70/70·abort 0·hangdump 0. (1회 선행 포함 총 6회 전부 클린. 소요 5~6s — 수정 전 행/abort 대비 결정적 종료.)
+   ```
+   RUN 1 EXIT=0  통과:70 실패:0  (5s)
+   RUN 2 EXIT=0  통과:70 실패:0  (5s)
+   RUN 3 EXIT=0  통과:70 실패:0  (5s)
+   RUN 4 EXIT=0  통과:70 실패:0  (5s)
+   RUN 5 EXIT=0  통과:70 실패:0  (5s)
+   선행 단독 RUN: EXIT=0 통과:70 (6s)
+   ```
+3. **[PASS] 회귀 0**: 70 단언 전부 PASS 유지. Phase 1 시나리오·IF-05/09/10·핸드셰이크·alarm·OFFLINE 전이 단언 변경 0(테스트 diff는 dispose 경로만, Assert 라인 무변경 직접 확인). 타이밍 민감 표적(Scenario+PlcGateway+P2bSimHandshake, 16건) 단독 3회 연속 전부 EXIT=0·16/16.
+4. **[PASS] 정상 동작 무영향**: `Writer.TryComplete()`는 `StopPollingAsync()`(=`SorterRegistryFactory.StopAsync`, IHostedService 종료 경로)에서만 호출 — 정상 운영 쓰기 경로 영향 0. 코드로 확인: (a) 종료-한정 호출처 단 1곳(Program.cs:293). (b) unbounded 채널 `TryComplete()`는 **이미 큐된 in-flight 쓰기를 드레인한 뒤** `await foreach`가 정상 종료 — 대기 쓰기 유실 없음. (c) `_writeQueue?`null 경로(생성자 기본 null)는 기존 `_polling.StopAsync()`만 수행(구동작 보존). (d) `Program.cs`에서 `PlcPollingService`와 `SorterBundleHandle`에 동일 `writeQueue` 인스턴스 전달 확인(line 214→219→229) — 컨슈머가 읽는 채널과 complete 대상 채널 동일.
+5. **[PASS] 무변경 가드 유지**: `git diff develop -- src/Wcs.PlcGateway/PlcGateway.cs src/Wcs.PlcGateway/HandshakeOrchestrator.cs src/Wcs.Sim3ds` = 빈 diff(3건 전부 0줄). 이 fix는 Wcs.Api(+테스트)에만 국한.
+6. **[PASS] 테스트 변경 정당성**: 4개 dispose 지점에 `Writer.TryComplete()` 추가(컨슈머 결정적 종료)뿐, 단언/타임아웃/시나리오 본문 무변경. `S8ApplicationFactory.Dispose(bool)`의 동기 `base.Dispose` 제거는 leak 아님 — 사용처 `S8FullPausedTests.DisposeAsync()`가 `await _factory.DisposeAsync()`를 명시 호출(line 1150) → override async `DisposeAsync()`가 `base.DisposeAsync()` 유지(line 1110)로 IHost 비동기 정상 종료. hang 은폐(teardown 스킵) 아님 — 호스트는 정상 disposal.
+
+### 빌드/오케스트레이터 보강 확인
+- `dotnet build Wcs.sln -c Debug` → 경고 0 / 오류 0.
+- 종료 후 orphan testhost/vstest 프로세스 0건(teardown 실제 완료 입증 — exit 0가 leak 은폐가 아님).
+- 6회 실행 중 신규 hangdump `.dmp` 생성 0건(13:00 이후 mtime dmp 없음). TestResults에 잔존하는 dmp 5건은 전부 08:52 이전 — 수정 전 행 재현 시 생성된 stale 산출물(이번 diff 외·untracked). 정리는 team-lead 재량(검증 결론에 무영향).
+
+### 비고
+- sprint-log.md는 teardown-fix 전체 호(WcsTeardownGuard·RcsController ContinueWith 안전화·FakeSerialPort·TestAssemblyInit 포함)를 서술하나, 그 컴포넌트들은 **이미 07cc992(Phase 1)에 커밋**됨(검증 범위 밖, brief 명시). 이번 미커밋 검증 대상은 채널 완료(`Writer.TryComplete()`) 결선 — full-suite teardown 데드락의 마지막 결정적 종료 조각. 6회 전체 suite 클린은 그 결합 효과를 입증.
+- 결론: Phase 1 BLOCKING-for-CI 항목 해소 확인. 커밋은 team-lead 진행.
