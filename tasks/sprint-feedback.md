@@ -1,3 +1,56 @@
+# Sprint Feedback — S-RCS-IF-REDESIGN Phase 2 (IF-08 아웃바운드 목적지 상태 푸시) — APPROVED
+
+## Phase 3 Evaluate 결과 (Evaluator fresh evidence, 미커밋 working tree `feat/rcs-if-redesign-p2`, 2026-06-24)
+
+**최종 판정: APPROVED** — 계약 Verification Scenarios·Completion Conditions·Evaluation Criteria·사용자 확정 6건 전부 fresh 직접 실행 증거로 충족. teardown hang 재발 0(Phase 1 fix 회귀 0). 동시 전이 멱등은 committed 테스트 + 독립 Evaluator 프로브(32 동시관찰)로 이중 입증.
+
+### Fresh evidence (직접 실행 — 주장 신뢰 아님)
+- **build**: `dotnet build Wcs.sln -c Debug` → **경고 0개 / 오류 0개, exit 0**.
+- **full test**: `dotnet test Wcs.sln --blame-hang-timeout 180s` → **통과! 실패:0 통과:76 건너뜀:0 전체:76, TEST_EXIT=0**. Blame 수집기 "시퀀스 파일이 생성되지 않습니다"(= teardown 전용 행 0). hangdump `.dmp`/`Sequence_*.xml` 생성 0건. **Phase 1 teardown-fix 회귀 0 — 신규 HttpClient/타이머/HostedService가 graceful shutdown으로 깨끗이 종료.** (기존 70 + 신규 푸시 6 = 76.)
+- **flaky 0(타이밍/동시성 표적 ≥5회)**: `RcsPushTests` 필터 **5/5회 연속 6/6 GREEN·exit 0**. 동시성 핵심 `PUSH4_ConcurrentTransition` 단독 **5/5회 연속 1/1 GREEN·exit 0**. 비결정성 0.
+- **동시 전이 멱등 독립 프로브(핵심 보강)**: PUSH4는 "전이 1회 + 무전이 16통지(중복억제 경로)"라, 같은 true→false 전이를 32스레드가 barrier로 **동시에 관찰**해 Gate 클레임 경합을 정면으로 치는 임시 프로브를 추가 실행 → **5/5회 정확히 1건(부트1+전이1=2, 중복 0·누락 0)**. P3 "단일 idle 경로라 동시 경합 미발생" 함정 차단. 프로브는 검증 후 삭제(working tree 복구 확인).
+
+### 무변경 가드 (git diff develop — 직접 실행)
+- `src/Wcs.PlcGateway/PlcGateway.cs`·`HandshakeOrchestrator.cs`·`src/Wcs.Sim3ds`·`src/Wcs.Core` → **diff stat 빈 출력(0줄)**. 레지스터맵/핸드셰이크/Sim3ds/Core 판정 불변. **소터 ready 전이용 추가 이벤트 노출 0** — 게이트웨이는 기존 `bundle.Latest` 주기 관찰만(Scope D (a)). 추가 이벤트 노출이 없으므로 정당성 검토 불요.
+- `src/Wcs.Api/RcsController.cs`(인바운드 IF-05/09/10) → **0줄**. 인바운드 회귀 0.
+- `src/Wcs.Api/DestinationStatusService.cs` → **0줄**(확정1 — 소터 full/paused 이연 보존). `ComputeSorter`는 여전히 `Full:false, Paused:false` 하드코딩, ready=`online && CurFloor==운영층 && Ready==1`만. Scope 확장 안 함 확인.
+- 전체 변경 표면 = `Wcs.Api`만(ChuteCapacityService·Program.cs·WcsOptions·appsettings 4 modified + DestinationStatusPusher·RcsPushClient 2 신규) + 테스트 1 신규(RcsPushTests). DB 스키마/마이그레이션/Data 변경 0(인메모리 전이 추적). 보호 zone 0.
+
+### 사용자 확정 6건 — 코드로 직접 대조 (전부 충족)
+1. **소터 full/paused 이연(확정1=a) PASS**: `DestinationStatusService.cs` diff 0 + `ComputeSorter` Full/Paused 하드코딩 false 유지. Phase 2가 소터 산출 안 건드림.
+2. **재시도 설정화·기본 3회 지수백오프(확정2) PASS**: `RcsPushOptions.RetryCount=3 / RetryBaseDelayMs=1000 / RetryMaxDelayMs=4000`(record init 기본값) + appsettings 명시. `ComputeBackoffDelay`=`base << (attempt-1)` 상한 클램프 = 1s/2s/4s. 하드코딩 0·고정 sleep 0(전부 `_opt.*`).
+3. **재시도 소진 후 최신값 유지·복구 재푸시(확정3) PASS**: `DestState.Computed`/`Acked` 분리. 푸시 성공 시만 `Acked=target`(PumpAsync:307), 실패 시 Acked 불변(미알림 유지). `Computed!=Acked` 잔존 → 다음 Observe/관찰이 재푸시. `PushAsync` 실패 시 false 반환(실패를 성공 간주 안 함). VS-PUSH-5가 거부→재시도 소진(baseline 유지)→복구→재푸시 도달 실증.
+4. **BaseUrl 미설정 → 경고+비활성(확정4) PASS**: `StartAsync`가 `!IsEnabled` 시 LogWarning 후 return(전이 추적·관찰 타이머 미기동). `PushAsync`도 방어적 false. VS-PUSH-8: BaseUrl=null → 수신 0 + IF-05 인바운드 200(인바운드 정상). 크래시 0.
+5. **기동 초기 스냅샷 후 전이만(확정5) PASS**: `StartAsync`가 `_states.Values` 전부 Compute→Computed 설정→PumpAsync(Acked=null이라 무조건 1회). VS-PUSH-6/7: 부트스트랩 7목적지(슈트5+PAUSED1+소터1) 각 정확히 1건 수신 후 stableCount:6 무변화(폭주 0).
+6. **하트비트 OUT(확정6) PASS**: 주기 keep-alive 전송 코드 0. 푸시는 부트스트랩 + 전이 트리거(Observe→Pump)에서만. SorterObserveIntervalMs 타이머는 "관찰"이지 "전송"이 아님(전이 없으면 PumpAsync가 Computed==Acked로 즉시 return).
+
+### 계약 Verification Scenarios — committed 테스트로 PASS
+- **페이로드 정합 PASS**: VS-PUSH-7 — FakeRcsServer가 수신한 raw JSON을 `EnumerateObject`로 검사: 키 정확히 3개(`chuteNo`/`ready`/`timeStamp`), `full`/`paused`/`online` 키 부재 단언. camelCase 와이어(STJ 기본). timeStamp 포맷 `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`.
+- **슈트 전이당 1건 PASS**: VS-PUSH-1 — 슈트4 true→false(OnReserved 만재)→false→true(OnCleared) 각 1건, 부트1+전이2=총 3건. WaitUntilExact stableCount:5로 중복 0 가드.
+- **소터 전이당 1건 + 폴마다 폭주 0 PASS**: VS-PUSH-2/3 — 소터 false→true(CurFloor=2·Ready=1)→true→false(Ready 1→0) 각 1건. **무변화 폴 다수에도 stableCount:6 유지**(폭주 0·핵심). 부트1+전이2=총 3건.
+- **무변화 0건 PASS**: VS-PUSH-3(통합) — 부트스트랩 후 stableCount:6 무변화. 전이 없는 폴/이벤트에서 푸시 0.
+- **동일 전이 중복 억제 PASS**: VS-PUSH-4 — 만재 후 추가 예약(ready 여전히 false) 동시 16통지 → 전이 1건만(Acked==Computed면 PumpAsync 즉시 return). stableCount:8.
+- **동시 전이 멱등 PASS(핵심)**: VS-PUSH-4 + 독립 프로브(32 barrier 동시관찰) 둘 다 전이당 정확히 1건. `Gate` 락 안에서 `(Acked!=Computed) && !PushInFlight` 원자 클레임 → 한 스레드만 성공, 나머지 즉시 return(누락은 in-flight 완료 후 재평가로 흡수). 비원자 check-then-act 0(P3 교훈 반영 코드 직접 확인 DestinationStatusPusher.cs:259-326).
+- **RCS 미도달 재시도 PASS**: VS-PUSH-5 — 503 거부 → 재시도 소진(baseline 유지·미알림) → StopRejecting → 재평가 트리거 → 최신 ready=false 1건 도달.
+
+### Evaluation Criteria (★★★ 1·2 / ★★ 3·4)
+1. **API Design Quality(★★★) PASS**: 페이로드 `{chuteNo,ready,timeStamp}` 정확(개별 플래그 미포함). 엔드포인트=`{BaseUrl}{Path}` 설정 조합(`CombineUrl` 슬래시 정규화, 하드코딩 0). `IHttpClientFactory.CreateClient("RcsPush")` 경유 — `new HttpClient(` grep=주석 3건뿐(직접 생성 0). 2xx→true, 비2xx→재시도 경로.
+2. **Architecture Originality(★★★) PASS**: ready=Phase 1 `Compute` 재사용(Pusher 내 Compute 호출 2지점=부트스트랩·Observe, 새 판정 0). 변화원 둘(슈트 콜백·소터 관찰)이 공통 `Observe→PumpAsync` 수렴. 전이 추적=chuteNo별 `Computed`/`Acked` 단일 상태(주기 전송 아님이 구조로 보장). 게이트웨이 본문 무변경(diff 0).
+3. **Craft(★★) PASS**: 재시도 전부 설정값(고정 sleep 0·하드코딩 0). 푸시 예외 삼킴 0(PushAsync는 false 수렴 + LogWarning/LogError, PumpAsync는 OCE/Exception 분리 catch). 동시 전이당 1회 멱등(원자 클레임). 빌드 경고 0·teardown 클린(멱등 StopAsync `Interlocked _stopped` + CTS 정리 + 관찰 task await). busy-loop 방지: 실패 시(ok==false) PumpAsync return하고 다음 Observe가 재구동(백오프 없는 바쁜 재시도 회피).
+4. **Functionality(★★) PASS**: 슈트/소터 전이당 1건(가짜 RCS 수신 단언), 폴마다 폭주 0, RCS 미도달 재시도 동작, Phase 1 인바운드 회귀 0(76/76 중 70 기존 GREEN).
+
+### Fail-Loud PASS
+재시도 소진=`LogError`("재시도 소진 — RCS 미도달… 미알림 유지"). 비2xx/전송예외=`LogWarning`(시도횟수·status 포함). 관찰 루프 예외=`LogError` 후 다음 주기 재시도(이벤트 영구 손실 방지·P3 핸들러 교훈 동형). 미관찰 예외 0(PumpAsync `_ = PumpAsync(st)` fire지만 내부 전 구간 try/catch로 미관찰 0).
+
+## Minor (비차단 — 다음 sprint Generator 읽음, todo.md 등재 권고)
+- **[MINOR / 설계 명확화] 슈트 실패 푸시의 자율 복구 없음**: 확정3은 "다음 전이 또는 복구 감지 시 재푸시"를 허용하고 구현은 **이벤트 구동 복구**(다음 슈트 상태변화가 재구동). 소터는 관찰 타이머가 매 주기 재구동하나, **슈트는 상태변화 이벤트가 없으면 실패 푸시가 다음 이벤트까지 stale**(자율 RCS 복구 폴러 없음). 확정3 경계 내(위반 아님)·상태 오염 0(Acked 불변)이나, RCS가 장시간 다운 후 복구돼도 무변화 슈트는 다음 IF-05/10까지 미동기. 운영상 RCS 복구 시 부트스트랩 재기동 또는 주기 복구 스윕이 필요하면 후속 스프린트 고려. (VS-PUSH-5가 명시적 후속 이벤트로 복구를 유도하는 것이 이 특성의 방증.)
+- **[MINOR / 정합성] `Path` 기본값 리터럴**: `RcsPushOptions.Path` 기본 `"/api/v1/destination-status"`는 record init 기본값(설정 미지정 시 사용). 하드코딩이 아니라 외부화된 설정의 기본값이므로 절대규칙 #7 위반 아님(BaseUrl과 동일 설정 섹션, appsettings에 명시). 단 스펙 경로 변경 시 appsettings로 오버라이드 가능함을 운영 문서에 명기 권고.
+
+## 독립 4-Tier 코드리뷰
+APPROVED 후 Step 4.5 게이트는 orchestrator(team-lead)가 별도 수행 — 본 평가는 functional 차원(계약 Evaluation Dimensions=functional only, 단 동시성 표면 명시 강제). 동시성 영역(PumpAsync 원자 클레임·Acked/Computed 분리·StopAsync 멱등·관찰 task 수명)은 메타교훈(5회 반복: 기능 GREEN ≠ 결함 없음)상 **독립 코드리뷰에서 전이 추적 원자성·푸시 경합·재시도 상태 오염·타이머/HostedService disposal을 코드 직접 검사 필수**. 본 Evaluator는 32-동시 프로브로 멱등을 행동 입증했으나, 정적 구조 리뷰는 별도 게이트.
+
+---
+
 # Sprint Feedback — S-RCS-IF-REDESIGN Phase 1 (인바운드 + 구조 전환) — APPROVED (조건부)
 
 ## Phase 3 Evaluate 결과 (Evaluator fresh evidence, working tree feat/rcs-if-redesign 기준, 2026-06-24)

@@ -94,6 +94,13 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ChuteCapacityService> _log;
 
+    // ── IF-08 푸시 변화원 ① 통지 (Phase 2) ──────────────────────────────────
+    // 슈트 상태(InFlight/Deposited/Paused/Active)가 바뀔 수 있는 이벤트마다 발화.
+    // DestinationStatusPusher가 구독해 ready 전이를 재평가·푸시(무변화면 0건).
+    // 게이트웨이 OnOfflineTransition과 동형 — 단방향 이벤트(여기는 DB·푸시 무지).
+    // 발화는 _rwLock 임계구역 밖(구독자 콜백이 락을 잡지 않게 — 데드락·확장 방지).
+    public event Action<long>? OnChuteStateChanged;
+
     public ChuteCapacityService(
         IServiceScopeFactory scopeFactory,
         ILogger<ChuteCapacityService> log)
@@ -232,6 +239,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
         {
             _rwLock.ExitWriteLock();
         }
+        RaiseChuteStateChanged(destinationId);
     }
 
     /// <inheritdoc/>
@@ -251,6 +259,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
         {
             _rwLock.ExitWriteLock();
         }
+        RaiseChuteStateChanged(destinationId);
     }
 
     /// <inheritdoc/>
@@ -266,6 +275,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
         {
             _rwLock.ExitWriteLock();
         }
+        RaiseChuteStateChanged(destinationId);
     }
 
     /// <inheritdoc/>
@@ -316,5 +326,24 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
         }
 
         _log.LogInformation("[ChuteCapacity] destinationId={Id} CLEARED — last_cleared_at 갱신·인메모리 리셋", destinationId);
+        RaiseChuteStateChanged(destinationId);
+    }
+
+    // ── IF-08 푸시 변화원 통지 — 락 밖에서 발화 ───────────────────────────────
+    // 구독자(DestinationStatusPusher) 콜백 예외가 capacity 갱신을 죽이지 않도록 흡수
+    // (Fail-Loud: 예외는 로깅). 콜백은 빠르게 반환(Pusher가 비동기 푸시 루프만 기동).
+    private void RaiseChuteStateChanged(long destinationId)
+    {
+        var handler = OnChuteStateChanged;
+        if (handler is null) return;
+        try
+        {
+            handler(destinationId);
+        }
+        catch (Exception ex)
+        {
+            try { _log.LogError(ex, "[ChuteCapacity] OnChuteStateChanged 구독자 예외 destId={Id}", destinationId); }
+            catch { /* teardown 중 로거 disposed */ }
+        }
     }
 }

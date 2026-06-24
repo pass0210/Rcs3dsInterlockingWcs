@@ -100,6 +100,30 @@ builder.Services.AddSingleton<IHostedService>(sp =>
 // 의존(ChuteCapacityService·SorterRegistry·WcsOptions) 전부 싱글톤이므로 싱글톤.
 builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
 
+// ── Phase 2: IF-08 아웃바운드 푸시 (WCS → RCS destination-status) ──────────────
+// ① named HttpClient(IHttpClientFactory 경유 — 직접 new HttpClient() 금지, 소켓 고갈 방지).
+//    타임아웃은 설정값(Wcs:RcsPush:HttpTimeoutMs). 하드코딩 0(절대규칙 #7).
+{
+    var rcsPush = builder.Configuration.GetSection("Wcs:RcsPush").Get<RcsPushOptions>()
+                  ?? new RcsPushOptions();
+    builder.Services.AddHttpClient(RcsPushClient.HttpClientName, c =>
+    {
+        c.Timeout = TimeSpan.FromMilliseconds(Math.Max(1, rcsPush.HttpTimeoutMs));
+    });
+}
+
+// ② 푸시 클라이언트(1건 전송 + 설정 경유 지수 백오프 재시도 + Fail-Loud).
+builder.Services.AddSingleton<IRcsPushClient, RcsPushClient>();
+
+// ③ 전이 감지·전이당 1회 푸시 파이프(변화원 둘 수렴 + 부트스트랩 + 복구 재푸시).
+//    IHostedService + IDestinationChangeNotifier 양쪽을 같은 싱글톤으로 공급.
+//    슈트 변화원은 ChuteCapacityService.OnChuteStateChanged 이벤트 구독(StartAsync).
+builder.Services.AddSingleton<DestinationStatusPusher>();
+builder.Services.AddSingleton<IDestinationChangeNotifier>(sp =>
+    sp.GetRequiredService<DestinationStatusPusher>());
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<DestinationStatusPusher>());
+
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════════
