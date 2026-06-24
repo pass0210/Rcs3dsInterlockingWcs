@@ -95,9 +95,10 @@ builder.Services.AddSingleton<ISorterGatewayRegistry>(sp =>
 builder.Services.AddSingleton<IHostedService>(sp =>
     sp.GetRequiredService<SorterRegistryFactory>());
 
-// ── IDestinationStatusService — full/ready 단일 산출 경로 (Scope E) ──────────
-// IF-05 NG 필터가 소비 + Phase 2 아웃바운드 푸시 재사용 확장점.
-// 의존(ChuteCapacityService·SorterRegistry·WcsOptions) 전부 싱글톤이므로 싱글톤.
+// ── IDestinationStatusService — full/ready 단일 산출 경로 (Scope E + m4p4 셀 만재) ──
+// IF-05 NG 필터가 소비 + Phase 2 아웃바운드 푸시 재사용.
+// 의존(ChuteCapacityService·SorterRegistry·WcsOptions)은 싱글톤이고, 소터 셀/정지 조회용
+// scoped WcsDbContext는 IServiceScopeFactory(싱글톤)로 스코프 생성해 취득(확정3 — captive 회피).
 builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
 
 // ── Phase 2: IF-08 아웃바운드 푸시 (WCS → RCS destination-status) ──────────────

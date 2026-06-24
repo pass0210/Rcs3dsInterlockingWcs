@@ -52,14 +52,25 @@ public sealed class RcsController : ControllerBase
         // ── 오더 매칭 → 목적지·상태 판정 (+ FULL/PAUSED 상류 필터) → OK 시 예약 차감 ─
         // FULL/PAUSED 차단은 배정 시점(IF-05)으로 상류 이동. 산출원은 DestinationStatusService(슈트·소터 공용).
         // BUSY(분류·이동 중)는 차단하지 않는다 — OK·이동시킴(도착 후 Phase 2 푸시 ready 시 투입).
+        //
+        // m4p4 piece-aware 예외(사용자 확정1): 소터가 SorterFull(빈셀 0)이어도, 이 piece의 오더가
+        //   그 소터에 활성 cell_assignment를 이미 보유하면 자기 셀에 누적 가능 → OK(차단 안 함).
+        //   보유 없고 Full이면 NG(FULL). Paused는 예외 없음(항상 차단). 슈트(CHUTE)는 예외 미적용.
         var (result, chuteNo, reason, destType, destId) =
             orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty, req.TimeStamp,
                 availability: (id, dt) =>
                 {
                     var dataType = dt == DestinationType.Sorter3D ? DestType.SORTER_3D : DestType.CHUTE;
                     var r = status.Compute(id, dataType);
-                    if (r.Full)   return DestinationBlock.Full;
-                    if (r.Paused) return DestinationBlock.Paused;
+                    if (r.Paused) return DestinationBlock.Paused;  // 정지는 예외 없이 차단(우선).
+                    if (r.Full)
+                    {
+                        // 소터 한정 오더 재사용 예외 — barcode 오더의 활성 셀 보유 시 Full 무시(OK).
+                        if (dataType == DestType.SORTER_3D
+                            && status.SorterHasActiveAssignmentForBarcode(id, req.Barcode))
+                            return DestinationBlock.None;
+                        return DestinationBlock.Full;
+                    }
                     return DestinationBlock.None;
                 });
 
