@@ -226,7 +226,7 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                 gwOpt,
                 logFac.CreateLogger<HandshakeOrchestrator>());
 
-            var bundle = new SorterBundleHandle(dest.Id, dest.ChuteNo, polling, handshake);
+            var bundle = new SorterBundleHandle(dest.Id, dest.ChuteNo, polling, handshake, writeQueue);
             bundles[dest.Id] = bundle;
 
             _log.LogInformation(

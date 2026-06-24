@@ -171,6 +171,9 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
 
     private async ValueTask DisposeAsyncCore()
     {
+        // 쓰기 큐 채널을 먼저 완료시켜 RunWriteConsumerAsync가 결정적으로 종료되게 한다
+        // (CTS 취소만으로는 빈 채널 parked ReadAllAsync가 안 깨어나는 타이밍 경쟁 → 호스트 StopAsync 데드락).
+        _fakeWriteQueue.Writer.TryComplete();
         await base.DisposeAsync().ConfigureAwait(false);
         _anchorConnection.Dispose();
         GC.SuppressFinalize(this);
@@ -1448,6 +1451,10 @@ public class P2bSimHandshakeTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        // 쓰기 큐 채널을 먼저 완료시켜 RunWriteConsumerAsync가 결정적으로 종료되게 한다
+        // (CTS 취소만으로는 빈 채널 parked ReadAllAsync가 안 깨어나는 타이밍 경쟁 → StopAsync 데드락).
+        _queueA?.Writer.TryComplete();
+        _queueB?.Writer.TryComplete();
         // 각 번들 독립 종료 (순서: polling → sim)
         if (_pollingA is not null) { await _pollingA.StopAsync(); await _pollingA.DisposeAsync(); }
         if (_pollingB is not null) { await _pollingB.StopAsync(); await _pollingB.DisposeAsync(); }

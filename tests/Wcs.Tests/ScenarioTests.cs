@@ -412,6 +412,9 @@ public class S234_9GatewayScenarioTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        // 쓰기 큐 채널을 먼저 완료시켜 RunWriteConsumerAsync가 결정적으로 종료되게 한다
+        // (CTS 취소만으로는 빈 채널 parked ReadAllAsync가 안 깨어나는 타이밍 경쟁 → StopAsync 데드락).
+        _queue?.Writer.TryComplete();
         if (_gw  is not null) { await _gw.StopAsync(); await _gw.DisposeAsync(); }
         if (_sim is not null) await _sim.DisposeAsync();
 
@@ -1099,6 +1102,11 @@ public sealed class S8ApplicationFactory : WebApplicationFactory<Program>
     // 비동기 종료 — IHost 종료를 비동기로 수행해 teardown sync-over-async 데드락 회피.
     public override async ValueTask DisposeAsync()
     {
+        // 쓰기 큐 채널을 먼저 완료(Complete)시켜 PlcPollingService.RunWriteConsumerAsync의
+        // `await foreach (ReadAllAsync)`가 우아하게 종료되게 한다.
+        // (CTS 취소만으로는 빈 채널에 parked된 ReadAllAsync가 깨어나지 않는 타이밍 경쟁이 있어
+        //  StopAsync가 _writeTask를 영원히 await → 호스트 종료 데드락. 채널 완료는 결정적으로 루프를 끝낸다.)
+        _writeQueue.Writer.TryComplete();
         await base.DisposeAsync().ConfigureAwait(false);
         _anchor.Dispose();
         GC.SuppressFinalize(this);
@@ -1106,8 +1114,11 @@ public sealed class S8ApplicationFactory : WebApplicationFactory<Program>
 
     protected override void Dispose(bool disposing)
     {
+        // 동기 Dispose 경로에서 base.Dispose(disposing)를 호출하면 WebApplicationFactory가
+        // IHost를 sync-over-async로 블로킹 종료하는데, Program.cs의 app.Run()은 별도 스레드에서
+        // 돌고 있어 teardown이 데드락한다(테스트호스트가 응답 불가 → 비활성 타임아웃 → 중단).
+        // IHost 종료는 DisposeAsync(비동기)에 일임하고, 여기서는 앵커 연결만 정리한다.
         if (disposing) _anchor.Dispose();
-        base.Dispose(disposing);
     }
 }
 
