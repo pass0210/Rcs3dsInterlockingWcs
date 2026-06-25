@@ -1,5 +1,58 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE (S-FOLDER-ORG)
+
+### Sprint: src 폴더 구조 정리 — 순수 파일 이동(behavior-preserving)
+
+`src/Wcs.Api`를 MVC 레이어(Services/Repositories/Dtos/Infrastructure)로, `src/Wcs.PlcGateway`의 Modbus 어댑터 4종을 `Modbus/`로 그룹핑. **`git mv`만 사용 — 파일 본문·네임스페이스·using·csproj·.sln 0줄 변경.** 평면 네임스페이스 유지(폴더 무관).
+
+### 이동 파일 목록 (15개, 전부 `git mv` rename)
+
+**Wcs.Api (11개):**
+- Services/ (5): `DestinationStatusService.cs`, `DestinationStatusPusher.cs`, `ChuteCapacityService.cs`, `SorterCellQty.cs`, `RcsPushClient.cs`
+- Repositories/ (2): `Repositories.cs`, `DbRepositories.cs`
+- Dtos/ (1): `Dtos.cs`
+- Infrastructure/ (3): `SorterGatewayRegistry.cs`, `WcsTeardownGuard.cs`, `WcsOptions.cs`
+
+**Wcs.PlcGateway (4개) → Modbus/:** `IModbusMaster.cs`, `ModbusMasterFactory.cs`, `ModbusTcpMaster.cs`, `ModbusRtuMaster.cs`
+
+**제자리 유지(이동 0):** Wcs.Api `Controllers/RcsController.cs`(이미 정위치)·`Program.cs`·`ProgramPartial.cs` / Wcs.PlcGateway `PlcGateway.cs`·`HandshakeOrchestrator.cs`.
+
+**무변경(절대 미접촉):** Core(2)·Data(3)·Sim3ds(2)·Migrations.Sqlite·Migrations.SqlServer·tests/Wcs.Tests.
+
+### 검증 결과 (fresh evidence — 이동 후 재측정)
+
+- **baseline(이동 직전)**: `dotnet build` 경고0/오류0 · `dotnet test` 99/99 GREEN·exit0·blame 시퀀스 파일 미생성(teardown 클린). develop@PR#16 기준 99와 동일.
+- **이동 후 clean 빌드** (`dotnet build Wcs.sln --no-incremental`): **경고 0 / 오류 0** — csproj 미편집으로 SDK 글로빙이 새 폴더의 `**/*.cs` 자동 포착 입증.
+- **이동 후 테스트** (`dotnet test Wcs.sln --blame-hang-timeout 120s`): **99/99 GREEN · 실패 0 · 건너뜀 0 · exit 0** · blame 시퀀스 파일 **미생성**(teardown 채널 경쟁 회귀 0). baseline 99와 동일 — 회귀 0.
+
+### git rename 순수성 증거 (계약 Criteria ②)
+
+- `git status --find-renames` — 이동 15파일 전부 **`R`(rename)**. 신규(`??`)/삭제(`D`) 단독 항목 없음.
+- `git diff -M --cached --stat -- src/` — `{ => Services}/...` 형태 rename, **"15 files changed, 0 insertions(+), 0 deletions(-)"**.
+- `git diff -M --cached --numstat` 집계 — **added=0 deleted=0** (본문 diff 0, rename hunk만).
+- (이동 전후 동일 콘텐츠라 git이 R100으로 감지 — 본문 1줄도 안 바뀜.)
+
+### 네임스페이스 불변 (계약 Criteria #5)
+
+이동 전후 `^namespace` grep 결과 동일:
+- Wcs.Api: **11×`namespace Wcs.Api;`**(이동 파일) + **1×`namespace Wcs.Api.Controllers;`**(RcsController, 유지) + Program/ProgramPartial(네임스페이스 없음, top-level/partial).
+- Wcs.PlcGateway: **6×`namespace Wcs.PlcGateway;`**.
+- 선언 문자열은 그대로, 경로만 새 폴더 반영.
+
+### 무변경 가드 (계약 #6,#7)
+
+- `git status --short -- src/Wcs.Core src/Wcs.Data src/Wcs.Sim3ds src/Wcs.Migrations.Sqlite src/Wcs.Migrations.SqlServer tests/` → **빈 출력**(0 변경).
+- `git status --short -- '*.csproj' '*.sln' '*.slnx' '**/appsettings*.json'` → **빈 출력**(편집 0).
+- 그 외 working-tree 변경: `tasks/sprint-contract.md`(하네스 산출물, src 아님)·`.claude/`(untracked, 선재 하네스 디렉터리) — 코드 표면 무관.
+
+### 참고
+
+- 계약 self-check(line 36)의 "나머지 12개 전부 `namespace Wcs.Api;`"는 실제로 **11개**(13개 루트 .cs − Program − ProgramPartial[네임스페이스 없음]). 핸드오프 메시지와 Completion #5는 11로 정확. baseline grep으로 확정.
+- 커밋/푸시는 미수행(team-lead 담당). 현재 모든 이동은 **staged** 상태.
+
+---
+
 ## IMPLEMENTATION COMPLETE (S-소터push운영상태)
 
 ### Sprint: 소터 IF-08 push `ready`를 운영상태로 좁히고 SorterFull·PAUSED를 push에서 분리

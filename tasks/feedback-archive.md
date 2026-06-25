@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-FOLDER-ORG (src 폴더 구조 정리 / 순수 파일 이동) — APPROVED (2026-06-25, 1 iteration to pass)
+
+- **순수 이동(behavior-preserving) 입증법 — rename R100 + numstat 0/0 이중 증거**: "파일 위치만 바뀌고 내용 0 변경" 명제는 ①`git diff -M --cached --summary`가 전 파일 `rename ... (100%)`(R100 = byte-identical), ②`--numstat`이 전 항목 `0 0`(본문 +/- 라인 0), ③`--stat` 합계 "N files changed, 0 insertions(+), 0 deletions(-)", ④`git status --find-renames --porcelain`에 `RM`(rename+modify) 없이 순수 `R `만, ⑤`git ls-files --others -- src/`(untracked src) 빈 출력 — 다섯 증거로 입증. staged 상태에선 `git diff -M`(unstaged) 빈 출력이므로 **반드시 `--cached`** 사용(놓치기 쉬운 함정). → 순수 이동 스프린트의 PASS 근거는 "rename 감지됐다"가 아니라 "rename이고 내용 diff가 0"의 이중 단언.
+- **평면 네임스페이스 유지 = 폴더 이동해도 네임스페이스 grep 불변**: C#은 폴더와 네임스페이스가 무관 → `Services/SorterCellQty.cs`도 `namespace Wcs.Api;` 그대로. 검증은 이동 후 `^namespace` grep의 파일별 선언 문자열·개수가 이동 전 baseline과 완전 동일함을 확인(Wcs.Api 11×`Wcs.Api;`+1×`Wcs.Api.Controllers;`, Program/ProgramPartial 미출현=정상, PlcGateway 6×`Wcs.PlcGateway;`). → 폴더 그룹핑과 네임스페이스 재구성은 직교 — 이동만 하면 using/네임스페이스 0 변경, grep 불변이 곧 의미 보존.
+- **SDK-style 글로빙 = csproj 편집 없이 폴더 이동 가능**: 7개 csproj 전부 `<Compile Include/Remove>` 없는 SDK 암묵 글로빙(`**/*.cs`) → 하위 폴더로 옮겨도 csproj/.sln 0 편집으로 빌드/테스트 발견 정상. 검증은 `git status -- '*.csproj' '*.sln'` 빈 출력 + clean build(`--no-incremental`) 0/0이 SDK가 새 폴더를 자동 포착함을 입증. → SDK-style 프로젝트의 폴더 정리는 빌드 메타 무편집이 정상이며, clean build 통과가 글로빙 검증.
+- **무변경 프로젝트 가드 + EF 디자인타임 강검증**: 유지 대상(Core/Data/Sim3ds/Migrations 2종/tests)은 `git status --find-renames -- <경로들>` 빈 출력으로 0 변경 확약. EF는 빌드 컴파일 성공에 더해 `dotnet ef migrations list --no-build`로 DbContext 해석·마이그레이션 목록 불변까지 강검증(이동이 디자인타임 발견 무영향). → 동작 보존 스프린트는 "변경한 것" 검증만큼 "안 변한 것" 빈-출력 가드가 동등하게 중요.
+- **teardown 회귀 0은 Blame 시퀀스 파일 부재로 입증(채널 경쟁 lesson 재적용)**: `--blame-hang-timeout 120s` 실행 후 "시퀀스 파일이 생성되지 않습니다"가 hang/dump 0의 결정적 증거. test 99/99 GREEN·exit 0과 함께 PlcPollingService 쓰기큐 teardown 경쟁(testhost-teardown-channel-race lesson) 미재발 확인. → 순수 이동이라도 테스트 호스트 종료 청정성은 Blame 시퀀스 파일 부재로 확인.
+- [CODE-REVIEW] sprint=S-FOLDER-ORG critical=0 major=0 minor=0 iter=0 (순수 파일 이동 — 코드 의미 0 변경이므로 정적 코드품질 표면 변화 없음. rename R100·내용 diff 0이 곧 코드리뷰 무대상 입증. orchestrator 판단 영역.)
+
 ## S-소터push운영상태 (소터 IF-08 push ready를 운영상태로 좁히고 SorterFull·PAUSED 분리) — APPROVED (2026-06-25, 1 iteration to pass)
 
 - **크로스-엔드포인트 정합은 한 시나리오에서 두 소비자를 연결 검증 (6회째 메타교훈 적용 성공)**: push(IF-08)와 IF-05가 같은 `Compute()` 산출을 분기 소비(push는 `.Ready`, IF-05는 `.Paused`+`SorterCanAcceptBarcode`)하는 표면. 검증 핵심은 **VS-4/VS-5**(`Compute().Full==true && Ready==true` 공존·`Paused==true && Ready==true` 공존)과 **VS-7**(운영상태 `r.Ready` 변경이 IF-05 3축 결과에 무영향 — 같은 piece에 대해 push ready=true인데 IF-05는 만재로 NG, paused로 NG). 두 소비자를 한 테스트에서 연결해 "ready 의미 변경이 dispatch를 깨지 않음"을 실 HTTP+실 push payload로 입증. → 같은 자원을 두 엔드포인트가 다른 로직으로 판정하면 분리 단언이 아니라 **연결(cross) 단언**이 회귀를 잡는다.

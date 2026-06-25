@@ -1,3 +1,46 @@
+# Sprint Feedback — S-FOLDER-ORG (src 폴더 구조 정리 / 순수 파일 이동) — APPROVED
+
+## Phase 3 Evaluate 결과 (Evaluator fresh evidence, working tree `refactor/src-folder-structure`, 2026-06-25)
+
+**최종 판정: APPROVED** — 계약 Completion Conditions #1~#7·Evaluation Criteria ①~⑤·Verification Scenarios(Backend/API 슬롯 a/b/c + 구조정리 1~8) 전부 fresh 직접 실행 증거로 충족. 순수 이동(rename R100·내용 diff 0)·동작 보존(build 0/0·test 99/99·exit 0·teardown 회귀 0)·네임스페이스 불변·무변경 프로젝트 가드 전부 통과. 회귀 0.
+
+### Ground-truth 확인 (stale 재핸드오프 아님)
+- `git rev-parse HEAD` = `1bb0a62`, 브랜치 `refactor/src-folder-structure`. 본 스프린트 이동 15파일은 **staged(미커밋)** 상태 — 이미 커밋된 스프린트가 아님 → 정당 활성 핸드오프.
+- `sprint-log.md` 최상단 `## IMPLEMENTATION COMPLETE (S-FOLDER-ORG)` 마커 존재 확인.
+- working tree 변경: src 이동 15파일(staged R) + `tasks/sprint-contract.md`·`tasks/sprint-log.md`(하네스 산출물) + `.claude/`(untracked, 선재). src 코드 표면 외 변경 없음.
+
+### Fresh evidence (직접 실행 — generator 주장 신뢰 아님)
+- **clean build**: `dotnet build Wcs.sln --no-incremental` → **경고 0개 / 오류 0개**. 8개 프로젝트 전부 빌드(Migrations 2종·Wcs.Tests 포함). csproj 미편집으로 SDK 글로빙이 새 폴더 `**/*.cs` 자동 포착 입증.
+- **full test**: `dotnet test Wcs.sln --blame-hang-timeout 120s` → **통과! 실패:0 통과:99 건너뜀:0 전체:99, EXIT CODE 0**. Blame 수집기 "모든 테스트 실행이 완료되었지만, 시퀀스 파일이 생성되지 않습니다"(teardown hang/dump 0 — 채널 경쟁 회귀 lesson 미재발). baseline 99와 동일 = 회귀 0.
+- **EF 디자인타임 강검증**: `dotnet ef migrations list --project src/Wcs.Migrations.Sqlite --no-build` → DbContext 정상 해석·마이그레이션 3건 나열(Initial·P2a·P1_If09Arrival), exit 0. 이동이 디자인타임 발견에 무영향.
+
+### Completion Conditions — 항목별 PASS/FAIL
+- **[PASS] #1 build 경고0/오류0**: clean build 경고 0개/오류 0개 (위 fresh evidence).
+- **[PASS] #2 test 전체 GREEN·count=99·exit 0·hang 0**: 99/99 GREEN, exit 0, Blame 시퀀스 파일 0(teardown 채널 경쟁 회귀 0).
+- **[PASS] #3 rename만(신규/삭제 단독 없음)**: `git status --find-renames --short` = src 15파일 전부 `R `(rename), `??`/`D` 단독 항목 0. porcelain raw에 `RM`(rename+modify) 없음·`git ls-files --others -- src/` 빈 출력(untracked src 0).
+- **[PASS] #4 내용 diff 0**: `git diff -M --cached --stat -- src/` = **"15 files changed, 0 insertions(+), 0 deletions(-)"**. `--numstat` 전 항목 `0 0`. `--summary` 전 항목 `rename ... (100%)` = R100 byte-identical. `+`/`-` 본문 라인 0.
+- **[PASS] #5 네임스페이스 grep 불변**: Wcs.Api 11×`namespace Wcs.Api;`(Dtos·SorterGatewayRegistry·WcsTeardownGuard·WcsOptions·DbRepositories·Repositories·DestinationStatusPusher·ChuteCapacityService·DestinationStatusService·RcsPushClient·SorterCellQty) + 1×`namespace Wcs.Api.Controllers;`(RcsController) + Program/ProgramPartial 네임스페이스 없음(grep 미출현=정상). PlcGateway 6×`namespace Wcs.PlcGateway;`. 이동 파일은 폴더와 무관하게 평면 선언 유지(예: `Services/SorterCellQty.cs`도 `namespace Wcs.Api;`). 계약 기준값 정확 일치(self-check line 36 "12개"는 11개 오기 — Completion #5·핸드오프가 정확).
+- **[PASS] #6 EF 디자인타임 무영향**: Migrations 2종 컴파일 성공(clean build 포함) + `dotnet ef migrations list` 강검증 통과.
+- **[PASS] #7 무변경 프로젝트 git status 0**: `git status --find-renames --short -- src/Wcs.Core src/Wcs.Data src/Wcs.Sim3ds src/Wcs.Migrations.Sqlite src/Wcs.Migrations.SqlServer tests/` = 빈 출력. csproj/.sln/appsettings 글로브 = 빈 출력(편집 0).
+
+### Evaluation Criteria — 항목별
+- **[PASS] ① 동작 보존 ★★★**: build 0/0·test 99/99·exit 0·teardown 회귀 0·count baseline 동일.
+- **[PASS] ② 순수 이동 입증 ★★★**: rename R100 15건·내용 diff 0·네임스페이스 불변. add/delete 단독 0.
+- **[PASS] ③ MVC 레이어 정확성 ★★**: working-tree 파일 배치 확인 — Wcs.Api Services/(5)·Repositories/(2)·Dtos/(1)·Infrastructure/(3)·Controllers/RcsController·Program/ProgramPartial 루트. PlcGateway Modbus/(4)·PlcGateway/HandshakeOrchestrator 루트. 구 평면 경로 잔존 파일 0.
+- **[PASS] ④ csproj/솔루션 무결성 ★★**: csproj/.sln 편집 0으로 빌드/테스트 발견 정상(SDK 글로빙 검증).
+- **[PASS] ⑤ 문서/참조 정합 ★(비차단)**: CLAUDE.md "솔루션 구조"는 프로젝트별 역할만 기술·내부 폴더 미언급 → 새 폴더와 모순 0. 정정 불요(계약 명시대로).
+
+### Verification Scenarios (Backend/API + 구조정리)
+- **[PASS] (a) 엔드포인트 목록**: IF-05/IF-09/IF-10 핸들러 `Controllers/RcsController.cs` 무변경(diff 0). 라우트/시그니처 불변.
+- **[PASS] (b) happy path / DI 해석**: WebApplicationFactory 기반 통합 테스트 GREEN(99 전체에 포함) → 이동된 타입(DestinationStatusService·RcsPushClient·SorterGatewayRegistry 등) DI 해석·앱 부팅 정상.
+- **[PASS] (c) 에러 케이스**: 기존 400/FULL·PAUSED NG/OFFLINE 경로 테스트 분포 0 변화(99/99 GREEN, 신규 에러 케이스 0).
+- **[PASS] 1 빌드 무결성 / 2 테스트 보존 / 3 git rename 순수성 / 4 네임스페이스 불변 / 5 Api MVC 배치 / 6 PlcGateway Modbus 배치 / 7 EF 디자인타임 / 8 테스트 타입 발견**: 위 Completion 증거로 전부 충족(8=test 99 GREEN이 곧 Wcs.Api.* 타입 발견·참조·실행 입증).
+
+### 결론
+순수 파일 이동 스프린트의 핵심 명제 "위치만 바뀌고 동작/내용 0 변경"을 fresh tool output으로 입증. R100 rename 15건·numstat 0/0·build 0/0·test 99/99 exit 0·네임스페이스 grep 불변·무변경 프로젝트 가드 빈 출력. **BLOCKING/FAIL 0. APPROVED.**
+
+---
+
 # Sprint Feedback — S-소터push운영상태 (소터 IF-08 push ready를 운영상태로 좁힘) — APPROVED
 
 ## Phase 3 Evaluate 결과 (Evaluator fresh evidence, 미커밋 working tree `feat/sorter-push-operational`, 2026-06-25)
