@@ -8,17 +8,23 @@ namespace Wcs.Api;
 // ════════════════════════════════════════════════════════════════════════════
 // DestinationStatusService — 목적지(슈트/소터) 상태 단일 산출 경로.
 //
-// RCS↔WCS 재설계 Phase 1, Scope E + 소터 셀 만재 판정(m4p4) + 셀 작업수량 full(이 스프린트):
+// RCS↔WCS 재설계 Phase 1, Scope E + 소터 셀 만재 판정(m4p4) + 셀 작업수량 full
+// + 소터 push ready를 운영상태로 좁힘(S-소터push운영상태):
 //   목적지별 full / paused / online / ready 를 한 함수로 접는다.
-//   ① IF-05 NG 필터(FULL/PAUSED→NG)가 이를 소비.
-//   ② Phase 2 아웃바운드 푸시(WCS→RCS destination-status)가 동일 산출을 재사용.
+//   ① IF-05 dispatch 게이트가 이를 소비 — 단 소터는 ready(운영상태)가 아니라
+//      Paused + SorterCanAcceptBarcode(셀 기준)만 본다(RcsController.cs IF-05).
+//   ② Phase 2 아웃바운드 푸시(WCS→RCS destination-status)가 ready(운영상태)를 소비.
 //
 //   - 일반 슈트(CHUTE): ready = 만재 아님 && 정지 아님(비활성 포함).
-//   - 3D 소터 슈트(SORTER_3D): ready = online && CurFloor==운영층 && Ready==1
-//                              && 만재 아님 && 정지 아님.
+//   - 3D 소터 슈트(SORTER_3D): ready = **운영상태만** = online && CurFloor==운영층 && Ready==1.
+//        ★ 셀 만재(SorterFull)·정지(PAUSED)는 push ready 합성에서 **제외**한다. 이 둘은
+//          push가 아니라 IF-05 dispatch 게이트에서만 차단된다(2단계 게이트 분리):
+//            · "받을 수 있는 운영 상태인가"(online·정렬·비분류) = push ready.
+//            · "지금 이 piece를 보낼 목적지가 있는가"(셀 여유·미정지) = IF-05 dispatch.
+//        ★ Full/Paused/Online/Reason 필드는 계속 산출한다(IF-05·내부 사유 소비) — ready 합성에서만 뺀다.
 //
 // m4p4 — 소터 full/paused 실산출(Phase 1의 Full:false/Paused:false 하드코딩 대체).
-// 이 스프린트 — 소터 셀 full을 "빈 셀 없음"에서 **셀 작업 투입 수량 기반**으로 정밀화(확정1~4):
+// 셀 작업수량 full — 소터 셀 full을 "빈 셀 없음"에서 **셀 작업 투입 수량 기반**으로 정밀화(확정1~4):
 //   - 셀 현재 투입 수량 = 그 셀에 적재(LOADED)된 piece.qty 합.
 //     산출원(확정2) = sorter_command(status=COMPLETED) JOIN piece.qty. piece별 1건만(재시도=새 행 →
 //     중복 합산 금지: DISTINCT piece로 카운트). cell_assignment는 핸드셰이크마다 released라 비사용.
@@ -26,8 +32,9 @@ namespace Wcs.Api;
 //     양수일 때만 현재수량 ≥ Capacity → 그 셀 full.
 //   - SorterFull(목적지 단위·확정1) = 빈 enabled 셀 없음 AND 모든 활성 배정 셀이 작업수량 도달.
 //     빈 셀 ≥1 또는 작업수량 미달 배정 셀 ≥1이면 SorterFull=false(그 채널로 수용 가능).
-//     단일 원자 쿼리로 평가(check-then-act 분리 금지 — "소터 전부 꽉 찼는데 ready=true"가 한 순간도
-//     새지 않도록). 읽기 전용(배정 부수효과 없음).
+//     같은 스코프(동일 DbContext) 순차 읽기로 평가. 읽기 전용(배정 부수효과 없음).
+//     (참고: push ready는 더 이상 SorterFull에 의존하지 않으므로 "꽉 찼는데 ready=true"는
+//      이제 모순이 아니다 — Full은 IF-05 dispatch만 차단. SorterFull은 IF-05·내부 사유용.)
 //   - IF-05 piece-aware(확정1)는 같은 셀 수량 산출을 재사용하되 "그 piece 오더의 배정 셀"만 별도
 //     체크 — 오더 셀 보유 AND 그 셀 여유(현재 < 작업수량)면 OK. 셀 꽉 차면 그 piece도 full(NG).
 //   - paused    = destination.Status==PAUSED 또는 IsActive==false(슈트 ComputeChute와 동형).
@@ -41,24 +48,27 @@ namespace Wcs.Api;
 /// <summary>
 /// 목적지 상태 산출 결과(내부 표현 — RCS로 직접 전송하지 않음).
 /// Ready 하나로 접되, 산출 근거(Full/Paused/Online/내부 사유)를 함께 보존해
-/// IF-05 NG 필터·Phase 2 푸시가 같은 산출을 재사용한다.
+/// IF-05 dispatch·Phase 2 푸시가 같은 산출을 분기 소비한다.
+///   - 푸시(IF-08)는 Ready만 소비(소터 Ready=운영상태, 슈트 Ready=만재·정지).
+///   - IF-05 dispatch는 소터에 대해 Ready가 아니라 Paused+SorterCanAcceptBarcode를 소비.
 /// </summary>
 public sealed record DestinationReadiness(
-    bool       Ready,        // 지금 받을 수 있는가(접힌 단일 플래그 — Phase 2 푸시 페이로드의 ready)
-    bool       Full,         // 만재
-    bool       Paused,       // 정지(비활성 포함)
+    bool       Ready,        // 푸시 페이로드의 ready. 슈트=만재 아님&&정지 아님 / 소터=운영상태(online·정렬·Ready==1).
+    bool       Full,         // 만재(소터: SorterFull). 소터 push ready 합성에는 미반영 — IF-05·내부 사유 전용.
+    bool       Paused,       // 정지(비활성 포함). 소터 push ready 합성에는 미반영 — IF-05·내부 사유 전용.
     bool       Online,       // 소터 온라인(슈트는 항상 true)
-    DenyReason Reason);      // 받을 수 없는 내부 사유(Ready=true면 None)
+    DenyReason Reason);      // 받을 수 없는 내부 사유(Ready=true면 None). 소터는 운영상태 사유(Offline·NotAligned·Busy)만.
 
 /// <summary>
 /// 목적지 상태(full/ready) 단일 산출 인터페이스.
-/// IF-05 NG 필터가 Compute로 소비. Phase 2 푸시가 동일 Compute 재사용.
+/// Phase 2 푸시가 Compute().Ready를 소비. IF-05 dispatch는 소터에 대해 Full/Paused·셀 술어를 소비.
 /// </summary>
 public interface IDestinationStatusService
 {
     /// <summary>
-    /// destination(슈트/소터)의 현재 수용 가능 여부를 단일 산출.
+    /// destination(슈트/소터)의 현재 상태를 단일 산출.
     /// 슈트면 ChuteCapacityService hold만, 소터면 게이트웨이 스냅샷 + DepositDecider + 셀 만재까지 접는다.
+    /// 소터 Ready는 **운영상태만**(online·정렬·Ready==1) — Full·Paused는 Ready 합성에서 제외하되 필드로 보존.
     /// </summary>
     DestinationReadiness Compute(long destinationId, DestType destType);
 
@@ -188,9 +198,10 @@ public sealed class DestinationStatusService : IDestinationStatusService
     //   (enabled 셀 자체가 0개여도 빈 셀 0·배정 셀 0 → 두 채널 모두 없음 → Full=true. 미구성 소터.)
     //
     // 산출은 같은 스코프(동일 DbContext)에서 2개 쿼리를 순차 실행한다 — ①enabled 셀+점유여부+Capacity,
-    // ②점유 셀들의 현재수량(LoadedQtyByCell). 단일 SQL 트랜잭션은 아니나 한 Compute 호출이 산출하는
-    // record 내부 불변식(full ⟹ !ready)은 full을 한 번 계산해 ready를 거기서 파생하므로 항상 성립.
-    // 두 쿼리 사이 race가 있어도 보수적 스냅샷이며 다음 관찰/IF-05에서 재평가(eventually consistent).
+    // ②점유 셀들의 현재수량(LoadedQtyByCell). 단일 SQL 트랜잭션은 아니나 읽기 전용 보수적 스냅샷이며,
+    // 두 쿼리 사이 race가 있어도 다음 관찰/IF-05에서 재평가(eventually consistent).
+    // (이 스프린트 전엔 ready=!full&&…이라 "full ⟹ !ready" 불변식이 있었으나, 이제 push ready는
+    //  운영상태(decision.Ready)만 보므로 full은 ready와 독립이다 — Full은 IF-05 dispatch·내부 사유 전용.)
     // 셀 현재수량 산출원(SorterCellQty)은 IF-05 piece-aware·IF-10 SelectCell과 공유.
     private static bool ComputeSorterFull(WcsDbContext db, long destinationId)
     {
@@ -241,22 +252,27 @@ public sealed class DestinationStatusService : IDestinationStatusService
         };
     }
 
-    // ── 3D 소터 슈트: online + 정렬 ready + 셀 작업수량 full + 정지(paused) ─────────
+    // ── 3D 소터 슈트: push ready=운영상태(online+정렬+비분류) / Full·Paused는 산출만(ready 제외) ──
     //
-    // 산출(목적지 단위 — 푸시 ready·IF-05 NG 공통 소비):
+    // 산출(목적지 단위):
     //   - Online : snap.Online (번들 없음 → false=OFFLINE).
     //   - Paused : destination.Status==PAUSED || IsActive==false(슈트 ComputeChute와 동형).
+    //              [push ready 합성 제외] IF-05 dispatch(RcsController)·내부 사유 전용.
     //   - Full(SorterFull, 확정1) : 빈 enabled 셀 없음 AND 모든 활성 배정 셀이 작업수량 도달.
     //              즉 새 오더도(빈 셀로) 기존 오더도(여유 배정 셀로) 아무것도 못 받는 상태.
     //              빈 셀 ≥1 또는 작업수량 미달 배정 셀 ≥1이면 Full=false(그 채널로 수용 가능).
     //              셀 현재수량 = sorter_command(COMPLETED) JOIN piece.qty(piece별 1건) — IF-05 공유.
-    //              단일 원자 쿼리로 평가 — "소터 전부 꽉 찼는데 ready=true" 모순이 한 순간도 새지 않게.
-    //   - Ready  : !Full && !Paused && online && CurFloor==운영층 && Ready==1.
-    //              (decision.Ready = online && CurFloor==운영층 && Ready==1 — 정렬·BUSY 판정.)
+    //              [push ready 합성 제외] IF-05 dispatch(SorterCanAcceptBarcode)·내부 사유 전용.
+    //   - Ready  : **운영상태만** = online && CurFloor==운영층 && Ready==1 (= decision.Ready).
+    //              ★ Full·Paused를 ready 합성에서 뺀다(S-소터push운영상태). 만재·정지여도 운영상태가
+    //                OK면 push ready=true. push 소비자(DestinationStatusPusher)가 이 ready를 발화.
+    //              ★ 2단계 게이트 분리: "받을 수 있는 운영상태인가"=push ready,
+    //                "이 piece를 보낼 셀/미정지인가"=IF-05 dispatch(Paused+SorterCanAcceptBarcode).
     //
-    // DenyReason 우선순위: Offline > Paused > Full > decision.Reason(정렬·BUSY).
-    // IF-05는 Ready=false(미정렬·BUSY)여도 차단하지 않는다(availability는 Full/Paused만 차단) —
-    //   여기서 산출한 Full/Paused만 IF-05 NG 필터가 소비하고, 미정렬·BUSY는 OK·이동 후 정렬.
+    // DenyReason(내부 — 외부 미노출): ready 산출과 정합하게 **운영상태 사유**만 보존한다.
+    //   ready=true(운영 OK)면 None. ready=false면 Offline(번들/오프라인) 또는 decision.Reason
+    //   (NotAligned·Busy). Full/Paused는 ready를 좌우하지 않으므로 ready-deny 사유에 넣지 않는다
+    //   (그 둘은 Full/Paused 필드로 별도 보존 — IF-05·로깅이 필드를 직접 본다).
     private DestinationReadiness ComputeSorter(long destinationId)
     {
         var bundle = _sorterRegistry.GetBundle(destinationId);
@@ -292,15 +308,18 @@ public sealed class DestinationStatusService : IDestinationStatusService
             full = ComputeSorterFull(db, destinationId);
         }
 
-        bool ready = !full && !paused && decision.Ready;
+        // push ready = 운영상태(online && 정렬 && Ready==1)만. Full·Paused 제외(S-소터push운영상태).
+        // decision.Ready는 DepositDecider가 !online이면 false이므로 offline도 자동 false로 접힌다.
+        bool ready = decision.Ready;
 
-        // DenyReason 우선순위: Offline > Paused > Full > decision.Reason.
+        // DenyReason(내부) — ready와 정합하는 운영상태 사유만. Full/Paused는 ready를 좌우하지 않으므로
+        // ready-deny 사유에서 제외(각자 Full/Paused 필드로 별도 보존 — IF-05·로깅이 필드를 직접 본다).
+        //   ready=true → None. !online → Offline. 그 외 → decision.Reason(NotAligned·Busy).
         DenyReason reason =
-            !online ? DenyReason.Offline
-          : paused  ? DenyReason.Paused
-          : full    ? DenyReason.Full
-          : decision.Reason;  // None(ready) 또는 정렬·BUSY 사유.
+            ready     ? DenyReason.None
+          : !online   ? DenyReason.Offline
+          :             decision.Reason;  // NotAligned·Busy(또는 Offline — decision이 이미 판정).
 
-        return new DestinationReadiness(ready, full, paused, online, ready ? DenyReason.None : reason);
+        return new DestinationReadiness(ready, full, paused, online, reason);
     }
 }
