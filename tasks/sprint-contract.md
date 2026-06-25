@@ -1,153 +1,122 @@
-# Sprint Contract — 소터 셀 full 정정(셀 작업 투입 수량 기반) + 슈트 IF-05 dispatch 정정
+# Sprint Contract — S-소터push운영상태 (소터 IF-08 push ready를 운영상태로 좁히고 SorterFull·PAUSED를 push에서 분리)
 
-> Branch: `feat/sorter-cell-qty-full` (develop @ PR #14 머지에서 분기)
-> Planner 작성 · WHAT만 정의 (HOW는 Generator 결정) · 사용자 확인 대기 (Phase 1 게이트)
-> 선행: m4p4(PR #14) — 소터 full="빈 셀 없음" + IF-05 piece-aware 오더 재사용 예외 + 푸시 ready 결선 (머지됨)
-
----
-
-## ⚠ 사용자 확인 필요 (계약 확정 전 결정 요청)
-
-아래 4개는 설계 분기점이다. **권고안을 기본값으로 계약 본문에 반영**했으나, 사용자가 다르게 결정하면 계약을 갱신한다.
-사용자 확정(정밀화 2026-06-25)은 (A)소터 셀 full=수량 기반 (B)슈트 IF-05 OK 두 축까지만 — 아래 4개의 "어떻게 결합/산출하는가"는 미확정으로 남아 있다.
-
-### Q1. 소터 목적지-단위 푸시 `ready` 정의 — 셀 수량 full을 단일 bool로 어떻게 접는가?  ✅ 확정 = 예(push ready도 셀 작업수량 반영)
-푸시 ready는 **chuteNo당 단일 bool**(목적지 단위)인데, 새 수량-full은 **셀 단위**다. m4p4까지 푸시 ready의 full은 "빈 셀 0개"였다.
-
-**사용자 확정**: 푸시 목적지-단위 소터 `ready`도 **셀 작업수량을 반영**한다(m4p4 "빈 셀 0개"만으로는 부족).
-- **`SorterFull`(목적지 단위) = 빈 enabled 셀 없음 AND 모든 (활성) 배정 셀이 작업수량 도달** — 즉 소터가 새 오더도 기존 오더도 **아무것도 못 받는** 상태. 이때만 push ready=false.
-- **빈 enabled 셀이 1개라도 있거나, 활성 배정 셀 중 작업수량 미달이 하나라도 있으면 `SorterFull`=false** — 그 채널(빈 셀=새 오더 / 여유 셀=기존 오더)로 수용 가능하므로 ready 유지(true, 정렬·online 등 다른 조건 충족 시).
-- `ComputeSorter`가 이 합성 `SorterFull`을 산출(셀 현재수량은 Q2 산출원을 재사용). **IF-05 piece-aware는 같은 셀 수량 산출을 재사용**하되 "그 piece 오더의 배정 셀"만 별도 체크(목적지 전체가 아니라 그 오더 셀 여유 유무).
-- 푸시 변화원은 **기존 150ms 소터 관찰 타이머**(`RunSorterObserveLoopAsync`)가 이 합성 ready 전이를 포착 — 별도 변화원 추가 불요. 단, 셀 적재(sorter_command 기록)·셀 작업수량 도달은 폴 스냅샷 변화가 아니라 **DB 상태 변화**이므로, 관찰 타이머가 매 주기 `Compute`를 호출해 DB를 재조회하면 자연히 포착된다(m4p4 빈셀 조회와 동형 — Compute 안에서 DB 읽음).
-
-### Q2. 셀 "현재 투입 수량" 산출원 — `sorter_command` vs `cell_assignment→order→piece`?
-셀 현재 투입 수량 = 그 셀에 deposited된 piece.qty 합. 두 산출 경로:
-- **(a) `sorter_command` 경유**: `SorterCommand(CellId, PieceId, Status)` JOIN `Piece.Qty`. 한 piece가 한 셀로 간 사실의 1:1 기록. 셀 현재수량 = `SUM(piece.qty) WHERE sorter_command.cell_id=셀 AND status IN (SENT, COMPLETED)`(또는 piece.status LOADED). **장점**: piece↔cell 직접 연결·qty 보유. **주의**: 재시도=새 행(중복 합산 위험 — piece별 1건만 카운트 필요), 실패(MISMATCH/TIMEOUT)는 적재 안 됐으니 제외.
-- **(b) `cell_assignment→order→piece` 경유**: 셀의 활성 배정 오더의 piece들 qty 합. **단점**: cell_assignment는 IF-11 콜백에서 핸드셰이크마다 즉시 released(현 `ReleaseCell` 호출) — released되면 그 셀의 누적 piece를 못 찾음. 오더↔셀이 1:N일 수도(같은 오더가 시간차로 다른 셀). **부정합 위험 큼**.
-
-→ **권고**: **(a) sorter_command 경유** — piece↔cell 직접 연결이 의미상 정확하고 qty를 들고 있다. 셀 현재수량 = `SUM(p.Qty)` over `sorter_command sc JOIN piece p ON sc.piece_id=p.id WHERE sc.cell_id=<셀> AND sc.status=COMPLETED`(성공 적재만). piece별 중복 합산은 "piece당 최신 COMPLETED 1건"으로 방지(같은 piece 재시도 행 중복 카운트 금지). 정확한 SQL·중복 제거·status 필터 경계는 Generator가 ERD·핸드셰이크 코드 보고 확정.
-**Q2 결정 요청**: 셀 현재수량을 **sorter_command(COMPLETED) JOIN piece.qty 합**으로 산출하는 데 동의하는가? (cell_assignment 경유를 원하면 — 단 위 released 부정합 해소 방안 필요 — 지정.)
-
-### Q3. `cell.Capacity` NULL의 의미 — 무제한 vs full?
-`cell.Capacity`(=셀 작업 투입 수량)가 시드에서 **NULL**(현재 미사용·DbSeeder.cs:117). 마이그레이션 없이 재활용이므로 기존 셀은 NULL일 수 있다.
-- **NULL=무제한**: 작업수량 임계치 없음 → 그 셀은 수량으로 full 안 됨(m4p4 "빈 셀 유무"로만 판정 — 회귀 0). 현장이 셀 작업수량을 설정하기 전까지 안전한 기본값.
-- **NULL=즉시 full(0 취급)**: 셀에 아무것도 못 받음 → 모든 셀 full → 소터 전체 마비. **위험·부적절**.
-
-→ **권고**: **NULL=무제한**(수량 full 미적용). 셀 현재수량 ≥ Capacity 판정은 `Capacity`가 양수일 때만. NULL/0/음수면 수량-full 판정을 건너뛴다(m4p4 빈셀 모델로만 동작 — 기존 테스트·시드 회귀 0). 이로써 **시드 변경·마이그레이션 없이** 도입 가능하고, 현장이 셀 Capacity를 채우면 그때부터 수량-full 활성.
-**Q3 결정 요청**: `cell.Capacity` NULL(또는 ≤0) = **무제한(수량 full 미적용)**에 동의하는가? (테스트는 Capacity를 명시 양수로 세팅해 수량-full 경로를 검증.)
-
-### Q4. 슈트 IF-05 OK 정정이 기존 capacity·푸시 로직과 충돌하지 않는가?
-슈트 full/pause → IF-05 **NG→OK**(보냄) 정정. 현재 슈트 차단은 **두 곳**:
-1. `EfOrderRepository.QueryDestination`의 **order-level PAUSED 조기 차단**(DbRepositories.cs:69 — `order.Destination?.Status==PAUSED` → NG). 이 검사는 **모든 dest 타입**(슈트+소터)에 적용된다.
-2. `RcsController` **availability 콜백**의 `r.Full`/`r.Paused` → `DestinationBlock.Full/Paused` 매핑(RcsController.cs:65-72). 슈트·소터 공통(소터엔 piece-aware 예외).
-
-슈트를 OK로 만들려면 **두 차단 모두**에서 슈트를 통과시키되 **소터는 NG 유지**해야 한다. 또한:
-- **푸시(IF-08)는 슈트 readiness를 계속 전달**(사용자 확정2: "슈트 readiness는 푸시로 RCS에 계속 전달"). 즉 IF-05 dispatch와 푸시 ready는 **분리된 소비자** — IF-05 OK여도 푸시 ready=false(슈트 만재/정지)는 그대로 보낸다. 충돌 없음(서로 다른 채널: IF-05는 "보낼지", 푸시는 "받을 수 있는지 상태 통지").
-- **ChuteCapacityService 모델 무변경**(GetHold·OnReserved/OnDeposited/OnCleared·집계). IF-05 OK 시 슈트 예약 차감(`capacity.OnReserved`, RcsController.cs:78) — full인데 OK로 보내면 예약이 work_full_qty를 **초과**할 수 있다. → 슈트는 곧 비워지니 초과 예약을 허용한다(사용자 모델: "슈트는 곧 비워지니 보내고 대기"). 단 음수·언더플로 없음(기존 `Math.Max(0, ...)` 가드 유지).
-
-→ **권고**: 슈트 IF-05는 full/paused여도 **항상 OK**(목적지 정상 매칭·활성인 한). 차단점 1·2를 **dest 타입으로 분기** — 슈트는 full/paused 통과(OK), 소터는 m4p4대로 NG(piece-aware 예외 포함). 푸시·capacity 집계는 무변경(IF-05 OK 시 예약 차감은 유지 — 초과 허용). order-level PAUSED 차단(차단점 1)은 **소터에만 적용**되도록 좁히고, 슈트 PAUSED는 통과.
-**대안**: 슈트 PAUSED는 여전히 NG로 두고 **FULL만 OK**로 — 사용자 확정은 "슈트 full/pause → OK" 둘 다이므로 대안 채택 안 함(확정과 충돌).
-**Q4 결정 요청**: 슈트는 full·paused **둘 다 IF-05 OK**(목적지 활성·매칭 시), 차단점 1·2를 dest 타입 분기로 슈트만 통과시키고 소터 NG 유지, 푸시·capacity 무변경에 동의하는가?
+> 사용자 확정 2026-06-25. Planner는 WHAT/WHERE/검증만 정의 — 구현 방법(HOW)은 Generator 결정.
+> 사용자 확인 대기 (Phase 1 게이트).
+> 선행: S-소터셀수량full(PR #14 계열, 머지됨) — 소터 full=셀 작업수량 기반 + IF-05 dispatch 정정 + push ready 결선.
 
 ---
 
 ## Goal
-사용자 정밀화(2026-06-25) 두 축을 구현한다.
 
-**(A) 소터 셀 full = 셀 현재 투입 수량 ≥ 셀 작업 투입 수량** (수량 기반 단일 임계치).
-m4p4의 "빈 셀 없음=full"을 수량 기반으로 정밀화한다. 셀 작업 투입 수량 = `cell.Capacity` 재활용(현재 미사용). 셀 현재 투입 수량 = 그 셀에 적재(deposited/loaded)된 piece.qty 합(산출원 = Q2). **결합 모델**: 새 오더(셀 미보유)는 빈 셀 필요(m4p4 free-cell 슬롯 유지), 기존 오더(셀 보유)는 그 셀이 작업수량 미달일 때만 OK. m4p4 IF-05 "오더 셀 보유하면 무조건 OK" 예외에 **"그 셀 현재수량 < 작업수량" 체크를 추가**(셀이 꽉 차면 그 오더 piece도 NG/FULL). 셀은 **기본 투입 수량·마감 reset 없음**(단순 임계치 — 슈트만 3-수량). 만재 센서는 이연(이번 스코프 아님).
+소터(SORTER_3D) IF-08 아웃바운드 push의 `ready` 플래그를 **운영 상태(decision.Ready = online && 정렬(CurFloor==운영층) && Ready==1)** 만으로 좁힌다. 셀 만재(SorterFull)와 destination PAUSED는 **push에서 제외**한다 — 이 둘은 IF-05 dispatch 게이트에서만 차단된다(2단계 게이트 분리: "받을 수 있는 운영 상태인가"는 push, "지금 이 piece를 보낼 목적지가 있는가"는 IF-05).
 
-**(B) 슈트 IF-05 dispatch full/pause → OK** (소터는 NG 유지).
-현재 develop은 슈트도 full/pause → NG. 사용자 모델: 슈트는 곧 비워지니 보내고 대기(OK). 소터 full/pause는 곧 안 풀리니 NG. **슈트만 OK로 정정, 소터 NG 유지**. 슈트 readiness는 푸시(IF-08)로 RCS에 계속 전달(IF-05 dispatch와 분리된 채널).
+현재 `DestinationStatusService.ComputeSorter`는 `ready = !full && !paused && decision.Ready`로 산출해 push·IF-05가 같은 `Compute().Ready`를 공유하던 구조였다. 이 변경 후:
+- **push ready** = `decision.Ready`(운영 상태) 만. SorterFull·PAUSED는 push ready에 영향 없음.
+- **IF-05 dispatch** = `r.Paused` + `SorterCanAcceptBarcode(셀 기준)` 소비(현행 유지, `r.Ready` 미사용).
+- `DestinationReadiness`의 `Full`/`Paused`/`Reason` 필드는 (IF-05·내부 DenyReason 사유용) **계속 산출**하되, **소터 ready 합성에서만 제외**한다.
 
-## Implementation Scope (Generator가 할 일)
-1. **셀 현재 투입 수량 산출(읽기 전용)**: Q2 권고(sorter_command COMPLETED JOIN piece.qty 합) 경로로 `셀별 현재 투입 수량`을 산출하는 읽기 전용 조회를 추가. piece별 중복 합산 금지(재시도 행). 정확한 SQL·status 경계·중복 제거는 Generator가 ERD·핸드셰이크(`EfSorterCommandJournal`·`TriggerSorterHandshake`) 코드 보고 결정.
-2. **셀 작업 투입 수량 = `cell.Capacity` 재활용**: Q3 권고(NULL/≤0 = 무제한 = 수량-full 미적용). 양수일 때만 `현재 ≥ Capacity` → 그 셀 full.
-3. **IF-05 piece-aware 수량 full 결선**: `RcsController.DestinationQuery` availability/예외 경로에서, 소터 + 그 piece 오더가 활성 cell_assignment 보유(m4p4 `SorterHasActiveAssignmentForBarcode`) 시 — **추가로 그 배정 셀의 현재수량 < 작업수량인지** 확인. 셀이 꽉 찼으면(현재 ≥ Capacity) 그 piece도 NG(FULL). 빈 셀로 새로 받을 수 있으면(빈 셀 ≥1) OK. m4p4 "오더 셀 보유=무조건 OK"를 "오더 셀 보유 AND 그 셀 여유"로 좁힌다.
-4. **소터 목적지-단위 full/ready 수량 반영(Q1=예)**: `DestinationStatusService.ComputeSorter`의 `SorterFull`을 수량 기반으로 **정밀화**한다 — `SorterFull = 빈 enabled 셀 없음 AND 모든 활성 배정 셀이 작업수량 도달`(현재수량 ≥ `cell.Capacity` 양수). 빈 셀 ≥1 또는 작업수량 미달 배정 셀 ≥1이면 `SorterFull`=false. 셀 현재수량은 1번의 산출원(sorter_command JOIN piece.qty)을 **재사용**(IF-05 piece-aware와 동일 산출 공유 — 중복 구현 0). 푸시 ready 합성 식(`ready = !SorterFull && !paused && decision.Ready`)은 형태 유지하되 `SorterFull` 의미가 수량 반영으로 확장. 단일 원자 쿼리로 평가(빈셀 카운트 + 배정셀별 작업수량 도달 여부를 한 시점 스냅샷으로 — check-then-act 분리 금지).
-5. **(B) 슈트 IF-05 full/pause → OK**: Q4 결정에 따라 차단점 1(order-level PAUSED, DbRepositories.cs:69)과 차단점 2(availability 콜백 Full/Paused 매핑, RcsController.cs:65-72)를 **dest 타입으로 분기** — 슈트는 full/paused 통과(OK), 소터는 NG 유지(piece-aware 예외 포함). 슈트 OK 시 예약 차감(`OnReserved`)은 유지(초과 허용).
-6. **DB 접근 경계**: 셀 수량 조회는 m4p4와 동일 패턴 — `DestinationStatusService`/`RcsController`가 `IServiceScopeFactory` 또는 요청 스코프 `WcsDbContext`로 읽기. 싱글톤 captive dependency 금지. `DepositDecider`(순수) 무변경.
-7. **테스트 추가/수정**: 아래 Verification Scenarios를 `SorterCellFullnessTests`(소터 수량 full) + `ApiIntegrationTests`(슈트 IF-05 OK 회귀 반전)에 실 DB·실 sorter_command/cell_assignment·가짜 RCS 수신으로 구현. **기존 슈트 NG 테스트 3건의 assertion을 OK로 반전**(아래 회귀 항목).
-
-## 무변경 / 회귀 0 (절대 건드리지 않음)
-- **Modbus·C/R 핸드셰이크·Sim3ds·`DepositDecider`(순수)** 본문 무변경.
-- **인바운드 IF-09/10·푸시(Phase 2) 메커니즘·슈트 ChuteCapacity 모델(GetHold·집계·OnCleared)** 회귀 0. (B)는 IF-05 dispatch의 슈트 full/paused NG→OK **정정만**.
-- **DB 스키마 무변경**: `cell.Capacity`(기존 nullable 컬럼) 재활용 — 신규 컬럼/테이블/인덱스/마이그레이션 **불요**(Q3 NULL=무제한이면 시드 변경도 불요). 스키마 변경이 실제 필요하다고 판명되면 protected zone → 사용자 확인.
-- **m4p4 자산 재사용**: free-cell 슬롯 로직(`EfCellSelector` ②분기)·`SorterHasActiveAssignmentForBarcode`·`IServiceScopeFactory` 패턴·`SorterCellFullnessTests`/`RcsPushWebApplicationFactory`/`FakeRcsServer`/`OccupyCells`·`ReleaseOneCell`·`FreeCellCount` 헬퍼.
-- **teardown exit 0** 유지(`DisposeAsync`·`StopAsync` 경쟁 경로 무변경).
-- **절대규칙 준수**: PLC 쓰기 단일 큐(#1), TgtFloor 조건(#2·#3), Ready 의미(#4), FULL/PAUSED는 WCS 판단(#5), 설정값(#7 — 하드코딩 금지), Wcs.Core 순수(#8).
-
-## ⚠ 회귀 — 의도적 동작 변경 (assertion 반전 필요)
-(B) 슈트 IF-05 OK 정정으로 **아래 기존 테스트의 기대값이 NG→OK로 바뀐다**. Generator가 반전한다(삭제 금지 — 새 의도로 갱신):
-- `ApiIntegrationTests.If05_Chute_Paused_Ng` → 슈트 PAUSED → 이제 **OK**(슈트 readiness는 푸시로 전달). 테스트명/assertion 갱신.
-- `ApiIntegrationTests.If05_Chute_Full_ThenCleared_Normal` → 슈트 FULL → 이제 **OK**(비움 전후 둘 다 OK). 수량-full 부분은 무의미해지므로 슈트 OK 단언으로 갱신.
-- `ApiIntegrationTests.VS2_If05_PausedOrder_NgPaused` → PAUSED 슈트 오더 → 이제 **OK**. (소터 PAUSED 오더는 NG 유지 — 별도 보강.)
-- **소터 PAUSED/FULL NG는 회귀 0**: `SorterCellFullnessTests.EC1/EC2`(소터 FULL/PAUSED → NG) 유지. (B)는 슈트만 정정, 소터 불변.
-
-## 동시성 / 일관성 (메타교훈 — 인메모리 GREEN ≠ 결함 없음)
-- 셀 현재수량 조회(읽기)와 IF-10 배정/적재(sorter_command 기록·`ReleaseCell`)는 서로 다른 스코프·시점. 셀 수량 판정(IF-05 piece-aware AND 목적지-단위 `SorterFull` 둘 다)은 **단일 원자 쿼리**(SUM + 비교를 한 쿼리/한 시점 스냅샷)로 — "셀 꽉 찼는데 OK" 또는 "셀 여유 있는데 NG", "소터 전부 꽉 찼는데 push ready=true"가 한 순간도 새지 않게. check-then-act 분리 금지(m4p4 EC-5 원자성 교훈 연장).
-- 조회와 적재 사이 race가 있어도 **다음 관찰/다음 IF-05에서 재평가**(eventually consistent) — 영구 오류 0. 단 단일 응답 내부 불변식(셀full ⟹ 그 piece NG / `SorterFull` ⟹ push ready=false)은 항상 성립.
-- 푸시 전이 멱등(전이당 1회·중복 0·누락 0)은 기존 Pusher per-dest 락·in-flight로 보장. **Q1=예로 push ready 산출이 수량 반영으로 확장되지만(`Compute` 내부 `SorterFull` 의미만 변경), 전이 추적·락·in-flight·관찰 타이머(150ms) 메커니즘은 무변경** — `Compute`가 DB(sorter_command·cell·cell_assignment)를 매 관찰 주기 재조회해 합성 ready 전이를 포착(m4p4 빈셀 조회와 동형). 멱등 기계는 손대지 않는다.
-- (B) 슈트 IF-05 OK 시 `OnReserved` 초과 예약 — 음수/언더플로 없음(`Math.Max(0,...)` 가드 유지), 단조 증가는 비움(OnCleared)에서 리셋.
-
-## Evaluation Criteria (Evaluator 판정 기준 + 가중치)
-- **(30%) 소터 셀 수량 full 산출 정확성**: 셀 현재수량(deposited piece.qty 합, Q2 경로·중복 0) ≥ `cell.Capacity`(양수) → 그 셀 full. NULL/≤0=무제한(미적용·Q3). 단일 원자 쿼리. 셀별 정확 합산(piece 재시도 중복 합산 0).
-- **(20%) IF-05 결합 모델 정확성**: 새 오더(빈 셀 ≥1)=OK / 기존 오더 셀 여유(현재<작업)=OK / 기존 오더 셀 full(현재≥작업) AND 빈 셀 0 = NG(FULL). m4p4 "오더 셀 보유=무조건 OK"가 "셀 여유 확인"으로 정확히 좁혀짐. piece_event reason(내부) FULL/NORMAL 정합.
-- **(15%) 소터 목적지-단위 push ready 수량 반영(Q1=예)**: `SorterFull = 빈 셀 없음 AND 전 활성 배정 셀 작업수량 도달`일 때만 push ready=false. 빈 셀 ≥1 또는 미달 배정 셀 ≥1이면 ready 유지(true, 정렬 등 충족 시). 셀 적재로 마지막 여유가 사라지는 순간 ready=false 전이 1건(관찰 타이머 포착), 여유 생기면 ready=true 재푸시 1건. IF-05 piece-aware 산출과 동일 셀수량 소스 재사용.
-- **(15%) (B) 슈트 IF-05 OK 정정 + 소터 NG 유지**: 슈트 full/paused → IF-05 OK(차단점 1·2 모두 슈트 통과). 소터 full/paused → IF-05 NG(불변). 슈트 readiness 푸시는 계속 전달(IF-05 OK와 무관하게 ready=false 푸시).
-- **(10%) 회귀 0 + 의도적 반전**: 기존 VS-PUSH-1~8·`SorterCellFullnessTests`(소터)·`DepositDeciderTests`·`ScenarioTests` GREEN. 슈트 NG 3건은 OK로 반전(삭제 아님). 무변경 항목 디프 0(스키마·Modbus·핸드셰이크·DepositDecider·ChuteCapacity 모델).
-- **(10%) 동시성·경계·DI 정합**: 셀 수량 평가 원자성(셀full⟹piece NG, `SorterFull`⟹push ready=false 불변식). 싱글톤 captive 주입 0(IServiceScopeFactory). DepositDecider 순수·Wcs.Core 의존성 0 불변. `Compute`/IF-05 예외가 관찰 루프·핸들러를 죽이지 않음. teardown exit 0.
-
-## Completion Conditions (Evaluator PASS 최소 조건)
-- `dotnet build` 경고 0, `dotnet test` 전체 GREEN (신규/반전 테스트 포함).
-- 아래 Verification Scenarios 전부 자동화 테스트로 통과 — **실 sorter_command/cell_assignment/cell.Capacity DB 상태**와 **가짜 RCS 수신 본문**을 ground-truth로 단언(인메모리 카운터 GREEN만으로 PASS 금지 — 메타교훈).
-- 무변경 영역(Modbus·Sim3ds·`DepositDecider`·핸드셰이크·스키마·ChuteCapacity 집계 모델) 디프 0.
-- Evaluator가 동일 테스트를 독립 재실행해 Generator 주장 검증(fresh evidence — HTTP 응답 본문·piece_event.reason·DB 셀수량 raw 단언).
-
-## Parallel Modules
-N/A (single module — 셀 수량 산출 + IF-05 결선 + 슈트 dispatch 정정이 `DestinationStatusService`/`RcsController`/`DbRepositories` 좁은 표면에 응집. 경계 분할 불가, 1/1/1 유지).
-
-## Evaluation Dimensions
-functional + concurrency (동시성이 핵심 위험 — 셀 수량 조회와 IF-10 적재/cell_assignment 변화 race). 단일 Evaluator가 두 차원 모두 판정(표면적이 좁아 expert pool 분리 불요) — 단 functional 판정 시 동시성 항목(원자 쿼리·셀full⟹piece NG 불변식·전이 멱등·예외 격리)을 **명시 체크 항목**으로 포함.
-
-## Detected Project Type: Backend/API
-
-## Verification Scenarios (Backend/API — mandatory)
-
-### 엔드포인트(메서드 + 경로) — 이 스프린트가 건드리는 표면
-- `POST /api/v1/destination-query` (IF-05) — 소터 셀 수량 full piece-aware 판정(신규) + 슈트 full/paused → OK(정정).
-- 아웃바운드 푸시 `POST {RcsBase}/api/v1/destination-status` (IF-08) — 소터 목적지-단위 ready가 **셀 작업수량 반영**(Q1=예: `SorterFull`=빈셀0 AND 전 배정셀 작업수량도달일 때만 ready=false) + 슈트 readiness 계속 전달(불변).
-- (간접) `POST /api/v1/deposit-report` (IF-10) — sorter_command 적재가 셀 현재수량을 누적시키는 입력원(동작 무변경, 셀 수량 트리거로만 관여).
-
-### Happy path (입력 → 기대 출력)
-- **HP-1 (소터 셀 여유 → OK)**: 그 piece 오더가 활성 cell_assignment 보유 + 그 셀 현재수량 < `cell.Capacity`(예: Capacity=10, 현재=3) → IF-05 `{result:"OK", chuteNo:30}`. piece_event reason(내부)=NORMAL.
-- **HP-2 (소터 새 오더 빈 셀 → OK)**: 셀 미보유 새 오더 + 빈 enabled 셀 ≥1 → IF-05 `{result:"OK", chuteNo:30}`. (m4p4 free-cell 슬롯 유지 — 회귀 가드.)
-- **HP-3 (슈트 FULL → OK 정정)**: 슈트 `ChuteCapacityService` Full 주입 → IF-05 `{result:"OK", chuteNo:N}`(NG 아님). 같은 piece에 대해 푸시 ready=false는 별도 전달됨(IF-05 OK ≠ 푸시 ready).
-- **HP-4 (슈트 PAUSED → OK 정정)**: 슈트 destination.Status=PAUSED → IF-05 `{result:"OK", chuteNo:N}`(NG 아님). order-level PAUSED 차단(차단점 1)이 슈트엔 미적용 확인.
-- **HP-5 (소터 push ready — 배정 셀 일부 여유 → ready 유지·Q1=예)**: 빈 enabled 셀 0개지만 활성 배정 셀 중 **하나라도 작업수량 미달**(예: 셀A 현재=Capacity, 셀B 현재<Capacity) + 정렬·online → 가짜 RCS 수신 `ready=true` 유지(`SorterFull`=false — 그 여유 셀로 기존 오더 수용 가능). `Compute(sorter).Full=false` 동반 단언. **실 sorter_command/cell.Capacity DB 상태로 ground-truth 구성.**
-
-### 오류/차단 케이스 (Planner가 적용 대상만 선별 — 패딩 금지)
-- **EC-1 (소터 셀 full → NG)**: 그 piece 오더가 활성 cell_assignment 보유하지만 그 셀 현재수량 ≥ `cell.Capacity`(예: Capacity=5, 현재=5) AND 빈 셀 0 → IF-05 `{result:"NG", chuteNo:null}`. piece_event reason(내부)=FULL. **실 sorter_command 행으로 현재수량을 ground-truth 구성**(인메모리 카운터 아님).
-- **EC-2 (소터 빈 셀 0 + 오더 미보유 → NG)**: 새 오더 + 모든 셀 점유(빈 셀 0) → IF-05 NG(FULL). (m4p4 EC-1 유지 — 회귀 가드.)
-- **EC-3 (소터 PAUSED/FULL NG 유지)**: 소터 destination PAUSED → IF-05 NG(불변). 소터 빈셀0+오더없음 → NG(불변). (B) 정정이 소터를 깨지 않음 확인.
-- **EC-4 (cell.Capacity NULL=무제한)**: 그 셀 `Capacity=NULL` + 현재수량이 아무리 많아도(예: 현재=100) → 수량-full 미적용 → 빈 셀 유무로만 판정(빈 셀 있으면 OK). Q3 권고 검증 — 시드 기본값(NULL)이 소터를 막지 않음(회귀 0).
-- **EC-5 (동시성 원자성)**: sorter_command 적재(셀 수량 증가)와 cell_assignment 배정/해제를 동시 다수 스레드가 churn하는 동안 IF-05/Compute 호출 — "셀 현재 ≥ Capacity인데 그 piece OK" 또는 "셀 여유 있는데 NG" 모순 응답 0건(단일 원자 쿼리). 최종 상태로 수렴(누락 0).
-- **EC-6 (셀 경계값)**: 현재수량 == Capacity-1 → OK(미달), == Capacity → NG/full(도달), == Capacity+1(초과 적재된 경우) → NG/full. 경계 등호(`≥`) 정확성.
-- **EC-7 (소터 push ready=false 전이 — 마지막 여유 소진·Q1=예)**: 빈 셀 0 + 마지막 미달 배정 셀이 작업수량에 도달(sorter_command 적재로 현재 → Capacity)하는 순간 → `SorterFull`=true → 관찰 타이머(150ms)가 `ready=true→false` 전이 감지 → 가짜 RCS가 `ready=false` **정확히 1건** 수신(중복 0·무변화 폴 폭주 0). 이어서 그 셀 작업수량 미달로 되돌리거나 빈 셀 1개 생성 → `ready=true` 재푸시 1건(전이당 1회). m4p4 EC-3/HP-3(빈셀 전이)와 동형이되 **수량 도달이 트리거**.
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints-touched, happy-path-per-endpoint, error-cases-per-endpoint). All slots filled: yes. Scenario count this sprint: HP-1~5 + EC-1~7 = 12 (소터 수량 full·결합 모델·push ready 수량 반영·슈트 OK 정정·동시성·경계).
+스펙 문서(`docs/wcs_rcs_interface_kr.html`)의 IF-08 소터 `ready` 정의와 IF-05 표를 위 확정 모델과 정합시킨다(필요시 `docs/SPEC.md`도).
 
 ---
 
-## 사용자 확정 (2026-06-25 — 진행 승인, Phase 2 진입)
+## Implementation Scope (Generator가 수행할 것 — WHAT/WHERE)
 
-1. **Q1 = 예 (push ready도 셀 작업수량 반영)** ← Planner 권고(아니오)와 다름. 목적지-단위 소터 push `ready`를 셀 작업수량으로 정밀화:
-   - **`SorterFull`(목적지 단위) = 빈 enabled 셀 없음 AND 모든 활성 배정 셀이 작업수량 도달**(현재수량 ≥ `cell.Capacity` 양수). 이때만 push `ready=false`(새 오더도 기존 오더도 못 받음).
-   - **빈 enabled 셀 ≥1 OR 작업수량 미달 배정 셀 ≥1 → `SorterFull`=false** → ready 유지(정렬·online 등 충족 시 true). 그 채널(빈 셀=새 오더 / 여유 셀=기존 오더)로 수용 가능하므로.
-   - `ComputeSorter`가 이 합성 `SorterFull`을 산출. **IF-05 piece-aware는 같은 셀 수량 산출을 재사용**하되 "그 piece 오더의 배정 셀"만 별도 체크(목적지 전체 아님). 푸시 변화원 = 기존 150ms 소터 관찰 타이머(`RunSorterObserveLoopAsync`)가 `Compute` 재호출로 합성 ready 전이 포착 — 별도 변화원·멱등 기계 무변경.
+### 변경 대상 파일
+1. **`src/Wcs.Api/DestinationStatusService.cs`** — `ComputeSorter`의 소터 ready 합성을 운영 상태(`decision.Ready`)만으로 좁힌다(현재 `!full && !paused && decision.Ready`인 line 295 지점). `Full`/`Paused`/`Online`/`Reason` 산출 자체는 유지(IF-05·내부 사유 소비). `Full`/`Paused`를 ready 합성에서 빼되, 산출은 유지된다는 점을 코드/주석으로 명확히. DenyReason 우선순위 문구(현재 line 257~259, 295~304)도 새 모델과 일치하게 정정 — ready는 운영상태로만 판정되므로 Full/Paused가 ready=false를 만들지 않음을 반영하되, `Reason`은 IF-05/내부 사유로 여전히 Offline/Paused/Full을 구분 보존할지 Generator가 일관되게 결정(단 ready 합성에서 Full/Paused 제외는 필수). 클래스 헤더 주석(line 8~38, 244~259)의 소터 ready 정의 문구도 새 모델로 정정.
+2. **`tests/Wcs.Tests`** — 아래 Verification Scenarios를 커버하는 테스트 추가/갱신. 실 DB(인메모리 SQLite seed)·가짜 RCS 수신 본문(push payload 캡처)·게이트웨이 snapshot을 ground-truth로. **인메모리 카운터 단독 단언 금지**. 기존 소터 push/IF-05 테스트 중 "셀 만재→push ready=false" 또는 "paused→push ready=false"를 단언하던 것이 있으면 새 모델(만재·paused는 push에 영향 없음)로 갱신(삭제가 아니라 단언 정정 — S-소터셀수량full 슈트 테스트 반전 선례 참조).
+3. **`docs/wcs_rcs_interface_kr.html`** — 아래 "스펙 정정 대상" 라인들을 확정 모델과 정합.
+4. **`docs/SPEC.md`** (필요시) — 소터 push ready 정의/판정 표에 push와 dispatch 2단계 게이트 분리가 반영돼 있지 않으면 정정. Generator가 SPEC.md를 읽어 해당 정의가 있는지 확인 후, 있으면 정합·없으면 무변경(불필요한 추가 금지).
 
-2. **Q2 = sorter_command(COMPLETED) JOIN piece.qty 합**: 셀 현재 투입 수량 = `SUM(piece.qty)` over `sorter_command(status=COMPLETED) JOIN piece` per cell. cell_assignment는 핸드셰이크마다 즉시 released라 **비사용**. piece별 중복 합산 금지(재시도 행 — piece당 1건). 정확한 SQL·status 경계·중복 제거는 Generator가 핸드셰이크 코드(`EfSorterCommandJournal`·`TriggerSorterHandshake`) 보고 확정.
+### 스펙 정정 대상 (`docs/wcs_rcs_interface_kr.html` — Planner가 확인한 라인)
+- **line 126** (§3 `ready` 필드 정의): 현재 "3D 소터 슈트: 추가로 온라인·정렬·정지(비분류)" — push ready에 "정지(paused)"가 포함돼 있음. → 소터 push ready = **온라인·정렬·비분류(운영 상태)** 만으로 정정. 만재·정지는 push가 아니라 IF-05 dispatch 게이트임을 명시.
+- **line 172** (§5 IF-08 prose): 현재 "일반 슈트면 만재·정지(WCS 관리), 3D 소터 슈트면 추가로 분류 중·오프라인·미정렬" — 소터 push에 만재·정지가 섞여 있음. → 소터 push ready=false는 **분류 중·이동 중·미정렬·오프라인(운영 상태 BUSY/OFFLINE)** 만이고, 만재·정지는 IF-05 dispatch에서 차단됨을 명시. 슈트 push 정의(만재·정지)는 현행 유지.
+- **line 216~217** (§6 IF-08 RCS 해석 표): line 217이 `full / paused / online=false`를 소터 push ready=false 사유로 명시. → 소터 push ready=false는 운영 상태(분류 중·이동 중·미정렬·오프라인)로 정정. full/paused는 push 사유에서 제외(IF-05 게이트). line 216의 "소터면 분류 중·오프라인도" 문구도 만재·정지 제외로 정합.
+- **line 208** (§6 IF-05 표 `FULL / PAUSED → NG` generic): 현재 슈트·소터 무차별로 "FULL/PAUSED→NG". → 확정 모델 정합: **슈트는 full/paused여도 OK**(IF-05 dispatch 통과, readiness는 push로 별도 전달), **소터는 PAUSED면 NG·셀 기준(SorterCanAcceptBarcode) 못 받으면 NG**, OFFLINE은 IF-05에서 보지 않음(셀 있으면 OK). (이미 코드는 RcsController.cs:64~79·확정4로 이렇게 동작 — 문서만 generic이라 정정.)
 
-3. **Q3 = cell.Capacity NULL/≤0 = 무제한**(그 셀 수량-full 미적용). 양수일 때만 `현재 ≥ Capacity` → 그 셀 full. **시드·마이그레이션 무변경**(기존 nullable 컬럼 재활용). 테스트는 Capacity를 명시 양수로 세팅해 수량-full 경로 검증.
+### 무변경 가드 파일 (diff 0 — Generator가 절대 건드리지 않음)
+- `src/Wcs.Core/` 전체(DepositDecider·Models·RegisterMap — 순수 판정 엔진).
+- `src/Wcs.PlcGateway/` 전체(PlcGateway·HandshakeOrchestrator — Modbus 마스터·핸드셰이크).
+- `src/Wcs.Sim3ds/` 전체(시뮬레이터).
+- `src/Wcs.Data/` 스키마·`src/Wcs.Migrations.*`(DB 스키마/마이그레이션).
+- `src/Wcs.Api/DestinationStatusPusher.cs` — push 멱등 기계(전이추적 Acked/Computed·per-dest Gate 락·PushInFlight·재시도·관찰 타이머·부트스트랩). **본문 무변경** — `Compute().Ready`가 매 관찰 주기 재산출돼 새 ready 의미를 자동 포착하므로 Pusher 코드 변경 불요.
+- `src/Wcs.Api/RcsPushClient.cs` — push 페이로드 `{chuteNo, ready, timeStamp}`·HttpClient·백오프(무변경).
+- `src/Wcs.Api/Controllers/RcsController.cs` — IF-05/09/10 인바운드. 특히 **IF-05 availability 콜백(line 64~79)이 `r.Ready`를 소비하지 않고 `r.Paused`+`SorterCanAcceptBarcode`만 소비함**(Planner가 코드로 확인). 이 무변경이 "소터 ready 의미 변경이 IF-05에 영향 없음"의 회귀 가드. (Generator는 변경 전 grep로 `.Ready` 소비처를 전수 확인하고, IF-05 경로에서 `r.Ready` 소비처 0임을 증거로 남길 것 — 만약 소비처가 발견되면 본 변경의 전제 위반이므로 Evaluator에 보고.)
+- `ChuteCapacityService`(슈트 capacity 집계), `SorterCellQty`(셀 수량 산출 공유 로직), `EfCellSelector.SelectCell`(셀 배정), `SorterCanAcceptBarcode`/`HasAssignedCellWithRoom`/`HasFreeEnabledCell`/`ComputeSorterFull`(IF-05 piece-aware·full 산출 — 산출 로직 자체는 무변경, ready 합성에서만 제외).
 
-4. **Q4 = 슈트 IF-05 full·paused 둘 다 OK**(보냄). 차단점 2곳 — ① `QueryDestination` order-level PAUSED(`DbRepositories.cs:69`) ② availability 콜백 Full/Paused 매핑(`RcsController.cs:65-72`) — 에 **dest 타입 분기**: 슈트는 full/paused 통과(OK), 소터는 NG 유지(piece-aware 예외 포함). **ChuteCapacity 집계 무변경**(IF-05 OK 시 OnReserved 초과 예약 허용). 슈트 readiness는 푸시(IF-08)로 계속 전달(IF-05 dispatch와 분리 채널 — IF-05 OK여도 ready=false 푸시).
+> 함께 정리 가능한 이연 MINOR(선택 — scope 내, Generator 판단): todo.md의 `Compute` 본문 주석 "단일 원자 쿼리로 평가"(DestinationStatusService.cs:253)는 이번에 ComputeSorter 주석을 손대므로 함께 "같은 스코프 순차 읽기"로 정정 가능. orphan `SorterHasAssignedCellWithRoomForBarcode` 제거는 IF-05/테스트 영향이 있어 본 스프린트 표면 밖 — **무리하게 끌어오지 말 것**(별도 정리 sprint). 정리 항목은 push ready 변경과 충돌하지 않을 때만, 가독성 한정으로.
+
+---
+
+## Evaluation Criteria (가중치 — Evaluator 판정 기준)
+
+1. **소터 push ready 운영상태 정확성 (★★★, 35%)** — 소터 push ready == `decision.Ready`(online && 정렬 && Ready==1). 셀 만재(SorterFull=true)·destination PAUSED는 push ready를 false로 만들지 **않는다**. busy(Ready==0 또는 미정렬)·offline은 push ready=false. 실 DB seed + 게이트웨이 snapshot으로 ground-truth 구성, push payload(가짜 RCS 수신 본문)의 `ready` 값으로 검증.
+2. **push 전이 발화 정확성 (★★★, 25%)** — 운영 상태 전이(예: 미정렬→정렬, Ready 0→1, offline→online)에는 push가 발화. **셀 만재 전이(빈 셀→만재 또는 만재→여유)·paused 전이만으로는 소터 push 무발화**(운영 상태 불변이면 push ready 불변 → 전이 없음 → push 0건). 멱등 기계(전이당 1회·무변화 무발화)는 보존.
+3. **회귀 0 — 슈트 push·IF-05·인바운드 (★★, 20%)** — 슈트 push ready(full/pause→false·비움/정지해제→true, ComputeChute 현행) 불변. IF-05 소터(셀 있으면 offline이어도 OK·paused면 NG·만재(셀없음)면 NG)·IF-05 슈트(full/pause여도 OK) 현행 유지. IF-09/IF-10 인바운드 동작 불변. 기존 테스트 단언 회귀 0(반전된 만재/paused push 단언만 정정 — diff로 정정 내역 확인).
+4. **무변경 가드 (★★, 15%)** — Modbus 레지스터맵·핸드셰이크·Wcs.Core(DepositDecider 순수성)·DB 스키마/마이그레이션·push 멱등 기계(DestinationStatusPusher·RcsPushClient)·RcsController·SorterCellQty·ChuteCapacity·EfCellSelector `git diff` 0줄로 입증.
+5. **스펙 문서 정합 (★, 5%)** — `docs/wcs_rcs_interface_kr.html` line 126·172·208·216~217 정정이 `git diff docs/`로 실재 확인. (필요시 SPEC.md.) 문서 주장 ≠ 실파일 변경 — diff로 대조(S-M4-P2b "정정 완료 거짓" 교훈).
+
+---
+
+## Completion Conditions (Evaluator 통과 최소 조건)
+
+- `dotnet build` 경고 0 / 오류 0.
+- `dotnet test` 전체 GREEN(신규 시나리오 포함) + testhost teardown **exit 0**(단언 PASS여도 exit≠0·`중단됨`·abort·hangdump면 미통과 — exit code·중단 라인 직접 확인. baseline 대조로 선재/도입 귀속: 선재 + 무변경 zone이면 명시·비차단, 본 변경 도입이면 차단 — S-RCS-IF-REDESIGN-P1 teardown 귀속 절차 적용).
+- 타이밍/동시성 표적(소터 관찰 타이머 기반 push 전이·무발화 시나리오) **단독 ≥5회 연속 flaky 0**.
+- 무변경 가드 파일 `git diff` 0(committed/staged/working/untracked 전부).
+- 스펙 문서 정정 `git diff docs/`로 라인 단위 확인.
+- IF-05 경로가 `r.Ready`를 소비하지 않음을 grep 증거로 확인(소터 ready 의미 변경이 IF-05에 무영향임의 구조적 근거).
+
+---
+
+## Parallel Modules
+
+N/A (single module — Wcs.Api 한 산출 함수의 ready 합성 변경 + 그 검증 + 문서 정정. 모듈 경계 분할 없음).
+
+## Evaluation Dimensions
+
+functional only.
+(단일 차원이나, 본 변경은 두 소비자(push·IF-05)가 같은 `Compute` 산출을 분기 소비하는 **크로스-엔드포인트 정합** 표면이다 — Evaluator는 S-소터셀수량full 6회째 메타교훈("두 엔드포인트가 같은 자원을 다른 로직으로 판정하면 크로스-엔드포인트 테스트 필수")을 적용해, push와 IF-05를 한 시나리오에서 연결 검증할 것. 보안/성능 별도 차원 불필요.)
+
+---
+
+## Detected Project Type: Backend/API
+
+판별 근거(repo 신호 — 사용자 표현 아님): `src/Wcs.Api/Controllers/RcsController.cs`(서버측 controller·`[ApiController]`·`[Route]`) + ASP.NET Core 서버 진입점(`Program.cs`·Windows Service 호스트). 브라우저 UI 트리 없음(docs의 `.html`은 스펙 정의서이지 client-rendered view 아님). 따라서 정확히 하나: **Backend/API**.
+
+---
+
+## Verification Scenarios (Backend/API — mandatory)
+
+> N = 10 (이 변경 표면에서 직접 결정: push 운영상태 5축 ①online·정렬·Ready=1 ②busy ③offline ④만재여도 ⑤paused여도 + 슈트 push 현행 ⑥ + IF-05 회귀 ⑦⑧ + push 멱등/무발화 ⑨ + 무변경 가드 ⑩). 모든 시나리오는 실 DB seed·가짜 RCS 수신 본문·게이트웨이 snapshot ground-truth 사용(인메모리 카운터 단독 금지).
+
+### Explicit list of endpoints/surfaces touched by this sprint (method + path / 산출 함수)
+- **(산출 함수)** `IDestinationStatusService.Compute(destId, SORTER_3D).Ready` — 소터 ready 합성(운영상태로 좁힘). push 소비자.
+- **IF-08 아웃바운드 push** `POST {RCS}/api/v1/destination-status` `{chuteNo, ready, timeStamp}` — Pusher가 `Compute().Ready` 전이 시 발화(코드 무변경, ready 의미만 바뀜).
+- **IF-05** `POST /api/v1/destination-query` — 소터 availability(`r.Paused`+`SorterCanAcceptBarcode`, `r.Ready` 미소비) 회귀 확인 대상.
+- (회귀 확인용) **IF-09** `POST /api/v1/arrival-report`, **IF-10** `POST /api/v1/deposit-report` — 인바운드 동작 불변.
+
+### Happy path per surface (expected input → expected output shape)
+- **VS-1 소터 online·정렬·Ready=1 → push ready=true**: snapshot(Online=true, CurFloor==운영층, Ready==1), destination NORMAL·활성, 셀 여유. `Compute(SORTER_3D).Ready==true` + 부트스트랩/전이 push payload `ready==true`(가짜 RCS 수신 본문).
+- **VS-6 슈트 full/pause → push ready=false · 비움/정지해제 → true (현행 유지)**: ComputeChute 경로. 슈트 destination full(hold=Full)→push ready=false, OnCleared→ready=true; paused→false, 정지해제→true. push payload로 확인.
+- **VS-8 IF-05 슈트 OK 유지**: 슈트 destination이 full/paused여도 IF-05 result=="OK"·chuteNo 반환(확정4 현행). 실 HTTP 요청→응답 JSON 증거.
+
+### Relevant error / boundary cases per surface (적용되는 것만 — 패딩 금지)
+- **VS-2 소터 busy → push ready=false**: (a) Ready==0(분류 중/이동 중) 또는 (b) CurFloor≠운영층(미정렬). 두 하위 케이스 모두 `Compute().Ready==false` + push payload `ready==false`.
+- **VS-3 소터 offline → push ready=false**: 게이트웨이 번들 없음(Online=false). `Compute().Ready==false`(Reason=Offline) + push payload `ready==false`.
+- **VS-4 소터 셀 만재(SorterFull=true)인데 운영상태 ready → push ready=true** [핵심 회귀]: snapshot 운영상태 OK(online·정렬·Ready=1)지만 모든 셀이 작업수량 도달(SorterFull=true). `Compute().Full==true`(IF-05/내부 사유 산출 유지)이면서 `Compute().Ready==true`(만재가 push ready에 영향 없음) + push payload `ready==true`. 실 sorter_command(COMPLETED) JOIN piece.qty로 만재 상태 ground-truth 구성.
+- **VS-5 소터 PAUSED인데 운영상태 ready → push ready=true** [핵심 회귀]: destination.Status==PAUSED(또는 IsActive==false)지만 운영상태 OK. `Compute().Paused==true`(산출 유지)이면서 `Compute().Ready==true`(paused가 push ready에 영향 없음) + push payload `ready==true`.
+- **VS-7 IF-05 소터 회귀 (3축)**: (a) 셀 있으면 **offline이어도 OK**(IF-05는 online을 보지 않음 — 셀 기준) (b) **paused면 NG**(소터 paused 차단 우선) (c) **만재(셀 없음)면 NG**. 세 하위 케이스 실 HTTP 요청→응답 result 확인. `r.Ready`(운영상태) 변경이 이 세 결과에 영향 없음을 입증(IF-05는 `r.Paused`+`SorterCanAcceptBarcode`만 소비).
+- **VS-9 push 전이당 1회·무변화 무발화 + 만재/paused 전이 무발화 (멱등 기계 보존)**: (a) 운영상태 전이 1회당 push 정확히 1건(같은 전이를 N스레드가 동시에 관찰해도 1건 — barrier 동시관찰 프로브로 클레임 경합 입증, 중복억제 경로만으로는 불충분 — S-RCS-IF-REDESIGN-P2 교훈). (b) **운영상태 불변인 채 셀 만재 전이(빈 셀↔만재)·paused 전이가 일어나도 소터 push 0건**(WaitUntilExactAsync stableCount로 폭주 0·무발화 부재 단언 — S-M4-P3/P2 no-flood 가드). (c) 관찰 주기마다 운영상태 무변화면 push 0건.
+- **VS-10 무변경 가드**: Wcs.Core·PlcGateway·Sim3ds·Data·Migrations·DestinationStatusPusher·RcsPushClient·RcsController·SorterCellQty·ChuteCapacity·EfCellSelector `git diff` 0줄. + IF-05 경로 `r.Ready` 미소비 grep 0.
+
+---
+
+## 미확정 질문 (사용자에게 — 추측 금지 항목)
+
+없음. 사용자 확정(2026-06-25)으로 push=운영상태(decision.Ready)·dispatch=IF-05(셀/paused)의 2단계 게이트 분리, 슈트 push·IF-05 현행 유지, 무변경 zone 전부가 명시됨. 메모리 `if05-dispatch-vs-push-operational` 확정 사항은 재질문하지 않음.
+
+단, **`Reason` 필드의 소터 ready=true 시 의미**(운영상태 ready지만 Full=true/Paused=true일 때 내부 DenyReason을 None으로 둘지 Full/Paused로 둘지)는 IF-05/내부 로깅이 `Reason`을 어떻게 쓰는지에 달린 **구현 세부**이므로 Generator가 기존 소비처(현재 `Reason`은 외부 미노출·IF-05 NG 필터는 Block enum 사용)와 일관되게 결정한다. push payload에는 `ready` bool만 나가므로 `Reason` 결정이 와이어에 영향 없음 — Planner는 이를 구현 결정으로 위임(WHAT 아님).
+
+---
+
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 10 (VS-1 happy=소터 운영ready→push true, VS-6 happy=슈트 push 현행, VS-8 happy=IF-05 슈트 OK, VS-2 error=소터 busy→false, VS-3 error=소터 offline→false, VS-4 error=소터 만재여도 push true[핵심회귀], VS-5 error=소터 paused여도 push true[핵심회귀], VS-7 error=IF-05 소터 회귀 3축, VS-9 error=push 멱등·만재/paused 무발화, VS-10 boundary=무변경 가드+grep). All slots filled: yes.

@@ -123,7 +123,7 @@
       <tr><td><code>chuteNo</code></td><td>integer</td><td>목적지 번호 — 슈트 번호. <b>IF-08 상태 푸시의 키</b>(목적지는 일반 슈트 또는 3D 소터 슈트)</td></tr>
       <tr><td><code>qty</code></td><td>integer</td><td>트레이 적재 수량 (같은 상품, 1개 초과 가능)</td></tr>
       <tr><td><code>timeStamp</code></td><td>string</td><td>이벤트 시각 — 해당 지역 <b>로컬 시간</b> 형식 (예: <code>2026-06-08 14:30:00</code>)</td></tr>
-      <tr><td><code>ready</code></td><td>bool</td><td><code>chuteNo</code>별 IF-08 상태 — RCS로 보내는 <b>유일한</b> 플래그. <code>true</code>=그 목적지가 지금 받을 수 있음, <code>false</code>=받을 수 없음. <b>일반 슈트</b>: <code>ready = 만재 아님 && 정지 아님</code>. <b>3D 소터 슈트</b>: 추가로 온라인·정렬·정지(비분류). WCS가 모두 boolean 하나로 접는다</td></tr>
+      <tr><td><code>ready</code></td><td>bool</td><td><code>chuteNo</code>별 IF-08 상태 — RCS로 보내는 <b>유일한</b> 플래그. <code>true</code>=그 목적지가 지금 받을 수 있음, <code>false</code>=받을 수 없음. <b>일반 슈트</b>: <code>ready = 만재 아님 &amp;&amp; 정지 아님</code>. <b>3D 소터 슈트</b>: <code>ready = 온라인 &amp;&amp; 정렬(운영층) &amp;&amp; 비분류(Ready=1)</code> — <b>운영 상태</b>만 본다. 셀 <b>만재·정지는 push <code>ready</code>에 포함하지 않는다</b>(만재·정지여도 운영상태가 OK면 push <code>ready=true</code>); 이 둘은 push가 아니라 <b>IF-05 투입 가부(dispatch)</b>에서 차단된다. WCS가 모두 boolean 하나로 접는다</td></tr>
     </table>
   </section>
 
@@ -169,7 +169,7 @@
 
 <span class="c">// 응답 (RCS → WCS)</span>
 { <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
-    <p><code>ready=true</code> = 그 목적지가 받을 수 있음(OK); <code>ready=false</code> = 받을 수 없음(NG). 일반 슈트면 <b>만재·정지</b>(WCS가 관리), 3D 소터 슈트면 추가로 분류 중·오프라인·미정렬. WCS가 모두 플래그 하나로 접으므로 RCS는 슈트 단위 <code>ready</code> 하나만 보고 <b>만재·정지 슈트엔 틸트하지 않는다</b>. <code>ready=true</code>일 때 투입 — 아니면 대기하며 다음 푸시를 기다린다.</p>
+    <p><code>ready=true</code> = 그 목적지가 받을 수 있음(OK); <code>ready=false</code> = 받을 수 없음(NG). <b>일반 슈트</b>는 <b>만재·정지</b>면 <code>ready=false</code>(WCS가 관리). <b>3D 소터 슈트</b>의 <code>ready=false</code>는 <b>운영 상태</b> 사유만 — <b>분류 중·이동 중·미정렬·오프라인</b>이다. 소터의 <b>셀 만재·정지는 push <code>ready</code>를 false로 만들지 않는다</b>(만재·정지여도 운영상태가 OK면 <code>ready=true</code>); 그 둘은 IF-05 투입 가부(dispatch)에서 차단된다. <code>ready=true</code>일 때 투입 — 아니면 대기하며 다음 푸시를 기다린다.</p>
 
     <h3><span class="ifid">IF-09</span> 도착 보고</h3>
     <p>제안: <code>POST /api/v1/arrival-report</code>. AGV가 목적지 슈트에 도착하면 투입 직전에 1회 호출. <b>WCS가 도착을 기록</b>하고 목적지를 수용 준비시킨다. 이후 RCS는 IF-08 상태 푸시에서 그 목적지가 <code>ready</code>가 되길 기다렸다가 투입한다.</p>
@@ -205,7 +205,7 @@
       <tr><th style="width:230px">WCS 사유(내부)</th><th style="width:120px">RCS 수신</th><th>RCS 동작</th></tr>
       <tr><td><code>NORMAL</code></td><td><span class="pill go">OK</span></td><td>AGV를 <code>chuteNo</code>로 이동</td></tr>
       <tr><td><code>BUSY</code> (분류 중·이동 중)</td><td><span class="pill go">OK</span></td><td>그래도 <code>chuteNo</code>로 이동 — 지금은 분류·이동 중이지만 곧 풀림. 도착 후 소터가 IF-08 상태에서 <code>ready</code>가 되면 투입</td></tr>
-      <tr><td><code>FULL / PAUSED</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>AGV 대기 — 그 목적지가 받을 수 없음(장기 차단). 가부 조회(IF-08)가 없어졌으므로 WCS가 만재·정지 목적지는 배정하지 않는다</td></tr>
+      <tr><td><code>FULL / PAUSED</code> (목적지 타입별)</td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span> / <span class="pill go">OK</span></td><td>목적지 타입에 따라 다르다. <b>슈트</b>: full/paused여도 <b>IF-05는 OK</b>(보내고 대기 — readiness는 IF-08 push로 별도 전달). <b>3D 소터</b>: <code>PAUSED</code>면 <b>NG</b>(예외 없이 차단), 셀 기준(<code>SorterCanAcceptBarcode</code>)으로 <b>못 받으면 NG(FULL)</b>; <b>OFFLINE은 IF-05에서 보지 않는다</b>(셀이 있으면 OFFLINE이어도 OK — 도착 후 push <code>ready</code> 대기). 즉 IF-05 가부는 ready(운영상태)가 아니라 paused+셀 여유로 판정한다</td></tr>
       <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>AGV 대기(전량이 한 목적지에 아직 안 들어감)</td></tr>
       <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>AGV 대기 — 보낼 목적지 없음(OFFLINE = 목적지 연결 끊김; 대체 / 보류)</td></tr>
     </table>
@@ -213,8 +213,8 @@
     <table>
       <tr><th style="width:300px">푸시된 상태</th><th>RCS 동작</th></tr>
       <tr><td><code>ready=true</code> (OK)</td><td><span class="pill ok">투입</span> 틸트 진행</td></tr>
-      <tr><td><code>ready=false</code> (NG)</td><td><span class="pill wait">대기</span> 그 목적지가 지금 받을 수 없음(만재·정지; 소터면 분류 중·오프라인도) — 이후 푸시에서 ready로 바뀌면 투입</td></tr>
-      <tr><td><code>full</code> / <code>paused</code> / <code>online=false</code></td><td><span class="pill ng">대기</span> 소터가 받을 수 없음 — 이후 푸시로 해소될 때까지 보류</td></tr>
+      <tr><td><code>ready=false</code> (NG)</td><td><span class="pill wait">대기</span> 그 목적지가 지금 받을 수 없음. 슈트는 만재·정지, <b>소터는 운영 상태 사유만 — 분류 중·이동 중·미정렬·오프라인</b>(소터의 만재·정지는 push <code>ready</code>에 반영하지 않으므로 여기 사유가 아니다) — 이후 푸시에서 <code>ready=true</code>로 바뀌면 투입</td></tr>
+      <tr><td>소터 운영 상태 BUSY/OFFLINE<br>(분류 중·이동 중·미정렬·오프라인)</td><td><span class="pill ng">대기</span> 소터가 지금 받을 수 없는 운영 상태 — 정렬·복귀·온라인 회복 후 push <code>ready=true</code>까지 보류. (소터 셀 <b>만재·정지는 push <code>ready</code>를 false로 만들지 않으며</b> IF-05 dispatch에서 차단된다.)</td></tr>
     </table>
   </section>
 

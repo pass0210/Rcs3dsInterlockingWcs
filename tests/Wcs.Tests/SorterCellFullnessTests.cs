@@ -281,6 +281,9 @@ public class SorterCellFullnessTests
     // ════════════════════════════════════════════════════════════════════════
     // EC-1: 오더 배정 셀 작업수량 도달(현재≥작업) + 빈셀0 → IF-05 NG(FULL)·reason=FULL
     //   Capacity=5, 현재=5(LOADED), 빈셀0. 그 오더(SORTER-FULL-BC)의 유일 배정 셀이 도달 → NG.
+    //   [S-소터push운영상태 정정] 만재(SorterFull)는 더 이상 push ready를 false로 만들지 않는다.
+    //   운영상태가 OK(online·정렬·Ready=1)이면 r.Ready=true·Reason=None이고, full은 r.Full로만 보존.
+    //   IF-05 dispatch는 r.Ready가 아니라 SorterCanAcceptBarcode를 보므로 NG·reason=FULL은 불변(회귀 가드).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task EC1_Sorter_AssignedCellAtCapacity_If05_Ng_Full()
@@ -319,9 +322,10 @@ public class SorterCellFullnessTests
         await WaitForSnapshotAsync(() => factory.FakePolling!.Latest, s => s.Online && s.CurFloor == 2 && s.Ready, 5000);
 
         var r = status.Compute(sorterId, DestType.SORTER_3D);
-        Assert.True(r.Full,   "빈셀0 + 전 배정 셀 작업수량 도달 → SorterFull=true");
-        Assert.False(r.Ready, "full → ready=false");
-        Assert.Equal(DenyReason.Full, r.Reason);
+        Assert.True(r.Full,   "빈셀0 + 전 배정 셀 작업수량 도달 → SorterFull=true(산출 유지)");
+        // [정정] 만재는 push ready에 영향 없음 — 운영상태 OK(online·정렬·Ready=1)이므로 ready=true·Reason=None.
+        Assert.True(r.Ready,  "만재여도 운영상태 OK → push ready=true(S-소터push운영상태)");
+        Assert.Equal(DenyReason.None, r.Reason);
 
         var if05Req = new { pId = 23100, agvNo = 1, barcode = "SORTER-FULL-BC", inductionNo = 1, qty = 1, timeStamp = (string?)null };
         var resp = await client.PostAsJsonAsync("/api/v1/destination-query", if05Req);
@@ -397,7 +401,10 @@ public class SorterCellFullnessTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // EC-3: 소터 PAUSED → IF-05 NG (소터 불변 — (B) 슈트 정정이 소터를 깨지 않음)
+    // EC-3: 소터 PAUSED → IF-05 NG (IF-05 dispatch는 r.Paused를 소비 — 소터 불변).
+    //   [S-소터push운영상태 정정] Paused는 산출(r.Paused 필드)로 유지되지만 push ready 합성에선 제외.
+    //   운영상태 OK(정렬)로 만들어 r.Ready=true·Reason=None이어도 IF-05는 r.Paused로 NG 차단함을 입증
+    //   (Reason은 이제 운영상태 사유만 보존 — 이전 DenyReason.Paused 단언은 새 모델로 정정).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task EC3_Sorter_Paused_If05_Ng_Unchanged()
@@ -409,7 +416,11 @@ public class SorterCellFullnessTests
         long sorterId = factory.SorterDestinationId;
         var status    = factory.Services.GetRequiredService<IDestinationStatusService>();
 
-        await WaitForSnapshotAsync(() => factory.FakePolling!.Latest, s => s.Online, 5000);
+        // 운영상태 정렬(online·CurFloor=2·Ready=1) — paused여도 push ready=true임을 함께 확인.
+        factory.FakeMaster.SetReady(true);
+        factory.FakeMaster.SetCurFloor(2);
+        factory.FakeMaster.SetTgtFloor(0);
+        await WaitForSnapshotAsync(() => factory.FakePolling!.Latest, s => s.Online && s.CurFloor == 2 && s.Ready, 5000);
 
         using (var scope = factory.Services.CreateScope())
         {
@@ -418,15 +429,18 @@ public class SorterCellFullnessTests
             db.SaveChanges();
         }
         var rPaused = status.Compute(sorterId, DestType.SORTER_3D);
-        Assert.True(rPaused.Paused);
-        Assert.Equal(DenyReason.Paused, rPaused.Reason);
+        Assert.True(rPaused.Paused, "PAUSED → Paused=true(산출 유지)");
+        // [정정] push ready는 운영상태만 보므로 paused여도 ready=true·Reason=None(운영상태 OK).
+        Assert.True(rPaused.Ready, "paused여도 운영상태 OK → push ready=true");
+        Assert.Equal(DenyReason.None, rPaused.Reason);
 
+        // 그러나 IF-05 dispatch는 r.Paused를 소비해 NG로 차단(소터 paused는 예외 없이 차단).
         var resp = await client.PostAsJsonAsync("/api/v1/destination-query",
             new { pId = 25001, agvNo = 1, barcode = "TEST-BARCODE-3", inductionNo = 1, qty = 1, timeStamp = (string?)null });
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.Equal("NG", body!.Result);
         Assert.Null(body.ChuteNo);
-        _out.WriteLine("[EC-3] 소터 PAUSED → IF-05 NG (소터 불변)");
+        _out.WriteLine("[EC-3] 소터 PAUSED → push ready=true(운영상태) BUT IF-05 NG(r.Paused 소비) — 크로스-엔드포인트 분리");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -518,9 +532,10 @@ public class SorterCellFullnessTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // HP-5: 빈셀0 + 일부 배정 셀 여유(셀A=도달, 셀B<도달) → push ready=true 유지·Full=false.
+    // HP-5: 빈셀0 + 일부 배정 셀 여유(셀A=도달, 셀B<도달) → SorterFull=false + push ready=true 유지.
     //   3셀 전부 점유, cellNo 1·2는 작업수량 도달, cellNo 3은 미달 → 그 여유 셀로 기존 오더 수용 가능
-    //   → SorterFull=false → 정렬·online 충족 시 push ready=true 유지.
+    //   → SorterFull=false. push ready는 운영상태(online·정렬·Ready=1)만 보므로 정렬·online 충족 시 true.
+    //   (S-소터push운영상태: Full=false든 true든 push ready는 운영상태로만 판정 — 여기선 Full=false·운영OK.)
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task HP5_Sorter_SomeAssignedCellHasRoom_PushReadyTrue()
@@ -567,11 +582,13 @@ public class SorterCellFullnessTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // EC-7: push ready=false 전이 — 마지막 여유 배정 셀이 작업수량 도달 → SorterFull=true →
-    //   관찰 타이머가 ready=true→false 전이 감지(정확히 1건) → 복귀(빈 셀 1개 생성) → ready=true 재푸시 1건.
+    // EC-7 [정정 — 만재 전이 무발화]: 운영상태가 ready=true인 채 SorterFull이 false→true→false로
+    //   churn해도 **소터 push 0건**(운영상태 불변 → push ready 불변 → 전이 없음). S-소터push운영상태.
+    //   (이전 모델: 마지막 여유 셀 소진→ready false→true 전이 푸시. 만재가 push ready에서 빠지면서 반전 —
+    //    삭제가 아니라 단언 정정. 메타교훈: 셀 만재 전이만으로는 소터 push 무발화 — no-flood 가드.)
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task EC7_Sorter_LastRoomConsumed_PushReadyFalse_ThenRecover()
+    public async Task EC7_Sorter_CellFullnessTransition_NoPush_OperationalReadyUnchanged()
     {
         await using var rcs     = await FakeRcsServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
@@ -579,13 +596,14 @@ public class SorterCellFullnessTests
 
         long sorterId    = factory.SorterDestinationId;
         int  sorterChute = factory.SorterChuteNo;
+        var  status      = factory.Services.GetRequiredService<IDestinationStatusService>();
 
         factory.FakeMaster.SetReady(true);
         factory.FakeMaster.SetCurFloor(2);
         factory.FakeMaster.SetTgtFloor(0);
         await WaitForSnapshotAsync(() => factory.FakePolling!.Latest, s => s.Online && s.CurFloor == 2 && s.Ready, 5000);
 
-        // 사전: 빈셀0 + cell1·2 도달, cell3 미달(여유) → ready=true 유지(HP-5 상태).
+        // 사전: 빈셀0 + cell1·2 도달, cell3 미달(여유) → SorterFull=false. 운영상태 OK → push ready=true.
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
@@ -597,23 +615,26 @@ public class SorterCellFullnessTests
             Assert.Equal(0, FreeCellCount(db, sorterId));
         }
 
-        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "여유 셀 존재 → ready=true");
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "운영상태 OK → ready=true");
         int baseReady = rcs.CountFor(sorterChute);
         await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 6, timeoutMs: 4000, "ready=true 안정");
 
-        // ── EC-7: 마지막 여유 셀(cell3)이 작업수량 도달(현재 3→5, 추가 적재) → SorterFull=true ──
+        // ── 만재 전이: 마지막 여유 셀(cell3) 작업수량 도달(현재 3→5) → SorterFull=true ──
+        // 운영상태(online·정렬·Ready=1)는 불변이므로 push ready는 여전히 true → 푸시 0건(무발화).
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
             LoadCellQty(db, sorterId, cellNo: 3, qty: 2, pId: 29013, barcode: "TEST-BARCODE-3");  // +2 → 현재 5(도달)
         }
-        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: false }, 5000, "마지막 여유 소진 → ready=false");
-        int afterFull = baseReady + 1;
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), afterFull, stableCount: 6, timeoutMs: 4000,
-            "SorterFull 전이 정확히 1건(중복 0·무변화 폴 폭주 0)");
-        Assert.False(rcs.LastFor(sorterChute)!.Ready);
+        // ground-truth: 산출은 Full=true·Ready=true(만재여도 운영상태 ready).
+        await WaitUntilAsync(() => status.Compute(sorterId, DestType.SORTER_3D).Full, 5000, "마지막 여유 소진 → SorterFull=true");
+        Assert.True(status.Compute(sorterId, DestType.SORTER_3D).Ready, "만재여도 운영상태 OK → ready=true");
+        // 관찰 주기 다수에도 push 무발화(폭주 0·전이 0) — 만재 전이는 push에 무영향.
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 8, timeoutMs: 4000,
+            "SorterFull 전이만으로는 소터 push 0건(무발화·no-flood)");
+        Assert.True(rcs.LastFor(sorterChute)!.Ready, "마지막 푸시는 여전히 ready=true(만재 전이가 false로 안 바꿈)");
 
-        // ── 복귀: 빈 셀 1개 생성(cell_assignment 해제) → SorterFull=false → ready=true 재푸시 1건 ──
+        // ── 만재 해소: 빈 셀 1개 생성 → SorterFull=false. 운영상태 여전히 불변 → push 0건 ──
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
@@ -624,18 +645,20 @@ public class SorterCellFullnessTests
             db.SaveChanges();
             Assert.Equal(1, FreeCellCount(db, sorterId));
         }
-        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 5000, "빈 셀 생성 → ready=true 재푸시");
-        int afterRecover = afterFull + 1;
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), afterRecover, stableCount: 6, timeoutMs: 4000,
-            "복귀 재푸시 정확히 1건(전이당 1회)");
+        await WaitUntilAsync(() => !status.Compute(sorterId, DestType.SORTER_3D).Full, 5000, "빈 셀 생성 → SorterFull=false");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 8, timeoutMs: 4000,
+            "만재 해소 전이만으로도 소터 push 0건(운영상태 불변)");
         Assert.True(rcs.LastFor(sorterChute)!.Ready);
-        _out.WriteLine($"[EC-7] 마지막 여유 소진 ready=false({afterFull}) → 빈 셀 복귀 ready=true({afterRecover}) — 전이당 1건");
+        _out.WriteLine($"[EC-7] SorterFull false→true→false churn 중 소터 push 0건(총 {rcs.CountFor(sorterChute)}건=부트1) — 만재 전이 무발화");
     }
 
     // ════════════════════════════════════════════════════════════════════════
     // EC-5: 동시성 원자성 — 셀 적재(sorter_command COMPLETED)·배정/해제를 동시 다수 churn 중
-    //   "셀 현재 ≥ Capacity인데 그 piece OK" 또는 "셀 여유 있는데 NG", "SorterFull인데 ready=true"
-    //   모순 응답 0건(단일 원자 쿼리). 최종 상태로 수렴(누락 0).
+    //   한 Compute 결과 내부 불변식이 깨지지 않음(누락 0·최종 상태 수렴).
+    //   [S-소터push운영상태 정정] 소터 ready=운영상태(decision.Ready)이므로 "Full ⟹ !ready"는
+    //   더 이상 불변식이 아니다(만재여도 운영상태 OK면 ready=true). 새 불변식:
+    //     - ready ⟹ online (운영상태 ready는 온라인 전제 — Full/Paused는 ready와 독립).
+    //   Full·Paused는 ready를 좌우하지 않으므로 (Full && Ready)·(Paused && Ready)는 모순이 아니다.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task EC5_Sorter_ConcurrentLoadAssign_AtomicCompute_NoContradiction()
@@ -671,10 +694,10 @@ public class SorterCellFullnessTests
         int observations   = 0;
 
         // 관찰자: Compute를 빠르게 반복 호출하며 **단일 Compute 결과 내부 불변식**을 검사.
-        //   - full ⟹ !ready  (SorterFull이면 절대 ready=true가 새면 안 됨)
-        //   - ready ⟹ !full && !paused && online  (ready 합성 정합)
-        //   단일 원자 쿼리 + record 동시 산출이면 0건. (셀 적재·배정/해제가 churn하는 동안에도
-        //   한 Compute 호출 내부에서 "빈셀0·전 배정 셀 도달"의 합성 결과가 일관해야 한다.)
+        //   [정정] 소터 ready=운영상태(decision.Ready)이므로 Full/Paused는 ready와 독립이다.
+        //   - ready ⟹ online  (운영상태 ready는 온라인 전제 — DepositDecider가 !online이면 Deny).
+        //   (셀 적재·배정/해제가 churn해도 운영상태(SetReady(true)·CurFloor=2)는 불변이므로 ready=true 유지.
+        //    Full/Paused churn은 ready에 무영향 — Full&&Ready는 이제 정당.)
         var observer = Task.Run(async () =>
         {
             while (!cts.IsCancellationRequested)
@@ -684,8 +707,7 @@ public class SorterCellFullnessTests
                 catch { await Task.Delay(1); continue; }  // SQLITE_BUSY — 다음 관찰에서 재평가
                 Interlocked.Increment(ref observations);
 
-                bool bad = (r.Full && r.Ready)
-                        || (r.Ready && (r.Full || r.Paused || !r.Online));
+                bool bad = r.Ready && !r.Online;  // 운영상태 ready는 온라인 전제(유일 불변식).
                 if (bad) Interlocked.Increment(ref contradictions);
                 await Task.Delay(1);
             }
@@ -771,8 +793,9 @@ public class SorterCellFullnessTests
             Assert.Equal(0, FreeCellCount(db, sorterId));
         }
         var rFull = status.Compute(sorterId, DestType.SORTER_3D);
-        Assert.True(rFull.Full,   "전부 점유 + 전 셀 작업수량 도달 → SorterFull=true 수렴");
-        Assert.False(rFull.Ready, "full → ready=false");
+        Assert.True(rFull.Full,  "전부 점유 + 전 셀 작업수량 도달 → SorterFull=true 수렴(산출 유지)");
+        // [정정] 만재는 push ready를 좌우하지 않음 — 운영상태 OK(SetReady·CurFloor=2)이므로 ready=true.
+        Assert.True(rFull.Ready, "만재여도 운영상태 OK → ready=true(S-소터push운영상태)");
 
         // 빈 셀 1개 생성 → SorterFull=false 수렴.
         using (var scope = scopeFactory.CreateScope())

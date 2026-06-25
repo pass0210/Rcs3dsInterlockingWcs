@@ -1,5 +1,80 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE (S-소터push운영상태)
+
+### Sprint: 소터 IF-08 push `ready`를 운영상태로 좁히고 SorterFull·PAUSED를 push에서 분리
+
+### 확정 모델 — 2단계 게이트 분리
+- **push ready(IF-08)** = `decision.Ready` = `online && CurFloor==운영층 && Ready==1`(운영상태만).
+  SorterFull·PAUSED는 **push ready 합성에서 제외**(만재·정지여도 운영상태 OK면 push ready=true).
+- **IF-05 dispatch** = `r.Paused` + `SorterCanAcceptBarcode`(셀 기준). `r.Ready`(운영상태) **미소비**(현행 유지).
+- `Full`/`Paused`/`Online`/`Reason` 필드는 계속 산출(IF-05·내부 사유) — ready 합성에서만 제외.
+
+### 구현 (변경 파일 = `src/Wcs.Api/DestinationStatusService.cs` 1개 + 테스트 + 문서)
+- `ComputeSorter`: `ready = !full && !paused && decision.Ready` → **`ready = decision.Ready`**.
+  `Reason`을 운영상태 사유만 보존하도록 정정: `ready ? None : !online ? Offline : decision.Reason`
+  (Full/Paused는 ready를 좌우하지 않으므로 ready-deny 사유에서 제외 — 각자 Full/Paused 필드로 보존).
+- 주석 전면 정정: 클래스 헤더(2단계 게이트 분리·소터 ready=운영상태)·`DestinationReadiness` 필드 doc·
+  인터페이스 `Compute` doc·`ComputeSorter` 메서드 헤더·`ComputeSorterFull` 본문. 이연 MINOR("단일 원자
+  쿼리" 문구)도 "같은 스코프 순차 읽기"로 정정 + "full ⟹ !ready 더 이상 불변식 아님" 명시.
+
+### grep 증거 — IF-05 경로 `r.Ready` 미소비 (소터 ready 의미 변경의 IF-05 무영향 구조적 근거)
+```
+grep -nE "\.Ready" src/Wcs.Api/Controllers/RcsController.cs
+  → 170: decision.Ready  ← DepositDecision(IF-09 정렬 로깅)이지 r.Ready(DestinationReadiness) 아님.
+RcsController IF-05(line 64~79): var r = status.Compute(...) 후 r.Paused·SorterCanAcceptBarcode만 소비.
+  r.Ready 소비 = 0건. (Compute().Ready 소비자는 DestinationStatusPusher 134·233 = push 페이로드 전용.)
+```
+
+### 정정한 반전 단언 (삭제 아님 — S-소터셀수량full 슈트 반전 선례 적용)
+- **EC-1** (`SorterCellFullnessTests`): 만재 소터 `Assert.False(r.Ready)`+`DenyReason.Full`
+  → `Assert.True(r.Ready)`+`DenyReason.None`(만재여도 운영상태 OK). IF-05 NG·reason=FULL은 불변(회귀 가드).
+- **EC-3**: PAUSED 소터 `DenyReason.Paused` 단언 → 운영상태 정렬 후 `r.Ready=true`+`Reason=None`이되
+  IF-05는 `r.Paused` 소비로 여전히 NG(크로스-엔드포인트 분리 입증).
+- **EC-5**: 관찰자 모순 불변식 `(Full&&Ready)||…` → `Ready && !Online`(운영상태 ready는 온라인 전제).
+  Full/Paused는 ready와 독립이라 모순 아님. quiesce `Assert.False(rFull.Ready)` → `Assert.True`.
+- **EC-7**: "마지막 여유 셀 소진→push ready false→true 전이" → **만재 churn 중 소터 push 0건**(무발화·
+  no-flood). 운영상태 불변이면 만재 전이만으로 push 전이 없음. 테스트 의미 자체를 새 모델로 정정.
+- **HP-5**: 단언 불변(SorterFull=false·push ready=true) — 주석만 "운영상태로 판정" 반영.
+
+### 신규 테스트 — `tests/Wcs.Tests/SorterPushOperationalTests.cs` (VS-1~9, 9건)
+VS-1 운영ready→push true / VS-2(a Ready=0·b 미정렬) busy→push false / VS-3 offline→push false /
+VS-4[핵심] 만재여도 push true(Full 산출 유지) / VS-5[핵심] paused여도 push true(Paused 산출 유지) /
+VS-7 IF-05 소터 3축(a offline+셀있음 OK·b paused NG·c 만재 NG — r.Ready 무영향) /
+VS-9a barrier 16스레드 동시관찰→운영상태 전이당 1건(클레임 경합 멱등) /
+VS-9b 만재·paused 전이 churn 중 소터 push 0건(WaitUntilExact stableCount no-flood).
+ground-truth: 실 DB seed(SQLite) + 게이트웨이 snapshot(FakeMaster) + 가짜 RCS 수신 본문(push payload).
+인메모리 카운터 단독 0. (테스트 헬퍼 `FakeModbusMasterForApi.SetFailReads` 추가 — Disconnect만으론
+EnsureConnected 즉시 재연결이라 OFFLINE 미발생 → 읽기 IOException 주입으로 진짜 OFFLINE 전이.)
+
+### 스펙 문서 정정 — `docs/wcs_rcs_interface_kr.html` (git diff docs/ 라인 확인)
+- line 126 ready 정의: 소터 push ready=온라인·정렬·비분류(운영상태)만, 만재·정지는 IF-05 dispatch.
+- line 172 IF-08 prose: 소터 push ready=false는 분류중·이동중·미정렬·오프라인만(만재·정지 제외).
+- line 208 IF-05 표: 슈트 full/pause여도 OK·소터 PAUSED면 NG·셀 기준·OFFLINE 안 봄(타입별 정정).
+- line 216~217 IF-08 RCS 해석: 소터 ready=false 운영상태 사유로·full/paused/online 행을 운영상태 BUSY/OFFLINE로.
+`docs/SPEC.md`: 소터 push ready/2단계 게이트 정의 **부재**(§2가 폐지된 IF-08 폴링 모델 그대로) → 무변경
+(계약 "있으면 정합·없으면 무변경·불필요 추가 금지" 준수. SPEC.md 재설계 동기화는 별도 sprint 표면).
+
+### 무변경 가드 (git diff 0 — committed/staged/working/untracked 전부 확인)
+Wcs.Core·PlcGateway·Sim3ds·Data 스키마·Migrations·**DestinationStatusPusher**·RcsPushClient·
+**RcsController**·SorterCellQty·ChuteCapacity·EfCellSelector·ComputeSorterFull(산출 로직) — 전부 0줄.
+```
+git diff --stat -- src/Wcs.Core src/Wcs.PlcGateway src/Wcs.Sim3ds src/Wcs.Data \
+  src/Wcs.Migrations.* src/Wcs.Api/DestinationStatusPusher.cs src/Wcs.Api/RcsPushClient.cs \
+  src/Wcs.Api/Controllers/RcsController.cs  → (빈 출력)
+```
+
+### 빌드·테스트 결과
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+dotnet test Wcs.sln → 통과! 실패:0 통과:99 전체:99 (exit 0)  ← +9 SorterPushOperational, 회귀 0
+  teardown 클린: 중단/abort/hang/dump/unhandled/fatal 라인 0, FULL_SUITE_EXIT=0
+타이밍/동시성 표적 5회 연속(VS9·EC7·EC5·PUSH2_3·PUSH4·VS1·VS2·VS3, 14건):
+  RUN 1~5 전부 통과! 실패:0 통과:14 (flaky 0, 각 exit 0)
+```
+
+---
+
 ## CODE REVIEW FIX (S-소터셀수량full — 독립 코드리뷰 BLOCK MAJOR-1 + MINOR-2)
 
 ### [MAJOR-1] IF-05 room 게이트 ↔ IF-10 SelectCell 용량 무지 비대칭 수정
