@@ -1,171 +1,118 @@
-# Sprint Contract — RCS↔WCS 인터페이스 재설계 Phase 2 (아웃바운드 목적지 상태 푸시)
+# Sprint Contract — 소터 셀 만재 판정 (m4p4)
 
-> Branch: `feat/rcs-if-redesign-p2` (develop @ PR #12 머지에서 분기)
-> Planner 작성. **WHAT만 정의 — HOW(라이브러리·클래스·시그니처·재시도 알고리즘)는 Generator 결정.**
-> 스펙 단일 진실 = 커밋된 HTML 5건. 특히 `docs/wcs_rcs_interface_kr.html`(IF-08 destination-status 푸시 정의·페이로드·RCS 해석 표)·`docs/wcs_3ds_unified_sequence.html`(③ ready 대기 = IF-08 푸시 수신).
-> 선행 = Phase 1(PR #12 머지). 이 계약은 Phase 1이 선확보한 **`DestinationStatusService.Compute` 단일 산출**을 소비하는 아웃바운드 푸시 계층만 신설한다.
+> Branch: `feat/sorter-cell-fullness` (develop @ PR #13 머지에서 분기)
+> Planner 작성 · WHAT만 정의 (HOW는 Generator 결정) · 사용자 확인 대기 (Phase 1 게이트)
 
 ---
 
-## 0. 분할 평가 (단일 스프린트 적정성)
+## ⚠ 사용자 확인 필요 (계약 확정 전 결정 요청)
 
-### 판정: **단일 스프린트로 진행한다** (분할하지 않음).
+아래 4개는 설계 분기점이다. **권고안을 기본값으로 계약 본문에 반영**했으나, 사용자가 다르게 결정하면 계약을 갱신한다.
 
-Phase 2의 세 구성요소 — ① 아웃바운드 HTTP 클라이언트(WCS→RCS) ② 복합 `ready` 전이 감지(변화원 둘) ③ 실패/재시도 정책 — 는 **하나의 응집된 관심사**다:
+### Q1. IF-05 "piece→오더→셀 해소" vs 푸시 "목적지→빈셀" 산출 — 통합 or 분리?
+두 소비자가 묻는 질문이 **다르다**:
+- **IF-05 (배정 시점)**: "이 piece의 오더가 셀을 확보할 수 있는가?" = ① 그 오더의 활성 cell_assignment 재사용 가능 **OR** ② 빈 셀(enabled·미점유) ≥ 1. → barcode/오더 의존. `EfCellSelector.SelectCell`의 ①②분기와 동형(단 SelectCell은 부수효과로 배정까지 함 — IF-05 필터는 **읽기만** 해야 함).
+- **푸시 `ready` (목적지 상태)**: "이 소터가 새 오더를 받을 수 있는가?" = 빈 셀 ≥ 1. → barcode 무관, 목적지 단위.
 
-- 세 요소가 **같은 신규 컴포넌트 경계**(아웃바운드 푸시 서비스) 안에서 동작하고 **같은 파일 집합**(신규 `Wcs.Api` 푸시 클라이언트 + 기존 변화원 2곳에 hook 결선)을 만진다. 모듈/패키지 경계로 깨끗이 갈라지지 않아 병렬 Generator로 쪼개면 같은 파일을 두 Generator가 만지게 된다.
-- ②(전이 감지)와 ③(재시도)은 ①(클라이언트)이 없으면 검증할 대상이 없고, ①은 ②의 트리거 없이는 호출되지 않는다 — **순환 의존**이라 중간 산출물이 "동작하지만 미완"이 되기 쉽다. 한 사이클에 묶어야 가짜 RCS 수신 엔드포인트로 "전이당 1회 푸시 + 재시도 + 폴마다 폭주 없음"을 한 번에 단언할 수 있다.
-- 규모: Phase 1(인바운드 4종 + Controller 전환 + 시나리오 대거 재작성)보다 작다. 신규 표면이 아웃바운드 푸시 1개 컴포넌트 + 변화원 2곳 hook + 테스트로 한정된다.
+**차이가 드러나는 경우**: 오더 A가 마지막 빈 셀을 점유 중 → 빈 셀 0개. 이때 (a) 오더 A의 다음 piece IF-05 = **OK**(활성 assignment 재사용) (b) 소터 푸시 ready = **false**(새 오더 불가) (c) 오더 B의 piece IF-05 = **NG**(재사용 불가 + 빈 셀 0).
 
-따라서 **단일 모듈 / 단일 Generator**가 적정하다(Parallel Modules N/A). 동시성 표면(변화 감지가 폴 스레드/타이머/이벤트 콜백 — 동시 푸시 경쟁)이 존재하므로 검증 차원은 functional 단일이되 **동시성 결함을 functional 시나리오로 명시 강제**하고, 4-Tier 독립 코드리뷰를 APPROVED 후 별도 게이트로 둔다(메타교훈: 인메모리/단일프로세스 GREEN ≠ 결함 없음 — 5회 반복 적발 사례).
+→ **권고**: `DestinationReadiness.Full`은 **목적지 빈셀 산출**(빈 셀 0 = Full)로 정의하고 푸시 ready·IF-05 NG 공통 소비. **단 IF-05는 `Full=true`여도 "그 오더의 활성 assignment가 있으면 OK"인 예외**가 필요(위 (a)). 이를 위해 IF-05 availability 콜백 경로에서 **barcode 기반 "오더 활성 assignment 보유" 여부**를 추가 조회해, `Full && !오더활성assignment보유`일 때만 NG. (즉 산출의 "빈셀=0" 부분은 공유, "오더 재사용 예외"는 IF-05 전용 추가 판정.)
+**대안**: 단순화 — IF-05도 빈셀 0이면 무조건 NG(오더 재사용 예외 미적용). 스펙 §4 "오더 활성 cell_assignment 있으면 재사용"과 충돌 가능 → 확인 필요.
+**Q1 결정 요청**: 위 권고(오더 재사용 예외 적용) vs 단순화(빈셀 0이면 일괄 NG) 중 무엇인가?
 
----
+### Q2. 소터 `full` 변화의 푸시 트리거 — 어떤 변화 감지원?
+현재 `DestinationStatusPusher`의 소터 변화원은 **폴링 스냅샷 관찰 타이머**(`RunSorterObserveLoopAsync`, 기본 150ms)뿐. 이 타이머는 매 주기 **모든 소터에 대해 `Compute` 호출**한다. `ComputeSorter`가 빈셀(cell_assignment)을 DB 조회하도록 바꾸면 — cell_assignment 변화(IF-10 `SelectCell` 배정 / 백그라운드 `ReleaseCell` 해제)도 **이 타이머가 자연히 포착**한다(별도 변화원 불요).
+- **비용**: 소터 1대당 매 150ms DB 쿼리 1회(빈셀 카운트). 멀티소터·짧은 주기면 부하.
+- **대안**: IF-10 셀 배정/해제 시점에 명시적 `IDestinationChangeNotifier.NotifyCellChanged(destId)` 콜백 추가(슈트 `OnChuteStateChanged`와 동형) → 타이머 DB 조회 없이 이벤트 기반.
 
-## [Sprint Contract] — Phase 2
+→ **권고**: **타이머 경로 재사용(별도 콜백 없음)** — 가장 작은 변경, 변화원 추가 0. `ComputeSorter`에 빈셀 DB 조회가 들어가므로 관찰 주기 부하를 수용. (RcsPushTests의 소터 관찰 주기는 30ms로 동작 중 — 테스트 부하 OK 확인됨.)
+**Q2 결정 요청**: 타이머 재사용(권고) vs 명시적 cell-change 콜백 추가 중 무엇인가? (부하 우려 시 후자.)
 
-### Goal
-WCS가 목적지(슈트 + 3D 소터) 상태를 **상태 변경 시에만** RCS로 푸시하는 **아웃바운드 HTTP 클라이언트**를 신설한다. `POST {RCS base}/api/v1/destination-status`, 페이로드 `{chuteNo, ready, timeStamp}`(키=`chuteNo`). `ready`는 Phase 1의 `DestinationStatusService.Compute`가 산출하는 **복합 단일 bool**을 재사용한다 — 새로 판정 로직을 만들지 않는다. chuteNo별 `ready`가 전이(true↔false)할 때만 **정확히 1회** 푸시한다(주기 전송 아님). 변화원은 둘: ① 슈트 `ChuteCapacityService` 상태 변화 ② 소터 게이트웨이 폴링 스냅샷 변화. RCS base URL은 설정화하고, RCS 미도달 시 실패/재시도 정책을 적용한다. **인바운드(IF-05/09/10)·Modbus·핸드셰이크·Sim3ds 본문은 건드리지 않는다.**
+### Q3. `DestinationStatusService`의 DB 접근 경계
+현재 `DestinationStatusService`는 **싱글톤**(`Program.cs:101`)이고 의존(ChuteCapacityService·SorterRegistry·WcsOptions)이 전부 싱글톤. 그러나 cell/cell_assignment 조회는 **scoped `WcsDbContext`** 필요 — 싱글톤이 scoped DbContext를 직접 주입하면 captive dependency(안티패턴).
+→ **권고**: `ChuteCapacityService`·`DestinationStatusPusher`와 **동일 패턴** — 생성자에 `IServiceScopeFactory`(싱글톤) 주입, `ComputeSorter` 내부에서 `CreateScope()`로 `WcsDbContext` 취득해 빈셀 카운트 조회. 순수 `DepositDecider`는 무변경(스냅샷·hold 입력만).
+**Q3 결정 요청**: `IServiceScopeFactory` 주입(권고) 동의? (다른 경계 선호 시 지정.)
 
-### Implementation Scope (Generator가 해야 할 일 — WHAT)
-
-**A. 아웃바운드 푸시 클라이언트 (신규 컴포넌트)**
-1. WCS→RCS로 목적지 상태를 푸시하는 **신규 아웃바운드 클라이언트**를 `Wcs.Api`에 신설한다. 전송: `POST {RCS base}/api/v1/destination-status`. **페이로드 = `{chuteNo, ready, timeStamp}`** (camelCase 와이어, STJ 기본). `chuteNo`=정수(목적지 슈트 번호 = destination.chute_no, 소터도 동일 키), `ready`=bool, `timeStamp`=문자열(기존 와이어 시간 포맷과 일관 — `wcs_rcs_interface_kr.html` 예시 `"2026-06-22 14:30:00"` 형태). RCS는 `{result:"OK"}` 또는 2xx로 응답.
-2. HTTP 클라이언트는 **`IHttpClientFactory` 경유**로 생성한다(소켓 고갈·DNS 갱신 방지 — 직접 `new HttpClient()` 금지). 타임아웃·기본 헤더 등은 설정/팩토리 구성.
-3. **RCS base URL은 설정화**한다(`WcsOptions` 또는 동등 설정 섹션 — 하드코딩 금지, 절대규칙 #7·#7-URL). 미설정 시 동작은 §사용자 질문 4 확인 후 결정.
-
-**B. `ready` 산출 = Phase 1 단일 산출 재사용 (새 판정 금지)**
-4. 푸시할 `ready` 값은 **`IDestinationStatusService.Compute(destinationId, destType)`의 결과(`DestinationReadiness.Ready`)를 그대로 사용**한다. Phase 2는 ready 판정 로직을 새로 만들지 않는다 — Phase 1이 선확보한 단일 산출 경로를 소비할 뿐이다.
-   - 슈트 `ready` = `!full && !paused`(비활성 포함) — `ComputeChute`가 이미 산출.
-   - 소터 `ready` = Phase 1 `ComputeSorter` 산출(`online && CurFloor==운영층 && Ready==1`). **단, 소터 `ready`에 full/paused를 접을지는 §사용자 질문 1에서 확정** — Phase 1 `ComputeSorter`는 현재 full/paused를 소터 ready에 미반영(`Full:false,Paused:false` 하드코딩, [[m4p4-if08-cell-fullness]] 이연). 사용자 결정에 따라 (a) Phase 1 산출 그대로 푸시 / (b) `DestinationStatusService`에 소터 full/paused 접기를 추가(이 경우 Scope 확장 — §질문 1).
-   - 개별 `full`/`paused`/`online` 플래그는 **푸시하지 않는다**(복합 `ready` 하나로 접힘 — 스펙 `ready`가 RCS로 보내는 유일한 플래그).
-
-**C. 변화원 ① — 슈트 상태 전이 감지 (`ChuteCapacityService`)**
-5. 슈트의 복합 `ready`가 전이(true↔false)할 때 푸시를 1회 발생시킨다. 변화원은 `ChuteCapacityService`의 상태 변화(`OnReserved`/`OnDeposited`/`OnReservationCancelled`/`OnCleared` 또는 그로 인한 full/paused 경계 통과). 현재 `ChuteCapacityService`는 전이 이벤트를 노출하지 않으므로, 전이 감지 hook을 결선한다(이벤트 노출 vs. 비교 방식은 Generator 결정).
-   - **전이 의미론**: chuteNo별 직전 `ready` 상태를 보관하고, 새 산출이 직전과 다를 때만 푸시한다. 같으면 푸시하지 않는다(주기·반복 전송 금지).
-   - `OnReserved`로 만재 경계를 막 넘으면 `ready: true→false` 1회, `OnCleared`/`OnReservationCancelled`로 다시 받을 수 있게 되면 `ready: false→true` 1회.
-
-**D. 변화원 ② — 소터 스냅샷 전이 감지 (게이트웨이 폴링 스냅샷)**
-6. 소터의 복합 `ready`가 전이(true↔false)할 때 푸시를 1회 발생시킨다. 변화원은 **소터별 폴링 스냅샷의 변화**(online·CurFloor·Ready 등 ready 구성요소 변화). 기존 폴링 스냅샷을 **관찰/구독**하여 전이를 감지한다(폴마다 스냅샷이 갱신되더라도 `ready` 전이가 없으면 푸시 0건 — 폴마다 폭주 금지).
-   - **기존 폴링 본문 무변경**: `PlcGateway.cs`/`PlcPollingService` 본문은 건드리지 않는다. 스냅샷 관찰은 (a) `SorterBundleHandle.Latest`를 WCS측에서 주기 관찰·diff 하거나 (b) `OnOfflineTransition`처럼 **추가 이벤트 노출이 정말 필요하면** 그 노출만 명시적으로 추가한다(이벤트 추가 시 게이트웨이 본문 변경을 최소·정당화하고 §무변경 zone 위반 여부를 Evaluator가 판정). HOW는 Generator 결정이되, **레지스터맵/핸드셰이크/Sim3ds 프로토콜 본문은 절대 무변경**.
-   - **운영층(OperationalFloor) 설정 경유**: 소터 ready 산출이 운영층 비교를 포함하므로 `DestinationStatusService`(이미 설정 주입)를 재사용. Phase 2가 운영층 리터럴을 새로 하드코딩하지 않는다.
-
-**E. 실패 / 오프라인 재시도 정책**
-7. RCS 미도달(연결 거부·타임아웃·5xx 등) 시 **재시도 정책**을 적용한다(고정 sleep 금지·하드코딩 금지 — 재시도 횟수·백오프·간격은 설정값, 절대규칙 #7). 재시도 소진 후 동작(드롭 vs. 큐잉/최신값 유지 후 다음 전이에 재시도)은 §사용자 질문 2·3 확인 후 결정.
-   - **전이 정합성 보존**: 재시도/실패가 chuteNo별 "마지막으로 RCS에 성공적으로 알린 ready 상태" 추적을 오염시키지 않아야 한다(실패한 푸시를 성공으로 간주해 다음 동일 전이를 놓치면 안 됨 — §질문 3과 연동).
-   - **예외 삼킴 금지**(절대규칙·Fail-Loud): 재시도 소진·최종 실패는 명시 로깅(ILogger). fire-and-forget 푸시라도 `.ContinueWith` IsFaulted 또는 동등 패턴으로 미관찰 예외 0.
-
-**F. 동시성 (변화원 둘 + 재시도 타이머/이벤트가 동시 푸시 경쟁)**
-8. 변화원 둘(슈트 이벤트 스레드 / 소터 폴 스레드·관찰 타이머) + 재시도 경로가 **동시에 같은 chuteNo의 ready 상태/푸시를 갱신**할 수 있다. chuteNo별 "직전 ready" 추적과 푸시 발생은 **경합에서도 전이당 정확히 1회**를 보장해야 한다(P3 OFFLINE 전이당-1건 멱등 교훈: 비원자 check-then-act가 동시 호출에서 2건 발화 — `Interlocked`/락 등으로 원자화). 동시 전이에서 중복 푸시 0·누락 0.
-
-**G. 부트스트랩(시작 시 초기 푸시) — §사용자 질문 5 확인 후**
-9. WCS 기동 시 각 목적지의 초기 ready 상태를 RCS에 1회 푸시할지(RCS가 부팅 직후 상태를 알도록) 여부는 §사용자 질문 5에서 확정. 기본 권고는 "기동 시 전 목적지 1회 스냅샷 푸시 + 이후 전이만" 이나 사용자 확정 전 미구현.
-
-**H. 검증 테스트 (가짜 RCS 수신 엔드포인트)**
-10. 아래 §Verification Scenarios에 따라 **가짜 RCS 수신 HTTP 서버**(테스트용 in-process HTTP 서버 또는 `WebApplicationFactory`/`TestServer` 기반 수신 엔드포인트)를 세워 푸시를 실제로 수신·단언한다. 코드 리뷰로 대체 금지(절대규칙·Evaluator 의무).
-
-**I. HTML 스펙 동기화 확인**
-11. Phase 2가 스펙 HTML을 추가 수정해야 할 부분(예: IF-08 푸시 페이로드·재시도·하트비트 문구가 Phase 1에서 이미 반영됐는지 확인)이 있으면 같은 작업에 포함해 커밋 대상으로 둔다. Phase 1에서 이미 커밋된 부분은 재수정 불요 — `git diff`로 추가 변경분만.
-
-### 무변경 유지 (절대 건드리지 말 것)
-- **Modbus 레지스터 맵**(D0~D6·FC03/06/16) — `Wcs.Core/RegisterMap`·`PlcSnapshot.FromRegisters` 본문.
-- **C/R 핸드셰이크 프로토콜** — `Wcs.PlcGateway/HandshakeOrchestrator`·`PlcGateway.cs`/`PlcPollingService` **본문**. 스냅샷 변화 감지는 기존 폴링 스냅샷(`Latest`)의 **관찰/구독만** — 폴 루프·RMW·`_clientLock`·기존 OFFLINE 전이 로직을 바꾸지 않는다. (소터 ready 전이 감지를 위해 `OnOfflineTransition`과 동형의 **추가 이벤트 노출**이 정말 필요하면 그 노출만 최소 추가 — 폴 동작·레지스터 읽기·타이밍은 불변. 추가 여부·범위는 Generator가 정당화하고 Evaluator가 본문 무변경을 git diff로 판정.)
-- **`Wcs.Sim3ds` 프로토콜 본문.**
-- **Phase 1 인바운드(IF-05/IF-09/IF-10)·`RcsController`·`DepositDecider`·`DestinationStatusService.Compute`의 판정 로직** — 회귀 0. (단 §질문 1에서 소터 full/paused 접기가 승인되면 `DestinationStatusService.ComputeSorter`에 **추가**는 허용 — 기존 IF-05 소비 동작은 회귀 0 유지.)
-- **DB 스키마 / 마이그레이션** — Phase 2는 신규 테이블/컬럼 불요(푸시는 인메모리 전이 추적 + HTTP). 새 영속화가 필요하다고 판단되면(예: 푸시 감사 로그) **scope 확장 요청** 후 사용자 확인(protected zone).
-- **`Wcs.Core` 순수성** — `Wcs.Core.csproj` Reference/Package 0, `DepositDecider` static·무필드·I/O 0. 푸시 클라이언트·HttpClient는 `Wcs.Api`에만.
-
-### Scope OUT (이번 Phase 아님)
-- **하트비트(주기 keep-alive 전송)** — 스펙상 "선택적·협의". §질문 6에서 사용자가 명시 요구하지 않으면 OUT(전이 기반 푸시만). 요구 시 별도 결정.
-- **RCS측 투입 판단 로직** — RCS 소관(WCS는 푸시만). 검증에서 가짜 RCS는 "수신·OK 응답"까지만.
-- **소터 셀 만재(빈 셀 없음)를 ready에 접는 로직** — §질문 1에서 "Phase 1 산출 그대로"로 확정되면 OUT([[m4p4-if08-cell-fullness]] 별도 트랙 유지). "접기"로 확정되면 IN(Scope B-4 (b)).
+### Q4. 마이그레이션 요부
+cell·cell_assignment 테이블·`(cell_id) WHERE released_at IS NULL` 부분 유니크 인덱스는 **이미 존재**(ERD·`WcsDbContext` 확인). 빈셀 판정은 **조회만** — 신규 컬럼/테이블/인덱스 불요.
+→ **권고**: **마이그레이션 없음**. (protected zone 미해당.)
+**Q4 결정 요청**: 마이그레이션 불필요에 동의? (스키마 변경이 실제로 필요하다고 보면 protected zone → 별도 확인.)
 
 ---
 
-## Evaluation Criteria (Evaluator 판정 기준 + 가중)
-프로젝트 타입 = Backend/API. 4-기준 구조:
+## Goal
+RCS↔WCS 재설계 Phase 1·2에서 의도적으로 이연한 **3D 소터의 `full`/`paused` 산출**을 구현하고, 두 소비자에 반영한다: **(1) IF-05 NG 상류 필터**(만재·정지 소터엔 배정 안 함) **(2) IF-08 푸시 `ready`**(full/paused 전이 시 ready=false 푸시·해소 시 true 재푸시). `DestinationStatusService.ComputeSorter`가 현재 하드코딩한 `Full:false, Paused:false`를 실제 산출로 대체한다.
 
-1. **API Design Quality (★★★)** — (a) 아웃바운드 푸시 페이로드가 정확히 `{chuteNo, ready, timeStamp}`(camelCase 와이어, 개별 full/paused/online 미포함). (b) 엔드포인트가 `POST {RCS base}/api/v1/destination-status`로 구성(base URL 설정 경유, 하드코딩 0). (c) `IHttpClientFactory` 경유(직접 `new HttpClient()` grep 0). (d) RCS 2xx/`{result:"OK"}` 정상 처리, 비2xx는 재시도 경로로.
-2. **Architecture Originality (★★★)** — (a) `ready` 산출이 **Phase 1 `DestinationStatusService.Compute` 재사용**(푸시 클라이언트가 ready 판정을 새로 구현하지 않음 — Compute 호출 1지점). (b) 변화원 둘이 **공통 푸시 경로**로 수렴(슈트 이벤트·소터 스냅샷이 같은 "전이 감지→푸시" 파이프로). (c) 전이 추적이 chuteNo별 "직전 ready" 단일 상태로 깔끔(주기 전송 아님이 구조로 보장). (d) 게이트웨이 본문 무변경(스냅샷 관찰만) — 추가 이벤트 노출이 있으면 최소·정당.
-3. **Craft (★★)** — (a) 재시도 정책이 설정값 경유(횟수·백오프·간격 하드코딩 0, 고정 sleep 0). (b) fire-and-forget 푸시 예외 삼킴 0(`.ContinueWith` IsFaulted/SafeLog 로깅). (c) 동시 전이에서 전이당 1회 멱등(원자화 — 비원자 check-then-act 0). (d) 빌드 경고 0·teardown 클린(신규 HttpClient/타이머/HostedService가 graceful shutdown — exit 0 유지).
-4. **Functionality (★★)** — (a) 슈트 ready 전이 시 정확히 1회 푸시(가짜 RCS 수신 단언). (b) 소터 ready 전이 시 정확히 1회 푸시 + **폴마다 폭주 0**(전이 없는 폴에선 푸시 0건). (c) RCS 미도달 시 재시도 동작(가짜 RCS를 거부→재개로 토글해 단언). (d) Phase 1 인바운드(IF-05/09/10·핸드셰이크) 회귀 0(전체 테스트 GREEN).
+## Implementation Scope (Generator가 할 일)
+1. **`ComputeSorter` paused 산출**: 소터 destination이 비활성(`IsActive==false`) 또는 `Status==PAUSED`면 `Paused:true, Ready:false`. (슈트 `ComputeChute`와 동형. 현재 소터 경로는 이 검사를 안 함 — destination 행 조회 필요.)
+2. **`ComputeSorter` full 산출**: 그 소터 소속 **enabled 셀 중 미점유(활성 cell_assignment 없는) 셀이 0개**면 `Full:true, Ready:false`. 빈셀 판정 = `cell.Enabled && DestinationId==소터 && id NOT IN (released_at IS NULL인 cell_assignment의 cell_id)`. `EfCellSelector` ②분기의 `occupiedCellIds`/`freeCell` 쿼리 로직 재활용(읽기 전용 — 배정 부수효과 없이).
+3. **`ComputeSorter` ready 합성**: 현 `ready = decision.Ready`(online && CurFloor==운영층 && Ready==1)를 → `ready = !full && !paused && decision.Ready`로 변경. `DenyReason` 우선순위 명시(권고: Offline > Paused > Full > decision.Reason).
+4. **DB 접근 경계(Q3)**: `DestinationStatusService` 싱글톤에 `IServiceScopeFactory` 주입, `ComputeSorter`에서 scope 생성해 destination·cell·cell_assignment 조회. `DepositDecider`(순수) 무변경.
+5. **IF-05 NG 필터 결선**: `RcsController.DestinationQuery`의 `availability` 콜백은 이미 `r.Full`/`r.Paused`를 `DestinationBlock`으로 매핑(`RcsController.cs:57-64`) — 소터도 이제 Full/Paused를 반환하므로 **기본은 코드 변경 없이 자동 NG**. (Q1 권고 적용 시: "오더 활성 assignment 보유" 예외를 IF-05 availability 경로에 추가 판정 — barcode 기반.)
+6. **푸시 ready 결선(Q2)**: 권고(타이머 재사용)면 `DestinationStatusPusher` 코드 변경 0 — `Compute`가 full/paused를 ready에 접으므로 기존 소터 관찰 타이머가 전이 자동 포착. (명시적 콜백 선택 시: IF-10 SelectCell/ReleaseCell 경로에 `NotifyCellChanged` 추가 + Pusher 구독.)
+7. **테스트 추가**: 아래 Verification Scenarios를 `RcsPushTests`(푸시) + `ApiIntegrationTests`(IF-05 NG)에 실 DB·실 cell_assignment·가짜 RCS 수신 서버로 구현.
 
-**가중**: ★★★ 항목(1·2) 하나라도 FAIL이면 APPROVED 불가. ★★ 항목(3·4)은 BLOCKING 결함이면 FAIL.
+## 무변경 / 회귀 0 (절대 건드리지 않음)
+- **Modbus·C/R 핸드셰이크·Sim3ds·`DepositDecider`(순수)** 본문 무변경.
+- **인바운드 IF-05/09/10·푸시 Phase 2 기존 동작** 회귀 0 (기존 `RcsPushTests` VS-PUSH-1~8 + `ApiIntegrationTests` 전부 GREEN 유지).
+- **DB 스키마** 변경 없음(Q4 — cell/cell_assignment 기존 테이블·부분유니크 재사용). 변경 필요 판명 시 protected zone → 사용자 확인.
+- **teardown exit 0** 유지 (`DisposeAsync`·`StopAsync` 경쟁 경로 무변경).
+- **절대규칙 준수**: PLC 쓰기 단일 큐(#1), TgtFloor 조건(#2·#3), Ready 의미(#4), FULL/PAUSED는 WCS 판단(#5), 설정값(#7 — 하드코딩 금지), Wcs.Core 순수(#8).
+
+## 동시성 / 일관성 (메타교훈 — 인메모리 GREEN ≠ 결함 없음)
+- cell 조회(읽기)와 cell_assignment 변화(IF-10 백그라운드 콜백의 `SelectCell` 배정 / `ReleaseCell` 해제)는 **서로 다른 스코프·시점**. `ComputeSorter`의 빈셀 카운트는 호출 시점 스냅샷 — 조회와 배정 사이 race가 있어도 **다음 관찰/다음 IF-05에서 재평가**되므로 영구 오류 없음(eventually consistent). 단 **"빈셀 0인데 ready=true"가 한 순간이라도 새지 않도록** 단일 쿼리(SQL `NOT IN`/`LEFT JOIN ... IS NULL`)로 원자 평가 — check-then-act 분리 금지.
+- 푸시 전이 멱등(전이당 1회·중복 0·누락 0)은 기존 `DestinationStatusPusher` per-dest 락·in-flight로 보장 — 이 스프린트는 `Compute`의 ready 산출만 바꾸므로 멱등 메커니즘 무변경.
+- 백그라운드 `ReleaseCell`(IF-11 콜백)이 cell_assignment를 해제 → full→!full 전이 → 푸시 ready=true 재푸시가 **타이머 주기 내** 발생해야 함(VS로 검증).
+
+## Evaluation Criteria (Evaluator 판정 기준 + 가중치)
+- **(40%) full/paused 산출 정확성**: 빈셀 0 → Full=true·ready=false / 빈셀 ≥1 → Full=false / 비활성·PAUSED → Paused=true·ready=false. 단일 원자 쿼리(check-then-act 분리 없음). 오더 활성 assignment 재사용 예외(Q1 결정대로) 정확.
+- **(25%) 두 소비자 결선**: IF-05 소터 full/paused → NG(chuteNo=null). 푸시 ready가 full/paused 전이를 반영(false 푸시·!full 시 true 재푸시), 전이당 1회.
+- **(15%) 회귀 0**: 기존 VS-PUSH-1~8·`ApiIntegrationTests`·`DepositDeciderTests`·`ScenarioTests` 전부 GREEN. 무변경 항목 디프 0.
+- **(10%) DI·경계 정합**: 싱글톤이 scoped DbContext를 captive 주입하지 않음(`IServiceScopeFactory` 경유). `DepositDecider` 순수 유지. Wcs.Core 의존성 0 불변.
+- **(10%) 동시성·예외 격리**: 빈셀 평가 원자성. `Compute` 예외가 관찰 루프·IF-05 핸들러를 죽이지 않음(기존 try-catch 흡수 패턴 유지). teardown exit 0.
 
 ## Completion Conditions (Evaluator PASS 최소 조건)
-- 솔루션 빌드 경고 0·에러 0(`dotnet build Wcs.sln`).
-- 전체 테스트 GREEN(`dotnet test Wcs.sln`) — Phase 2 신규 푸시 테스트 + Phase 1 회귀 포함. **full-suite exit 0**(teardown hang 0 — PR #12에서 해소됨; 신규 HttpClient/타이머/HostedService가 graceful shutdown으로 종료 클린 유지. exit 1·abort·hangdump 발생 시 FAIL).
-- flaky 의심 테스트(가짜 RCS 수신 HTTP·실 Sim 소켓 기반)는 **단독 다회(≥5) 연속 GREEN·exit 0·hangdump 0**으로 비결정성 0 확인(feedback-archive 메타교훈).
-- **전이당 정확히 1회 푸시**: 가짜 RCS 수신 엔드포인트가 수신한 푸시 건수를 직접 카운트해 슈트·소터 각각 ready 전이 1회당 수신 1건 단언(2건도 0건도 아님). 동시 전이(병렬 변화원) 시뮬레이션에서도 정확히 1건.
-- **폴마다 폭주 없음**: ready 전이가 없는 N회 폴(또는 N회 무변화 이벤트) 후 가짜 RCS 수신 0건(P3 `WaitUntilExactAsync(expected, stableCount)`형 강한 가드 — count가 N회 연속 expected 유지).
-- **RCS 미도달 재시도**: 가짜 RCS를 거부(연결 거부/5xx)로 설정 → 재시도 발생 → 가짜 RCS 재개 → 푸시 성공 도달을 단언. 재시도 소진 후 동작(§질문 3 확정값)대로.
-- **base URL·재시도 설정 경유**: RCS base URL·재시도 파라미터 하드코딩 grep 0(설정 1지점). `new HttpClient(` 직접 생성 grep 0(`IHttpClientFactory` 경유).
-- **푸시 페이로드 정합**: 가짜 RCS가 수신한 실제 JSON 본문이 `{chuteNo, ready, timeStamp}` 정확히(개별 full/paused/online 키 부재) — 수신 raw 본문으로 입증.
-- **무변경 가드**: `git diff develop -- src/Wcs.PlcGateway/PlcGateway.cs src/Wcs.PlcGateway/HandshakeOrchestrator.cs src/Wcs.Sim3ds src/Wcs.Core` — 본문 0줄(소터 ready 전이용 추가 이벤트 노출이 있으면 그 한 줄만 정당화; 레지스터맵/핸드셰이크/Sim3ds/Core 판정 0). `RcsController.cs` 인바운드 액션 본문 회귀 0.
-- **Phase 1 회귀 0**: IF-05/09/10·핸드셰이크·alarm·OFFLINE 전이 단언 전부 GREEN 유지.
+- `dotnet build` 경고 0, `dotnet test` 전체 GREEN (신규 VS 포함).
+- 아래 Verification Scenarios 전부 자동화 테스트로 통과 — **가짜 RCS 수신 본문·실 cell_assignment DB 상태**를 ground-truth로 단언(인메모리 카운터 GREEN만으로 PASS 금지 — 메타교훈).
+- 무변경 영역(Modbus·Sim3ds·`DepositDecider`·핸드셰이크·스키마) 디프 0.
+- Evaluator가 동일 테스트를 독립 재실행해 Generator 주장 검증(fresh evidence).
 
 ## Parallel Modules
-N/A (single module — 아웃바운드 푸시 클라이언트 + 변화원 2곳 hook + 재시도가 한 컴포넌트 경계 안에서 강결합. 파일 경계가 겹치고(같은 푸시 파이프) 순환 의존이라 병렬 분할 시 충돌. 기본 1 Generator.)
+N/A (single module — `DestinationStatusService` 단일 산출 지점 + 그 테스트. 경계 분할 불가, 1/1/1 유지).
 
 ## Evaluation Dimensions
-functional only (단일 차원). **단, 동시성 표면이 명시적으로 존재한다**(변화원 둘 + 재시도 타이머/이벤트가 동시 푸시 경쟁 — Scope F). 메타교훈(M2 off-lock·M3 IF-10 멱등·M4-P1 마이그레이션·M4-P2a FULL 영속화·M4-P3 OFFLINE 전이당-1건 — 5회 연속 기능 GREEN 후 독립 리뷰가 동시성 적발)에 따라: ① functional 시나리오에 **동시 전이→전이당 1회 멱등**을 명시 강제(아래 VS), ② 4-Tier 독립 코드리뷰(Step 4.5)를 APPROVED 후 별도 게이트로 수행(전이 추적 원자성·푸시 경합·재시도 상태 오염·타이머/HostedService 수명주기 disposal을 코드 직접 검사). 인메모리 GREEN을 PASS 근거로 삼지 않는다.
-
----
+functional + concurrency (동시성이 핵심 위험 — cell 조회와 IF-10 배정/해제 race). 단일 Evaluator가 두 차원 모두 판정(표면적이 좁아 expert pool 분리 불요) — 단 functional 판정 시 동시성 항목(원자 쿼리·전이 멱등·예외 격리)을 **명시 체크 항목**으로 포함.
 
 ## Detected Project Type: Backend/API
-프로젝트 신호: `src/Wcs.Api`에 서버 라우트/컨트롤러(`RcsController`)와 서버 엔트리포인트(`Program.cs`, ASP.NET Core, `Microsoft.NET.Sdk.Web`)가 존재하고, 같은 리포에 브라우저 대면 UI 트리 없음(docs/의 HTML은 정적 인터페이스 정의서이지 클라이언트 렌더 뷰가 아님). Phase 2 신규 표면도 서버측 아웃바운드 HTTP 클라이언트(WCS→RCS)로 Backend/API 영역. 따라서 Backend/API.
 
 ## Verification Scenarios (Backend/API — mandatory)
 
-### 이번 Phase가 건드리는 "엔드포인트" (아웃바운드 — WCS가 호출하는 대상)
-> Phase 2는 인바운드 라우트를 신설하지 않는다. WCS가 **호출하는 아웃바운드 엔드포인트** + 그 호출을 **트리거하는 내부 변화원**을 검증 표면으로 둔다.
-- **아웃바운드(WCS→RCS)**: `POST {RCS base}/api/v1/destination-status` — 가짜 RCS 수신 엔드포인트로 수신·단언.
-- **트리거 경로(검증 진입점)**: ① 슈트 `ChuteCapacityService` 상태 변화(IF-05 예약/IF-10 투입/비움이 만재·정지 경계를 넘김) ② 소터 폴링 스냅샷 변화(online/CurFloor/Ready 전이 — 실 Sim3ds 또는 Fake 게이트웨이로 유도).
+### 엔드포인트(메서드 + 경로) — 이 스프린트가 건드리는 표면
+- `POST /api/v1/destination-query` (IF-05) — 소터 목적지 full/paused → NG 필터 (신규 동작: 소터 full/paused가 이제 NG)
+- 아웃바운드 푸시 `POST {RcsBase}/api/v1/destination-status` (IF-08) — 소터 full/paused 전이 → ready 푸시 (신규 변화원: cell_assignment 변화)
+- (간접) `POST /api/v1/deposit-report` (IF-10) — 셀 배정/해제가 full 전이를 유발하는 입력원 (동작 무변경, full 트리거로만 관여)
 
-### Happy path per "엔드포인트" (expected trigger → expected push shape)
-- **슈트 ready 전이 → 푸시**
-  - `false→true`: 만재였던 슈트가 비움(`OnCleared`)/예약 취소로 받을 수 있게 됨 → 가짜 RCS가 `{chuteNo:<chute>, ready:true, timeStamp}` **정확히 1건** 수신.
-  - `true→false`: 예약(`OnReserved`)으로 만재 경계 통과 또는 정지(PAUSED) → 가짜 RCS가 `{chuteNo:<chute>, ready:false, timeStamp}` **정확히 1건** 수신.
-- **소터 ready 전이 → 푸시**
-  - `false→true`: 소터가 미정렬/이동중(CurFloor≠운영층 또는 Ready=0)에서 정렬·준비(online && CurFloor==운영층 && Ready==1)로 전이 → `{chuteNo:<sorter>, ready:true, timeStamp}` **정확히 1건** 수신.
-  - `true→false`: 준비 상태에서 분류 시작(Ready 1→0) 또는 OFFLINE 전이 → `{chuteNo:<sorter>, ready:false, timeStamp}` **정확히 1건** 수신.
-- **RCS OK 응답 경로**: 가짜 RCS가 2xx/`{result:"OK"}` 반환 → WCS가 정상 처리(재시도 미발생·로그 정상).
+### Happy path (입력 → 기대 출력)
+- **HP-1 (IF-05 빈셀 있음)**: 소터 enabled 셀 3개 중 ≥1 미점유 + online·CurFloor=운영층·Ready=1 → IF-05 `{result:"OK", chuteNo:30}`. 푸시 ready=true.
+- **HP-2 (IF-05 오더 재사용)**: 빈셀 0이지만 그 piece의 오더가 활성 cell_assignment 보유 → IF-05 `{result:"OK", chuteNo:30}` (Q1 권고 적용 시). piece_event 내부 reason=NORMAL/BUSY.
+- **HP-3 (푸시 full→!full 재푸시)**: 빈셀 0(full → ready=false 푸시됨) → IF-11 백그라운드 `ReleaseCell`로 셀 1개 해제 → 빈셀 1 → 관찰 타이머가 full→!full 전이 감지 → 가짜 RCS가 ready=true 1건 수신(전이당 1회).
 
-### Relevant error / edge cases per "엔드포인트" (Planner가 적용분만 선택 — pad 금지)
-- **무변화 → 푸시 0건(폭주 방지·핵심)**: ready 전이가 없는 N회 폴 / N회 무경계 이벤트(OnReserved로 만재 미도달 등) → 가짜 RCS 수신 **0건**. (전이 없는 폴마다 푸시하면 FAIL.)
-- **동일 전이 중복 억제**: 같은 `ready=false`가 연속 두 번 산출(예: 만재 상태에서 추가 예약) → 첫 전이만 1건, 이후 0건.
-- **동시 전이 → 전이당 1회 멱등(동시성·핵심)**: 슈트와 소터가 동시에 전이하거나, 같은 소터의 스냅샷 전이를 폴 스레드와 관찰 타이머가 동시에 감지 → chuteNo별 정확히 1건(중복 0·누락 0). 병렬 변화 유도 후 가짜 RCS 수신 카운트 단언.
-- **RCS 미도달 → 재시도**: 가짜 RCS 연결 거부/5xx/타임아웃 → 재시도 정책 발동(설정 횟수/백오프) → 가짜 RCS 재개 후 푸시 도달. 재시도 소진 후 동작은 §질문 3 확정값(드롭이면 다음 전이까지 미전송, 큐잉/최신값이면 재개 시 최신 ready 1건).
-- **재시도 상태 오염 없음**: 푸시 실패 후 동일 chuteNo가 같은 ready로 재전이 시도 시, 실패를 "성공한 직전 상태"로 오인해 누락하지 않음(실패 → 다음 산출에서 재시도 가능).
-- **base URL 미설정/오설정**: §질문 4 확정값대로(예: 미설정 시 기동 실패 fail-loud vs. 푸시 비활성 경고). 검증은 그 확정 동작 단언.
+### 오류/차단 케이스 (Planner가 적용 대상만 선별 — 패딩 금지)
+- **EC-1 (소터 FULL → NG)**: 소터 enabled 셀 전부 활성 cell_assignment 점유(빈셀 0) + 오더 재사용 불가(다른 오더 piece) → IF-05 `{result:"NG", chuteNo:null}`. piece_event reason(내부)=FULL. (도메인 거부 — 와이어는 200+NG, 검증 실패 400 아님.)
+- **EC-2 (소터 PAUSED / 비활성 → NG)**: 소터 destination.Status==PAUSED → IF-05 `{result:"NG", chuteNo:null}`, reason(내부)=PAUSED. IsActive==false도 동일 NG — 두 케이스 각각 단언.
+- **EC-3 (푸시 !full→full 전이 ready=false)**: 빈셀 ≥1(ready=true 푸시됨) → 마지막 빈 셀 점유(cell_assignment 활성 삽입)로 빈셀 0 전이 → 가짜 RCS가 ready=false 1건 수신(전이당 정확히 1건·중복 0·무변화 폴 폭주 0).
+- **EC-4 (paused 전이 푸시)**: 소터 NORMAL(ready=true) → Status PAUSED 전이 → ready=false 푸시 1건. full과 독립적으로 paused 단독 전이 검증.
+- **EC-5 (동시성 원자성)**: cell_assignment를 동시 다수 스레드가 배정/해제하는 동안 IF-05/Compute 호출 — "빈셀 0인데 ready=true" 또는 "빈셀 ≥1인데 ready=false" 같은 모순 응답이 단 한 건도 없음(원자 쿼리 검증). 전이 푸시는 최종 상태로 수렴(누락 0).
+- **EC-6 (회귀 — 기존 소터 정렬 ready)**: 빈셀 충분 + 미정렬(CurFloor≠운영층) → ready=false (full/paused 아님, decision.Reason). 기존 VS-PUSH-2/3 동작 유지(full 도입이 정렬 ready를 깨지 않음).
 
----
-
-## 사용자 확인 필요 (모호점 — Phase 2 진행 전 답변 요청)
-
-> 아래는 스펙 HTML·Phase 1 코드만으로 단정할 수 없어 사용자 확정이 필요한 항목이다. **1·2·3·4·5는 Generator 착수 전 답이 필요**(설계 분기). 6은 기본 OUT으로 두되 확인.
-
-1. **소터 `ready`에 full/paused를 접는가?** 스펙(`wcs_rcs_interface_kr.html` L126)은 3D 소터 `ready = !full && !paused && online && 정렬`이라 명시하나, **Phase 1 `DestinationStatusService.ComputeSorter`는 현재 소터 full(빈 셀 없음)·paused를 ready에 미반영**(`Full:false, Paused:false` 하드코딩 — [[m4p4-if08-cell-fullness]] 의도적 이연). Phase 2 푸시 `ready`는 (a) **Phase 1 산출 그대로**(online·정렬만 — full/paused 미반영, 셀만재 트랙은 별도 유지) 인가, 아니면 (b) **이번에 소터 full/paused를 ready에 접기**(ComputeSorter에 셀가용성·소터 PAUSED 추가 — Scope 확장)인가? **권고: (b)** — 스펙 정합(`ready`가 RCS의 유일 플래그인데 셀 만재인데 ready=true면 RCS가 만재 소터에 투입). 단 셀 만재 산출 결선이 추가 작업이라 사용자 확정 요청.
-
-2. **재시도 정책 상세**: 재시도 (a) 횟수(예: 3회) (b) 백오프 방식(고정 간격 / 지수 백오프) (c) 간격/상한을 어떻게 둘까? 전부 설정값으로 외부화하되 **기본값**을 확정해야 한다. (예: 3회·지수 백오프·초기 500ms·상한 5s — 협의.)
-
-3. **재시도 소진 후: 드롭 vs. 큐잉/최신값 유지?** RCS가 끝내 미도달이면 (a) **드롭**(해당 전이 푸시 포기 — 단 "직전 성공 ready"는 갱신 안 함 → 다음 전이 시 자연 재시도, 또는 다음 동일상태 전이에서 다시 보냄) (b) **최신값 유지·재개 시 1회**(RCS 복구되면 그 chuteNo의 현재 ready를 1회 푸시 — 중간 전이는 합쳐짐) 중 무엇인가? **권고: (b) 최신값 유지** — RCS가 복구되면 최종 상태로 수렴(누락된 전이로 RCS가 영영 stale 상태에 머무는 것 방지). 단 "전이당 1회"와의 상호작용(복구 푸시는 전이가 아니라 복구 트리거)을 사용자 확인.
-
-4. **RCS base URL 미설정 시 동작**: 설정에 RCS base URL이 없으면 (a) **기동 실패(fail-loud)** (b) **푸시 비활성 + 경고 로그**(WCS는 정상 기동, 푸시만 no-op) 중 무엇인가? (개발/Sim 환경에선 RCS가 없을 수 있어 (b)가 편하나, 운영 누락을 조용히 넘기면 위험.) **권고: 설정 키 존재 시 활성·미설정 시 (b) 경고 후 비활성**(개발 편의) — 단 운영 appsettings엔 필수 표기. 사용자 확정.
-
-5. **기동 시 초기 푸시(부트스트랩) 유무**: WCS 기동 직후 전 목적지의 현재 ready를 1회씩 RCS에 푸시할까(RCS가 부팅 직후 전체 상태를 알도록), 아니면 **전이가 발생할 때까지 푸시 0**(RCS가 첫 전이까지 모름)인가? **권고: 기동 시 전 목적지 1회 스냅샷 푸시 후 이후 전이만** — RCS가 초기 stale 상태에 머무는 것 방지. 단 RCS 미기동 시 재시도 폭주 우려(§4와 연동).
-
-6. **하트비트(주기 keep-alive) 필요?** 스펙은 "선택적·협의"(L241). 기본은 **OUT**(전이 기반 푸시만)으로 두려 한다. RCS측이 "일정 시간 푸시 없으면 WCS 다운으로 간주" 같은 요구가 있으면 IN으로 전환(주기·간격 설정값). 사용자 확인.
-
----
-
-> **Planner self-check** — Detected project type: Backend/API. Required scenario slots: 3 (endpoints touched [아웃바운드 `POST {RCS}/destination-status` + 트리거 경로 2: 슈트 ChuteCapacity 변화·소터 스냅샷 변화], happy path per endpoint [슈트 ready 전이 푸시·소터 ready 전이 푸시·RCS OK 응답], error/edge cases per endpoint [무변화 0건·동일전이 중복억제·동시전이 멱등·RCS미도달 재시도·재시도 상태오염 없음·base URL 미설정]). All slots filled: yes.
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints-touched, happy-path-per-endpoint, error-cases-per-endpoint). All slots filled: yes.
 
 ---
 
 ## 사용자 확정 (2026-06-24 — 진행 승인)
-1. **소터 full/paused = 이연**(질문1=a): Phase 2는 **푸시 메커니즘에 집중**. 소터 `ready`는 Phase 1 `ComputeSorter` 산출 그대로(`online && CurFloor==운영층 && Ready==1`) 푸시 — 소터 full/paused(빈셀없음=셀만재 판정, [[m4p4-if08-cell-fullness]])는 **다음 전용 스프린트로 이연**. Phase 2에서 DestinationStatusService 소터 산출 변경 없음(Scope 확장 안 함). 슈트 ready는 기존대로 `!full && !paused`.
-2. **재시도 기본값**(질문2): 횟수·백오프·간격 전부 **WcsOptions 설정화**(하드코딩 0). 기본값 = 3회 지수 백오프(예 1s/2s/4s, Generator가 합리값 + 주석). 고정 sleep 금지.
-3. **재시도 소진 후 = 최신값 유지·복구 시 재푸시**(질문3=최신값): chuteNo별 "마지막으로 RCS에 성공 알린 ready"는 **실패 시 오염 금지**(실패한 푸시를 성공으로 간주 안 함 → 미알림 상태 유지). RCS 복구되면 현재 ready를 재푸시(다음 전이 또는 복구 감지 시 1회). 드롭 아님.
-4. **RCS base URL 미설정 시 = 경고 + 푸시 비활성**(질문4): 기동 시 ILogger 경고, 푸시 best-effort 비활성(크래시 X). 운영 필수 설정으로 표기. 인바운드(IF-05/09/10)는 정상 동작.
-5. **기동 시 초기 푸시 = 전 목적지 1회 스냅샷 후 전이만**(질문5): RCS URL 설정 시, 기동(또는 URL 설정 시점)에 모든 목적지 현재 ready 1회 푸시 → 이후 전이만. URL 미설정이면 비활성.
-6. **하트비트 = OUT**(질문6): 전이 + 초기 스냅샷만. 주기 하트비트는 RCS 요구 시 후속.
+1. **Q1 = 오더 재사용 예외(OK)**: 공통 산출 `SorterFull = (그 소터 enabled 셀 중 미점유 셀 0개)`. 
+   - **푸시 ready(목적지 단위)**: `SorterFull`이면 ready=false(새 오더 수용 불가). `ComputeSorter`: `!SorterFull && !paused && online && CurFloor==운영층 && Ready==1`.
+   - **IF-05(piece 단위)**: piece의 오더가 **활성 cell_assignment 보유**(EfCellSelector 오더 재사용 경로) 시 `SorterFull`이어도 **OK**(자기 셀에 누적). 보유 없고 `SorterFull`이면 **NG**(FULL). 보유 없고 빈셀≥1이면 OK. 즉 IF-05는 SorterFull 위에 "오더 활성 셀 예외"를 더해 piece-aware 판정.
+2. **Q2 = 기존 소터 관찰 타이머(150ms) 재사용**: `ComputeSorter`가 빈셀을 DB 조회하면 cell_assignment 변화가 매 주기 Compute에 자동 반영 → full↔!full 전이가 기존 푸시 변화원(소터 스냅샷 관찰)에 포착됨. **별도 cell-change 변화원 불요.**
+3. **Q3 = IServiceScopeFactory 주입**: `DestinationStatusService`(싱글톤)는 scoped `WcsDbContext`를 직접 못 받으므로(captive dependency) `IServiceScopeFactory`로 셀 조회 스코프 생성(ChuteCapacityService/푸시 콜백 패턴 동형). I/O 경계 명확화·DepositDecider 순수성 불변.
+4. **Q4 = 마이그레이션 없음**: cell·cell_assignment·`(cell_id) WHERE released_at IS NULL` 부분유니크 모두 기존. **DB 스키마 무변경**(protected zone 미접촉). 읽기 전용 조회만 추가.

@@ -1026,3 +1026,56 @@ Wcs.Core 소스 impurity(DateTime.Now/Random/File/HttpClient/Console/Task.Run): 
 - VS-PUSH-4 동시 16통지 → 전이당 정확히 1건(중복 0·누락 0 멱등).
 - VS-PUSH-5 RCS 거부(503)→재시도 소진(미알림 유지)→복구→재푸시 최신값 도달(확정3).
 - VS-PUSH-8 BaseUrl 미설정→푸시 비활성(수신 0)·IF-05 정상(회귀 0).
+
+---
+
+## S-M4-P4 (소터 셀 만재 판정 — m4p4) — IMPLEMENTATION COMPLETE (Generator, 2026-06-24)
+
+### 요약
+Phase 1이 의도적으로 하드코딩하던 소터 `Full:false / Paused:false`를 **실산출로 대체**.
+`DestinationStatusService.ComputeSorter`가 이제 cell/cell_assignment/destination을 읽어 full/paused를 산출하고,
+두 소비자(IF-05 NG 상류 필터 · IF-08 푸시 ready)가 동일 산출을 소비한다. DepositDecider(순수)·게이트웨이·Sim3ds·DB 스키마 무변경.
+
+### 구현 (전부 Wcs.Api — 보호 zone 0, DB 스키마 무변경)
+- **`DestinationStatusService.cs`**
+  - 생성자에 **`IServiceScopeFactory` 주입**(확정3 — 싱글톤이 scoped WcsDbContext를 직접 받지 않음 = captive 회피).
+  - `ComputeSorter`: 번들 없음→Offline(조기 반환·DB 불요). 이후 1 스코프에서
+    ① **paused** = `destination.Status==PAUSED || !IsActive`(미존재도 paused) — 1 조회.
+    ② **full** = 그 소터 enabled 셀 중 활성 cell_assignment(`released_at IS NULL`) 없는 셀이 0개 = `!hasFreeCell`.
+       **단일 원자 쿼리** `Cells.Any(c=> enabled && !CellAssignments.Any(active))` — check-then-act 분리 없음
+       ("빈셀0인데 ready=true" 한 순간도 안 새도록). 읽기 전용(배정 부수효과 0 — EfCellSelector ②분기 로직 재활용).
+    - `ready = !full && !paused && decision.Ready`(decision.Ready = online && CurFloor==운영층 && Ready==1).
+    - DenyReason 우선순위 **Offline > Paused > Full > decision.Reason**.
+  - 신규 `SorterHasActiveAssignmentForBarcode(destId, barcode)` — IF-05 piece-aware 예외용 **읽기 전용** 조회
+    (EfCellSelector ①분기 동형: 그 소터 셀의 활성 assignment 오더 항목에 barcode 매칭 — 배정 부수효과 0).
+- **`RcsController.cs` (IF-05 availability 콜백)**: `r.Paused`면 차단(예외 없음). `r.Full`이고 **소터**면
+  `SorterHasActiveAssignmentForBarcode`가 true일 때만 `DestinationBlock.None`(OK — 자기 셀 누적, 확정1 재사용 예외),
+  아니면 `Full`(NG). 슈트는 예외 미적용. (그 외 controller·인바운드 동작 무변경.)
+- **`Program.cs`**: 주석만(DI 등록 라인 불변 — `IServiceScopeFactory`는 자동 해석).
+- **푸시 ready(확정2)**: 코드 변경 0 — 기존 소터 관찰 타이머(`RunSorterObserveLoopAsync`)가 매 주기 `ComputeSorter`를
+  호출하므로 cell_assignment 변화(IF-10 배정/IF-11 해제)가 full↔!full 전이로 자동 포착(별도 변화원·이벤트 0).
+
+### 무변경 가드 (git diff HEAD — 검증 완료)
+- `src/Wcs.Core`(DepositDecider 순수)·`src/Wcs.PlcGateway`·`src/Wcs.Sim3ds`·`src/Wcs.Data`·
+  `src/Wcs.Migrations.Sqlite`·`src/Wcs.Migrations.SqlServer` — **0줄**(`git diff --stat` empty). DB 스키마 무변경(확정4).
+
+### 신규 검증 테스트 (tests/Wcs.Tests/SorterCellFullnessTests.cs — 실 cell_assignment DB·가짜 RCS ground-truth)
+- HP-1/EC-6 빈셀3 미정렬→ready=false(decision.Reason, full/paused 아님) → 정렬→ready=true, full=false 유지.
+- EC-1 셀 전부 점유(빈셀0) + 재사용 불가 새 오더 → IF-05 NG·chuteNo=null·piece_event reason(내부)=FULL + Compute full=true·DenyReason.Full.
+- HP-2 빈셀0 + ORD-003 활성 assignment 보유 → IF-05 OK·chuteNo=30·reason=NORMAL (목적지 Compute는 여전히 full=true).
+- EC-2 Status=PAUSED → Compute paused=true·DenyReason.Paused + IF-05 NG / IsActive=false → Compute paused=true(산출원 정확성).
+- EC-3/HP-3 정렬 ready=true → 셀3 점유(full)→푸시 ready=false 1건 → 셀1 해제(!full)→푸시 ready=true 1건(전이당 1회·stableCount 폭주 0).
+- EC-4 paused 단독 전이(셀 무변)→푸시 ready=false 1건.
+- EC-5 6스레드 동시 배정/해제 + Compute 반복 → **단일 Compute 결과 내부 불변식**(full⟹!ready, ready⟹!full&&!paused&&online) 위반 0건;
+  quiesce 후 full⟺빈셀0 등가성 확정(누락 0). (별도 free-count 재조회 비교는 읽기시점차 위양성이므로 배제 — 진성 불변식만 단언.)
+
+### 테스트 인프라 fix (선재 잠복 버그 해소 — 신규 테스트 공존을 위해 필요)
+- `RcsPushTests.cs`: `RcsPushWebApplicationFactory._dbName`가 **static**이라 인스턴스가 같은 in-memory SQLite를 공유 →
+  병렬 테스트 클래스(SorterCellFullnessTests)가 같은 DB에 EnsureCreated+Seed → "table agv already exists"/UNIQUE 충돌.
+  **instance 필드로 전환**(팩토리마다 독립 DB). RcsPushTests 단독일 땐 순차+dispose로 가려졌던 선재 결함.
+
+### 검증 결과 (fresh evidence)
+- `dotnet build Wcs.sln` — **경고 0·오류 0**.
+- `dotnet test Wcs.sln` — **83/83 GREEN·exit 0**(기존 76 회귀 0 + 신규 7). `--blame-hang-timeout 120s`: 시퀀스 파일 미생성(hang 0).
+- 동시성/타이밍 표적(SorterCellFullnessTests + RcsPushTests 13개) **5회 연속 GREEN·exit 0**.
+- 기능 회귀 클래스(ApiIntegrationTests + ScenarioTests + P2bMultiSorterTests) 33/33 GREEN.

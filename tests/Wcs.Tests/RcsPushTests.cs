@@ -161,7 +161,10 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
 
     public PlcPollingService? FakePolling => _fakePolling;
 
-    private static readonly string _dbName = $"WcsPushTest_{Guid.NewGuid():N}";
+    // 인스턴스별 고유 DB 이름 — RcsPushWebApplicationFactory는 테스트마다 새로 생성되므로
+    // static이면 병렬 테스트 클래스가 같은 in-memory DB를 공유해 시드 충돌(UNIQUE/table exists).
+    // 인스턴스 필드로 각 팩토리가 독립 DB를 갖게 한다.
+    private readonly string _dbName = $"WcsPushTest_{Guid.NewGuid():N}";
     private readonly Microsoft.Data.Sqlite.SqliteConnection _anchorConnection;
 
     public long SorterDestinationId { get; private set; }
