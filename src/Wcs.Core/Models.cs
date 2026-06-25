@@ -48,16 +48,20 @@ public sealed record PlcSnapshot(
 /// <summary>WCS가 자체 판단하는 차단 상태(PLC는 Ready만 제공).</summary>
 public enum WcsHold { None, Full, Paused }
 
-public enum DenyReason { None, WrongFloor, Busy, Full, Paused, Offline }
+/// <summary>
+/// 3D 소터가 받을 수 없는 사유(WCS 내부용 — RCS로 전송하지 않음).
+/// 재설계: 2층 고정 운영으로 WRONG_FLOOR 개념 소멸 → NotAligned(미정렬)로 대체.
+/// </summary>
+public enum DenyReason { None, Busy, NotAligned, Full, Paused, Offline }
 
 public static class DenyReasonWire
 {
-    /// <summary>API 응답용 문자열(docs/SPEC.md §2).</summary>
+    /// <summary>내부 사유 문자열(piece_event 기록용 — RCS 미전송).</summary>
     public static string? ToWire(this DenyReason r) => r switch
     {
         DenyReason.None       => null,
-        DenyReason.WrongFloor => "WRONG_FLOOR",
         DenyReason.Busy       => "BUSY",
+        DenyReason.NotAligned => "NOT_ALIGNED",
         DenyReason.Full       => "FULL",
         DenyReason.Paused     => "PAUSED",
         DenyReason.Offline    => "OFFLINE",
@@ -65,8 +69,14 @@ public static class DenyReasonWire
     };
 }
 
-/// <summary>IF-08 판정 결과. WriteTgtFloor=true면 게이트웨이 쓰기 큐에 TgtFloorValue 투입.</summary>
-public sealed record DepositDecision(bool Allowed, DenyReason Reason, bool WriteTgtFloor, int TgtFloorValue)
+/// <summary>
+/// 3D 소터 정렬·준비 판정 결과(순수 함수 산출).
+///   - Ready=true: 소터가 지금 받을 수 있음(online && CurFloor==운영층 && Ready==1).
+///   - WriteTgtFloor=true: 운영층으로 정렬하기 위해 TgtFloorValue(=운영층)를 쓰기 큐에 투입.
+///   - Reason: 받을 수 없는 사유(내부 기록용 — Ready=true면 None).
+/// IF-09 도착 정렬 판단(쓸지/값)과 Phase 2 푸시 ready 산출의 공용 재료.
+/// </summary>
+public sealed record DepositDecision(bool Ready, DenyReason Reason, bool WriteTgtFloor, int TgtFloorValue)
 {
     public static DepositDecision Allow() => new(true, DenyReason.None, false, 0);
     public static DepositDecision Deny(DenyReason reason, int? writeTgtFloor = null) =>

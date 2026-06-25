@@ -14,11 +14,15 @@ dotnet add tests/Wcs.Tests  package xunit && dotnet add tests/Wcs.Tests package 
 dotnet build
 ```
 SDK 버전이 net10.0과 다르면 csproj TargetFramework 일괄 수정.
-**Done**: `dotnet build` 성공, `dotnet test` 실행되고 DepositDeciderTests가 **RED**(NotImplemented) — 이게 정상 시작점.
+**Done**: `dotnet build` 성공, `dotnet test` 실행되고 DepositDeciderTests의 **Decide 판정 9케이스가 RED**(NotImplemented), Wire_Strings_AreStable 1건은 GREEN — 이게 정상 시작점.
 
 ## M1. 판정 엔진 (Wcs.Core)
 - `DepositDecider.Decide` 구현 — docs/SPEC.md §2 표 7행이 그대로 tests/DepositDeciderTests.cs에 있음
-- **Done**: `dotnet test --filter Decider` 전부 GREEN. 표에 없는 동작 추가 금지.
+- **테스트 보강(하네스 검증 도출)**: 표에 없는 동작 추가는 금지하되, 표를 정확히 인코딩하는 경계 케이스 3건 추가
+  - 행1 경계: `Snap(ready:true, cur:1, tgt:1), agvFloor:1` → Allowed, WriteTgtFloor=false (이동완료 후 TgtFloor 잔류 ≠0)
+  - 행4 쓰기 차단: `Snap(ready:false, cur:2, tgt:0)` + Full/Paused/Offline → 거부·WriteTgtFloor=false (Hold/Offline이 선기입 차단)
+  - 행6 강한 경계: `Snap(ready:true, cur:1, tgt:0), agvFloor:1` + Full → false·Full·WriteTgtFloor=false (층일치·Ready=1인데 Hold 우선)
+- **Done**: `dotnet test --filter Decider` 전부 GREEN(보강 케이스 포함).
 
 ## M2. PLC 게이트웨이 + 시뮬레이터 핸드셰이크
 - Sim3ds: SPEC §6 동작 구현(FluentModbus.ModbusTcpServer, :1502)
@@ -27,12 +31,15 @@ SDK 버전이 net10.0과 다르면 csproj TargetFramework 일괄 수정.
 - **Done**: 통합 테스트 — 시뮬레이터 상대로 셀 지정→적재 완료 왕복 1건 성공, R_Seq==C_Seq 검증, 로그에 레지스터 타임라인
 
 ## M3. API 3종 (Wcs.Api)
+- **DTO 정정(하네스 검증 도출 — Dtos.cs 스켈레톤 오류)**: IF-05 req에 `AgvNo` 추가 / IF-08·IF-10에서 timeStamp·qty는 nullable 선택필드로(원본 HTML엔 없음, SPEC §7-A) / IF-05 OK 응답 reason(NORMAL·BUSY·FULL·PAUSED) 주석 정정
 - IF-05/08/10 구현(스텁 교체). IF-08 = 스냅샷 캐시 읽기 → Decide → (쓰기 결정 시) 쓰기 큐 투입 → 즉시 응답(쓰기 완료 대기 안 함)
+  - **allowed=true → reason="READY" 주입**(API 계층, Core ToWire(None)=null 유지). SPEC §7-A
 - IF-05 예약 차감(메모리 우선, M4에서 Data 연결), IF-10 멱등
 - **Done**: Sim3ds + API 띄우고 curl 시나리오: IF-05 OK → IF-08(WRONG_FLOOR→이동→allowed) → IF-10 OK
 
 ## M4. 시나리오 검증 + 영속화
 - Wcs.Data: **docs/ERD.md의 16테이블** 그대로 EF Core 구현(SQL Server Express, 개발은 SQLite 분기) + Initial 마이그레이션 + 기준정보 시드
+  - **agvFloor 단일 진실 전환**: M4부터 `agv.floor`가 단일 진실, appsettings.Floors는 초기 시드 전용으로 강등(M3의 매핑 조회는 IAgvFloorResolver로 추상화해 교체 1지점화)
 - 시나리오 S1~S9 자동화(xUnit 통합 테스트, Sim3ds 고장 주입 사용):
   S1 정상 / S2 층 다름(차트②) / S3 분류 중 선기입·복귀·분류시작 클리어(차트③) / S4 핑퐁 차단(쓰기 이력 검증)
   / S5 R_Seq 불일치 알람 / S6 R_Flag 타임아웃 / S7 OFFLINE / S8 FULL·PAUSED / S9 다중 AGV 경합

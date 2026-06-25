@@ -4,8 +4,8 @@
 목적지(슈트 또는 3D Sorter)에 전량 틸트한다. WCS는 가운데에서 양쪽을 중재한다.
 
 ```
-[RCS(AGV)] --HTTP/JSON--> [WCS(이 프로젝트)] --Modbus TCP--> [3D Sorter PLC(VEICHI)]
-   클라이언트                 API서버 + Modbus 마스터              슬레이브
+[RCS(AGV)] --HTTP/JSON--> [WCS(이 프로젝트)] --Modbus RTU/TCP--> [3D Sorter PLC(VEICHI)]
+   클라이언트                 API서버 + Modbus 마스터                슬레이브
 ```
 
 ## 절대 규칙 (위반 금지)
@@ -24,7 +24,7 @@
 
 ## 스펙 소스 (docs/ — 항상 이것이 정답)
 - `docs/SPEC.md` — 응축 스펙(레지스터 맵, 판정 표, 핸드셰이크, 시뮬레이터 동작). **먼저 읽을 것.**
-- `docs/ERD.md` — DB 스키마 12테이블(M4 구현 기준). 대리키·p_id 순환·이력 분리 원칙 포함.
+- `docs/ERD.md` — DB 스키마 16테이블(M4 구현 기준). 대리키·p_id 순환·이력 분리 원칙 포함.
 - `docs/wcs_3ds_interface.html` — WCS↔3DS Modbus 정의 + 타이밍 차트 ①②③
 - `docs/wcs_rcs_3ds_master_spec.html` — 마스터 정의서(§6 투입 가부 표 = 판정 스펙)
 - `docs/wcs_3ds_unified_sequence.html` — 통합 시퀀스(IF-05→08→10→11→12)
@@ -37,7 +37,7 @@ src/Wcs.PlcGateway  FluentModbus 마스터: 폴링 스냅샷 캐시 + 쓰기 큐
 src/Wcs.Api         ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트
 src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그
 src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역
-tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(처음엔 전부 RED가 정상)
+tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정 케이스는 처음엔 RED가 정상, ToWire 검증은 GREEN)
 ```
 
 ## 빌드/테스트 명령
