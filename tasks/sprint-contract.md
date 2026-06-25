@@ -1,122 +1,203 @@
-# Sprint Contract — S-소터push운영상태 (소터 IF-08 push ready를 운영상태로 좁히고 SorterFull·PAUSED를 push에서 분리)
+# Sprint Contract — S-FOLDER-ORG (src 폴더 구조 정리 / 순수 파일 이동)
 
-> 사용자 확정 2026-06-25. Planner는 WHAT/WHERE/검증만 정의 — 구현 방법(HOW)은 Generator 결정.
+> 작성: Planner Subagent · 2026-06-25 · 사용자 확정 3건 반영
+> 성격: **순수 구조 정리 스프린트 — 동작 보존(behavior-preserving) 리팩터링.**
+> 핵심 산출물 = "어느 파일을 어디로 옮길지"의 매핑 표. 코드 본문/네임스페이스/로직 변경은 0.
 > 사용자 확인 대기 (Phase 1 게이트).
-> 선행: S-소터셀수량full(PR #14 계열, 머지됨) — 소터 full=셀 작업수량 기반 + IF-05 dispatch 정정 + push ready 결선.
 
 ---
 
 ## Goal
 
-소터(SORTER_3D) IF-08 아웃바운드 push의 `ready` 플래그를 **운영 상태(decision.Ready = online && 정렬(CurFloor==운영층) && Ready==1)** 만으로 좁힌다. 셀 만재(SorterFull)와 destination PAUSED는 **push에서 제외**한다 — 이 둘은 IF-05 dispatch 게이트에서만 차단된다(2단계 게이트 분리: "받을 수 있는 운영 상태인가"는 push, "지금 이 piece를 보낼 목적지가 있는가"는 IF-05).
+`src/**` 전체를 **역할별 폴더로 정리**한다. Wcs.Api는 MVC 레이어(Controllers/Services/Repositories/Dtos/Infrastructure)로 그룹핑하고,
+실익이 있는 다른 프로젝트(PlcGateway의 Modbus 어댑터군)도 폴더로 그룹핑한다.
+**평면 네임스페이스를 유지** — 모든 파일의 네임스페이스 선언은 기존 그대로(`Wcs.Api`, `Wcs.PlcGateway`, …),
+따라서 이번 작업은 **순수 파일 이동(`git mv`)** 이며 네임스페이스·using·코드 본문은 **단 1줄도 바뀌지 않는다**.
+빌드·테스트·런타임 동작은 이동 전후 완전히 동일해야 한다.
 
-현재 `DestinationStatusService.ComputeSorter`는 `ready = !full && !paused && decision.Ready`로 산출해 push·IF-05가 같은 `Compute().Ready`를 공유하던 구조였다. 이 변경 후:
-- **push ready** = `decision.Ready`(운영 상태) 만. SorterFull·PAUSED는 push ready에 영향 없음.
-- **IF-05 dispatch** = `r.Paused` + `SorterCanAcceptBarcode(셀 기준)` 소비(현행 유지, `r.Ready` 미사용).
-- `DestinationReadiness`의 `Full`/`Paused`/`Reason` 필드는 (IF-05·내부 DenyReason 사유용) **계속 산출**하되, **소터 ready 합성에서만 제외**한다.
-
-스펙 문서(`docs/wcs_rcs_interface_kr.html`)의 IF-08 소터 `ready` 정의와 IF-05 표를 위 확정 모델과 정합시킨다(필요시 `docs/SPEC.md`도).
-
----
-
-## Implementation Scope (Generator가 수행할 것 — WHAT/WHERE)
-
-### 변경 대상 파일
-1. **`src/Wcs.Api/DestinationStatusService.cs`** — `ComputeSorter`의 소터 ready 합성을 운영 상태(`decision.Ready`)만으로 좁힌다(현재 `!full && !paused && decision.Ready`인 line 295 지점). `Full`/`Paused`/`Online`/`Reason` 산출 자체는 유지(IF-05·내부 사유 소비). `Full`/`Paused`를 ready 합성에서 빼되, 산출은 유지된다는 점을 코드/주석으로 명확히. DenyReason 우선순위 문구(현재 line 257~259, 295~304)도 새 모델과 일치하게 정정 — ready는 운영상태로만 판정되므로 Full/Paused가 ready=false를 만들지 않음을 반영하되, `Reason`은 IF-05/내부 사유로 여전히 Offline/Paused/Full을 구분 보존할지 Generator가 일관되게 결정(단 ready 합성에서 Full/Paused 제외는 필수). 클래스 헤더 주석(line 8~38, 244~259)의 소터 ready 정의 문구도 새 모델로 정정.
-2. **`tests/Wcs.Tests`** — 아래 Verification Scenarios를 커버하는 테스트 추가/갱신. 실 DB(인메모리 SQLite seed)·가짜 RCS 수신 본문(push payload 캡처)·게이트웨이 snapshot을 ground-truth로. **인메모리 카운터 단독 단언 금지**. 기존 소터 push/IF-05 테스트 중 "셀 만재→push ready=false" 또는 "paused→push ready=false"를 단언하던 것이 있으면 새 모델(만재·paused는 push에 영향 없음)로 갱신(삭제가 아니라 단언 정정 — S-소터셀수량full 슈트 테스트 반전 선례 참조).
-3. **`docs/wcs_rcs_interface_kr.html`** — 아래 "스펙 정정 대상" 라인들을 확정 모델과 정합.
-4. **`docs/SPEC.md`** (필요시) — 소터 push ready 정의/판정 표에 push와 dispatch 2단계 게이트 분리가 반영돼 있지 않으면 정정. Generator가 SPEC.md를 읽어 해당 정의가 있는지 확인 후, 있으면 정합·없으면 무변경(불필요한 추가 금지).
-
-### 스펙 정정 대상 (`docs/wcs_rcs_interface_kr.html` — Planner가 확인한 라인)
-- **line 126** (§3 `ready` 필드 정의): 현재 "3D 소터 슈트: 추가로 온라인·정렬·정지(비분류)" — push ready에 "정지(paused)"가 포함돼 있음. → 소터 push ready = **온라인·정렬·비분류(운영 상태)** 만으로 정정. 만재·정지는 push가 아니라 IF-05 dispatch 게이트임을 명시.
-- **line 172** (§5 IF-08 prose): 현재 "일반 슈트면 만재·정지(WCS 관리), 3D 소터 슈트면 추가로 분류 중·오프라인·미정렬" — 소터 push에 만재·정지가 섞여 있음. → 소터 push ready=false는 **분류 중·이동 중·미정렬·오프라인(운영 상태 BUSY/OFFLINE)** 만이고, 만재·정지는 IF-05 dispatch에서 차단됨을 명시. 슈트 push 정의(만재·정지)는 현행 유지.
-- **line 216~217** (§6 IF-08 RCS 해석 표): line 217이 `full / paused / online=false`를 소터 push ready=false 사유로 명시. → 소터 push ready=false는 운영 상태(분류 중·이동 중·미정렬·오프라인)로 정정. full/paused는 push 사유에서 제외(IF-05 게이트). line 216의 "소터면 분류 중·오프라인도" 문구도 만재·정지 제외로 정합.
-- **line 208** (§6 IF-05 표 `FULL / PAUSED → NG` generic): 현재 슈트·소터 무차별로 "FULL/PAUSED→NG". → 확정 모델 정합: **슈트는 full/paused여도 OK**(IF-05 dispatch 통과, readiness는 push로 별도 전달), **소터는 PAUSED면 NG·셀 기준(SorterCanAcceptBarcode) 못 받으면 NG**, OFFLINE은 IF-05에서 보지 않음(셀 있으면 OK). (이미 코드는 RcsController.cs:64~79·확정4로 이렇게 동작 — 문서만 generic이라 정정.)
-
-### 무변경 가드 파일 (diff 0 — Generator가 절대 건드리지 않음)
-- `src/Wcs.Core/` 전체(DepositDecider·Models·RegisterMap — 순수 판정 엔진).
-- `src/Wcs.PlcGateway/` 전체(PlcGateway·HandshakeOrchestrator — Modbus 마스터·핸드셰이크).
-- `src/Wcs.Sim3ds/` 전체(시뮬레이터).
-- `src/Wcs.Data/` 스키마·`src/Wcs.Migrations.*`(DB 스키마/마이그레이션).
-- `src/Wcs.Api/DestinationStatusPusher.cs` — push 멱등 기계(전이추적 Acked/Computed·per-dest Gate 락·PushInFlight·재시도·관찰 타이머·부트스트랩). **본문 무변경** — `Compute().Ready`가 매 관찰 주기 재산출돼 새 ready 의미를 자동 포착하므로 Pusher 코드 변경 불요.
-- `src/Wcs.Api/RcsPushClient.cs` — push 페이로드 `{chuteNo, ready, timeStamp}`·HttpClient·백오프(무변경).
-- `src/Wcs.Api/Controllers/RcsController.cs` — IF-05/09/10 인바운드. 특히 **IF-05 availability 콜백(line 64~79)이 `r.Ready`를 소비하지 않고 `r.Paused`+`SorterCanAcceptBarcode`만 소비함**(Planner가 코드로 확인). 이 무변경이 "소터 ready 의미 변경이 IF-05에 영향 없음"의 회귀 가드. (Generator는 변경 전 grep로 `.Ready` 소비처를 전수 확인하고, IF-05 경로에서 `r.Ready` 소비처 0임을 증거로 남길 것 — 만약 소비처가 발견되면 본 변경의 전제 위반이므로 Evaluator에 보고.)
-- `ChuteCapacityService`(슈트 capacity 집계), `SorterCellQty`(셀 수량 산출 공유 로직), `EfCellSelector.SelectCell`(셀 배정), `SorterCanAcceptBarcode`/`HasAssignedCellWithRoom`/`HasFreeEnabledCell`/`ComputeSorterFull`(IF-05 piece-aware·full 산출 — 산출 로직 자체는 무변경, ready 합성에서만 제외).
-
-> 함께 정리 가능한 이연 MINOR(선택 — scope 내, Generator 판단): todo.md의 `Compute` 본문 주석 "단일 원자 쿼리로 평가"(DestinationStatusService.cs:253)는 이번에 ComputeSorter 주석을 손대므로 함께 "같은 스코프 순차 읽기"로 정정 가능. orphan `SorterHasAssignedCellWithRoomForBarcode` 제거는 IF-05/테스트 영향이 있어 본 스프린트 표면 밖 — **무리하게 끌어오지 말 것**(별도 정리 sprint). 정리 항목은 push ready 변경과 충돌하지 않을 때만, 가독성 한정으로.
+비-goal(명시적 제외): 네임스페이스 재구성, using 정리, 코드 리팩터링, 로직 변경, 테스트 단언 변경,
+Modbus 레지스터맵/핸드셰이크/판정 로직 의미 변경, EF 마이그레이션/스냅샷/디자인타임 변경, `.sln` 구조 변경, 신규 파일 생성, 파일 분할.
 
 ---
 
-## Evaluation Criteria (가중치 — Evaluator 판정 기준)
+## 사전 조사 결과 (Generator는 이 사실에 의존해도 됨 — Planner가 직접 확인)
 
-1. **소터 push ready 운영상태 정확성 (★★★, 35%)** — 소터 push ready == `decision.Ready`(online && 정렬 && Ready==1). 셀 만재(SorterFull=true)·destination PAUSED는 push ready를 false로 만들지 **않는다**. busy(Ready==0 또는 미정렬)·offline은 push ready=false. 실 DB seed + 게이트웨이 snapshot으로 ground-truth 구성, push payload(가짜 RCS 수신 본문)의 `ready` 값으로 검증.
-2. **push 전이 발화 정확성 (★★★, 25%)** — 운영 상태 전이(예: 미정렬→정렬, Ready 0→1, offline→online)에는 push가 발화. **셀 만재 전이(빈 셀→만재 또는 만재→여유)·paused 전이만으로는 소터 push 무발화**(운영 상태 불변이면 push ready 불변 → 전이 없음 → push 0건). 멱등 기계(전이당 1회·무변화 무발화)는 보존.
-3. **회귀 0 — 슈트 push·IF-05·인바운드 (★★, 20%)** — 슈트 push ready(full/pause→false·비움/정지해제→true, ComputeChute 현행) 불변. IF-05 소터(셀 있으면 offline이어도 OK·paused면 NG·만재(셀없음)면 NG)·IF-05 슈트(full/pause여도 OK) 현행 유지. IF-09/IF-10 인바운드 동작 불변. 기존 테스트 단언 회귀 0(반전된 만재/paused push 단언만 정정 — diff로 정정 내역 확인).
-4. **무변경 가드 (★★, 15%)** — Modbus 레지스터맵·핸드셰이크·Wcs.Core(DepositDecider 순수성)·DB 스키마/마이그레이션·push 멱등 기계(DestinationStatusPusher·RcsPushClient)·RcsController·SorterCellQty·ChuteCapacity·EfCellSelector `git diff` 0줄로 입증.
-5. **스펙 문서 정합 (★, 5%)** — `docs/wcs_rcs_interface_kr.html` line 126·172·208·216~217 정정이 `git diff docs/`로 실재 확인. (필요시 SPEC.md.) 문서 주장 ≠ 실파일 변경 — diff로 대조(S-M4-P2b "정정 완료 거짓" 교훈).
-
----
-
-## Completion Conditions (Evaluator 통과 최소 조건)
-
-- `dotnet build` 경고 0 / 오류 0.
-- `dotnet test` 전체 GREEN(신규 시나리오 포함) + testhost teardown **exit 0**(단언 PASS여도 exit≠0·`중단됨`·abort·hangdump면 미통과 — exit code·중단 라인 직접 확인. baseline 대조로 선재/도입 귀속: 선재 + 무변경 zone이면 명시·비차단, 본 변경 도입이면 차단 — S-RCS-IF-REDESIGN-P1 teardown 귀속 절차 적용).
-- 타이밍/동시성 표적(소터 관찰 타이머 기반 push 전이·무발화 시나리오) **단독 ≥5회 연속 flaky 0**.
-- 무변경 가드 파일 `git diff` 0(committed/staged/working/untracked 전부).
-- 스펙 문서 정정 `git diff docs/`로 라인 단위 확인.
-- IF-05 경로가 `r.Ready`를 소비하지 않음을 grep 증거로 확인(소터 ready 의미 변경이 IF-05에 무영향임의 구조적 근거).
+1. **모든 7개 csproj가 SDK-style 암묵 글로빙**이다 (`<Project Sdk="Microsoft.NET.Sdk[.Web]">`).
+   어떤 csproj에도 `<Compile Include>` / `<Compile Remove>` 항목이 **없다**.
+   → **하위 폴더로 파일을 옮겨도 csproj 편집이 전혀 필요 없다.** SDK가 `**/*.cs`를 자동 포함한다.
+   (`obj/`,`bin/`은 SDK가 자동 제외 — 이동 대상 아님.)
+2. **`.sln`(Wcs.sln)은 `.csproj` 경로만 참조**하고, `.csproj` 파일들은 **이동하지 않는다**(프로젝트 루트 유지).
+   → `.sln` 편집 불필요. 솔루션 폴더 구조(NestedProjects)도 무변경.
+3. **`Directory.Build.props` / `.editorconfig` 없음** — 경로 기반으로 파일을 글로빙/제외하는 설정이 솔루션에 존재하지 않는다.
+4. **`Program.cs`(top-level statements) + `ProgramPartial.cs`(`public partial class Program {}`)는 프로젝트 루트 유지(확정).**
+   - top-level statements는 컴파일 단위 하나에만 존재 가능(CS8803). 위치는 컴파일 동작에 영향 없으나 루트 유지가 사용자 확정.
+   - `Program.cs`는 파일-스코프 네임스페이스가 없고(top-level), 내부에 `SorterRegistryFactory`/`SorterConfig`/`SorterTimingOverride`/`TimingOptions`/`PlcPollingHostedAdapter` 클래스가 **같은 파일에 동거**한다. 이 클래스들을 별도 파일로 쪼개는 것은 "파일 분할"이며 **본 스프린트 범위 밖**(순수 이동만). `Program.cs`는 통째로 루트 유지.
+5. **네임스페이스 invariant 확인됨**(이동 후 grep이 이동 전과 동일해야 함):
+   - Wcs.Api: `RcsController.cs`만 `namespace Wcs.Api.Controllers;`, 나머지 12개 전부 `namespace Wcs.Api;` (Program/ProgramPartial은 파일-스코프 네임스페이스 없음 — top-level/partial).
+   - Wcs.PlcGateway: 6개 전부 `namespace Wcs.PlcGateway;`
+   - 폴더는 디렉터리일 뿐 — 네임스페이스는 폴더와 무관하게 기존 선언을 그대로 둔다(C# 평면 네임스페이스 허용).
 
 ---
 
-## Parallel Modules
+## Implementation Scope (WHAT / WHERE) — 프로젝트별 파일→폴더 매핑 표
 
-N/A (single module — Wcs.Api 한 산출 함수의 ready 합성 변경 + 그 검증 + 문서 정정. 모듈 경계 분할 없음).
+> 규칙(전 항목 공통):
+> - **반드시 `git mv <현재경로> <목표경로>`** 를 사용한다(rename 이력 보존 + git rename 감지). 일반 mv+add 금지.
+> - 목표 폴더가 없으면 `git mv`가 자동 생성. (필요 시 Generator가 mkdir 후 `git mv` 해도 무방하나 git이 add/delete가 아닌 rename으로 감지되어야 함.)
+> - **파일 본문은 0줄 변경**. 네임스페이스·using·주석·로직 손대지 않는다.
+> - **csproj/.sln 편집 0** (SDK 글로빙 확인됨 — 사전조사 #1,#2).
+> - 파일명 자체는 변경하지 않는다(폴더만 바뀜).
 
-## Evaluation Dimensions
+### ① Wcs.Api — MVC 레이어 (사용자 확정, 그대로 적용) — **이동 대상**
 
-functional only.
-(단일 차원이나, 본 변경은 두 소비자(push·IF-05)가 같은 `Compute` 산출을 분기 소비하는 **크로스-엔드포인트 정합** 표면이다 — Evaluator는 S-소터셀수량full 6회째 메타교훈("두 엔드포인트가 같은 자원을 다른 로직으로 판정하면 크로스-엔드포인트 테스트 필수")을 적용해, push와 IF-05를 한 시나리오에서 연결 검증할 것. 보안/성능 별도 차원 불필요.)
+현재 모든 `.cs`가 `src/Wcs.Api/` 평면에 있음(RcsController만 이미 Controllers/). 아래로 그룹핑:
+
+| 현재 경로 | 목표 경로 | 비고 |
+|---|---|---|
+| `src/Wcs.Api/Controllers/RcsController.cs` | `src/Wcs.Api/Controllers/RcsController.cs` | **이미 위치 정확 — 이동 없음(유지)** |
+| `src/Wcs.Api/DestinationStatusService.cs` | `src/Wcs.Api/Services/DestinationStatusService.cs` | Services/ |
+| `src/Wcs.Api/DestinationStatusPusher.cs` | `src/Wcs.Api/Services/DestinationStatusPusher.cs` | Services/ |
+| `src/Wcs.Api/ChuteCapacityService.cs` | `src/Wcs.Api/Services/ChuteCapacityService.cs` | Services/ |
+| `src/Wcs.Api/SorterCellQty.cs` | `src/Wcs.Api/Services/SorterCellQty.cs` | Services/ |
+| `src/Wcs.Api/RcsPushClient.cs` | `src/Wcs.Api/Services/RcsPushClient.cs` | Services/ |
+| `src/Wcs.Api/Repositories.cs` | `src/Wcs.Api/Repositories/Repositories.cs` | Repositories/ (인터페이스) |
+| `src/Wcs.Api/DbRepositories.cs` | `src/Wcs.Api/Repositories/DbRepositories.cs` | Repositories/ (EF 구현) |
+| `src/Wcs.Api/Dtos.cs` | `src/Wcs.Api/Dtos/Dtos.cs` | Dtos/ |
+| `src/Wcs.Api/SorterGatewayRegistry.cs` | `src/Wcs.Api/Infrastructure/SorterGatewayRegistry.cs` | Infrastructure/ |
+| `src/Wcs.Api/WcsTeardownGuard.cs` | `src/Wcs.Api/Infrastructure/WcsTeardownGuard.cs` | Infrastructure/ |
+| `src/Wcs.Api/WcsOptions.cs` | `src/Wcs.Api/Infrastructure/WcsOptions.cs` | Infrastructure/ |
+| `src/Wcs.Api/Program.cs` | `src/Wcs.Api/Program.cs` | **루트 유지(확정)** |
+| `src/Wcs.Api/ProgramPartial.cs` | `src/Wcs.Api/ProgramPartial.cs` | **루트 유지(확정)** |
+
+이동 파일 수: **11개** (RcsController·Program·ProgramPartial은 제자리 유지).
+
+### ② Wcs.PlcGateway — Modbus 어댑터 그룹핑 (실익 있음, 사용자 제시 방향) — **이동 대상**
+
+| 현재 경로 | 목표 경로 | 비고 |
+|---|---|---|
+| `src/Wcs.PlcGateway/IModbusMaster.cs` | `src/Wcs.PlcGateway/Modbus/IModbusMaster.cs` | Modbus/ |
+| `src/Wcs.PlcGateway/ModbusMasterFactory.cs` | `src/Wcs.PlcGateway/Modbus/ModbusMasterFactory.cs` | Modbus/ |
+| `src/Wcs.PlcGateway/ModbusTcpMaster.cs` | `src/Wcs.PlcGateway/Modbus/ModbusTcpMaster.cs` | Modbus/ |
+| `src/Wcs.PlcGateway/ModbusRtuMaster.cs` | `src/Wcs.PlcGateway/Modbus/ModbusRtuMaster.cs` | Modbus/ |
+| `src/Wcs.PlcGateway/PlcGateway.cs` | `src/Wcs.PlcGateway/PlcGateway.cs` | **루트 유지** (폴링/큐 코어) |
+| `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` | `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` | **루트 유지** (핸드셰이크 코어) |
+
+이동 파일 수: **4개** (Modbus 어댑터 4종을 `Modbus/`로). PlcGateway·HandshakeOrchestrator는 게이트웨이 코어로 루트 유지.
+
+### ③ Wcs.Core — **폴더 없음 / 유지 권장** (이동 0)
+
+2파일(`DepositDecider.cs`, `Models.cs`). 응집도 높고 폴더 실익 미미 → **무변경 권장**(사용자 확정 3: "2~3파일 프로젝트는 최소화/유지").
+판정 엔진 순수 함수 핵심 — 위치 변경 무의미.
+
+### ④ Wcs.Data — **폴더 없음 / 유지 권장** (이동 0)
+
+3파일(`WcsDbContext.cs`, `Entities.cs`, `DbSeeder.cs`). EF 디자인타임 민감(마이그레이션 두 프로젝트가 `WcsDbContext`를 ProjectReference로 모델 참조) →
+파일 이동 자체는 디자인타임에 무해하나(타입은 폴더 무관) **실익 < 위험**. **무변경 권장**.
+
+### ⑤ Wcs.Sim3ds — **폴더 없음 / 유지 권장** (이동 0)
+
+2파일(`Program.cs`, `SimServer.cs`). 시뮬레이터 — 폴더 실익 없음. **무변경 권장**.
+
+### ⑥ Wcs.Migrations.Sqlite / Wcs.Migrations.SqlServer — **무변경(확정)** (이동 0)
+
+이미 `Migrations/` 구조 + EF 디자인타임 팩토리(`*DesignTimeFactory.cs`)·스냅샷·`<RootNamespace>` 민감.
+사용자 확정 3: **무변경 권장**. 어떤 파일도 옮기지 않는다.
+
+### ⑦ tests/Wcs.Tests — **범위 밖** (사용자 요청은 src 한정)
+
+이동 0. 단 Completion에서 "테스트가 이동된 타입을 여전히 발견(컴파일·실행)"을 검증해야 함.
 
 ---
 
-## Detected Project Type: Backend/API
+## 절대 무변경 (위반 시 즉시 FAIL)
 
-판별 근거(repo 신호 — 사용자 표현 아님): `src/Wcs.Api/Controllers/RcsController.cs`(서버측 controller·`[ApiController]`·`[Route]`) + ASP.NET Core 서버 진입점(`Program.cs`·Windows Service 호스트). 브라우저 UI 트리 없음(docs의 `.html`은 스펙 정의서이지 client-rendered view 아님). 따라서 정확히 하나: **Backend/API**.
-
----
-
-## Verification Scenarios (Backend/API — mandatory)
-
-> N = 10 (이 변경 표면에서 직접 결정: push 운영상태 5축 ①online·정렬·Ready=1 ②busy ③offline ④만재여도 ⑤paused여도 + 슈트 push 현행 ⑥ + IF-05 회귀 ⑦⑧ + push 멱등/무발화 ⑨ + 무변경 가드 ⑩). 모든 시나리오는 실 DB seed·가짜 RCS 수신 본문·게이트웨이 snapshot ground-truth 사용(인메모리 카운터 단독 금지).
-
-### Explicit list of endpoints/surfaces touched by this sprint (method + path / 산출 함수)
-- **(산출 함수)** `IDestinationStatusService.Compute(destId, SORTER_3D).Ready` — 소터 ready 합성(운영상태로 좁힘). push 소비자.
-- **IF-08 아웃바운드 push** `POST {RCS}/api/v1/destination-status` `{chuteNo, ready, timeStamp}` — Pusher가 `Compute().Ready` 전이 시 발화(코드 무변경, ready 의미만 바뀜).
-- **IF-05** `POST /api/v1/destination-query` — 소터 availability(`r.Paused`+`SorterCanAcceptBarcode`, `r.Ready` 미소비) 회귀 확인 대상.
-- (회귀 확인용) **IF-09** `POST /api/v1/arrival-report`, **IF-10** `POST /api/v1/deposit-report` — 인바운드 동작 불변.
-
-### Happy path per surface (expected input → expected output shape)
-- **VS-1 소터 online·정렬·Ready=1 → push ready=true**: snapshot(Online=true, CurFloor==운영층, Ready==1), destination NORMAL·활성, 셀 여유. `Compute(SORTER_3D).Ready==true` + 부트스트랩/전이 push payload `ready==true`(가짜 RCS 수신 본문).
-- **VS-6 슈트 full/pause → push ready=false · 비움/정지해제 → true (현행 유지)**: ComputeChute 경로. 슈트 destination full(hold=Full)→push ready=false, OnCleared→ready=true; paused→false, 정지해제→true. push payload로 확인.
-- **VS-8 IF-05 슈트 OK 유지**: 슈트 destination이 full/paused여도 IF-05 result=="OK"·chuteNo 반환(확정4 현행). 실 HTTP 요청→응답 JSON 증거.
-
-### Relevant error / boundary cases per surface (적용되는 것만 — 패딩 금지)
-- **VS-2 소터 busy → push ready=false**: (a) Ready==0(분류 중/이동 중) 또는 (b) CurFloor≠운영층(미정렬). 두 하위 케이스 모두 `Compute().Ready==false` + push payload `ready==false`.
-- **VS-3 소터 offline → push ready=false**: 게이트웨이 번들 없음(Online=false). `Compute().Ready==false`(Reason=Offline) + push payload `ready==false`.
-- **VS-4 소터 셀 만재(SorterFull=true)인데 운영상태 ready → push ready=true** [핵심 회귀]: snapshot 운영상태 OK(online·정렬·Ready=1)지만 모든 셀이 작업수량 도달(SorterFull=true). `Compute().Full==true`(IF-05/내부 사유 산출 유지)이면서 `Compute().Ready==true`(만재가 push ready에 영향 없음) + push payload `ready==true`. 실 sorter_command(COMPLETED) JOIN piece.qty로 만재 상태 ground-truth 구성.
-- **VS-5 소터 PAUSED인데 운영상태 ready → push ready=true** [핵심 회귀]: destination.Status==PAUSED(또는 IsActive==false)지만 운영상태 OK. `Compute().Paused==true`(산출 유지)이면서 `Compute().Ready==true`(paused가 push ready에 영향 없음) + push payload `ready==true`.
-- **VS-7 IF-05 소터 회귀 (3축)**: (a) 셀 있으면 **offline이어도 OK**(IF-05는 online을 보지 않음 — 셀 기준) (b) **paused면 NG**(소터 paused 차단 우선) (c) **만재(셀 없음)면 NG**. 세 하위 케이스 실 HTTP 요청→응답 result 확인. `r.Ready`(운영상태) 변경이 이 세 결과에 영향 없음을 입증(IF-05는 `r.Paused`+`SorterCanAcceptBarcode`만 소비).
-- **VS-9 push 전이당 1회·무변화 무발화 + 만재/paused 전이 무발화 (멱등 기계 보존)**: (a) 운영상태 전이 1회당 push 정확히 1건(같은 전이를 N스레드가 동시에 관찰해도 1건 — barrier 동시관찰 프로브로 클레임 경합 입증, 중복억제 경로만으로는 불충분 — S-RCS-IF-REDESIGN-P2 교훈). (b) **운영상태 불변인 채 셀 만재 전이(빈 셀↔만재)·paused 전이가 일어나도 소터 push 0건**(WaitUntilExactAsync stableCount로 폭주 0·무발화 부재 단언 — S-M4-P3/P2 no-flood 가드). (c) 관찰 주기마다 운영상태 무변화면 push 0건.
-- **VS-10 무변경 가드**: Wcs.Core·PlcGateway·Sim3ds·Data·Migrations·DestinationStatusPusher·RcsPushClient·RcsController·SorterCellQty·ChuteCapacity·EfCellSelector `git diff` 0줄. + IF-05 경로 `r.Ready` 미소비 grep 0.
+- **코드 본문·네임스페이스 선언·using 지시문·주석·로직·테스트 단언** — 0줄 변경.
+  (이동 파일의 `git diff -M` 내용 hunk는 비어 있어야 한다 — rename only.)
+- **Modbus 레지스터맵·핸드셰이크·판정 로직의 의미** — 0 변경(파일 위치만 바뀜).
+- **EF 마이그레이션/스냅샷/디자인타임 팩토리** — Migrations 두 프로젝트 전체 무변경. `WcsDbContext`/`Entities`도 무변경 권장(Data 유지).
+- **csproj · .sln · appsettings · 패키지 참조** — 0 변경(사전조사로 불필요 확인됨).
+- **CLAUDE.md 절대규칙(PLC 단일 큐, TgtFloor 가드, Ready 의미 등)** — 코드 의미 무변경이므로 자동 보존.
 
 ---
 
-## 미확정 질문 (사용자에게 — 추측 금지 항목)
+## Evaluation Criteria (가중치)
 
-없음. 사용자 확정(2026-06-25)으로 push=운영상태(decision.Ready)·dispatch=IF-05(셀/paused)의 2단계 게이트 분리, 슈트 push·IF-05 현행 유지, 무변경 zone 전부가 명시됨. 메모리 `if05-dispatch-vs-push-operational` 확정 사항은 재질문하지 않음.
-
-단, **`Reason` 필드의 소터 ready=true 시 의미**(운영상태 ready지만 Full=true/Paused=true일 때 내부 DenyReason을 None으로 둘지 Full/Paused로 둘지)는 IF-05/내부 로깅이 `Reason`을 어떻게 쓰는지에 달린 **구현 세부**이므로 Generator가 기존 소비처(현재 `Reason`은 외부 미노출·IF-05 NG 필터는 Block enum 사용)와 일관되게 결정한다. push payload에는 `ready` bool만 나가므로 `Reason` 결정이 와이어에 영향 없음 — Planner는 이를 구현 결정으로 위임(WHAT 아님).
+| # | 기준 | 가중치 | 판정 방법 |
+|---|---|---|---|
+| ① | **동작 보존** | ★★★ | `dotnet build` 경고 0·오류 0 · `dotnet test` 전체 GREEN(이동 전 통과 수와 동일) · 테스트 호스트 exit 0(teardown hang 0) · 회귀 0 |
+| ② | **순수 이동 입증** | ★★★ | `git status --find-renames`(또는 `git diff -M --stat`)가 **rename(R)만** 표시, add/delete 아님 · 이동 파일 내용 diff 0(rename hunk 비어 있음) · 네임스페이스 선언 grep이 이동 전후 **완전 동일** |
+| ③ | **MVC 레이어 정확성** | ★★ | Wcs.Api 11개 파일이 약속된 폴더(Services/Repositories/Dtos/Infrastructure)에 정확히 배치 · Controllers/RcsController 유지 · Program/ProgramPartial 루트 유지 · PlcGateway Modbus 4종이 `Modbus/`에 |
+| ④ | **csproj/솔루션 무결성** | ★★ | csproj·.sln **편집 0**으로도 빌드/테스트 발견 정상(SDK 글로빙 검증) · 빌드 산출물 동일 |
+| ⑤ | **문서/참조 정합** | ★ (문서, 비차단) | CLAUDE.md "솔루션 구조"가 새 폴더와 **모순되면** 정정. (현 "솔루션 구조"는 프로젝트별 역할만 기술하고 내부 폴더는 언급 안 함 → 모순 없음. 선택적 보강만, 동작 아님) |
 
 ---
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 10 (VS-1 happy=소터 운영ready→push true, VS-6 happy=슈트 push 현행, VS-8 happy=IF-05 슈트 OK, VS-2 error=소터 busy→false, VS-3 error=소터 offline→false, VS-4 error=소터 만재여도 push true[핵심회귀], VS-5 error=소터 paused여도 push true[핵심회귀], VS-7 error=IF-05 소터 회귀 3축, VS-9 error=push 멱등·만재/paused 무발화, VS-10 boundary=무변경 가드+grep). All slots filled: yes.
+## Completion Conditions (Evaluator PASS 최소 조건 — 전부 충족)
+
+1. `dotnet build` → **경고 0 / 오류 0**.
+2. `dotnet test` → **전체 GREEN** (이동 직전 통과 테스트 수와 동일, 0 회귀) · 테스트 프로세스 **exit 0**(hang/crash 0 — lessons/todo의 teardown 채널 경쟁 회귀 없음).
+3. `git status --find-renames`(또는 `git status` + `git diff -M`)에 **신규(??)/삭제(D) 단독 항목이 없고 rename(R)만** — 즉 모든 이동이 rename으로 감지.
+4. 이동된 모든 파일의 **내용 diff가 0**: `git diff -M` 에서 이동 파일에 `+`/`-` 본문 라인이 나오면 FAIL(rename hunk만 허용).
+5. **네임스페이스 선언 grep 불변**: 이동 전후 `^namespace` grep 결과(파일별 선언 문자열)가 동일.
+   - 이동 전 기준값(사전조사 #5): Wcs.Api = 11×`namespace Wcs.Api;`(이동) + 1×`namespace Wcs.Api.Controllers;`(RcsController, 유지) + Program/ProgramPartial 2개(네임스페이스 없음) / PlcGateway = 6×`namespace Wcs.PlcGateway;`.
+6. **EF 디자인타임 무영향**: Migrations 두 프로젝트 컴파일 성공. (선택 강검증: 인프라 가능 시 `dotnet ef migrations list` 또는 `dotnet ef dbcontext info`가 이동 전과 동일 결과.)
+7. Migrations 두 프로젝트 + Core/Data/Sim3ds(유지 권장 프로젝트)는 **git status에 어떤 변경도 없어야** 함(무변경 확약).
+
+---
+
+## Parallel Modules (optional)
+
+N/A (단일 정리 작업). 프로젝트별 폴더 이동은 논리적으로 독립적이나 규모가 작고(이동 15파일) 순차 `git mv` + 단일 빌드/테스트가 더 안전 — 병렬화 실익 없음. 기본 1 Generator.
+
+## Evaluation Dimensions (optional)
+
+functional only (동작 보존 + 순수성 입증). 보안/성능 표면 변화 0(코드 의미 무변경) → 단일 차원 검토. 기본 1 Evaluator.
+
+---
+
+## Detected Project Type: **Backend/API**
+
+(프로젝트 신호: 서버측 컨트롤러 `Controllers/RcsController.cs` + ASP.NET Core 진입점 `Program.cs` 존재, 브라우저 향 UI 트리(HTML 셸/클라이언트 렌더 뷰) 부재. 사용자 표현이 아닌 repo 구조로 판별.)
+
+---
+
+## Verification Scenarios (Backend/API — 본 스프린트 표면 = 파일 이동 + 빌드/테스트 보존 + 순수성 입증)
+
+> 본 스프린트는 HTTP 엔드포인트 동작을 **변경하지 않는다**(순수 이동). 따라서 엔드포인트 행위 검증의 목적은
+> "이동 후에도 동일하게 동작/컴파일됨" 입증이다. 시나리오는 이동 표면(빌드·테스트·git 순수성·디자인타임)에 맞춰 N=8로 결정.
+
+### Backend/API 슬롯
+
+**(a) 이번 스프린트가 건드린 엔드포인트 목록 (method + path)** — *행위 무변경, 코드 위치만 이동*:
+- IF-05 계열(투입 가부), IF-09(도착 보고), IF-10(핸드셰이크) — 전부 `Controllers/RcsController.cs` 내. **라우트/시그니처 무변경, 핸들러 파일도 무변경(RcsController 유지)**.
+  핸들러가 의존하는 Services/Repositories/Dtos/Infrastructure 타입들의 **파일이 이동**할 뿐 → 컴파일·DI 해석이 이동 후에도 동일해야 함.
+- 정확한 라우트 문자열은 Generator/Evaluator가 `Controllers/RcsController.cs`에서 확인(본 스프린트는 라우트를 바꾸지 않으므로 "이동 전 == 이동 후"가 검증 포인트).
+
+**(b) 엔드포인트별 happy path (기대 입력 → 기대 출력 shape)** — *이동 전후 불변*:
+- 기존 통합 테스트(`tests/Wcs.Tests`의 WebApplicationFactory 기반 IF-05/09/10 시나리오 + Sim3ds 연동)가 **이동 전과 동일하게 GREEN**. 응답 shape(필드 `pId,agvNo,barcode,inductionNo,chuteNo,qty,timeStamp` 등)·상태코드 불변.
+- DI 컨테이너 구성(`Program.cs`의 AddScoped/AddSingleton/AddHostedService 배선)이 이동된 타입(`DestinationStatusService`,`RcsPushClient`,`SorterRegistryFactory` 등)을 여전히 해석 → 앱 부팅 성공(WebApplicationFactory 기동).
+
+**(c) 엔드포인트별 관련 에러 케이스 (적용되는 것만 — 패딩 금지)** — *이동 전후 불변*:
+- 기존 테스트에 존재하는 검증실패 400 · FULL/PAUSED NG · OFFLINE 결과 경로가 **이동 후에도 동일 결과**. (본 스프린트는 새 에러 케이스를 도입하지 않음 — 기존 테스트의 통과/실패 분포가 0 변화.)
+
+### 구조-정리 전용 추가 시나리오 (이 스프린트의 본질 표면)
+
+1. **빌드 무결성**: clean 후 `dotnet build` → 경고 0/오류 0. (csproj 미편집으로도 성공 = SDK 글로빙 검증.)
+2. **테스트 보존**: `dotnet test` 전체 GREEN, 통과 수 = 이동 전 통과 수, 프로세스 exit 0(teardown hang 0).
+3. **git rename 순수성**: `git diff -M --stat` / `git status --find-renames` 가 이동 파일을 전부 rename(R100 등)으로 표시, 내용 hunk 0.
+4. **네임스페이스 불변**: 이동 전후 `^namespace` grep 결과 동일(사전조사 #5 기준값과 일치).
+5. **Wcs.Api MVC 배치 확인**: 11개 이동 파일이 Services/Repositories/Dtos/Infrastructure에 정확 배치, Controllers/Program/ProgramPartial 위치 정확.
+6. **PlcGateway Modbus 배치 확인**: 4종 어댑터가 `Modbus/`에, PlcGateway/HandshakeOrchestrator 루트 유지.
+7. **EF 디자인타임 무영향**: Migrations 두 프로젝트 컴파일 성공 + (인프라 가능 시) `dotnet ef` 메타 조회가 이동 전과 동일. Migrations/Core/Data/Sim3ds git status 무변경.
+8. **테스트 프로젝트의 타입 발견**: `tests/Wcs.Tests`가 이동된 `Wcs.Api.*` 타입(DTO·Service·Registry 등)을 여전히 참조·컴파일·실행(평면 네임스페이스 유지로 using 변경 불필요).
+
+---
+
+## 미확정/질문 (확정 3건은 재질문 안 함)
+
+- **(확인 요청, 비차단)** Wcs.Api `Services/` 그룹에 `SorterCellQty.cs`·`RcsPushClient.cs`를 포함했다(둘 다 서비스성 코드). 사용자 명시 목록 "DestinationStatusService·DestinationStatusPusher·ChuteCapacityService·SorterCellQty·RcsPushClient" 5개를 Services로 지정 → 그대로 반영. 이견 없으면 진행.
+- **(제안, 비차단)** Core(2)·Data(3)·Sim3ds(2)는 폴더 실익 < 도입 비용으로 **무변경 권장**. 사용자가 "전체 src honoring"을 원하면 이 셋도 그룹핑 가능하나, 무의미한 폴더 강제 금지 원칙(확정 3)에 따라 유지를 기본값으로 둠. 강제 그룹핑 원하면 알려줄 것.
+
+---
+
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 8 (endpoints-touched, happy-path-per-endpoint, error-cases-per-endpoint, build-integrity, test-preservation, git-rename-purity, namespace-invariance, type-discovery — MVC/Modbus 배치·EF-디자인타임 보강 포함). All slots filled: yes.
