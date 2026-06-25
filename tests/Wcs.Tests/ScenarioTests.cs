@@ -1150,6 +1150,9 @@ public class S8FullPausedTests : IAsyncLifetime
         if (_factory is not null) await _factory.DisposeAsync();
     }
 
+    // ⚠ 의도적 반전(이 스프린트 확정4): 슈트 FULL → IF-05 **OK**(NG→OK).
+    // 슈트는 곧 비워지니 보내고 대기 — IF-05 dispatch에서 FULL을 차단하지 않는다(비움 전후 둘 다 OK).
+    // 슈트 readiness(만재 시 ready=false)는 IF-08 푸시로 별도 전달. 소터 FULL은 NG 유지.
     [Fact]
     public async Task S8_Chute_Full_Then_Cleared_Ok()
     {
@@ -1167,17 +1170,17 @@ public class S8FullPausedTests : IAsyncLifetime
         capacity.OnReserved(dest1.Id, fullQty);
         Assert.Equal(WcsHold.Full, capacity.GetHold(dest1.Id));
 
-        // IF-05 FULL 상류 필터 → NG (chuteNo=null)
+        // 반전: 슈트 FULL이어도 IF-05 dispatch → OK(보냄). readiness는 푸시로 별도 전달.
         var resp = await _client!.PostAsJsonAsync("/api/v1/destination-query",
             new { pId = 15001, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.NotNull(body);
-        Assert.Equal("NG", body.Result);
-        Assert.Null(body.ChuteNo);
-        _out.WriteLine($"[S8] FULL → IF-05 NG chuteNo=null");
+        Assert.Equal("OK", body.Result);
+        Assert.Equal(1, body.ChuteNo);
+        _out.WriteLine($"[S8 반전] 슈트 FULL → IF-05 OK chuteNo={body.ChuteNo}");
 
-        // OnCleared → NORMAL 복귀 → IF-05 OK
+        // OnCleared 후에도 OK 유지(슈트는 항상 보냄).
         await capacity.OnCleared(dest1.Id);
         var resp2 = await _client!.PostAsJsonAsync("/api/v1/destination-query",
             new { pId = 15002, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null });
@@ -1185,21 +1188,22 @@ public class S8FullPausedTests : IAsyncLifetime
         Assert.NotNull(body2);
         Assert.Equal("OK", body2.Result);
         Assert.Equal(1, body2.ChuteNo);
-        _out.WriteLine($"[S8] OnCleared 후 → IF-05 OK chuteNo={body2.ChuteNo}");
+        _out.WriteLine($"[S8 반전] OnCleared 후에도 → IF-05 OK chuteNo={body2.ChuteNo}");
     }
 
+    // ⚠ 의도적 반전(이 스프린트 확정4): 슈트 PAUSED → IF-05 **OK**(NG→OK).
     [Fact]
     public async Task S8_Chute_Paused_Ng()
     {
-        // TEST-BARCODE-PAUSED → destPaused(chuteNo=6, status PAUSED) → IF-05 NG
+        // TEST-BARCODE-PAUSED → destPaused(chuteNo=6, status PAUSED) → 반전: IF-05 OK
         var resp = await _client!.PostAsJsonAsync("/api/v1/destination-query",
             new { pId = 15003, agvNo = 1, barcode = "TEST-BARCODE-PAUSED", inductionNo = 1, qty = 1, timeStamp = (string?)null });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.NotNull(body);
-        Assert.Equal("NG", body.Result);
-        Assert.Null(body.ChuteNo);
-        _out.WriteLine($"[S8] PAUSED → IF-05 NG chuteNo=null");
+        Assert.Equal("OK", body.Result);  // 반전: 슈트 PAUSED → OK
+        Assert.Equal(6, body.ChuteNo);
+        _out.WriteLine($"[S8 반전] 슈트 PAUSED → IF-05 OK chuteNo={body.ChuteNo}");
     }
 }
 
