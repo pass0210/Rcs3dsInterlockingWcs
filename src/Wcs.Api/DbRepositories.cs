@@ -65,8 +65,13 @@ public sealed class EfOrderRepository : IOrderRepository
             return ("NG", null, "COMPLETED", ToDestType(order.Destination), null);
         }
 
-        // PAUSED: destination status PAUSED
-        if (order.Destination?.Status == DestStatus.PAUSED)
+        // PAUSED: destination status PAUSED — dest 타입 분기(확정4).
+        //   소터(SORTER_3D)는 PAUSED → NG 유지(곧 안 풀림).
+        //   슈트(CHUTE)는 PAUSED여도 통과(OK) — 곧 비워지니 보내고 대기. PAUSED 차단을 IF-05에서
+        //   하지 않는다(슈트 readiness는 IF-08 푸시로 별도 전달 — IF-05 dispatch와 분리 채널).
+        //   목적지 미할당(AUTO 배정 — order.Destination==null)은 NORMAL 슈트만 자동 할당되므로 무관.
+        if (order.Destination?.Status == DestStatus.PAUSED
+            && order.Destination.DestType == DestType.SORTER_3D)
         {
             RecordDenied(pId, agvNo, barcode, inductionNo, qty, "PAUSED",
                 clientTs, effective, item, order.Destination);
@@ -117,7 +122,12 @@ public sealed class EfOrderRepository : IOrderRepository
         else
         {
             dest = order.Destination!;
-            if (!dest.IsActive || dest.Status != DestStatus.NORMAL)
+            // 비활성(IsActive=false)은 슈트·소터 공통 차단(목적지 자체가 비운영 — "목적지 활성" 전제, 확정4).
+            // PAUSED(Status!=NORMAL) 차단은 소터에만 적용 — 슈트 PAUSED는 통과(OK). 슈트 PAUSED는
+            // 위 조기 차단(소터 한정)을 이미 통과했고 여기서도 통과시켜 OK로 배정한다.
+            bool blocked = !dest.IsActive
+                        || (dest.DestType == DestType.SORTER_3D && dest.Status != DestStatus.NORMAL);
+            if (blocked)
             {
                 RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST",
                     clientTs, effective, item, dest);
@@ -547,8 +557,8 @@ public sealed class EfDepositRecorder : IDepositRecorder
 
 /// <summary>
 /// EF Core 기반 셀 선택기.
-/// 선택 우선순위: ①활성 cell_assignment 재사용(같은 오더) → ②빈 셀 할당 → ③없으면 null.
-/// 점유 = released_at IS NULL.
+/// 선택 우선순위: ①활성 cell_assignment 재사용(같은 오더 + **여유 있는 셀**) → ②빈 셀 할당 → ③없으면 null.
+/// 점유 = released_at IS NULL. 여유 = 현재 투입 수량(LOADED qty 합) &lt; cell.Capacity(NULL/≤0=무제한).
 /// </summary>
 public sealed class EfCellSelector : ICellSelector
 {
@@ -574,20 +584,37 @@ public sealed class EfCellSelector : ICellSelector
         {
             var now = DateTime.UtcNow;
 
-            // ① 같은 오더(바코드)의 활성 assignment 재사용
-            var existingAssign = _db.CellAssignments
-                .Include(a => a.Cell)
-                .Include(a => a.Order)
-                    .ThenInclude(o => o.Items)
+            // ① 같은 오더(바코드)의 활성 assignment **중 여유 있는 셀** 재사용.
+            // MAJOR-1 수정(크로스-엔드포인트 정합): IF-05(SorterHasAssignedCellWithRoomForBarcode)는
+            //   "오더 배정 셀 중 여유 있는 셀 있으면 OK"인데, 기존 SelectCell은 FirstOrDefault로
+            //   임의(=용량 무관) 배정 셀을 골라 full 셀에 Capacity 초과 적재가 샜다.
+            //   → 여기서도 SorterCellQty 공유 로직으로 **여유 있는 배정 셀만** 재사용해 byte-consistent.
+            //   결정적 선택을 위해 CellNo 오름차순 중 여유 있는 첫 셀(IF-05 OK ⟹ 적재 가능 불변식 보존).
+            //   보유 셀이 전부 full이면 ②빈 셀 폴백 → 빈 셀도 없으면 ③null(IF-05도 그 경우 NG라 일관).
+            var assignedCells = _db.CellAssignments
                 .Where(a => a.ReleasedAt == null
                          && a.Cell.DestinationId == dest.Id
                          && a.Order.Items.Any(i => i.Barcode == barcode))
-                .FirstOrDefault();
+                .Select(a => new { a.CellId, a.Cell.CellNo, a.Cell.Capacity })
+                .Distinct()
+                .OrderBy(x => x.CellNo)
+                .ToList();
 
-            if (existingAssign is not null)
+            if (assignedCells.Count > 0)
             {
-                tx.Commit();
-                return existingAssign.Cell.CellNo;
+                var assignedCellIds = assignedCells.Select(x => x.CellId).ToList();
+                var loaded = SorterCellQty.LoadedQtyByCell(_db, dest.Id, assignedCellIds);
+
+                var roomCell = assignedCells
+                    .FirstOrDefault(x => !SorterCellQty.IsCellAtCapacity(
+                        x.Capacity, loaded.GetValueOrDefault(x.CellId, 0)));
+
+                if (roomCell is not null)
+                {
+                    tx.Commit();
+                    return roomCell.CellNo;  // 여유 있는 배정 셀 재사용(현재수량 < Capacity).
+                }
+                // 보유 배정 셀 전부 작업수량 도달 → ②빈 셀 폴백으로 진행.
             }
 
             // ② 빈 셀 할당
