@@ -53,25 +53,29 @@ public sealed class RcsController : ControllerBase
         // FULL/PAUSED 차단은 배정 시점(IF-05)으로 상류 이동. 산출원은 DestinationStatusService(슈트·소터 공용).
         // BUSY(분류·이동 중)는 차단하지 않는다 — OK·이동시킴(도착 후 Phase 2 푸시 ready 시 투입).
         //
-        // m4p4 piece-aware 예외(사용자 확정1): 소터가 SorterFull(빈셀 0)이어도, 이 piece의 오더가
-        //   그 소터에 활성 cell_assignment를 이미 보유하면 자기 셀에 누적 가능 → OK(차단 안 함).
-        //   보유 없고 Full이면 NG(FULL). Paused는 예외 없음(항상 차단). 슈트(CHUTE)는 예외 미적용.
+        // 슈트(CHUTE) vs 소터(SORTER_3D) 분기(확정4):
+        //   - 슈트: full/paused여도 IF-05 OK(보냄) — 슈트는 곧 비워지니 보내고 대기. availability는
+        //     슈트에 대해 항상 None(통과). 슈트 readiness는 푸시(IF-08)로 별도 전달(IF-05와 분리 채널).
+        //   - 소터: Paused는 예외 없이 차단(곧 안 풀림). 그 외엔 **이 piece(이 오더)를 지금 받을 수 있나**로
+        //     판정 — SorterCanAcceptBarcode = (빈 셀 ≥1) OR (그 오더 배정 셀 중 여유 있는 셀 보유).
+        //     이 술어는 IF-10 SelectCell의 비-null 조건과 동형이라 "IF-05 OK ⟹ 적재 가능"(§88)이 성립.
+        //     받을 수 없으면 NG(FULL). (목적지-단위 SorterFull(푸시 ready)은 "아무 piece라도 받나"라
+        //     다른 오더의 여유 셀까지 포함하므로, piece 단위 dispatch엔 SorterCanAcceptBarcode를 쓴다.)
         var (result, chuteNo, reason, destType, destId) =
             orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty, req.TimeStamp,
                 availability: (id, dt) =>
                 {
-                    var dataType = dt == DestinationType.Sorter3D ? DestType.SORTER_3D : DestType.CHUTE;
-                    var r = status.Compute(id, dataType);
-                    if (r.Paused) return DestinationBlock.Paused;  // 정지는 예외 없이 차단(우선).
-                    if (r.Full)
-                    {
-                        // 소터 한정 오더 재사용 예외 — barcode 오더의 활성 셀 보유 시 Full 무시(OK).
-                        if (dataType == DestType.SORTER_3D
-                            && status.SorterHasActiveAssignmentForBarcode(id, req.Barcode))
-                            return DestinationBlock.None;
-                        return DestinationBlock.Full;
-                    }
-                    return DestinationBlock.None;
+                    // 슈트는 full/paused 통과(OK) — IF-05 dispatch에서 차단하지 않는다(확정4).
+                    if (dt != DestinationType.Sorter3D)
+                        return DestinationBlock.None;
+
+                    var r = status.Compute(id, DestType.SORTER_3D);
+                    if (r.Paused) return DestinationBlock.Paused;  // 소터 정지는 예외 없이 차단(우선).
+
+                    // 이 piece(이 오더)를 지금 받을 수 있으면 OK, 아니면 FULL(NG) — SelectCell과 동형.
+                    return status.SorterCanAcceptBarcode(id, req.Barcode)
+                        ? DestinationBlock.None
+                        : DestinationBlock.Full;
                 });
 
         // ── FULL/PAUSED 인메모리 집계: IF-05 OK 예약 반영 (슈트만) ───────────────

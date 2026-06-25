@@ -421,10 +421,13 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         _out.WriteLine("[VS-2] pId=0 → 400 확인");
     }
 
+    // ⚠ 의도적 반전(이 스프린트 확정4): 슈트 PAUSED 오더 → IF-05 **OK**(NG→OK).
+    // 슈트는 곧 비워지니 보내고 대기 — IF-05 dispatch에서 PAUSED를 차단하지 않는다.
+    // 슈트 readiness(ready=false)는 IF-08 푸시로 별도 전달(IF-05와 분리 채널). 소터 PAUSED는 NG 유지.
     [Fact]
     public async Task VS2_If05_PausedOrder_NgPaused()
     {
-        // 시드: TEST-BARCODE-PAUSED → IsPaused=true
+        // 시드: TEST-BARCODE-PAUSED → destPaused(chuteNo=6, CHUTE, Status=PAUSED)
         var req = new
         {
             pId        = 2002,
@@ -440,9 +443,9 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
 
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.NotNull(body);
-        Assert.Equal("NG", body.Result);
-        Assert.Null(body.ChuteNo);  // PAUSED 목적지 → NG (reason 키 부재 — 내부 piece_event에만 기록)
-        _out.WriteLine($"[VS-2] PAUSED 시드 → NG chuteNo=null");
+        Assert.Equal("OK", body.Result);   // 반전: 슈트 PAUSED → OK
+        Assert.Equal(6, body.ChuteNo);     // PAUSED 슈트(chuteNo=6)로 배정
+        _out.WriteLine($"[VS-2 반전] 슈트 PAUSED 오더 → OK chuteNo={body.ChuteNo}");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -872,24 +875,26 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         _out.WriteLine($"[IF-05필터] NORMAL → OK chuteNo={body.ChuteNo}");
     }
 
-    // 구 P2a_If08_Chute_PausedStatus 재타겟: PAUSED 목적지 → IF-05 NG (chuteNo=null)
+    // ⚠ 의도적 반전(이 스프린트 확정4): 슈트 PAUSED → IF-05 **OK**(NG→OK).
+    // 슈트는 곧 비워지니 보내고 대기 — IF-05 dispatch에서 PAUSED를 차단하지 않는다.
     [Fact]
     public async Task If05_Chute_Paused_Ng()
     {
-        // TEST-BARCODE-PAUSED → destPaused(chuteNo=6, status PAUSED) → NG
+        // TEST-BARCODE-PAUSED → destPaused(chuteNo=6, status PAUSED) → 반전: OK
         var req  = new { pId = 10002, agvNo = 1, barcode = "TEST-BARCODE-PAUSED", inductionNo = 1, qty = 1, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/destination-query", req);
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.NotNull(body);
-        Assert.Equal("NG", body.Result);
-        Assert.Null(body.ChuteNo);  // PAUSED → NG·chuteNo=null (reason 키 부재)
-        _out.WriteLine($"[IF-05필터] PAUSED → NG chuteNo=null");
+        Assert.Equal("OK", body.Result);   // 반전: 슈트 PAUSED → OK
+        Assert.Equal(6, body.ChuteNo);
+        _out.WriteLine($"[IF-05 반전] 슈트 PAUSED → OK chuteNo={body.ChuteNo}");
     }
 
-    // 구 P2a_If08_Chute_Full_ThenCleared 재타겟: 슈트 FULL → IF-05 NG, 비움 후 OK.
-    // ChuteCapacityService에 직접 FULL 주입 → IF-05 상류 필터가 NG → OnCleared → IF-05 OK.
+    // ⚠ 의도적 반전(이 스프린트 확정4): 슈트 FULL → IF-05 **OK**(비움 전후 둘 다 OK).
+    // ChuteCapacityService에 FULL 주입해도 IF-05 dispatch는 슈트를 차단하지 않는다(보냄).
+    // 슈트 readiness(만재 시 ready=false)는 IF-08 푸시로 별도 전달 — IF-05와 분리 채널.
     [Fact]
     public async Task If05_Chute_Full_ThenCleared_Normal()
     {
@@ -902,22 +907,21 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         var detail1 = db.ChuteDetails.First(cd => cd.DestinationId == dest1.Id);
         var workFullQty = detail1.WorkFullQty; // 기본 100
 
-        // qty 합산으로 FULL 도달(COUNT 아님 — qty>1 합산 검증)
         capacity.OnReserved(dest1.Id, workFullQty);
         Assert.Equal(WcsHold.Full, capacity.GetHold(dest1.Id));
-        _out.WriteLine($"[IF-05필터] OnReserved(qty={workFullQty}) → Full confirmed");
+        _out.WriteLine($"[IF-05 반전] OnReserved(qty={workFullQty}) → Full confirmed (그래도 IF-05 OK)");
 
-        // IF-05: FULL 상류 필터 → NG (chuteNo=null)
+        // 반전: 슈트 FULL이어도 IF-05 → OK(보냄).
         var req  = new { pId = 10050, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/destination-query", req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
         Assert.NotNull(body);
-        Assert.Equal("NG", body.Result);
-        Assert.Null(body.ChuteNo);
-        _out.WriteLine($"[IF-05필터] FULL → NG chuteNo=null");
+        Assert.Equal("OK", body.Result);
+        Assert.Equal(1, body.ChuteNo);
+        _out.WriteLine($"[IF-05 반전] 슈트 FULL → OK chuteNo={body.ChuteNo}");
 
-        // OnCleared → 비움 → IF-05 OK 복귀
+        // OnCleared 후에도 OK 유지(슈트는 항상 보냄).
         await capacity.OnCleared(dest1.Id);
         Assert.Equal(WcsHold.None, capacity.GetHold(dest1.Id));
 
@@ -928,7 +932,7 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         Assert.NotNull(body2);
         Assert.Equal("OK", body2.Result);
         Assert.Equal(1, body2.ChuteNo);
-        _out.WriteLine($"[IF-05필터] 비움 후 NORMAL → OK chuteNo={body2.ChuteNo}");
+        _out.WriteLine($"[IF-05 반전] 비움 후에도 → OK chuteNo={body2.ChuteNo}");
     }
 
     // 회귀 가드: OnCleared 후 InitializeFromDbAsync 재실행 시 NORMAL 유지 (MAJOR-1/MAJOR-2 수정 증명)

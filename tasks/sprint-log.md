@@ -1,5 +1,130 @@
 # Sprint Log
 
+## CODE REVIEW FIX (S-소터셀수량full — 독립 코드리뷰 BLOCK MAJOR-1 + MINOR-2)
+
+### [MAJOR-1] IF-05 room 게이트 ↔ IF-10 SelectCell 용량 무지 비대칭 수정
+**문제**: IF-05(`SorterHasAssignedCellWithRoomForBarcode`)는 "오더 배정 셀 중 여유 셀 있으면 OK"인데
+`EfCellSelector.SelectCell` ①분기는 `FirstOrDefault`로 **임의(용량 무관)** 배정 셀을 재사용 →
+오더가 full 셀 + 여유 셀 동시 보유 시 IF-05 OK인데 SelectCell이 full 셀을 골라 Capacity 초과 적재
+(계약 §88 "IF-05 OK ⟹ 적재 가능" 위반).
+
+**수정 — 셀 수량 로직 공유로 크로스-엔드포인트 동형화**:
+1. `src/Wcs.Api/SorterCellQty.cs` 신규(internal static) — `LoadedQtyByCell`·`IsCellAtCapacity`를 한 곳으로
+   추출. IF-05·SelectCell·SorterFull 세 호출자가 **공유**(byte-consistent). `DestinationStatusService`의
+   private 복사본 제거하고 위임.
+2. `EfCellSelector.SelectCell` ①분기 **용량 인식**으로 — 그 오더 활성 배정 셀 중 **여유 셀만**
+   (CellNo 오름차순 첫 여유 셀, 결정적) 재사용. 전부 full이면 ②빈 셀 폴백 → 빈 셀도 없으면 ③null
+   (IF-05도 그 경우 NG라 일관). `SorterCellQty` 공유 로직 사용.
+3. **추가 정합(루트 원인 완결)** — availability 게이트도 piece 단위로 교정. 기존엔 목적지-단위
+   `SorterFull`(다른 오더 여유 셀까지 포함)로 분기해, A 셀 full·빈 셀 0이어도 **B 오더 여유 셀** 때문에
+   `SorterFull=false`면 A piece가 OK로 새는 잔여 홀이 있었다. → `IDestinationStatusService.SorterCanAcceptBarcode`
+   신규 = `(빈 enabled 셀 ≥1) OR (그 오더 배정 셀 중 여유 셀 보유)` — **SelectCell 비-null 조건과 동형**.
+   `RcsController` availability: 소터는 Paused 차단 후 `SorterCanAcceptBarcode ? None : Full`.
+   ("IF-05 OK ⟺ SelectCell 적재 가능" 완전 동형. 목적지-단위 SorterFull은 푸시 ready 전용으로 유지.)
+
+**불변식 테스트 2건 추가**(`SorterCellFullnessTests`):
+- EC-8 — 오더가 full 셀(cell1)+여유 셀(cell2) 보유 + 빈 셀 0 → IF-05 OK·`SelectCell`이 **여유 셀(2)** 선택
+  (full 셀 아님)·적재 후 현재수량 ≤ Capacity(초과 0). 실 sorter_command/cell.Capacity ground-truth.
+- EC-9 — 오더 A full+빈셀0, **다른 오더 B만 여유** → IF-05(A) NG·`SelectCell(A)` null (B 여유 셀은 A에 무용,
+  목적지 SorterFull=false에 끌려 OK로 새지 않음) / IF-05(B) OK·`SelectCell(B)`=2. piece 단위 동형 입증.
+
+### [MINOR-2] ComputeSorterFull 주석 정정
+"단일 원자 쿼리" → 실제는 같은 스코프 2-쿼리 순차 읽기(보수적 스냅샷). 정확성 무해(ready가 full에서
+파생되어 record 내부 불변식 성립)이나 주석 오해 소지 제거.
+
+### 빌드·테스트 결과 (수정 후)
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+dotnet test Wcs.sln → 통과! 실패:0 통과:90 전체:90 (exit 0)   ← +EC-8·EC-9 (88→90)
+  --blame-hang-timeout 90s: teardown 클린(hangdump 0·exit 0)
+타이밍/동시성 표적 5회 연속(SorterCellFullnessTests + RcsPushTests, 20건): RUN 1~5 전부 GREEN
+```
+무변경 가드 유지: Modbus·핸드셰이크·Sim3ds·DepositDecider·Wcs.Core 본문 0, ChuteCapacity 모델 0,
+DB 스키마/마이그레이션/시드 0. SelectCell은 Wcs.Api 수정 가능 영역.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-소터셀수량full + 슈트 IF-05 정정)
+
+### Sprint: 소터 셀 full 정정(셀 작업 투입 수량 기반) + 슈트 IF-05 dispatch full/paused → OK
+
+### 구현 범위 (사용자 확정 4건 Q1~Q4 반영)
+
+**(A) 소터 셀 full = 셀 현재 투입 수량 ≥ 셀 작업 투입 수량(cell.Capacity)**
+- `src/Wcs.Api/DestinationStatusService.cs`:
+  - `LoadedQtyByCell(db, destId, cellIdFilter?)` 신규 — 셀별 현재 투입 수량 산출(읽기 전용·확정2).
+    `sorter_command(status=COMPLETED) JOIN piece.qty`를 `(CellId, PieceId, Qty)` **Distinct** 후
+    cellId로 GroupBy SUM. piece 재시도(=새 sorter_command 행) 중복 합산 0. IF-05·SorterFull **공유 산출원**.
+  - `IsCellAtCapacity(capacity, current)` — `capacity is >0 && current >= capacity`. NULL/≤0 = 무제한(확정3).
+  - `ComputeSorterFull(db, destId)` 신규 — `SorterFull = 빈 enabled 셀 없음 AND 모든 활성 배정 셀 작업수량 도달`(확정1).
+    빈 셀(점유 안 됨) ≥1 → false / 점유 셀 중 작업수량 미달 ≥1 → false / 둘 다 없으면 true(미구성 소터 포함).
+    한 스코프 내 연속 읽기로 단일 시점 스냅샷 산출(check-then-act 분리 없음). m4p4 "빈셀0=full" 대체.
+  - `ComputeSorter`의 `full` 산출을 `ComputeSorterFull`로 교체(`ready = !full && !paused && decision.Ready` 형태 유지).
+  - 인터페이스 메서드 개명·의미 확장: `SorterHasActiveAssignmentForBarcode` → `SorterHasAssignedCellWithRoomForBarcode`.
+    m4p4 "오더 셀 보유=무조건 OK"를 "오더 배정 셀 보유 AND 그 셀 여유(현재<작업, 무제한 포함)"로 좁힘.
+    배정 셀 전부 작업수량 도달이면 false(그 piece도 NG/FULL).
+- `src/Wcs.Api/Controllers/RcsController.cs` IF-05 availability 콜백:
+  - 슈트는 항상 `DestinationBlock.None`(통과). 소터만 `Compute` 후 Paused→차단, Full→`SorterHasAssignedCellWithRoomForBarcode`
+    예외(배정 셀 여유 시 OK) 적용. 개명 메서드로 결선.
+
+**(B) 슈트 IF-05 dispatch full/paused → OK (소터 NG 유지·확정4)**
+- `src/Wcs.Api/DbRepositories.cs` `EfOrderRepository.QueryDestination` — 차단점 dest 타입 분기:
+  - 조기 order-level PAUSED 차단을 `order.Destination.DestType == SORTER_3D`일 때만 적용(슈트 PAUSED 통과).
+  - 배정 목적지 검사 `blocked = !IsActive || (SORTER_3D && Status != NORMAL)` — 슈트 PAUSED 통과,
+    슈트·소터 공통 `IsActive==false`만 차단("목적지 활성" 전제). AUTO 배정은 NORMAL 슈트만이라 무관.
+- `RcsController` availability 콜백에서 슈트 full/paused 통과(상기). ChuteCapacity 집계·`OnReserved` 예약 차감 무변경(초과 허용).
+
+### ⚠ 의도적 동작 변경 — 슈트 NG→OK 반전 테스트 (삭제 아님·갱신)
+기존 슈트 FULL/PAUSED → IF-05 NG 단언 **5건**을 OK로 반전(계약은 ApiIntegration 3건만 명시했으나
+ScenarioTests에 동일 행위 단언 2건이 더 있어 함께 반전 — 미반전 시 실패함):
+- `ApiIntegrationTests.If05_Chute_Paused_Ng` → 슈트 PAUSED → **OK·chuteNo=6**.
+- `ApiIntegrationTests.If05_Chute_Full_ThenCleared_Normal` → 슈트 FULL → **OK**(비움 전후 둘 다 OK).
+- `ApiIntegrationTests.VS2_If05_PausedOrder_NgPaused` → 슈트 PAUSED 오더 → **OK·chuteNo=6**.
+- `ScenarioTests.S8_Chute_Full_Then_Cleared_Ok` → 슈트 FULL → **OK**(비움 전후 둘 다 OK).
+- `ScenarioTests.S8_Chute_Paused_Ng` → 슈트 PAUSED → **OK·chuteNo=6**.
+(소터 PAUSED/FULL NG는 회귀 0 — `SorterCellFullnessTests.EC3`·EC-1/EC-2가 소터 NG 유지를 단언.)
+
+### 테스트 (계약 HP-1~5 · EC-1~7 = 12, 실 sorter_command/cell.Capacity DB·가짜 RCS 본문 ground-truth)
+`tests/Wcs.Tests/SorterCellFullnessTests.cs` 전면 재작성(m4p4 7건 → 이 스프린트 12건):
+- HP-1 배정 셀 여유(현재3<작업10)+빈셀0 → IF-05 OK·reason=NORMAL.
+- HP-2 새 오더 빈 셀 → IF-05 OK(m4p4 free-cell 회귀 가드).
+- HP-5 빈셀0 + 일부 배정 셀 여유(cell3 미달) → SorterFull=false·push ready=true 유지(폭주 0).
+- EC-1 배정 셀 작업수량 도달(현재5≥작업5)+빈셀0 → IF-05 NG·reason=FULL(실 sorter_command 행 ground-truth).
+- EC-2 새 오더 빈셀0+전 배정 셀 도달 → IF-05 NG(FULL).
+- EC-3 소터 PAUSED → IF-05 NG(소터 불변).
+- EC-4 cell.Capacity NULL=무제한 → 현재 100이어도 수량-full 미적용 → IF-05 OK·SorterFull=false.
+- EC-5 동시성 — 6스레드 적재(sorter_command COMPLETED)/배정/해제 churn + Compute 반복 → 내부 모순(full&&ready,
+  ready 합성) **0건**. quiesce 후 SorterFull 등가성 수렴(누락 0).
+- EC-6 셀 경계값 Theory — 현재4<작업5=OK / 현재5==작업5=NG / 현재6>작업5=NG(≥ 등호).
+- EC-7 마지막 여유 셀 작업수량 도달(현재3→5) → 관찰 타이머 ready=true→false 전이 **1건** → 빈 셀 복귀 → ready=true 재푸시 1건.
+
+### 무변경 확인
+- Modbus·C/R 핸드셰이크·Sim3ds·`DepositDecider`(순수)·`Wcs.Core` 본문 무변경.
+- 인바운드 IF-09/10·푸시(Phase 2) 메커니즘(전이추적·per-dest 락·in-flight·150ms 관찰 타이머) 무변경 —
+  `Compute` 내부 `SorterFull` 의미만 수량 반영으로 확장(관찰 타이머가 매 주기 DB 재조회로 합성 ready 전이 포착).
+- 슈트 `ChuteCapacityService` 모델(GetHold·OnReserved/OnDeposited/OnCleared·집계) 무변경.
+- DB 스키마·마이그레이션·시드 무변경(`cell.Capacity` 기존 nullable 컬럼 재활용, NULL=무제한).
+- `IServiceScopeFactory` 패턴 유지(싱글톤 captive 0). 테스트 인프라(RcsPushWebApplicationFactory·FakeRcsServer·OccupyCells 등) 재사용.
+
+### 빌드·테스트 결과
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0
+
+dotnet test Wcs.sln → 통과! 실패:0 통과:88 전체:88 (exit 0)
+  (기존 83 → 88 = +12 신규 SorterCellFullnessTests − 7 구 SorterCellFullnessTests)
+  --blame-hang-timeout 90s: teardown 클린(시퀀스 파일 0·hangdump 0·exit 0)
+
+타이밍/동시성 표적 5회 연속(SorterCellFullnessTests + RcsPushTests, 18건):
+  RUN 1~5: 통과! 실패:0 통과:18 전체:18 (모두 GREEN)
+```
+
+### 동시성/불변식
+- 단일 응답 내부 불변식(셀full ⟹ 그 piece NG / SorterFull ⟹ push ready=false)은 한 Compute record 내부에서
+  원자적으로 성립(EC-5 churn 0 모순). 조회와 적재 사이 race는 다음 관찰/다음 IF-05에서 재평가(eventually consistent).
+- 푸시 전이 멱등(전이당 1회·중복 0·누락 0)은 기존 Pusher per-dest 락·in-flight로 보존(EC-7 전이당 1건 확인).
+
+---
+
 ## IMPLEMENTATION COMPLETE v2 (M4-P2b — Evaluator FAIL 재작업 후 최종)
 
 ### 평가자 FAIL → 재작업 수정 내역 (2차 제출)
