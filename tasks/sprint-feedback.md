@@ -1,3 +1,65 @@
+# Sprint Feedback — S-소터push운영상태 (소터 IF-08 push ready를 운영상태로 좁힘) — APPROVED
+
+## Phase 3 Evaluate 결과 (Evaluator fresh evidence, 미커밋 working tree `feat/sorter-push-operational`, 2026-06-25)
+
+**최종 판정: APPROVED** — 계약 Verification Scenarios(VS-1~10)·Completion Conditions·Evaluation Criteria(35/25/20/15/5)·크로스-엔드포인트 정합(push·IF-05가 같은 Compute 산출을 분기 소비) 전부 fresh 직접 실행 증거로 충족. 무변경 가드 11개 경로 diff 0·IF-05 `r.Ready` 미소비 grep 0·teardown 회귀 0·baseline 귀속 명확(90→99=+9 신규).
+
+### Ground-truth 확인 (stale 재핸드오프 아님)
+- `git rev-parse HEAD` = `7b12098`(PR #15 머지 = 직전 스프린트). 본 스프린트 변경은 **working tree 미커밋/untracked**(이미 커밋된 스프린트 아님 → 정당 활성 핸드오프). 브랜치 `feat/sorter-push-operational`.
+- `sprint-log.md` 최상단 `## IMPLEMENTATION COMPLETE (S-소터push운영상태)` 마커 존재 확인.
+- 변경 파일(working tree): `docs/wcs_rcs_interface_kr.html`·`src/Wcs.Api/DestinationStatusService.cs`·`tests/Wcs.Tests/{ApiIntegrationTests,SorterCellFullnessTests}.cs`·신규 `tests/Wcs.Tests/SorterPushOperationalTests.cs`(+ tasks/ 하네스 산출물). 소스 변경 = `DestinationStatusService.cs` 1개뿐(계약 single-module 일치).
+
+### Fresh evidence (직접 실행 — generator 주장 신뢰 아님)
+- **build**: `dotnet build Wcs.sln` → **경고 0개 / 오류 0개, BUILD_EXIT=0**.
+- **full test**: `dotnet test Wcs.sln --blame-hang-timeout 120s` → **통과! 실패:0 통과:99 건너뜀:0 전체:99, FULL_SUITE_EXIT=0**. Blame 수집기 "모든 테스트 실행이 완료되었지만, 시퀀스 파일이 생성되지 않습니다"(teardown hang/dump 0건). 중단/abort 라인 0.
+- **baseline 귀속**: 본 스프린트 변경을 `git stash`로 제거 후 HEAD(`7b12098`) baseline 측정 → **통과:90 exit 0, teardown 클린**. 복원 후 99 = 90 baseline + 9 신규 SorterPushOperational. teardown은 baseline에서도 이미 클린 → 본 변경이 teardown 회귀 도입 0. (stash pop 클린 복원 확인.)
+- **flaky 0(타이밍/동시성 표적 ≥5회 단독)**: `VS9|VS2|VS3|EC7|EC5|VS1` 필터(12건 — VS-9a barrier 16스레드 동시관찰·VS-9b no-flood·VS-2 전이·VS-3 offline·EC-7 만재 churn 무발화·EC-5 동시 churn·VS-1) **5/5회 연속 12/12 GREEN·exit 0·시퀀스 파일 0**. 비결정성 0.
+  ```
+  RUN 1: exit=0 통과:12 (4s)   RUN 2: exit=0 통과:12 (3s)   RUN 3: exit=0 통과:12 (4s)
+  RUN 4: exit=0 통과:12 (3s)   RUN 5: exit=0 통과:12 (3s)
+  ```
+- **신규 suite 단독**: `SorterPushOperationalTests` 9/9 GREEN. `SorterCellFullnessTests`(반전 EC-1/3/5/7+HP-5 포함) 14/14 GREEN.
+
+### Verification Scenarios — 항목별 PASS/FAIL (실 DB seed·게이트웨이 snapshot·가짜 RCS push payload ground-truth)
+- **[PASS] VS-1 (소터 online·정렬·Ready=1 → push ready=true)**: `VS1_...` — `AlignSorterAsync`(SetReady/CurFloor=2/TgtFloor=0) → `Compute(SORTER_3D).Ready==true`·`Online==true`·`Reason==None` + 가짜 RCS 수신 본문 `LastFor(sorterChute).Ready==true`(실 HTTP push payload). `DestinationStatusService.cs:313` `ready = decision.Ready`.
+- **[PASS] VS-2 (소터 busy → push ready=false, 2 하위)**: `VS2_...[Theory]` — (a) `SetReady(false)`→`Reason==Busy` (b) `SetCurFloor(1)`(미정렬)→`Reason==NotAligned`. 두 케이스 모두 `Compute().Ready==false` + push payload `LastFor.Ready==false`(true→false 전이 관찰).
+- **[PASS] VS-3 (소터 offline → push ready=false)**: `VS3_...` — `SetFailReads(true)`(읽기 IOException 주입 = 진짜 OFFLINE, Disconnect 즉시재연결 회피) → snap.Online=false → `Compute().Online==false`·`Ready==false`·`Reason==Offline` + push payload `LastFor.Ready==false`.
+- **[PASS] VS-4 [핵심회귀] (셀 만재여도 운영상태 ready → push ready=true)**: `VS4_...` — `MakeSorterFull`(Capacity=5·3셀 전부 점유·각 sorter_command COMPLETED+piece.qty=5 = 실 JOIN ground-truth) → **`Compute().Full==true` AND `Compute().Ready==true` 공존**·`Reason==None` + push payload `LastFor.Ready==true`. 만재가 push에 무영향 입증.
+- **[PASS] VS-5 [핵심회귀] (PAUSED여도 운영상태 ready → push ready=true)**: `VS5_...` — `destination.Status=PAUSED`(실 DB) → **`Compute().Paused==true` AND `Compute().Ready==true` 공존**·`Reason==None` + push payload `LastFor.Ready==true`. paused가 push에 무영향 입증.
+- **[PASS] VS-6 (슈트 push full/pause→false·비움/정지해제→true 현행 유지)**: 회귀 — `RcsPushTests.PUSH1_Chute_ReadyTransition`(만재→ready:false·비움→ready:true 전이당 1건)·부트스트랩 PAUSED 슈트6 `LastFor(6).Ready==false`. ComputeChute(`:247-252`) 무변경. 전체 99 GREEN에 포함·기존 단언 불변.
+- **[PASS] VS-7 (IF-05 소터 3축 — r.Ready 무영향)**: `VS7_...` 실 HTTP `POST /api/v1/destination-query` — (a) offline(`SetFailReads`)+셀있음 → `Compute().Ready==false`인데 `result=="OK"`·chuteNo 반환(IF-05는 online 안 봄) (b) `Status=PAUSED` → `result=="NG"`·chuteNo=null (c) `MakeSorterFull`+정렬(`Compute().Ready==true`) → `SorterCanAcceptBarcode==false`·`result=="NG"`. 운영상태 ready 변화가 세 결과에 무영향(IF-05는 `r.Paused`+`SorterCanAcceptBarcode`만 소비) 입증.
+- **[PASS] VS-8 (IF-05 슈트 full/pause여도 OK)**: 회귀 — `RcsController.cs:69-70`(슈트는 `DestinationBlock.None` 무조건 통과) + `SorterCellFullnessTests`의 슈트 IF-05 OK 단언(이전 스프린트 반전분) 불변. 전체 GREEN 포함.
+- **[PASS] VS-9 (push 멱등 + 만재/paused 무발화)**: (a) `VS9a_...` — 부트스트랩 1건(ready=false) 안정 후 운영상태 전이(정렬) 발생, **16스레드 Barrier 동시관찰** `NotifyChuteChanged` → `WaitUntilExact(2, stableCount:8)`로 정확히 2건(부트1+전이1, 중복 0) = 클레임 경합 멱등 입증(중복억제만 아닌 동시관찰 프로브). (b) `VS9b_...`·`EC7_...` — 운영상태 불변인 채 `MakeSorterFull`+`Status=PAUSED` 전이 → `WaitUntilExact(baseReady, stableCount:8~10)`로 **소터 push 0건**(no-flood)·`LastFor.Ready==true` 유지. (c) 무변화 폴 폭주 0.
+- **[PASS] VS-10 (무변경 가드 + grep)**: `git diff HEAD --stat`로 Wcs.Core·PlcGateway·Sim3ds·Data·Migrations.{Sqlite,SqlServer}·DestinationStatusPusher.cs·RcsPushClient.cs·RcsController.cs = **빈 출력(0줄)**. IF-05 `r.Ready` 미소비: `grep "\.Ready" RcsController.cs` → line 170 `decision.Ready`(IF-09 DepositDecision 로깅) 1건뿐 — `r.Ready`(DestinationReadiness) 소비 0. IF-05 콜백(`:64-79`)은 `r.Paused`+`SorterCanAcceptBarcode`만 소비(코드 직접 확인).
+
+### Evaluation Criteria 충족 (가중치)
+- **[PASS] ① 소터 push ready 운영상태 정확성 (★★★ 35%)**: `ready = decision.Ready`(`:313`). VS-1(true)·VS-2(busy false)·VS-3(offline false)·VS-4(만재+ready 공존)·VS-5(paused+ready 공존) 실 push payload로 입증.
+- **[PASS] ② push 전이 발화 정확성 (★★★ 25%)**: VS-9a 전이당 1건(동시 16관찰 중복 0)·VS-9b·EC-7 만재/paused 전이 무발화(no-flood). 멱등 기계(DestinationStatusPusher) 무변경 보존.
+- **[PASS] ③ 회귀 0 (★★ 20%)**: 슈트 push(VS-6)·IF-05 소터3축(VS-7)·IF-05 슈트(VS-8)·IF-09/IF-10 인바운드 불변. 반전 단언(EC-1/3/5/7·HP-5)은 삭제 아닌 정정(diff로 확인) — IF-05 NG·reason=FULL/Paused 회귀 가드 단언 보존. baseline 90 회귀 0.
+- **[PASS] ④ 무변경 가드 (★★ 15%)**: VS-10 — 11개 경로 git diff 0줄.
+- **[PASS] ⑤ 스펙 문서 정합 (★ 5%)**: `git diff HEAD -- docs/wcs_rcs_interface_kr.html` 실제 4개 라인영역(126·172·208·216~217) 정정 확인(diff 인용). 소터 push ready=운영상태·만재/정지는 IF-05 dispatch로 명문화. SPEC.md는 push-ready 정의 부재(폐지된 폴링 모델)라 무변경(계약 "있으면 정합·없으면 무변경" 준수 — 허위 deliverable 주장 0).
+
+### Completion Conditions — 전부 충족
+build 0/0·full GREEN exit 0·teardown 클린·표적 5회 flaky 0·무변경 가드 diff 0·docs diff 라인 확인·IF-05 r.Ready 미소비 grep 0.
+
+### Minor 관찰 (비차단 — 다음 sprint Generator 참고)
+- `DestinationStatusService.cs:34` `LoadedQtyByCell` 본문 주석에 "(LOADED)" 표현이 남았으나 실 산출원은 sorter_command(COMPLETED) JOIN — 코드는 정확, 주석 단어만. 비차단(이번 변경 표면 밖, 산출 로직 무변경 zone).
+- 계약 §46에서 언급된 orphan `SorterHasAssignedCellWithRoomForBarcode`(인터페이스 `:84`)는 여전히 존재하나 계약이 "본 스프린트 표면 밖·무리하게 끌어오지 말 것"으로 명시 → 정당한 scope-out. 별도 정리 sprint 권장.
+
+## Step 4.5 독립 코드리뷰 (orchestrator, opus, 팀 외부) — APPROVE (BLOCKING/MAJOR/MINOR 0)
+
+독립 Opus 코드리뷰어가 7가설 적대적 검증 후 **APPROVE** — 차단 사유 0:
+1. **크로스엔드포인트 분리**: `Compute()` 3소비처 grep — push=`.Ready`만/IF-05=`.Paused`만/`r.Ready` IF-05 소비 0(구조적 입증).
+2. **Reason 무붕괴**: `Compute().Full/Reason` production 미소비(테스트만) + ComputeSorter가 hold=None 주입 → DepositDecider Full/Paused 분기 도달불가 → stale 누출 0. `ready=true ⟹ reason=None`.
+3. **push 전이**: Pusher가 ready bool에 agnostic → 운영전이만 발화·만재/paused 무발화 구조 보장. full torn-read가 ready(=decision.Ready, DB 셀쿼리 미사용)에 무영향.
+4. **무변경 가드**: 11파일 diff 0. 5. **엣지 6케이스**: `ready⟹online` 불변식. 6. **스펙 4라인** 과/소정정 0. 7. **반전 7건** 정정·IF-05 NG 가드 보존.
+
+정보성 2건(비차단·todo 등재): ①`DestinationReadiness.Full/Paused/Reason` 현재 production 미소비(dead-but-consistent — 향후 소비처 생기면 ready=true&&Full=true 의미 재확인) ②`docs/SPEC.md` §2 구 IF-08(deposit-permission 폴링) 모델 기술 잔존(선재 문서부채·스코프밖).
+
+→ BLOCKING 0 → Step 5 커밋 진행. 7회째 독립 리뷰 중 P2b에 이은 2번째 클린 통과(산출 단일지점 변경+소비처 grep+크로스엔드포인트 연결 테스트로 사전 방어).
+
+---
+
 # Sprint Feedback — S-M4-P4 (소터 셀 만재 판정 m4p4) — APPROVED
 
 ## Phase 3 Evaluate 결과 (Evaluator fresh evidence, 미커밋 working tree `feat/sorter-cell-fullness`, 2026-06-24)
