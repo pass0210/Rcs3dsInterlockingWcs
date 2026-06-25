@@ -264,6 +264,11 @@ public sealed class FakeModbusMasterForApi : IModbusMaster
     private readonly ushort[] _registers = new ushort[RegisterMap.BlockLength];
     private readonly object   _lock      = new();
 
+    // 읽기 실패 주입 — true면 ReadHoldingRegistersAsync가 IOException을 던져 폴 루프가
+    // OFFLINE 전이(연속 실패 / HardEx)를 일으킨다. Disconnect()만으로는 EnsureConnected가
+    // 즉시 재연결해 OFFLINE이 안 되므로(읽기가 성공) 진짜 오프라인 시뮬레이션엔 이 토글을 쓴다.
+    private volatile bool _failReads;
+
     public FakeModbusMasterForApi()
     {
         // 초기 상태: Ready=1, CurFloor=1, TgtFloor=0
@@ -281,8 +286,14 @@ public sealed class FakeModbusMasterForApi : IModbusMaster
     public void Disconnect() => IsConnected = false;
     public void Dispose()    { }
 
+    /// <summary>읽기 실패 주입 토글 — true면 폴 읽기가 IOException으로 실패해 OFFLINE 전이를 유발.</summary>
+    public void SetFailReads(bool fail) => _failReads = fail;
+
     public Task<ushort[]> ReadHoldingRegistersAsync(ushort startAddress, ushort count, CancellationToken ct)
     {
+        if (_failReads)
+            throw new System.IO.IOException("FakeMaster: read fault injected (OFFLINE simulation)");
+
         lock (_lock)
         {
             var result = new ushort[count];
