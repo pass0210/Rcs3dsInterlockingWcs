@@ -17,6 +17,10 @@
 - [ ] [정리] `Compute` 본문 주석(`DestinationStatusService.cs:253`)에 "단일 원자 쿼리로 평가" 잔존 — `ComputeSorterFull` 주석은 2-쿼리로 정정됐으나 이 1줄 미반영. 주석 불일치(정확성 무해). → "같은 스코프 순차 읽기"로 정정.
 - [ ] [정보성] 동일 오더 **동시 IF-10 2건**이 같은 여유 셀을 둘 다 읽고 적재 시 일시 Capacity 초과(soft-threshold, 1건 바운드·자가수렴). m4p4에도 없던 용량 모델 본질 특성이며 이 fix가 악화 안 함(SelectCell tx는 배정 INSERT만 직렬화, sorter_command 적재는 별도 핸드셰이크 콜백). 계약 §88-89 "단일 응답 내부 불변식 + eventually-consistent" 범위 내(교차 IF-10 직렬 capacity 강제 미약속). 강제 직렬화 필요 시 후속(만재센서 도입과 함께 재검토).
 
+## S-E2E-MULTI-AGV 후속(코드리뷰 MINOR·finding — 비차단)
+- [ ] [정보성·테스트] E2EGroupGHI I2 단언 `sw.ElapsedMilliseconds < 3000` 느슨 경계 — 동기 핸드셰이크 대기로의 회귀는 잡으나(비공허) 3s 경계가 헐거움. 더 결정적인 단언(핸드셰이크 미완료 상태 직접 관찰)으로 조일 수 있음.
+- [ ] [FINDING·진성·후속] 한 소터 concurrent 핸드셰이크 직렬화 부재 — `HandshakeOrchestrator.ExecuteAsync` 인스턴스 락 0(공유 `_gw.Latest` RSeq 폴링) → 한 소터 동시 IF-10 시 R_Seq 교차 MISMATCH≥1. 순차 dispatch면 전부 COMPLETED(SPEC §6 물리 직렬 모델 정합·현 지원). **동시 IF-10 허용 명세 미정** → 허용하려면 orchestrator 직렬화(per-소터 락) 필요. RCS가 한 소터에 동시 다발 IF-10을 보낼 가능성 확인 후 결정. (E2E F1b가 현 동작으로 명시 단언.)
+
 ## S-소터push운영상태 후속(코드리뷰 정보성 — 비차단)
 - [ ] [문서부채·선재] `docs/SPEC.md` §2(line 20·60)가 **폐지된 구 IF-08(deposit-permission 폴링) 모델**을 기술 — RCS 재설계로 IF-08=WCS→RCS 상태 푸시로 대체됐으나 SPEC.md는 미반영(canonical 정의서 wcs_rcs_interface_kr.html은 최신). 이 스프린트 이전부터의 문서 부채. 별도 문서 정리에서 SPEC.md IF-08 섹션을 푸시 모델(+소터 push=운영상태 / IF-05=셀·관리 게이트 2단계)로 갱신 권고.
 - [ ] [정리·정보성] `DestinationReadiness.Full`/`Paused`/`Reason` 필드가 현재 **production 미소비**(테스트 introspection·내부 산출 전용 — IF-05는 `SorterCanAcceptBarcode`·`r.Paused`만, push는 `r.Ready`만). dead-but-consistent. 향후 이 필드들의 소비처가 생기면 "ready=true && Full=true 공존" 의미를 재확인할 것(현재는 무해).
