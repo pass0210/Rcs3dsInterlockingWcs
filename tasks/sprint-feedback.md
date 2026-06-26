@@ -1,3 +1,29 @@
+# Sprint Feedback — S-E2E-MULTI-AGV — APPROVED 유지 (post-commit 재확인 + IT4b 독립 검증)
+
+## Phase 3 Post-Commit 재확인 (Evaluator fresh evidence, HEAD `c47e790`·PR #19, 2026-06-26)
+
+**최종 판정: APPROVED 유지** — 스프린트가 커밋(c47e790)·PR #19로 정착된 상태에서 generator가 IT4b 잔여 리스크를 정직 보고하며 재핸드오프. Evaluator 독립 재검증:
+
+### Ground-truth
+- HEAD `c47e790`(E2E 8파일·S9 stable-count fix `WaitUntilStableCountAsync`×3 **커밋 확인**). working tree = `tasks/sprint-log.md`+`.claude/`뿐. `git diff HEAD -- src/` 빈 출력(production 0). S9 blob `afc8941` 불변(직전 Rev.2 평가분과 동일 — 재검증 불요).
+- IT4b는 `tests/Wcs.Tests/PlcGatewayIntegrationTests.cs`의 **기존 미수정** 테스트(`IT4b_WritesDuringReconnect_NoCorruption`) — 이 스프린트 코드 아님.
+
+### build 함정(환경·정직 기록)
+- 1차 빌드 "오류 2·경고 25"는 **MSB3021/MSB3027 파일 잠금** — 고아 `Wcs.Sim3ds.exe`(PID 49188·이전 세션 standalone exe 잔류)가 출력 바이너리를 잠가 복사 실패. **코드 오류 아님**. 프로세스 kill 후 클린 재빌드 **경고0/오류0**. (E2E 인-프로세스 SimServer는 정상 정리됨 — 내 15회 실행 후 잔류 Sim3ds 0.)
+
+### IT4b 독립 검증 (generator 정직 보고 → Evaluator fresh 재현 시도)
+- generator 보고: IT4b가 E2E 병렬 부하서 저빈도(초기 10회중 2회) flake(Success→RSeqMismatch). 근본=xUnit 기본 병렬 + 무거운 실 Sim E2E가 타이밍 민감 실 Sim 통합 테스트와 동시 실행(CPU/소켓 경합). team-lead 결정=**S9-only 스코프**(병렬 비활성 미채택), IT4b는 후속 finding.
+- **Evaluator 직접 full-suite 15회 연속**(클린 슬레이트·런 간 testhost/Sim3ds 정리) → **PASS=15/15·146/146·exit0·IT4b flake 0회**. 직전 10/10 + generator 12/12 합산해도 IT4b 미발현. → IT4b는 **부하/스케줄러 의존 저빈도** — 현 머신 상태선 미재현이나, generator 보고가 거짓이라 단정 못 함(저빈도 특성상 25회로도 0 가능). **정직 보고로 수용**(은폐 아님 = 가점), S9-only 스코프 하 본 스프린트 PASS.
+
+### 판정: Completion #1~#8·Evaluation ①~⑥ 전부 PASS 유지 (S9-only 스코프)
+- ②④(전체 GREEN·flaky0): 스프린트 deliverable(S9 fix+E2E) 기준 15/15 GREEN. IT4b는 미수정 기존 테스트·team-lead 후속 결정·내 15회 미발현 → 본 스프린트 차단 아님.
+- ⑥ 정직 보고: F1b(직렬화 갭)에 더해 **IT4b 잔여 리스크까지 은폐 없이 명시·team-lead 보고** — 정직성 추가 가점.
+
+### ⚠ Evaluator 권고 (team-lead 판단)
+- **IT4b finding이 `tasks/todo.md`에 아직 미등재**(grep 0). generator/team-lead 합의(S9-only·IT4b 후속)대로라면 todo.md에 IT4b 항목 추가 필요(나도 보고에 포함). 후속 처리 옵션: (A) `[CollectionDefinition·DisableTestParallelization]`로 실 Sim 통합 테스트를 E2E와 직렬화(즉효·team-lead 미승인), (B) IT4b를 WaitUntil 기반으로 견고화, (C) CI에서 별도 격리 실행.
+
+---
+
 # Sprint Feedback — S-E2E-MULTI-AGV (다중 AGV 전 플로우 경우의 수 E2E) — APPROVED (Rev.2 fix 재확인)
 
 ## Phase 3 Re-Evaluate 결과 (Evaluator fresh evidence, branch `test/e2e-multi-agv-scenarios`, 2026-06-26 Rev.2 — S9 stable-count 변형)

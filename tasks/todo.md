@@ -20,6 +20,7 @@
 ## S-E2E-MULTI-AGV 후속(코드리뷰 MINOR·finding — 비차단)
 - [ ] [정보성·테스트] E2EGroupGHI I2 단언 `sw.ElapsedMilliseconds < 3000` 느슨 경계 — 동기 핸드셰이크 대기로의 회귀는 잡으나(비공허) 3s 경계가 헐거움. 더 결정적인 단언(핸드셰이크 미완료 상태 직접 관찰)으로 조일 수 있음.
 - [ ] [FINDING·진성·후속] 한 소터 concurrent 핸드셰이크 직렬화 부재 — `HandshakeOrchestrator.ExecuteAsync` 인스턴스 락 0(공유 `_gw.Latest` RSeq 폴링) → 한 소터 동시 IF-10 시 R_Seq 교차 MISMATCH≥1. 순차 dispatch면 전부 COMPLETED(SPEC §6 물리 직렬 모델 정합·현 지원). **동시 IF-10 허용 명세 미정** → 허용하려면 orchestrator 직렬화(per-소터 락) 필요. RCS가 한 소터에 동시 다발 IF-10을 보낼 가능성 확인 후 결정. (E2E F1b가 현 동작으로 명시 단언.)
+- [ ] [테스트 인프라·후속] 실-Sim I/O 통합 테스트(IT4b `IT4b_WritesDuringReconnect_NoCorruption`·S9·핸드셰이크 R_Seq류)가 **xUnit 기본 병렬 + 무거운 E2E 부하**에서 저빈도 flake(RSeqMismatch). 근본=실 Modbus TCP I/O 타이밍 테스트가 무거운 E2E와 병렬 실행 시 CPU/소켓 경합. **클린 단일 런은 결정적**(Evaluator fresh 25+회 0 발현·Generator 12/12), 미정리 누적·고부하 러너에서만 드물게 발현. S9는 본 스프린트서 stable-count로 견고화 완료. 옵션: **(B) 권장** — 실-Sim 통합+E2E 테스트만 `[CollectionDefinition]`+`DisableTestParallelization`로 직렬 컬렉션(나머지 unit은 병렬 유지·속도 보존) / (A) 어셈블리 전체 병렬 비활성(즉효·12s→42s blunt) / (C) IT4b 개별 WaitUntil 견고화(whack-a-mole). 실 CI에서 발현 시 (B) 착수.
 
 ## S-소터push운영상태 후속(코드리뷰 정보성 — 비차단)
 - [ ] [문서부채·선재] `docs/SPEC.md` §2(line 20·60)가 **폐지된 구 IF-08(deposit-permission 폴링) 모델**을 기술 — RCS 재설계로 IF-08=WCS→RCS 상태 푸시로 대체됐으나 SPEC.md는 미반영(canonical 정의서 wcs_rcs_interface_kr.html은 최신). 이 스프린트 이전부터의 문서 부채. 별도 문서 정리에서 SPEC.md IF-08 섹션을 푸시 모델(+소터 push=운영상태 / IF-05=셀·관리 게이트 2단계)로 갱신 권고.

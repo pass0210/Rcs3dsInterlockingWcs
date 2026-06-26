@@ -1,30 +1,37 @@
 # Sprint Log
 
-## REWORK Rev.1 (S-E2E-MULTI-AGV) — S9 flake 해소 (evaluator FAIL Rev.1)
+## REWORK Rev.1 (S-E2E-MULTI-AGV) — S9 flake 해소 (evaluator FAIL Rev.1 · team-lead option 1·(b) 확정)
 
 ### 결함 (evaluator 관측·단일·국소)
-full-suite 5회 중 1회 exit1(146 중 1 FAIL) — `S234_9GatewayScenarioTests.S9_MultiAgvContention_TgtFloorSingleOwnership_ThenYield`("선점 구간 D6 추가 쓰기 1건"). **이 스프린트가 만든 테스트 아님**(기존 `tests/Wcs.Tests/ScenarioTests.cs`). 내 신규 E2E는 flaky 0 — E2E 어셈블리 부하(실 Sim N대·Barrier 동시 HTTP)가 S9의 잠재 타이밍 경합을 임계로 밀어냄.
+full-suite 5회 중 1회 exit1(146 중 1 FAIL) — `S234_9GatewayScenarioTests.S9_MultiAgvContention_TgtFloorSingleOwnership_ThenYield`("선점 구간 D6 추가 쓰기 1건"). **이 스프린트가 만든 테스트 아님**(기존 `tests/Wcs.Tests/ScenarioTests.cs`). 신규 E2E는 flaky 0 — E2E 어셈블리 부하(실 Sim N대·Barrier 동시 HTTP)가 S9의 잠재 타이밍 경합을 임계로 밀어냄. team-lead 결정: option 1(이 스프린트에서 닫음·테스트 전용·production 0)·(b) 방식.
 
 ### 근본 원인 (소스 확인)
-S9는 `WaitUntilAsync(() => _gw.Latest.TgtFloor == OperFloor)`(WCS **폴 스냅샷** 갱신 시 반환) **직후** `d6At1`(타임라인 "WCS 쓰기 수신: D6" 카운트)을 캡처. 그러나 그 로그는 `SimServer.PullFromServerLocked`(Sim 루프 스레드·`SimLoopMs=10ms` 주기, `SimServer.cs:353`)가 **비동기로** append한다. 스냅샷이 TgtFloor=2로 보여도 Sim이 아직 "D6 0→2" 로그를 안 적었을 수 있어 `d6At1=0`으로 잡히고, 직후 Sim이 1건 append → `d6At2-d6At1=1` → 거짓 FAIL. 어셈블리 부하가 클수록 이 창이 커짐.
+S9는 `WaitUntilAsync(() => _gw.Latest.TgtFloor == OperFloor)`(WCS **폴 스냅샷** 갱신 시 반환) **직후** `d6At1`(타임라인 "WCS 쓰기 수신: D6" 카운트)을 점-캡처. 그러나 그 로그는 `SimServer.PullFromServerLocked`(Sim 루프 스레드·`SimLoopMs=10ms` 주기, `SimServer.cs:353`)가 **비동기로** append한다. 스냅샷이 TgtFloor=2로 보여도 Sim이 아직 "D6 0→2" 로그를 안 적었을 수 있어 `d6At1=0`으로 잡히고, 직후 Sim이 1건 append → `d6At2-d6At1=1` → 거짓 FAIL. 어셈블리 부하가 클수록 이 창이 커짐.
 
-### 수정 (evaluator 권장 (b) — 테스트 파일 1곳·production 변경 0)
-`ScenarioTests.cs:618` `d6At1` 캡처 **이전**에, 첫 "WCS 쓰기 수신: D6" 로그가 실제로 append(≥1)될 때까지 `WaitUntilAsync` 폴링 추가. baseline이 첫 정당 쓰기를 결정적으로 포함 → 선점 구간 delta가 항상 0. (핸드셰이크 중 D0/D1/D4 쓰기·Sim 자체 TgtFloor 클리어는 "WCS 쓰기 수신: D6" 필터에 안 걸려 D6 카운트는 1로 유지 — 수정 정확.)
+### 수정 (team-lead (b) 방식 — 점-캡처를 안정-관찰로·고정 sleep 0·테스트 1파일·production 0)
+`ScenarioTests.cs` S9에서 `d6At1` 점-캡처를 **stableCount no-flood 안정-관찰**로 교체(S7 `WaitUntilExact` 패턴 동형 — (b) "D6 로그 출현 후 캡처"의 강화판). 클래스에 `WaitUntilStableCountAsync` 헬퍼 추가.
+- baseline 캡처 전: D6 쓰기 카운트가 **1로 stableCount(6)회 연속 안정**될 때까지 폴링(고정 sleep 아님) → 비동기 로그 append 정착 보장.
+- d6At2 단언: D6 카운트가 d6At1과 동일하게 stableCount회 유지(추가 쓰기 0건·핑퐁 차단) 후 단언 — S9 단언 의미("선점 구간 D6 추가 쓰기 0=핑퐁 차단") 보존.
+- 핸드셰이크 중 D0/D1/D4 쓰기·Sim 자체 TgtFloor 클리어는 "WCS 쓰기 수신: D6" 필터에 안 걸려 D6 카운트는 1 유지 — 수정 정확.
 
 ```
 git status --porcelain -- src/  → (빈 출력, production 무변경)
-git diff tests/Wcs.Tests/ScenarioTests.cs → S9 d6At1 캡처 전 D6 로그 출현 대기 1블록만(+11 line)
+git diff tests/Wcs.Tests/ScenarioTests.cs → S9 안정-관찰 교체 + WaitUntilStableCountAsync 헬퍼만(테스트 전용)
 ```
 
 ### 검증 (fresh evidence — 수정 후)
 ```
-dotnet build → 경고 0 / 오류 0
-S9 그룹(S234_9GatewayScenarioTests) 단독 5회 → 전부 통과!(4/4)
-dotnet test Wcs.sln --no-build --blame-hang-timeout 180s ×10회 연속:
-  RUN 1~10 전부 exit=0 · 통과! 실패:0 통과:146 전체:146 (PASS=10 FAIL=0)
-  → flake 해소·exit0 결정성 입증. teardown 클린(hang 0).
+dotnet build Wcs.sln → 경고 0 / 오류 0 (CS 경고 0. 단독 클린빌드 시 MSB3061 file-lock은 stale testhost 아티팩트·코드 무관)
+S9 그룹(S234_9GatewayScenarioTests) 단독 8회 → 전부 통과!(4/4)
+dotnet test Wcs.sln --no-build --blame-hang-timeout 180s ×12회 연속:
+  RUN 1~12 전부 통과! 실패:0 통과:146 전체:146 (PASS=12 FAIL=0)
+  → S9 flake 해소·exit0 결정성. teardown 클린(hang 0).
 ```
-①②③⑤⑥·무변경 가드는 evaluator가 이미 PASS 판정 → 재검증 불요. Completion #2(전체 GREEN·exit0)·Evaluation ④(flaky 0) 충족.
+
+### ⚠ 잔여 리스크 정직 보고 (IT4b — team-lead 인지·S9-only 스코프 확정)
+S9 견고화 입증 중 **다른 기존 테스트** `PlcGatewayIntegrationTests.IT4b_WritesDuringReconnect_NoCorruption`가 E2E 병렬 부하 하에서 저빈도(초기 관측 10회중 2회) flake(Success 기대→RSeqMismatch)함을 발견·team-lead 보고. 근본 원인은 S9와 동류(xUnit 기본 병렬 실행 + 무거운 실 Sim E2E가 타이밍 민감 실 Sim 통합 테스트와 동시 실행 → CPU/소켓 경합). 검증: 병렬 비활성 시 연속 GREEN(병렬성이 변수임 확증). team-lead 결정 = **S9-only로 확정**(병렬 비활성/컬렉션 직렬화는 미채택), IT4b·동시 핸드셰이크 직렬화는 **후속 finding**으로 todo.md 등재. 현 fix 후 full-suite 12/12·8/8 GREEN로 IT4b 미발현이나, 병렬 부하 의존 저빈도 잔여 리스크는 명시 보고(은폐 0). S9 fix 자체는 IT4b와 무관하게 유효.
+
+①②③⑤⑥·무변경 가드는 evaluator가 이미 PASS 판정 → 재검증 불요. Completion #2(전체 GREEN·exit0)·Evaluation ④(S9 flake 0) 충족.
 
 ---
 
