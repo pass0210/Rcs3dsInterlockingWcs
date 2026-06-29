@@ -1,5 +1,62 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE (S-M5-P1) — 콜드스타트 프로비저닝 + Windows Service 호스팅
+
+작업: Generator(standalone) · 브랜치 `feat/m5-coldstart-hosting` · 커밋 없음(working tree만, team-lead 커밋).
+
+### 게이트 메커니즘 (Generator 설계·정당화)
+- **신규 startup 훅**: `src/Wcs.Api/Startup/DbInitializer.cs` — `app.Build()` 이후 `app.Run()` 이전(Program.cs:145)에서
+  `await DbInitializer.ProvisionAsync(app)` 1회 호출. IHostedService(ChuteCapacityService·SorterRegistryFactory)가
+  DB를 조회하기 전에 스키마를 보장한다(직전 E2E 크래시 `no such table: chute_detail`의 정확한 발생 지점).
+- **테스트 안전 게이트(최우선 제약)**: DI에 등록된 `WcsDbContext`의 실제 연결을 검사해 **in-memory SQLite면 Migrate·시드를 전부 건너뜀**.
+  판별 = `db.Database.IsSqlite()` && `SqliteConnectionStringBuilder.Mode == Memory`(또는 DataSource==":memory:").
+  5개 테스트 팩토리는 모두 `Mode=Memory;Cache=Shared`를 쓰므로 자동 no-op → **테스트 배선 0줄 변경**(무변경 가드 §3.6 준수).
+  실 호스트는 파일(`Data Source=wcs.db`)/SqlServer라 게이트를 통과해 Migrate 실행. 라이브 로그로 양 경로 모두 입증.
+- **자동 Migrate 게이트**: `Database:MigrateOnStartup`(기본 true, appsettings 외부화·`_comment_` 문서화). provider 분기는
+  기존 AddDbContext 등록(Wcs.Migrations.Sqlite/SqlServer)을 그대로 사용 — 새 마이그레이션 생성 0(적용만).
+- **dev 시드 게이트(운영 안전)**: `Database:SeedOnStartup`(bool?, appsettings.json 기본 **false** = 운영 안전).
+  null이면 `IsDevelopment()` fallback. `appsettings.Development.json` 신규로 dev는 true 오버라이드(운영 base는 false 유지).
+  `DbSeeder.Seed` 본문 무변경(이미 멱등). 시드는 게이트 통과 시에만 호출.
+
+### baseline 실측 (착수 시)
+- `dotnet build Wcs.sln` 경고 0·오류 0(컴파일러 기준). `dotnet test Wcs.sln --no-build` → **146/146 GREEN**(계약 ≈146 일치).
+- 변경 후: 동일 **146/146 GREEN·회귀 0**. 컴파일러 경고 0·오류 0(`-p:NuGetAudit=false` 격리).
+- ⚠ NU1903(SQLitePCLRaw.lib.e_sqlite3 2.1.10 transitive 취약성) 경고는 **선재**(pristine stash 빌드에서 8건 동일 출현 — 내 변경 무관,
+  EF Sqlite가 항상 끌어옴). P1 스코프 아님(코드 경고 아님·의존성 audit). 기존 incremental 빌드가 audit 미재실행으로 가렸던 것.
+
+### 콜드스타트 입증 (라이브 — 빈 DB → provision → 기동 → IF-05)
+- 빈 디렉터리(파일 없음)에 Windows 경로 DB 지정 + `ASPNETCORE_ENVIRONMENT=Development`로 `dotnet run`:
+  로그 `Migrate 시작 → Migrate 완료 → dev 시드 적용됨(트리거: SeedOnStartup=true) → ChuteCapacity 슈트 수=6
+  → SorterRegistry SORTER_3D 1대 조회 → Now listening / Application started`. `wcs.db` 파일 생성됨.
+- IF-05 `TEST-BARCODE-1` → `{"result":"OK","chuteNo":1}` (시드 오더 ORD-001 필요 — 시드·스키마 동시 입증).
+  **`no such table` 0건·Unhandled exception 0건·DB fail 0건**(Modbus offline 폴링 노이즈만 — 시뮬레이터 미기동).
+- **운영 안전 입증**: `ASPNETCORE_ENVIRONMENT=Production` + 빈 DB → 로그 `Migrate 완료 → 시드 게이트 off(운영 안전) —
+  빈 스키마만 프로비저닝 → Application started`. 스키마는 생성·테스트 시드 미삽입(Dev override 미적용). 크래시 0.
+
+### Windows Service 호스팅
+- `builder.Host.UseWindowsService()` 활성(Program.cs:27) + `Microsoft.Extensions.Hosting.WindowsServices` 9.0.5 패키지(csproj).
+- 비-서비스 컨텍스트 no-op 확인: 콘솔 `dotnet run` 정상 기동(위 로그) + WebApplicationFactory 테스트 146 GREEN.
+  `WindowsServiceLifetime`은 SCM 기동(`IsWindowsService()==true`)에서만 활성 — 콘솔·테스트는 영향 0.
+- 서비스 등록 스크립트: `scripts/install-service.ps1`(sc.exe create·start=auto·failure 재시작·Environment 주입·플레이스홀더+주석),
+  `scripts/uninstall-service.ps1`(stop→delete·미존재 안전). 사용법 상세 문서화는 P4(README)로 이연(계약 §0).
+
+### §3.5 재시작 레지스터 재독 — 판정: **이미 충족**(근거)
+- `PlcPollingService._latest`(PlcGateway.cs:98-99)는 생성 시 **`Online:false`** fail-safe 스냅샷으로 초기화. `StartAsync`가
+  `RunPollLoopAsync`로 매 `PollIntervalMs`마다 D0~D6 재독해 덮어씀(line 166 `Latest`). 콜드스타트 시 게이트웨이가 현재 레지스터를 재독.
+- 첫 폴 완료 전 들어온 요청은 `Online=false`(보수적)를 보므로 stale "ready"/stale 층으로 인한 오정렬 위험 0
+  (스냅샷은 in-memory 필드라 재시작 시 stale 잔존 불가). **새 동기화 메커니즘 추가 불요**(추측 신규 0). 무변경.
+
+### 무변경 가드 (§3.6) 결과
+- Wcs.Core(DepositDecider·RegisterMap)·Modbus 레지스터맵·C/R 핸드셰이크 본문·WcsDbContext.OnModelCreating·Entities·
+  DbSeeder 토폴로지·기존 마이그레이션 3개 — **전부 무변경**. 새 마이그레이션 생성 0. API 필드/엔드포인트 무변경.
+- 변경 파일: `Program.cs`(using 1·UseWindowsService 1·ProvisionAsync 1줄)·`Wcs.Api.csproj`(패키지 1)·`appsettings.json`(게이트 키 2)·
+  신규 `Startup/DbInitializer.cs`·`appsettings.Development.json`·`scripts/*.ps1`. 테스트 배선 0줄.
+
+### 이연 / 메모
+- `Urls`(appsettings) 키가 `ASPNETCORE_URLS` 환경변수보다 우선해 라이브 검증 시 :5080으로 listen(설정 우선순위 — 동작 정상). P1 스코프 아님.
+
+---
+
 ## REWORK Rev.1 (S-E2E-MULTI-AGV) — S9 flake 해소 (evaluator FAIL Rev.1 · team-lead option 1·(b) 확정)
 
 ### 결함 (evaluator 관측·단일·국소)
