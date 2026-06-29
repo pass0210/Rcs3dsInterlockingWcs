@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
+    <!-- M5: Windows Service 호스팅 (builder.Host.UseWindowsService) -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.5" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />
     <ProjectReference Include="..\Wcs.PlcGateway\Wcs.PlcGateway.csproj" />
     <!-- M4: Wcs.Data 참조 복원 — EF Core 리포지토리 구현 -->

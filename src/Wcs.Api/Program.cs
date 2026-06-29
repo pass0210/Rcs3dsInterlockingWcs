@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Wcs.Api;
+using Wcs.Api.Startup;
 using Wcs.Core;
 using Wcs.Data;
 using Wcs.PlcGateway;
@@ -17,7 +18,14 @@ using Wcs.PlcGateway;
 WcsTeardownGuard.Install();
 
 var builder = WebApplication.CreateBuilder(args);
-// TODO(M5): builder.Host.UseWindowsService(); + Serilog
+
+// ── Windows Service 호스팅 (M5) ──────────────────────────────────────────────
+// 서비스 컨텍스트(SCM이 기동)에서는 Windows Service 호스트로, 콘솔/테스트에서는 no-op.
+// UseWindowsService()는 WindowsServiceHelpers.IsWindowsService()가 false면(콘솔·
+// WebApplicationFactory 테스트 호스트) 아무것도 하지 않으므로 콘솔·테스트 무파손.
+// 서비스 등록 스크립트: scripts/install-service.ps1 / uninstall-service.ps1.
+builder.Host.UseWindowsService();
+// TODO(M5-P2): Serilog 구조화 로깅
 
 // ════════════════════════════════════════════════════════════════════════════
 // (D) DI 배선
@@ -128,9 +136,17 @@ builder.Services.AddHostedService(sp =>
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════════
+// 콜드스타트 자동 프로비저닝 (M5-P1)
+// IHostedService(ChuteCapacityService·SorterRegistryFactory)가 DB를 조회하기 전
+// (app.Run() 이전)에 스키마를 보장하고 dev/빈-DB 한정 시드를 적용한다.
+// 테스트 호스트(in-memory SQLite)에서는 DbInitializer가 자동으로 no-op
+// (기존 5개 테스트 팩토리의 EnsureCreated+DbSeeder.Seed 경로 무파손).
+// ════════════════════════════════════════════════════════════════════════════
+await DbInitializer.ProvisionAsync(app);
+
+// ════════════════════════════════════════════════════════════════════════════
 // (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10)
 // IF-08 투입 가부 폴링(deposit-permission)은 폐지 — Phase 2 WCS→RCS 푸시로 대체.
-// 개발/테스트 마이그레이션·시드는 WebApplicationFactory가 주입(운영 자동 Migrate는 M5).
 // ════════════════════════════════════════════════════════════════════════════
 app.MapControllers();
 
