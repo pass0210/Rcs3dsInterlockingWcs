@@ -615,8 +615,19 @@ public class S234_9GatewayScenarioTests : IAsyncLifetime
         await WaitUntilAsync(() => _gw!.Latest.TgtFloor == OperFloor, 2000, "AGV1 TgtFloor=2 선점");
         _out.WriteLine("[S9] AGV1 TgtFloor=2 선점 완료");
 
-        int d6At1;
-        lock (_tlLock) { d6At1 = _timeline.Count(l => l.Contains("WCS 쓰기 수신: D6")); }
+        // d6At1(선점 baseline) 점-캡처를 **안정-관찰**로 교체 — 근본 원인 제거(밴드에이드·고정 sleep 아님).
+        // 경합: WaitUntilAsync(_gw.Latest.TgtFloor==2)는 WCS **폴 스냅샷**이 갱신되면 반환하지만,
+        //  "WCS 쓰기 수신: D6 0→2" 타임라인 로그는 Sim 루프 스레드의 PullFromServerLocked(SimLoopMs 주기)가
+        //  **비동기로** append한다. 스냅샷이 2여도 로그가 아직 없는 창에서 d6At1을 0으로 잡고 직후 Sim이
+        //  1건 append하면 d6At2-d6At1=1로 거짓 실패(어셈블리 전체 부하가 클수록 창이 임계로 커짐).
+        // 해소: D6 쓰기 카운트가 **1로 안정**(stableCount 연속 동일)될 때까지 폴링한 뒤 baseline 캡처
+        //  (S7 no-flood WaitUntilExact 패턴 동형). 선점 SetTgtFloor는 정확히 1건이므로 1에서 안정되며,
+        //  안정 후 baseline을 잡으면 pending append가 남지 않아 선점 구간 delta가 결정적으로 0이 된다.
+        int D6Count() { lock (_tlLock) { return _timeline.Count(l => l.Contains("WCS 쓰기 수신: D6")); } }
+        await WaitUntilStableCountAsync(D6Count, expected: 1, stableCount: 6, timeoutMs: 3000,
+            "AGV1 D6=2 쓰기 카운트 1로 안정(비동기 로그 append 정착)");
+
+        int d6At1 = D6Count();
 
         // 선점 구간에서 추가 SetTgtFloor 시도 → 스킵 (TgtFloor≠0 핑퐁 차단)
         var snap2 = _gw!.Latest;
@@ -638,8 +649,12 @@ public class S234_9GatewayScenarioTests : IAsyncLifetime
         await WaitUntilAsync(() => _gw!.Latest.TgtFloor == 0, 2000, "TgtFloor=0 클리어");
 
         // ── 선점~클리어 구간 D6 추가 쓰기 0건 단언 ─────────────────────────────
-        int d6At2;
-        lock (_tlLock) { d6At2 = _timeline.Count(l => l.Contains("WCS 쓰기 수신: D6")); }
+        // d6At2도 안정-관찰로 — D6 카운트가 d6At1과 동일(=1)하게 stableCount회 유지됨을 확인(추가 쓰기 0건·
+        // 폭주 0). 선점 구간엔 추가 SetTgtFloor 미투입(dec2.WriteTgtFloor=false)이고 핸드셰이크의
+        // D0/D1/D4 쓰기·Sim 자체 TgtFloor 클리어는 "WCS 쓰기 수신: D6" 필터에 안 걸리므로 카운트는 1 유지.
+        await WaitUntilStableCountAsync(D6Count, expected: d6At1, stableCount: 6, timeoutMs: 3000,
+            "선점 구간 D6 카운트 불변(추가 쓰기 0건·핑퐁 차단)");
+        int d6At2 = D6Count();
         Assert.True(d6At2 - d6At1 == 0,
             $"선점 구간 D6 추가 쓰기 {d6At2 - d6At1}건 (0건이어야 함)");
         _out.WriteLine($"[S9] 선점 구간 D6 추가 쓰기 0건 확인");
@@ -665,6 +680,25 @@ public class S234_9GatewayScenarioTests : IAsyncLifetime
         var deadline = DateTimeOffset.Now.AddMilliseconds(durationMs);
         while (DateTimeOffset.Now < deadline)
             await Task.Delay(pollMs);
+    }
+
+    /// <summary>
+    /// count()가 expected 값을 stableCount회 연속 반환할 때까지 폴링(추가 변화 없음 = 안정).
+    /// 비동기 타임라인 로그 append가 정착했음을 보장 — 점-캡처 경합 제거(S7 no-flood 패턴 동형).
+    /// </summary>
+    private static async Task WaitUntilStableCountAsync(
+        Func<int> countFunc, int expected, int stableCount, int timeoutMs, string msg, int pollMs = 20)
+    {
+        var deadline = DateTimeOffset.Now.AddMilliseconds(timeoutMs);
+        int consecutive = 0;
+        while (consecutive < stableCount)
+        {
+            if (DateTimeOffset.Now > deadline)
+                Assert.Fail($"WaitUntilStableCount 타임아웃({timeoutMs}ms): {msg} (현재={countFunc()}, 기대={expected})");
+            if (countFunc() == expected) consecutive++;
+            else                         consecutive = 0;
+            await Task.Delay(pollMs);
+        }
     }
 
     private static int GetFreePort()

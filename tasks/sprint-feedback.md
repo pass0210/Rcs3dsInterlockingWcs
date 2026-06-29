@@ -1,3 +1,126 @@
+# Sprint Feedback — S-E2E-MULTI-AGV — APPROVED 유지 (post-commit 재확인 + IT4b 독립 검증)
+
+## Phase 3 Post-Commit 재확인 (Evaluator fresh evidence, HEAD `c47e790`·PR #19, 2026-06-26)
+
+**최종 판정: APPROVED 유지** — 스프린트가 커밋(c47e790)·PR #19로 정착된 상태에서 generator가 IT4b 잔여 리스크를 정직 보고하며 재핸드오프. Evaluator 독립 재검증:
+
+### Ground-truth
+- HEAD `c47e790`(E2E 8파일·S9 stable-count fix `WaitUntilStableCountAsync`×3 **커밋 확인**). working tree = `tasks/sprint-log.md`+`.claude/`뿐. `git diff HEAD -- src/` 빈 출력(production 0). S9 blob `afc8941` 불변(직전 Rev.2 평가분과 동일 — 재검증 불요).
+- IT4b는 `tests/Wcs.Tests/PlcGatewayIntegrationTests.cs`의 **기존 미수정** 테스트(`IT4b_WritesDuringReconnect_NoCorruption`) — 이 스프린트 코드 아님.
+
+### build 함정(환경·정직 기록)
+- 1차 빌드 "오류 2·경고 25"는 **MSB3021/MSB3027 파일 잠금** — 고아 `Wcs.Sim3ds.exe`(PID 49188·이전 세션 standalone exe 잔류)가 출력 바이너리를 잠가 복사 실패. **코드 오류 아님**. 프로세스 kill 후 클린 재빌드 **경고0/오류0**. (E2E 인-프로세스 SimServer는 정상 정리됨 — 내 15회 실행 후 잔류 Sim3ds 0.)
+
+### IT4b 독립 검증 (generator 정직 보고 → Evaluator fresh 재현 시도)
+- generator 보고: IT4b가 E2E 병렬 부하서 저빈도(초기 10회중 2회) flake(Success→RSeqMismatch). 근본=xUnit 기본 병렬 + 무거운 실 Sim E2E가 타이밍 민감 실 Sim 통합 테스트와 동시 실행(CPU/소켓 경합). team-lead 결정=**S9-only 스코프**(병렬 비활성 미채택), IT4b는 후속 finding.
+- **Evaluator 직접 full-suite 15회 연속**(클린 슬레이트·런 간 testhost/Sim3ds 정리) → **PASS=15/15·146/146·exit0·IT4b flake 0회**. 직전 10/10 + generator 12/12 합산해도 IT4b 미발현. → IT4b는 **부하/스케줄러 의존 저빈도** — 현 머신 상태선 미재현이나, generator 보고가 거짓이라 단정 못 함(저빈도 특성상 25회로도 0 가능). **정직 보고로 수용**(은폐 아님 = 가점), S9-only 스코프 하 본 스프린트 PASS.
+
+### 판정: Completion #1~#8·Evaluation ①~⑥ 전부 PASS 유지 (S9-only 스코프)
+- ②④(전체 GREEN·flaky0): 스프린트 deliverable(S9 fix+E2E) 기준 15/15 GREEN. IT4b는 미수정 기존 테스트·team-lead 후속 결정·내 15회 미발현 → 본 스프린트 차단 아님.
+- ⑥ 정직 보고: F1b(직렬화 갭)에 더해 **IT4b 잔여 리스크까지 은폐 없이 명시·team-lead 보고** — 정직성 추가 가점.
+
+### ⚠ Evaluator 권고 (team-lead 판단)
+- **IT4b finding이 `tasks/todo.md`에 아직 미등재**(grep 0). generator/team-lead 합의(S9-only·IT4b 후속)대로라면 todo.md에 IT4b 항목 추가 필요(나도 보고에 포함). 후속 처리 옵션: (A) `[CollectionDefinition·DisableTestParallelization]`로 실 Sim 통합 테스트를 E2E와 직렬화(즉효·team-lead 미승인), (B) IT4b를 WaitUntil 기반으로 견고화, (C) CI에서 별도 격리 실행.
+
+---
+
+# Sprint Feedback — S-E2E-MULTI-AGV (다중 AGV 전 플로우 경우의 수 E2E) — APPROVED (Rev.2 fix 재확인)
+
+## Phase 3 Re-Evaluate 결과 (Evaluator fresh evidence, branch `test/e2e-multi-agv-scenarios`, 2026-06-26 Rev.2 — S9 stable-count 변형)
+
+**최종 판정: APPROVED 유지** — Rev.2에서 generator가 S9 fix를 **더 강한 안정-관찰**로 정련(blob `afc8941`·mtime 10:40). Rev.1의 "D6 로그 ≥1 출현 대기" → Rev.2 **`WaitUntilStableCountAsync(D6Count, expected:1, stableCount:6)`**(d6At1·d6At2 양쪽에 적용·S7 no-flood 동형). Evaluator가 generator의 "10/10" 주장을 신뢰하지 않고 **직접 fresh 재실행**.
+
+### Rev.2 fix 품질 (코드 직접 검사)
+- **근본수정·테스트 전용·고정 sleep 아님**: 신규 헬퍼 `WaitUntilStableCountAsync`(ScenarioTests.cs:689) = `pollMs=20` 조건 폴링·타임아웃 시 `Assert.Fail`(fail-loud)·연속 일치 카운트. `Task.Delay` 밴드에이드 아님.
+- **단언 의미 보존 + 마스킹 0**: `d6At2 - d6At1 == 0`(선점 D6 추가쓰기0=핑퐁 차단) 불변. **진성 추가 쓰기 발생 시** D6Count가 2가 되어 d6At2 안정-대기(expected=d6At1=1)가 영영 안정 안 됨 → **타임아웃 Assert.Fail**(결함 은폐 아님·여전히 fail-loud). production diff 0.
+
+### Rev.2 Fresh evidence (Evaluator 직접 — raised bar ≥10회)
+- build: 경고 0 / 오류 0 (deterministic — 1차 빌드 "경고 4개"는 testhost kill 동시 실행 중 일시 산출물이었고 클린 재빌드 2회 0 확정).
+- **클린 슬레이트 full-suite 10회 연속 → 전부 146/146 GREEN·exit0·신규 Sequence 파일 0** (PASS=10/10·런 간 testhost 정리+TestResults 청소).
+- 무변경: `git diff HEAD -- src/` 빈 출력. 변경 = ScenarioTests.cs S9 1블록뿐. E2E 8파일 untracked·Rev.1 평가분과 동일(매트릭스·ground-truth·동시성·F1b finding 회귀 0).
+
+### Rev.2 판정: Completion #1~#8·Evaluation ①~⑥ 전부 PASS 유지. (findings·라이브 구동은 아래 Rev.1 기록과 동일.)
+
+---
+
+## Phase 3 Re-Evaluate 결과 (Evaluator fresh evidence, branch `test/e2e-multi-agv-scenarios`, 2026-06-26 Rev.1 fix)
+
+**최종 판정: APPROVED** — Rev.1 FAIL(S9 flake) 재작업이 근본수정으로 해소됨. 계약 Completion #1~#8·Evaluation ①~⑥ 전부 충족. fresh 재검증:
+
+### Ground-truth 확인 (fresh 재핸드오프 — stale 아님)
+- HEAD `99a0c9d` 불변, 브랜치 `test/e2e-multi-agv-scenarios`. **이번엔 `tests/Wcs.Tests/ScenarioTests.cs`가 실제 변경됨**(mtime `2026-06-26 10:33`·`git status` ` M`) — 직전 stale 재핸드오프(코드 0변경)와 구분됨.
+- `git diff HEAD -- src/` 빈 출력(production 무변경 유지). 변경 = ScenarioTests.cs S9 1블록(+11 line)뿐.
+
+### S9 fix 품질 (코드 직접 검사 — 근본수정·테스트 전용·sleep 밴드에이드 아님)
+- 수정: `d6At1` 캡처 **이전**에 첫 "WCS 쓰기 수신: D6" 타임라인 로그가 실제 append(≥1)될 때까지 `WaitUntilAsync` **조건 폴링** 추가. 고정 `Task.Delay` 아님 — 경합의 실제 조건(비동기 로그 append)을 기다림 = 근본수정.
+- 근본원인 정합: `WaitUntilAsync(_gw.Latest.TgtFloor==2)`는 WCS 폴 스냅샷 갱신 시 반환하나 "D6 0→2" 로그는 SimServer 루프 스레드(`PullFromServerLocked`)가 비동기 append → 스냅샷 2여도 로그 미append 창에서 d6At1=0 캡처·직후 1건 → delta=1 거짓 실패. 로그 출현 후 baseline 캡처로 delta 결정적 0. (내 직전 진단과 정확 일치.)
+- **단언 의미 보존**: `d6At2 - d6At1 == 0`(선점 구간 D6 추가 쓰기 0 = 핑퐁 차단·절대규칙 #3) 단언 **불변**. 진성 추가 쓰기 발생 시 여전히 실패 — 의미 약화 0.
+- 테스트 전용: 변경은 `tests/`뿐. production 0.
+
+### Fresh evidence (직접 실행 — 요약 신뢰 아님)
+- **build**: `dotnet build Wcs.sln --no-incremental` → 경고 0 / 오류 0.
+- **full-suite ≥10회 강검증(raised bar)**: 클린 슬레이트(직전 실행 잔류 testhost 프로세스 정리 + 묵은 TestResults 제거)에서 `dotnet test Wcs.sln --no-build --blame-hang-timeout 180s` **10회 연속 → 전부 146/146 GREEN·exit 0·신규 Blame 시퀀스 파일 0**. (PASS=10/10, FAIL=0.)
+- **S9 단독 5회**: 전부 GREEN.
+- **teardown 클린**: 클린 10회 실행에서 신규 hangdump/Sequence 파일 0(`find TestResults` 빈 출력).
+  ⚠ 평가 절차 주의(은폐 아닌 정직 기록): **1차** 10x 시도에서 RUN8 16실패·RUN9/10 exit1이 관측됐으나, 원인은 **Evaluator 측 환경 소진**(연속 무정리 실행으로 testhost 프로세스 ~18개 누적·포트/핸들 경합)이었고 `blameSeqAbsent=0` 신호는 **`20260624` 묵은 산출물** 매칭 오탐이었음. 프로세스 정리 + 묵은 TestResults 제거 + 런 간 간격 후 재실행 시 **10/10 GREEN**. 스프린트 결함 아님(귀속 확정).
+
+### Completion / Evaluation — 항목별 (Rev.1 fix 반영)
+- **[PASS] #1 build 0/0** · **[PASS] #2 전체 GREEN·exit0·회귀 0**(10/10·S9 해소) · **[PASS] #3·⑤ teardown exit0**(신규 시퀀스 파일 0) · **[PASS] #4·④ flaky 0**(≥10회 강검증 — 직전 5회보다 강함) · **[PASS] #5·① 매트릭스 커버리지** · **[PASS] #6·② ground-truth 진정성** · **[PASS] ③ 동시성 진성 경합** · **[PASS] #7·⑥ 결함 정직보고**(F1b 직렬화 갭 finding·⚠항목 분류) · **[PASS] #8·무변경 가드**(src diff 0).
+- ①②③⑥는 Rev.1에서 코드/source 직접 검사로 PASS 확정했고 production·E2E 코드가 그대로이므로 회귀 0(ScenarioTests.cs S9 1블록만 추가).
+
+### 결함·finding (계약 §6 정직 보고 — 후속 인계)
+- **[FINDING·진성·후속] 한 소터 concurrent 핸드셰이크 직렬화 부재** (`F1b`): `HandshakeOrchestrator.ExecuteAsync`가 동일 인스턴스 concurrent 호출을 직렬화하지 않아(인스턴스 락 0·공유 `_gw.Latest` RFlag/RSeq 폴링) 한 소터 동시 IF-10 시 R_Seq 교차 MISMATCH≥1. 순차 dispatch면 전부 COMPLETED(F1/F8). SPEC §6 물리 직렬 모델과 정합 → 직렬 dispatch가 현 지원 모델. 동시 IF-10 허용 명세 미정 → **orchestrator 직렬화는 범위 밖 후속**. 은폐 0·`mismatch>=1` 명시 단언(정직 보고 가점).
+- **[⚠ SPEC §7 미확정 — 현 동작 단언]** D5(C_Flag 상한)·D6(핸드셰이크 중 OFFLINE)·D8(R_CellNo≠C_CellNo 주입 불가·Sim 한계)·G6(슈트 복구 재푸시 비대칭)·H4(TgtFloor 잔류)·H5(R_Flag 재시도 정책). 전부 "현 동작 단언/기대 미정"으로 올바로 분류 — 추측 단언 0.
+- **[⚠ M5 이연]** E6(콜백 throw 셀 누수 — 호스트종료/DI오설정 한정·정상 경로 누수 0만 입증).
+
+### 최종 판정: APPROVED. 라이브 구동(§7 orchestrator step)은 별도 진행.
+
+---
+
+<details><summary>이전: Rev.1 FAIL 기록 (S9 flake — 위 fix로 해소됨)</summary>
+
+**최종 판정: FAIL (재작업 1건)** — 매트릭스 커버리지·ground-truth 진정성·동시성 진성 경합·정직 보고·무변경 가드(①②③⑥⑧)는 전부 PASS이고 구현 품질이 높으나, **Completion #2(전체 GREEN·exit 0) + Evaluation ④(flaky 0)** 가 미충족. fresh full-suite **5회 실행 중 1회 FAIL**(S9 — 기존 미수정 테스트가 E2E 추가 부하 하에서 간헐 실패). exit 1 관측. 단일 결함이며 국소 수정 가능.
+
+### Ground-truth 확인 (stale 재핸드오프 아님)
+- `git rev-parse HEAD` = `99a0c9d`, 브랜치 `test/e2e-multi-agv-scenarios`. E2E 8파일은 untracked(`tests/Wcs.Tests/E2E/`) — 미커밋 활성 핸드오프.
+- `sprint-log.md` 최상단 `## IMPLEMENTATION COMPLETE (S-E2E-MULTI-AGV)` 마커·매핑 표 존재.
+- working tree: `tests/Wcs.Tests/E2E/`(신규 8파일) + `tasks/sprint-contract.md`·`tasks/sprint-log.md`(하네스 산출물) + `.claude/`(선재). **`git diff HEAD -- src/` = 빈 출력**(production 0 변경) + `git ls-files --others -- src/` 빈 출력.
+
+### Fresh evidence (직접 실행 — generator 주장 신뢰 아님)
+- **clean build**: `dotnet build Wcs.sln --no-incremental` → **경고 0 / 오류 0** (재현 확인).
+- **full test (결정적 검증)**: `dotnet test Wcs.sln --no-build --blame-hang-timeout 180s` 를 포함해 full-suite **총 5회** 실행:
+  - RUN1: **실패! 실패:1 통과:145 전체:146, EXIT 1** — `S234_9GatewayScenarioTests.S9_MultiAgvContention_TgtFloorSingleOwnership_ThenYield` FAIL ("선점 구간 D6 추가 쓰기 1건 (0건이어야 함)").
+  - RUN2~5: 통과! 146/146 exit 0. → **4 GREEN / 1 FAIL (flake rate ~20%)**.
+  - 전 실행 Blame "시퀀스 파일이 생성되지 않습니다"(teardown hang/dump 0 — 채널 경쟁 회귀 0 = ⑤ PASS).
+- **flake 귀속(stash 대조)**: E2E 디렉터리를 일시 제거하고 baseline full-suite **4회** → **99/99 GREEN 4/4, 6~8s**(S9 안정). E2E 복원 시 146 테스트·11~13s. S9 **단독 5회 전부 GREEN**(`--filter S9_MultiAgvContention`).
+  → **근본 원인**: S9는 이 스프린트가 **수정하지 않은** 기존 타이밍-취약 테스트(마지막 변경 9ff57f6, 본 스프린트 무관). `d6At1`을 `WaitUntilAsync(_gw.Latest.TgtFloor==2)` 직후 캡처하나, "WCS 쓰기 수신: D6 0→2" 타임라인 로그는 **Sim 스레드가 비동기로** append → 게이트웨이 스냅샷 갱신과 로그 append 사이 경합. E2E 다수 테스트(실 Sim N대·Barrier 동시 HTTP)가 어셈블리 전체 부하·런타임을 6~8s→11~13s로 올려, 잠재 경합이 간헐 발현. **baseline에선 안정, E2E 부하가 임계로 밀어냄.**
+
+### Completion Conditions — 항목별 PASS/FAIL
+- **[PASS] #1 build 경고0/오류0**: clean build 0/0 재현.
+- **[FAIL] #2 전체 GREEN·exit 0·기존 회귀 0**: full-suite 5회 중 1회 exit 1(S9 FAIL). "전체 GREEN·exit 0"이 결정적이지 않음. 기존 회귀로 분류 — S9는 미수정 기존 테스트이나 E2E 부하가 발현시킴.
+- **[FAIL] #4 동시성/타이밍 표적 ≥5회 flaky 0**: full-suite 차원에서 flaky 발현(1/5). 단, **신규 E2E 테스트 자체는 flaky 0**(아래 ④ 참조) — 결함은 기존 S9.
+- **[PASS] #3 teardown exit 0**: Blame 시퀀스 파일 0(전 5회)·채널 경쟁 회귀 0.
+- **[PASS] #5 매트릭스 A~I 매핑**: 매핑 표 전 항목 ↔ 신규/기존 테스트 대응(아래 ① 참조).
+- **[PASS] #6 ground-truth 진정성**: 핵심 단언 전부 실 Sim/실 EF DB/가짜 RCS push(아래 ② 참조).
+- **[PASS] #7 결함 정직 보고**: F1b·⚠항목 정직 등재(아래 ⑥ 참조).
+- **[PASS] #8 무변경 가드**: `git diff HEAD -- src/` 빈 출력.
+
+### Evaluation Criteria — 항목별 (가중)
+- **[PASS] ① 매트릭스 커버리지 0.25**: A1~A7·B1/B6/B10/B11·C5~C7·D3~D9·E2~E6·F1/F1b/F4~F8·G1~G6·H1/H4/H6·I1~I4 가 **실제 실행되는 단언**에 대응(코드 직접 확인). "기존 커버" 항목(B2~B5·B7~B9·B12~B16·C1~C4·D1/D2/D7·G4·H2/H3·F2/F3)은 매핑 표에 기존 테스트 명시. 빈 테스트·이름만 통과 0. 로드-베어링 단언원 source 확인: B11 `"OVER"`=`DbRepositories.cs:84-86`, B6 `"NO_DEST"`=`:54/114/132`, B1 `"FULL"`=`:151` (추측 문자열 아님).
+- **[PASS] ② ground-truth 진정성 0.25**: `E2EWebApplicationFactory`가 실 Sim3ds N대(동적 포트)+production `SorterRegistryFactory`(Fake/Nop 교체 0)+실 EF SQLite+FakeRcs 결선. 단언이 sorter_command(COMPLETED/MISMATCH/TIMEOUT·R_Seq==C_Seq)·cell_assignment(released_at)·piece/piece_event·alarm·셀수량(COMPLETED JOIN piece.qty DISTINCT)·push payload(CountFor/LastFor/Ready)에 근거. 인메모리 카운터 단독 0.
+- **[PASS] ③ 동시성 진성 경합 0.20**: F4/E3(Barrier 8병렬 실 HTTP→DB 정확히 1)·F5(실 Sim 2대 동시 핸드셰이크 교차 0)·F6(stableCount:8 전이당 1·무폭주)·F7(stableCount:5 alarm 1). F1/F8은 "순차"로 **정직 명명**(거짓 동시 주장 아님). F1b의 직렬화 부재는 `HandshakeOrchestrator.ExecuteAsync` source 확인(인스턴스 락 0·공유 `_gw.Latest` RFlag/RSeq 폴링) — 진성 결함 입증.
+- **[FAIL] ④ flaky 0 0.15**: **신규 E2E 표적은 flaky 0이나**, full-suite 차원에서 기존 S9가 1/5 실패 → 계약 "타이밍·동시성 표적 ≥5회 반복 GREEN" 미충족(전체 스위트 기준). 핵심 수정 대상.
+- **[PASS] ⑤ teardown exit 0 0.10**: 실 Sim/실 호스트 다중 기동에도 Blame 시퀀스 파일 0(전 5회). `DisposeAsync` 순서(Sim→base IHost→anchor) 적정.
+- **[PASS] ⑥ 결함 정직 보고 0.05**: F1b(한 소터 동시 IF-10 직렬화 부재 MISMATCH≥1)를 은폐 없이 명시 입증·`mismatch>=1` 단언. ⚠항목(D5·D6·D8·E6·G6·H4·H5)은 "현 동작 단언/Sim 한계/기대 미정"으로 올바로 분류(추측 단언 0). D8은 R_CellNo==C_CellNo 단언+주입 불가 명시. **정직성 가점.**
+
+### 재작업 지시 (FAIL — 1건, 국소)
+1. **S9 flake 해소(필수·exit 0 차단)**: 기존 `S9_MultiAgvContention...`의 `d6At1` 캡처가 Sim 타임라인 로그 append와 경합. 권장: ① `d6At1`을 SetTgtFloor enqueue **이전**에 캡처하거나, ② D6 카운트 판정을 타임라인 로그 대신 게이트웨이 스냅샷 전이(또는 `WaitUntilExact`로 D6 카운트 안정화 후) 기준으로 변경. **production 변경 금지**(무변경 가드 — S9는 테스트). 수정 후 full-suite ≥10회 연속 GREEN·exit 0 입증. (S9는 본 스프린트가 만들지 않았으나, E2E 부하가 발현시킨 회귀이므로 이 스프린트 범위에서 해소하거나 — 범위 밖 판단 시 team-lead/사용자 협의로 별도 처리.)
+2. 그 외 ①②③⑤⑥·무변경 가드는 재검증 불요(이미 PASS) — S9 한 건만 수정 후 재핸드오프.
+
+</details>
+
+---
+
 # Sprint Feedback — S-FOLDER-ORG (src 폴더 구조 정리 / 순수 파일 이동) — APPROVED
 
 ## Phase 3 Evaluate 결과 (Evaluator fresh evidence, working tree `refactor/src-folder-structure`, 2026-06-25)

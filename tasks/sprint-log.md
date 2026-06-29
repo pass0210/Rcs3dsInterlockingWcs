@@ -1,5 +1,192 @@
 # Sprint Log
 
+## REWORK Rev.1 (S-E2E-MULTI-AGV) — S9 flake 해소 (evaluator FAIL Rev.1 · team-lead option 1·(b) 확정)
+
+### 결함 (evaluator 관측·단일·국소)
+full-suite 5회 중 1회 exit1(146 중 1 FAIL) — `S234_9GatewayScenarioTests.S9_MultiAgvContention_TgtFloorSingleOwnership_ThenYield`("선점 구간 D6 추가 쓰기 1건"). **이 스프린트가 만든 테스트 아님**(기존 `tests/Wcs.Tests/ScenarioTests.cs`). 신규 E2E는 flaky 0 — E2E 어셈블리 부하(실 Sim N대·Barrier 동시 HTTP)가 S9의 잠재 타이밍 경합을 임계로 밀어냄. team-lead 결정: option 1(이 스프린트에서 닫음·테스트 전용·production 0)·(b) 방식.
+
+### 근본 원인 (소스 확인)
+S9는 `WaitUntilAsync(() => _gw.Latest.TgtFloor == OperFloor)`(WCS **폴 스냅샷** 갱신 시 반환) **직후** `d6At1`(타임라인 "WCS 쓰기 수신: D6" 카운트)을 점-캡처. 그러나 그 로그는 `SimServer.PullFromServerLocked`(Sim 루프 스레드·`SimLoopMs=10ms` 주기, `SimServer.cs:353`)가 **비동기로** append한다. 스냅샷이 TgtFloor=2로 보여도 Sim이 아직 "D6 0→2" 로그를 안 적었을 수 있어 `d6At1=0`으로 잡히고, 직후 Sim이 1건 append → `d6At2-d6At1=1` → 거짓 FAIL. 어셈블리 부하가 클수록 이 창이 커짐.
+
+### 수정 (team-lead (b) 방식 — 점-캡처를 안정-관찰로·고정 sleep 0·테스트 1파일·production 0)
+`ScenarioTests.cs` S9에서 `d6At1` 점-캡처를 **stableCount no-flood 안정-관찰**로 교체(S7 `WaitUntilExact` 패턴 동형 — (b) "D6 로그 출현 후 캡처"의 강화판). 클래스에 `WaitUntilStableCountAsync` 헬퍼 추가.
+- baseline 캡처 전: D6 쓰기 카운트가 **1로 stableCount(6)회 연속 안정**될 때까지 폴링(고정 sleep 아님) → 비동기 로그 append 정착 보장.
+- d6At2 단언: D6 카운트가 d6At1과 동일하게 stableCount회 유지(추가 쓰기 0건·핑퐁 차단) 후 단언 — S9 단언 의미("선점 구간 D6 추가 쓰기 0=핑퐁 차단") 보존.
+- 핸드셰이크 중 D0/D1/D4 쓰기·Sim 자체 TgtFloor 클리어는 "WCS 쓰기 수신: D6" 필터에 안 걸려 D6 카운트는 1 유지 — 수정 정확.
+
+```
+git status --porcelain -- src/  → (빈 출력, production 무변경)
+git diff tests/Wcs.Tests/ScenarioTests.cs → S9 안정-관찰 교체 + WaitUntilStableCountAsync 헬퍼만(테스트 전용)
+```
+
+### 검증 (fresh evidence — 수정 후)
+```
+dotnet build Wcs.sln → 경고 0 / 오류 0 (CS 경고 0. 단독 클린빌드 시 MSB3061 file-lock은 stale testhost 아티팩트·코드 무관)
+S9 그룹(S234_9GatewayScenarioTests) 단독 8회 → 전부 통과!(4/4)
+dotnet test Wcs.sln --no-build --blame-hang-timeout 180s ×12회 연속:
+  RUN 1~12 전부 통과! 실패:0 통과:146 전체:146 (PASS=12 FAIL=0)
+  → S9 flake 해소·exit0 결정성. teardown 클린(hang 0).
+```
+
+### ⚠ 잔여 리스크 정직 보고 (IT4b — team-lead 인지·S9-only 스코프 확정)
+S9 견고화 입증 중 **다른 기존 테스트** `PlcGatewayIntegrationTests.IT4b_WritesDuringReconnect_NoCorruption`가 E2E 병렬 부하 하에서 저빈도(초기 관측 10회중 2회) flake(Success 기대→RSeqMismatch)함을 발견·team-lead 보고. 근본 원인은 S9와 동류(xUnit 기본 병렬 실행 + 무거운 실 Sim E2E가 타이밍 민감 실 Sim 통합 테스트와 동시 실행 → CPU/소켓 경합). 검증: 병렬 비활성 시 연속 GREEN(병렬성이 변수임 확증). team-lead 결정 = **S9-only로 확정**(병렬 비활성/컬렉션 직렬화는 미채택), IT4b·동시 핸드셰이크 직렬화는 **후속 finding**으로 todo.md 등재. 현 fix 후 full-suite 12/12·8/8 GREEN로 IT4b 미발현이나, 병렬 부하 의존 저빈도 잔여 리스크는 명시 보고(은폐 0). S9 fix 자체는 IT4b와 무관하게 유효.
+
+①②③⑤⑥·무변경 가드는 evaluator가 이미 PASS 판정 → 재검증 불요. Completion #2(전체 GREEN·exit0)·Evaluation ④(S9 flake 0) 충족.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-E2E-MULTI-AGV)
+
+### Sprint: 다중 AGV 동시 제품수령→셀이동 전 플로우 경우의 수 E2E (매트릭스 A~I)
+
+자동 xUnit E2E 스위트 백본(① WebApplicationFactory + 실 Program 호스트 ② 실 Sim3ds N대 + **production
+`SorterRegistryFactory`** = 실 Modbus TCP 핸드셰이크 ③ 다중 AGV RCS HTTP 드라이버(Barrier 동시성) ④ 실 EF
+DB ⑤ 가짜 RCS push 수신 `FakeRcsServer`)와 라이브 구동 진입점(§3.3)을 추가. **production 변경 0**.
+
+### 신규 파일 (tests/Wcs.Tests/E2E/ — 8개, src/ 변경 0)
+
+| 파일 | 역할 |
+|---|---|
+| `E2EInfrastructure.cs` | `E2EWebApplicationFactory` — §9 재사용 갭 해소(실 Sim + 실 핸드셰이크 + push 수신 동시). production `SorterRegistryFactory`/`DestinationStatusPusher` 그대로(Fake/Nop 미사용). 다중 소터는 테스트 측 추가 시드(둘째 SORTER_3D dest+셀+order+Sim+config Sorters[]). `SorterSimSlot`(소터별 실 Sim). |
+| `MultiAgvDriver.cs` | 다중 AGV 드라이버(IF-05→IF-09→IF-10 단일 사이클 + `RunConcurrentAsync` Barrier 동시 N대) + `AgvJob`/`AgvResult` + `E2EWait`(WaitUntil/UntilExact 폴링 — 고정 sleep 0). **자동·라이브 공유**(`ForFactory`/`ForBaseUrl`). |
+| `E2ESeed.cs` | 셀 만재/배정 ground-truth 시드(OccupyCells·SetAllCapacities·LoadCellQty·AddSorterOrderWithAssignedCell·LoadedQtyForDestination — SorterCellFullnessTests 패턴 재사용). |
+| `E2EGroupAB_NormalAndGateTests.cs` | 그룹 A(정상)+B(IF-05 게이트) — 12 테스트. |
+| `E2EGroupCD_AlignHandshakeTests.cs` | 그룹 C(정렬)+D(핸드셰이크·고장주입) — 9 테스트. |
+| `E2EGroupEF_DepositConcurrencyTests.cs` | 그룹 E(적재)+F(동시성 진성 경합) — 12 테스트. |
+| `E2EGroupGHI_FailureBoundaryOrderTests.cs` | 그룹 G(장애)+H(경계)+I(순서/멱등) — 11 메서드(H1 Theory ×3 → 13 실행). |
+| `LiveMultiAgvRunner.cs` | 라이브 진입점(§3.3) — `MultiAgvDriver` 공유. `WCS_LIVE_BASEURL` 미설정 시 no-op(자동 회귀 0). orchestrator step에서 실행. |
+
+### 매트릭스 A~I ↔ 테스트 매핑 표 (계약 §5·Completion #5)
+
+> 신규 = 이 스위트에서 실 stack 단언. "기존 X" = 기존 테스트가 ground-truth 커버(중복 재현 대신 매핑).
+
+| VS | 매핑 | GT 단언원 |
+|---|---|---|
+| **A1** 새오더·빈셀 정상 | 신규 `A1_...` | sorter_command COMPLETED·R_Seq==C_Seq·셀수량=qty(실 Sim+EF) |
+| **A2** 같은오더 셀누적 | 신규 `A2_...` | COMPLETED 2건·소터 적재수량 합(DISTINCT piece) |
+| **A3** 이미 정렬→안 씀 | 신규 `A3_...` | Sim 타임라인 D6 쓰기 0건(stableCount) |
+| **A4** 미정렬→정렬→핸드셰이크 | 신규 `A4_...` | D6=2 1건·CurFloor=2·COMPLETED |
+| **A5** 슈트 정상·트리거 0 | 신규 `A5_...` | piece DEPOSITED·sorter_command 0·소터 C_Flag 불변 |
+| **A6** 멀티소터 라우팅 | 신규 `A6_...`(Sim 2대) | 각 destId cmd.cell.DestinationId 교차 0 |
+| **A7** 한 슈트 다중 송장 | 신규 `A7_...` | piece 2건·ReservedQty 합산 |
+| **B1** 소터 셀 만재→NG·FULL | 신규 `B1_...` + 기존 `SorterCellFullnessTests.EC1` | 응답 NG·piece_event IF05_RES.Reason=FULL |
+| **B2** 새오더 빈셀0→NG | 기존 `EC2` | (단위 커버) |
+| **B3** 보유셀 여유→OK | 기존 `HP1` | (단위 커버) |
+| **B4** 보유셀 전부 full→NG | 기존 `EC9`(A 경로) | (단위 커버) |
+| **B5** 소터 PAUSED→NG | 기존 `EC3` + 신규 `G5` | (단위+E2E 크로스) |
+| **B6** ⚠ 비활성 소터→NG | 신규 `B6_...`(Q1 현 동작) | NG·reason=NO_DEST(IsActive=false 경로) |
+| **B7** 슈트 full→**OK**(반전) | 기존 `S8`·`If05_Chute_Full` | (단위 커버) |
+| **B8** 슈트 pause→**OK**(반전) | 기존 `S8_Chute_Paused` | (단위 커버) |
+| **B9** 소터 offline+셀→OK | 기존 `SorterPushOperationalTests.VS7a` | (단위 커버) |
+| **B10** dest NULL→AUTO 슈트 | 신규 `B10_...` | OK·order.DestAssignType=AUTO |
+| **B11** ⚠ 오더 OVER→NG | 신규 `B11_...`(Q2 시드 가능) | NG·reason=OVER(reserved+qty>planned) |
+| **B12** barcode 미매칭→NG | 기존 `VS2_UnknownBarcode` | (단위 커버) |
+| **B13** Capacity NULL=무제한 | 기존 `EC4` | (단위 커버) |
+| **B14** OK시 예약 차감(슈트) | 기존 capacity + 신규 `A7`(ReservedQty) | (단위+E2E) |
+| **B15** NG여도 piece DENIED | 신규 `B1`/`B6`/`B11`(piece_event 단언 경유) + 기존 P2a | piece_event IF05_RES 존재 |
+| **B16** 검증 실패→400 | 신규 `H1`(qty) + 기존 `VS2`/`MINOR1` | HTTP 400 |
+| **C1** 도착→TgtFloor=2 | = A4 / 기존 `S2`·`If09_..NotAligned` | (= A4) |
+| **C2** 이미 정렬→안 씀 | = A3 / 기존 `If09_AlreadyAligned` | (= A3) |
+| **C3** 진행중→덮어쓰기 안 함 | 기존 `S4`·`S9` | (단위 커버) |
+| **C4** 슈트 도착→정렬 없음 | 기존 `If09_ChuteArrival` | (단위 커버) |
+| **C5** 미존재 chuteNo→200 | 신규 `C5_...` + 기존 `If09_UnknownChuteNo` | HTTP 200·500 없음 |
+| **C6** IF-05 없이 IF-09 | 신규 `C6_...`(현 동작) | 200·IF09_ARRIVAL 부재(RecordArrival false) |
+| **C7** 도착 후 OFFLINE→정렬 0 | 신규 `C7_...` | OFFLINE snap에서 D6 추가 쓰기 0 |
+| **D1/D2** 정상 C/R 대사 | = A1 / 기존 `S1` | (= A1) |
+| **D3** R_Seq 불일치→MISMATCH | 신규 `D3_...`(실 Sim Inject) + 기존 `S5` | alarm R_SEQ_MISMATCH·status MISMATCH |
+| **D4** R_Flag 타임아웃→TIMEOUT | 신규 `D4_...`(실 Sim Inject) + 기존 `S6` | alarm RFLAG_TIMEOUT·TIMEOUT 1행 |
+| **D5** ⚠ C_Flag 상한(SPEC §7) | 신규 `D5_...`(현 동작·finding) | InjectNoResponse→TIMEOUT 계열+alarm(상한 정책 미정) |
+| **D6** ⚠ 핸드셰이크 중 OFFLINE | 신규 `D6_...`(현 동작) | OFFLINE alarm 또는 TIMEOUT |
+| **D7** 분류시작 Ready1→0·Tgt클리어 | 기존 `S3` | (단위 커버) |
+| **D8** ⚠ R_CellNo≠C_CellNo | 신규 `D8_...`(Sim 한계·기대미정) | R_CellNo==C_CellNo(주입 수단 없음·Q3) |
+| **D9** C_Seq 증가 | 신규 `D9_...` | 연속 2건 CSeq 단조 증가 |
+| **D10** 단일 쓰기 큐 직렬화 | 기존 게이트웨이 + 신규 `F8`(R_Seq==C_Seq 직렬 입증) | (단위+E2E) |
+| **E1** 정상→IF-11 트리거 | = A1 / 기존 `VS6`·`S1` | (= A1) |
+| **E2** 멱등(중복 pId) | 신규 `E2_...` + 기존 `VS5` | 2차 OK·활성 기록 1건 |
+| **E3** 동시 같은 pId→1배정 | 신규 `E3_...`(8병렬) + 기존 `CONCUR1` | 활성 DEPOSITED/LOADED piece 1건 |
+| **E4** COMPLETED→셀 수량 반영 | 신규 `E4_...` | LoadedQty=qty(COMPLETED JOIN) |
+| **E5** cell_assignment 해제 | 신규 `E5_...`(현 동작) | 콜백 후 released_at 기록 |
+| **E6** ⚠ 콜백 throw 누수 | 신규 `E6_...`(정상 누수 0·finding) | 정상 경로 활성 배정 0 수렴 |
+| **F1** N-AGV 다른 셀 | 신규 `F1_...`(서로 다른 오더·순차) | 3 COMPLETED·서로 다른 cellNo |
+| **F1b** ⚠ 한 소터 동시 핸드셰이크 | 신규 `F1b_...`(**FINDING** 현 동작) | 동시 IF-10→직렬화 부재→MISMATCH≥1 |
+| **F2** 같은오더 누적+과적재 경계 | 기존 `EC8`(soft-threshold) + 신규 `A2` | (단위+E2E) |
+| **F3** 비행중 셀 채워짐(TOCTOU) | 기존 `EC9`(IF-05 OK⟹적재 §88) | (단위 커버) |
+| **F4** 동시 IF-05 같은 셀→1배정 | 신규 `F4_...`(8병렬) + 기존 `EC5`/`CONCUR1` | 활성 기록 1·sorter_command 1 |
+| **F5** 멀티소터 동시 핸드셰이크 | 신규 `F5_...`(Sim 2대 동시) | 각 destId cmd 자기 cell만·교차 0 |
+| **F6** push 전이 동시→전이당 1 | 신규 `F6_...`(정렬 전이) + 기존 `VS9a`/`PUSH4` | FakeRcs CountFor 전이당 1(폭주 0) |
+| **F7** OFFLINE 전이 동시→알람 1 | 신규 `F7_...` + 기존 `S7` | alarm OFFLINE 1건(stableCount) |
+| **F8** 한 소터 여러 AGV 직렬 | 신규 `F8_...`(순차 dispatch) | 3 COMPLETED·전부 R_Seq==C_Seq |
+| **G1** OFFLINE→push false | 신규 `G1_...` + 기존 `VS3` | push ready=false 수신 |
+| **G2** 복구→자동 재평가 | 신규 `G2_...`(RestartSim) + 기존 `S7`Ph2 | online 복구→push ready=true 재전이 |
+| **G3** busy→ready 전이 | 신규 `G3_...` + 기존 `PUSH2_3` | Ready 0→1→push ready=true 1건 |
+| **G4** 슈트 full→비움 재푸시 | 기존 `PUSH1` | (단위 커버) |
+| **G5** PAUSED push 무영향·IF-05만 | 신규 `G5_...` + 기존 `VS5`/`EC3` | push ready=true 유지·IF-05 NG(크로스) |
+| **G6** ⚠ RCS복구 소터재푸시/슈트stale | 신규 `G6_...`(현 동작·비대칭 finding) | 소터 자동 재푸시·슈트 비대칭(SPEC §7) |
+| **H1** qty 경계 -1/0/+1 | 신규 `H1_...`(Theory) + 기존 `MINOR1` | qty≤0→400·qty≥1→OK |
+| **H2** Capacity NULL/0/음수 무제한 | 기존 `EC4` | (단위 커버) |
+| **H3** 다중 셀 여유 선택 | 기존 `EC8` | (단위 커버) |
+| **H4** ⚠ TgtFloor 잔류 | 신규 `H4_...`(현 동작·finding) | 투입 없음→TgtFloor=2 잔류(WCS 클리어 안 함) |
+| **H5** ⚠ R_Flag 재시도 정책 | = D4(TIMEOUT 1행) / 기존 `S6` | 재시도 0·1행(현 동작·finding) |
+| **H6** 2층 고정 운영 | 신규 `H6_...` | OperationalFloor=2 설정 경유·항상 2층 |
+| **I1** IF-09 선행 없이 핸드셰이크 | 신규 `I1_...`(현 동작) | IF-09 없이 IF-10→핸드셰이크 trigger |
+| **I2** IF-10 핸드셰이크 전 | 신규 `I2_...`(현 동작) | IF-10 즉시 200·핸드셰이크 비동기 |
+| **I3** 재시도 중복 수량 0 | 신규 `I3_...` | 같은 piece COMPLETED 2행→셀 수량 1배(DISTINCT) |
+| **I4** 중복 IF-05 | 신규 `I4_...`(현 동작) | 같은 pId 활성 piece 1건 |
+
+### 드러난 결함·⚠분류·finding (계약 §6 정직 보고)
+
+- **[FINDING] 한 소터 concurrent 핸드셰이크 직렬화 부재** (`F1b` 명시 입증·은폐 0): `HandshakeOrchestrator`는
+  동일 인스턴스의 concurrent `ExecuteHandshakeAsync`를 직렬화하지 않는다(각자 `_cSeq` 증가·같은 R_Flag 폴링).
+  한 소터에 IF-10을 **동시**로 쏘면 R_Seq 교차로 일부 MISMATCH(진단: COMPLETED=1·MISMATCH=2). **순차 dispatch**면
+  3건 모두 COMPLETED(`F1`/`F8` 입증). 물리 모델(SPEC §6 "분류·이동 직렬" — 한 소터 트레이 1개씩)과 정합하므로
+  현 동작은 **직렬 dispatch 전제**가 옳다. 동시 IF-10 한 소터 허용 명세는 미정 → orchestrator 직렬화 필요(범위 밖·후속).
+  진성 동시 경합은 **서로 다른 소터**(F5)·**같은 pId 멱등**(F4·E3)·**push/offline 전이**(F6/F7)로 입증.
+- **[⚠ SPEC §7 미확정 — 현 동작 단언]** D5(C_Flag 상한 정책 미정 — TIMEOUT 계열 수렴만 단언), D8(R_CellNo≠C_CellNo
+  주입 수단 없음 — Sim 한계·기대 미정), D6(핸드셰이크 중 OFFLINE — 현 동작), G6(RCS 복구 시 소터 자동 재푸시·
+  슈트 stale 비대칭 — 현 명세로 고정·결함 아님), H4(TgtFloor 잔류 — WCS 클리어 안 함·해소책 미정), H5(R_Flag
+  재시도 0·1행 — 정책 미정). 전부 "올바른 명세"라 단언하지 않고 현 코드 동작을 ground-truth로 고정.
+- **[⚠ M5 이연 finding]** E6(콜백 throw 시 ReleaseCell 스킵 셀 누수 — 호스트종료/DI오설정 한정 경로라 E2E 재현
+  곤란 → 정상 경로 누수 0만 입증. todo.md S-M4-P3 이연과 동일 뿌리).
+
+### 검증 결과 (fresh evidence)
+
+```
+dotnet build Wcs.sln --no-incremental → 경고 0 / 오류 0
+
+dotnet test Wcs.sln --no-build --blame-hang-timeout 180s
+  → 통과! 실패:0 통과:146 전체:146 (exit 0)
+     Blame: "시퀀스 파일이 생성되지 않습니다" — hang/dump 0(teardown 채널 경쟁 회귀 0).
+  baseline(비-E2E): 99/99 GREEN(회귀 0 — 기존 전부 유지). E2E 신규 +47.
+
+타이밍/동시성 표적 ≥5회 연속(고정 sleep 0·WaitUntil*/UntilExact 폴링):
+  GroupCD+EF+GHI(고장주입·Barrier 경합·push/offline 전이, 34건) → RUN 1~5 전부 통과!(flaky 0)
+  GroupAB(멀티소터 A6 = 실 Sim 2대, 12건) → RUN 1~5 전부 통과!(flaky 0)
+```
+
+### 무변경 가드 (계약 #8 — production diff 0)
+
+```
+git status --porcelain -- src/  → (빈 출력)   # RegisterMap·DepositDecider·DestinationStatusService·
+                                              # DbSeeder 토폴로지·핸드셰이크 전부 무변경
+변경: tests/Wcs.Tests/E2E/(신규 8파일)만. 다중 소터는 테스트 측 추가 시드(production DbSeeder 미변경).
+```
+
+### ground-truth 진정성 (계약 §6 ②)
+
+- 모든 핵심 단언이 **실 Sim3ds 핸드셰이크**(sorter_command COMPLETED/MISMATCH/TIMEOUT·R_Seq==C_Seq·R_CellNo·
+  alarm) / **실 EF DB**(piece·piece_event·cell_assignment·셀수량=COMPLETED JOIN piece.qty DISTINCT) /
+  **가짜 RCS push payload**(FakeRcsServer.CountFor/LastFor/Ready) 중 하나에 근거. 인메모리 카운터 단독 0.
+- 동시성은 **Barrier 동시 도달 + 독립 HttpClient 실 동시 HTTP**(`RunConcurrentAsync`)로 진성 경합(단일 idle
+  경로 함정 회피). push 전이당-1건은 stableCount 무발화 가드로 폭주 0 입증.
+
+### 라이브 구동(§3.3/§7 — orchestrator step·APPROVED 후)
+
+`LiveMultiAgvRunner`가 자동 스위트와 **동일 `MultiAgvDriver`** 공유. `WCS_LIVE_BASEURL`(+선택 AGVS/BARCODE/
+CHUTE/PIDBASE) 설정 후 실행: 기동한 WCS API+실 Sim에 다중 AGV 동시 부하 인가 → 로그·DB·push 육안 관찰.
+미설정 시 no-op(자동 회귀 0).
+
+---
+
 ## IMPLEMENTATION COMPLETE (S-FOLDER-ORG)
 
 ### Sprint: src 폴더 구조 정리 — 순수 파일 이동(behavior-preserving)
