@@ -1796,3 +1796,59 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
   FK **17개 전부 NO_ACTION**(CASCADE 0) + filtered index 2개 PascalCase 정상. 완료 후 `DROP DATABASE` — **잔여 0**.
 - 무변경 가드: `git diff` 코드 범위가 `src/Wcs.Data/WcsDbContext.cs`(OnDelete Restrict 10개+주석) + 양 `Migrations/`(스쿼시)에 **국한**.
   Core/PlcGateway/Sim3ds/Api/Entities/DbSeeder **0줄**.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-OBSERVABILITY)
+
+> Generator 완료 보고 · 2026-06-30 · 브랜치 `feat/field-observability` · 커밋 0(보고만).
+
+### 요약
+현장 chuteNo 30→1 일원화(현장 데이터만) + 전 동작 콘솔(Serilog)·DB(operation_log) 상세 로깅. 8개 Completion(C1~C8) 전부 fresh evidence로 PASS.
+
+### 변경 파일 (무변경 가드 — Wcs.Core·tests 0줄)
+**A. chuteNo 30→1 (현장 데이터 2지점 — DbSeeder 불변)**
+- `src/Wcs.Api/appsettings.json` — `Sorters[0].ChuteNo` 30→1 (+주석).
+- `scripts/seed-field-16cells.sql` — `@sorterChute` 30→1 (+주석·THROW 메시지·헤더 정정).
+- `DbSeeder.cs` 변경 0(소터 chuteNo=30 유지 — 계약 개정). 테스트 인프라 변경 0(분석으로 누설 없음 입증: 5개 팩토리 전부 ① NopSorterRegistryFactory로 production SorterRegistryFactory 미기동(ApiIntegration·RcsPush·S8) 또는 ② `Sorters:0:ChuteNo=30` 메모리 config 명시 override(Sim·E2E). base appsettings 1이 fail-loud 매칭에 누설 0 → 146 GREEN).
+
+**B. Serilog (콘솔+롤링 파일, 전부 appsettings)**
+- `src/Wcs.Api/Wcs.Api.csproj` — Serilog.AspNetCore 8.0.3·Settings.Configuration 8.0.4·Sinks.Console 6.0.0·Sinks.File 6.0.0.
+- `src/Wcs.Api/Program.cs:28` 마커 → `builder.Host.UseSerilog((ctx,svc,cfg)=>cfg.ReadFrom.Configuration(ctx.Configuration).ReadFrom.Services(svc))`. 레벨·싱크·경로·롤링·보존·outputTemplate 전부 `Serilog` 섹션(하드코딩 0·절대규칙 #7).
+- `appsettings.json` Serilog: Console INFO + File `logs/wcs-.log` Day 롤링·14일 보존. `appsettings.Development.json`: Console Debug + `logs/wcs-dev-.log` 7일.
+
+**C. operation_log 신설 (17번째 테이블)**
+- `Entities.cs` — `OperationLog`(Id bigint identity·At datetime2 UTC·Category/Action/Level enum·SorterChuteNo?/DestinationId?/Barcode?/PId? 스냅샷·Detail JSON nvarchar(max)·**append-only**) + `OperationLogCategory`/`OperationLogLevel` enum.
+- `WcsDbContext.cs` — `ConfigureOperationLog`(테이블 `operation_log`·enum→string+length·**FK 0개**(1785 회피)·At 선두 인덱스 IX_operation_log_at·보조 (SorterChuteNo,At) IX_operation_log_sorter_at·**filtered index 아님**(207 비해당)). 기존 16테이블 매핑 0 변경.
+- 신규 마이그레이션: `Wcs.Migrations.SqlServer/20260630060710_AddOperationLog`, `Wcs.Migrations.Sqlite/20260630060725_AddOperationLog`. 각 design-time factory·`--project`=`--startup-project`=해당 마이그레이션 어셈블리. 양 ModelSnapshot 독립 갱신. operation_log 테이블만 생성(기존 테이블 0 변경).
+- `docs/ERD.md` — 16→17 테이블, operation_log 정의(스냅샷 컬럼·FK 0·횡단 관측 스트림(중복 아님) 명문화·보존 14일·기록 정책).
+
+**D. DB 기록 서비스 (비동기·단일경로·fail-safe)**
+- `src/Wcs.Data/IOperationLogger.cs` — 논블로킹 enqueue 추상화(EF 비의존 계층은 미참조).
+- `src/Wcs.Api/Services/OperationLogService.cs` — `IOperationLogger`+`IHostedService` 싱글톤. unbounded Channel enqueue(즉시 반환) + 백그라운드 컨슈머가 IServiceScopeFactory 스코프로 배치(≤256) AddRange+SaveChanges. 본 처리 비지연·기록 실패는 Serilog 경고 후 드롭(fail-safe). 소프트 의존(미등록 호스트면 관측 훅 구독 skip).
+
+**E. 로그 호출 부가 (의미 0 — 부수 기록·EF 의존 방향 보존)**
+- PlcGateway/HandshakeOrchestrator는 EF 무의존 유지 — 콜백 이벤트만 추가(가산적·핸들러 예외 격리):
+  - `PlcGateway.cs`: `OnOnlineTransition`·`OnRegisterChange(reg,old,new)`·`OnWrite(action,detail)`. 폴 루프 prevRFlag→전체 레지스터 전이 감지(변화분만). 쓰기 컨슈머 SET_TGTFLOOR·CELL_ASSIGN·CLEAR_R·RMW_D4(before→after) 발화. 단일 큐·RMW 의미 0 변경.
+  - `HandshakeOrchestrator.cs`: `OnStage(action,detail)` — HS_C_SENT/HS_R_RECV/HS_RSEQ_MATCH/MISMATCH/HS_CLEAR_R/HS_TIMEOUT/HS_CFLAG_TIMEOUT/HS_OFFLINE. C/R 의미 0 변경.
+- `SorterGatewayRegistry.cs`(SorterBundleHandle): Subscribe{Online,RegisterChange,Write,HandshakeStage} 노출.
+- `Program.cs`(SorterRegistryFactory.StartAsync): 번들별 관측 훅 → IOperationLogger 구독(PLC_WRITE·POLL_CHANGE·HANDSHAKE·STATE/ONLINE·OFFLINE). FULL/PAUSED: app.Build() 후 ChuteCapacityService.OnChuteStateChanged 구독 + GetHold 전이 추적(전이당 1행). DI에 OperationLogService 등록(IOperationLogger·IHostedService).
+- `RcsController.cs`: IF05_REQ/IF05_RES·IF09·IF10 전수(응답 형상 0 변경 — 부수 기록만). `RcsPushClient.cs`: IF08_PUSH 전수(성공/실패).
+
+### C1~C8 증거 (fresh)
+- **C5(빈 SqlServer fresh)**: `dotnet ef database update`(WcsObsTest, Initial+AddOperationLog) → exit 0·**1785/207 0**. sqlcmd 검사: operation_log 테이블 1·인덱스 3(PK+IX_at+IX_sorter_at)·**FK 0**·총 17테이블·Detail=nvarchar(-1=max). `DROP DATABASE WcsObsTest` 완료.
+- **C6(회귀 0)**: base=SqlServer `dotnet test Wcs.sln` **146 통과·0 실패 × 3회 연속**(결정성). 첫 실행서 P2b7c 1건 실패(IOperationLogger GetRequiredService 강제의존) → 소프트 의존(GetService+null skip)으로 수정 후 146 GREEN.
+- **C8(양 provider No changes)**: SqlServer·Sqlite 둘 다 `has-pending-model-changes` = "No changes".
+- **C1(라이브 IF-05 chuteNo=1)**: Production+SqlServer(RTU COM1 OFFLINE) 기동, IF-05 `0701-CELL-01` → `{"result":"OK","chuteNo":1}`. 음성대조 `0701-CELL-99` → `{"result":"NG","chuteNo":null}`. IF-09/IF-10 `{"result":"OK"}`. qty<=0 → HTTP 400(검증 불변).
+- **C2(콘솔+파일)**: 콘솔 Serilog 구조화 출력 확인. 파일 싱크 `logs/wcs-20260630.log` 생성·IF-05 라인이 구조화 속성(SourceContext·ActionName·RequestId·RequestPath) 포함.
+- **C3(operation_log 적재)**: Sim 백업 라이브(Sorters__0__Transport=Tcp override, Production·field DB chuteNo=1)로 전 카테고리 입증 — API(IF05_REQ/RES·IF09·IF10)·PLC_WRITE(SET_TGTFLOOR `{reg:D6,floor:2}`·CELL_ASSIGN·RMW_D4 before→after `{before:4,set:1,after:5}`·CLEAR_R)·HANDSHAKE(HS_C_SENT→HS_R_RECV→HS_RSEQ_MATCH→HS_CLEAR_R + HS_OFFLINE)·POLL_CHANGE(REG_CHANGE)·STATE(OFFLINE+ONLINE). 각 ≥1행·Detail 채워짐.
+- **C4(변화분 정책)**: 무변화 6초 idle(~40폴)에서 POLL_CHANGE 13→13(delta=0·무폭주). 2차 AGV 플로우에서 13→21(delta=8·전이 시 기록) — 양방향 입증.
+- **C7(재적재 클린)**: 실 DB `Rcs3dsInterlockingWcs` 소터 chuteNo 30→1 클린 전환(destination 단일 행 UPDATE — cells/orders/assignments는 DestinationId 참조라 불변) + 검증 산물 정리(piece/piece_event/sorter_command/alarm 삭제·order_item reserved/sorted 0 복원·released cell_assignment 정리) + 시드 재실행. 최종: 소터 1(chuteNo=1)·chuteNo=30 0·셀 16·오더 16·order_item 16(reserved/sorted 0)·active_assign 16·piece 0·oplog 0(테이블 present). 시드 멱등 재실행 16/16/16 불변.
+
+### 무변경 가드
+- `src/Wcs.Core/` git diff **0줄**(DepositDecider·RegisterMap·PlcSnapshot). `tests/` **0줄**(테스트 결선 변경 불요 — 누설 없음).
+- WcsDbContext **+44 삽입·0 삭제**(operation_log만). PlcGateway·HandshakeOrchestrator **+89 삽입·0 삭제**(이벤트 가산만 — 단일 큐·RMW·C/R 의미 보존). 기존 도메인 이벤트 테이블(piece_event/plc_event/alarm/...) 스키마·의미 0. 로깅이 Modbus 추가 호출·큐 우회 0.
+
+### 미해결/주의
+- PLC_WRITE·POLL_CHANGE·HANDSHAKE-success·ONLINE의 실 DB 입증은 Sim 백업(TCP override)으로 수행 — 현장 RTU HW 부재(placeholder). Production RTU 기동은 OFFLINE(예상)이나 IF-05는 DB dispatch라 chuteNo=1 정상.
+- operation_log 자동 퍼지 일배치는 본 스프린트 범위 밖(ERD에 보존 14일 정의만).
