@@ -1,3 +1,55 @@
+# Sprint Feedback — S-M5-P1 (콜드스타트 프로비저닝 + Windows Service 호스팅) — APPROVED
+
+## Phase 3 Evaluate (Evaluator fresh evidence, branch `feat/m5-coldstart-hosting`, 2026-06-29)
+
+**최종 판정: APPROVED** — 5개 평가 차원 전부 PASS. generator "146/146" 주장을 신뢰하지 않고 fresh build + 3회 연속 테스트 + 라이브 콜드스타트 2종(Dev/Prod) 직접 재현으로 검증. SDK net10.0(10.0.300) 설치 확인.
+
+### Ground-truth (직접 읽음·실행)
+- 변경 파일(`git diff HEAD --stat`): `Program.cs`(+20)·`Wcs.Api.csproj`(+4)·`appsettings.json`(+6) + 신규 untracked `src/Wcs.Api/Startup/DbInitializer.cs`·`appsettings.Development.json`·`scripts/{install,uninstall}-service.ps1`. 계약 §3.6 무변경 가드 범위와 일치.
+- DbInitializer·Program.cs·appsettings(.Development).json·scripts·DbSeeder·5개 테스트 팩토리 DB 배선 직접 정독.
+
+### ① 콜드스타트 자동 provision 정확성 (30%) — PASS (라이브 직접 재현)
+- **Development 콜드스타트**(빈 temp 디렉터리·`ASPNETCORE_ENVIRONMENT=Development`·temp DB 경로·`--Urls=http://127.0.0.1:5099`, `dotnet run --no-build`):
+  로그 시퀀스 fresh 인용 = `[DbInitializer] 콜드스타트 자동 Migrate 시작 (provider=...Sqlite)` → `Migrate 완료 — 스키마 보장됨` → `dev 시드 적용됨 (트리거: Database:SeedOnStartup=true)` → `[ChuteCapacity] 인메모리 집계 초기화 완료. 슈트 수=6` → `[SorterRegistry] SORTER_3D destination 1대 조회됨` → 소터 폴링 시작 → `Now listening on: http://127.0.0.1:5099` → `Application started`. `coldstart.db`(+wal/shm) 파일 생성 확인.
+- **직전 크래시 해소 입증**: `ChuteCapacityService`(직전 E2E `no such table: chute_detail` 사망 지점)가 정상 초기화. 로그 grep `no such table|Unhandled exception|SqliteException` = **0건**. Modbus `Could not connect`(시뮬레이터 미기동·예상 노이즈)·그에 따른 OFFLINE alarm만 존재.
+- **라이브 IF-05 실 HTTP**(`POST /api/v1/destination-query`): `TEST-BARCODE-1`(chuteNo int pId) → `{"result":"OK","chuteNo":1}` HTTP 200 / `TEST-BARCODE-3` → `{"result":"OK","chuteNo":30}`(소터) / `NOPE-NOPE` → `{"result":"NG","chuteNo":null}`. 핸들러 로그 3건 정상 기록. → VS-1·VS-2 충족.
+
+### ② 기존 테스트 회귀 0 (30%) — PASS
+- `dotnet build Wcs.sln -p:NuGetAudit=false` → **경고 0 / 오류 0**(코드 경고 0 확인). NU1903은 SQLitePCLRaw transitive audit 노이즈(선재·EF Sqlite 상시 끌어옴·코드 무관) — generator 주장과 일치.
+- `dotnet test Wcs.sln --no-build --blame-hang-timeout 180s` **3회 연속**: RUN1/2/3 = **실패 0·통과 146·건너뜀 0·전체 146·exit 0**. blame 시퀀스 파일 미생성(teardown 클린·hang 0). baseline 146 실측 일치·회귀 0. (S9·IT4b flake history 고려해 반복 실행 — 3/3 결정적.)
+- **테스트 in-memory 경로 무파손 입증(코드+동작)**: 5개 팩토리 전부 `Data Source=...;Mode=Memory;Cache=Shared` + `EnsureCreated()` + `DbSeeder.Seed()` 패턴(grep 확인). `DbInitializer.IsInMemorySqlite`가 `SqliteConnectionStringBuilder.Mode==Memory`로 정확히 이 경로를 감지→Migrate·시드 전부 no-op. 테스트 배선 `git diff` = 0줄(VS-3 충족).
+
+### ③ 호스팅 조건부 (15%) — PASS
+- `builder.Host.UseWindowsService()`(Program.cs:27) + `Microsoft.Extensions.Hosting.WindowsServices` 9.0.5(csproj) 확인.
+- 비-서비스 컨텍스트 no-op 입증: 콘솔 `dotnet run`이 Dev·Prod 양쪽에서 `Now listening`/`Application started`로 정상 기동(서비스 컨텍스트 에러 0) + WebApplicationFactory 테스트 146 GREEN. `UseWindowsService`는 `WindowsServiceHelpers.IsWindowsService()==false`면 no-op(VS-4 충족).
+- 서비스 등록 스크립트 `scripts/install-service.ps1`(sc.exe create·start=auto·failure 재시작·Environment 멀티스트링 주입·플레이스홀더+주석)·`uninstall-service.ps1`(stop→delete·미존재 안전) 존재.
+
+### ④ dev 시드 게이트 (운영 안전) (15%) — PASS (라이브 직접 입증)
+- **Production 콜드스타트**(빈 temp DB·`ASPNETCORE_ENVIRONMENT=Production`·`--Urls=...5098`):
+  로그 fresh 인용 = `Migrate 완료 — 스키마 보장됨` → `시드 게이트 off(운영 안전) — 빈 스키마만 프로비저닝` → `[ChuteCapacity] ... 슈트 수=0` → `[SorterRegistry] SORTER_3D destination 0대 조회됨` → `Now listening`/`Application started`. 크래시 0(`no such table` 등 0건).
+- **테스트 시드 미삽입 직접 입증**: Prod에서 IF-05 `TEST-BARCODE-1` → `{"result":"NG","chuteNo":null}`(Dev는 OK/chuteNo=1) — 동일 시드 바코드가 Prod에선 미해석 = 시드 오더 부재. DB 바이너리 스캔 교차검증: `chute_detail` 스키마 테이블명은 Dev·Prod WAL 양쪽 11회(스키마 둘 다 마이그레이션됨), `TEST-BARCODE`는 Dev WAL 33회 vs Prod 사실상 0(IF-05 NG로 확증). 스키마는 생성·테스트 시드만 차단(VS-5 충족).
+- 게이트 키 외부화: `Database:MigrateOnStartup`(기본 true)·`Database:SeedOnStartup`(appsettings.json 기본 **false**=운영 안전, `appsettings.Development.json`만 true 오버라이드). 하드코딩 0·`_comment_`로 문서화(절대규칙 #7 준수).
+
+### ⑤ 재시작 레지스터 재독 동기화 (10%) — PASS ("이미 충족" 근거 코드 확인)
+- `PlcPollingService._latest`(PlcGateway.cs:98-99)는 생성 시 **`Online:false`** fail-safe 스냅샷으로 초기화. `StartAsync`(173-178)가 `RunPollLoopAsync`를 띄워 매 `PollIntervalMs`마다 레지스터 재독→`_latest` 덮어씀. `_latest`는 in-memory `volatile` 필드 → 재시작 시 stale 잔존 불가, 첫 폴 전 요청은 `Online=false`(보수적)를 봄. generator "이미 충족·새 메커니즘 0" 판정은 코드에 근거함. 추측 신규 메커니즘 0(VS-6 충족).
+
+### 무변경 가드 (§3.6) — PASS
+- `git status --short -- src/Wcs.Core src/Wcs.PlcGateway src/Wcs.Data src/Wcs.Sim3ds src/Wcs.Migrations.Sqlite src/Wcs.Migrations.SqlServer tests/` = **빈 출력**(전 가드존 0변경). 새 마이그레이션 생성 0. `Program.cs` diff는 using 1·UseWindowsService 1·ProvisionAsync 1줄·주석으로 국한(SorterRegistryFactory/핸드셰이크 본문 무변경). appsettings diff는 게이트 키 2 + 주석만. API 필드/엔드포인트 무변경.
+
+### 감점 트리거 점검 — 전부 미발생
+새 마이그레이션 0 / 테스트 배선 0줄 / DbSeeder 토폴로지 0 / 운영 테스트 시드 무조건 삽입 0(Prod off 입증) / 판정·Modbus맵·핸드셰이크 본문 0 / 빈 DB 라이브 기동 미입증 → **입증됨**(Dev·Prod 2종).
+
+### Static checks
+- 빌드(컴파일러 경고 0)가 사실상 type-check. 프로젝트에 별도 린터/포매터 미구성 → `not configured`(평가 실패 아님).
+
+### Evaluator 정리(라이브 검증 부산물)
+- 임시 DB 디렉터리·임시 프로젝트 로그 전부 정리, Wcs.Api 프로세스 0 잔존, working tree에 stray db/log 0(스프린트 의도 변경만 잔존) — 확인 완료.
+
+### Completion(§5) 점검
+- build 경고0/오류0 ✔ · test 146 GREEN·회귀0 ✔ · 콜드스타트→정상(Migrate+dev시드+IF-05 OK·크래시 해소) ✔ · 라이브 빈DB 기동 성공 ✔(Dev·Prod 직접) · 서비스 스크립트 존재 ✔ · 변경 범위 국한 ✔.
+
+---
+
 # Sprint Feedback — S-E2E-MULTI-AGV — APPROVED 유지 (post-commit 재확인 + IT4b 독립 검증)
 
 ## Phase 3 Post-Commit 재확인 (Evaluator fresh evidence, HEAD `c47e790`·PR #19, 2026-06-26)
