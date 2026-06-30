@@ -69,6 +69,12 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        // base appsettings=SqlServer → 테스트 더블은 인메모리 SQLite. host setting으로 Provider=Sqlite를
+        // Program의 builder.Configuration 읽기 전에 주입해 Program이 SQLite 분기로 등록(EF SqlServer
+        // provider 미등록 → "Only a single database provider" 충돌 회피). connection은 아래
+        // ConfigureServices가 named in-memory(anchor)로 재등록(provider 결선만 — 토폴로지·시드·단언 불변).
+        builder.UseSetting("Database:Provider", "Sqlite");
+
         builder.ConfigureServices(services =>
         {
             // ── WcsDbContext를 named in-memory SQLite로 교체 ─────────────────────

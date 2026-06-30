@@ -1,3 +1,69 @@
+# Sprint Feedback — S-FIELD-SEED-16CELLS (실 3DS 16셀 작업 데이터 + 현장 구성, iter2 개정 SqlServer 전부 전환) — APPROVED
+
+## Phase 3 Evaluate (Evaluator fresh evidence, branch `feat/field-16cell-seed`, 2026-06-30)
+
+**최종 판정: APPROVED** — C1~C6 + §6 시나리오 전부 PASS. Generator 요약을 신뢰하지 않고 working tree 그대로(base=SqlServer) `dotnet test` 직접 재실행 + 실 SQL Server sqlcmd 전수 쿼리 + 앱 라이브 기동·실 IF-05 HTTP로 fresh 검증. sqlcmd OK·dotnet 10.0.300·DB `Rcs3dsInterlockingWcs`(localhost) 존재 확인.
+
+### Ground-truth (직접 읽음·실행)
+- 브랜치 `feat/field-16cell-seed`. `git diff --stat`: `src/Wcs.Api/appsettings.json`(7) + `tests/Wcs.Tests/{ApiIntegrationTests(6),E2E/E2EInfrastructure(5),RcsPushTests(6),ScenarioTests(10)}.cs` + untracked `scripts/seed-field-16cells.sql`. tasks 문서·`.claude/settings.json`은 하네스/세션 산출물(코드 범위 밖).
+- sprint-log.md `## IMPLEMENTATION COMPLETE (S-FIELD-SEED-16CELLS) — iteration 2` 마커 + 실제 diff 존재 확인(거짓 핸드오프 아님). 계약 개정 블록(SqlServer 전부 전환·base appsettings 커밋·테스트 provider 결선만·인메모리 SQLite 더블 유지) 정독.
+- IF-05 경로 = `POST /api/v1/destination-query`(RcsController.cs:37), 요청 DTO `pId,agvNo,barcode,inductionNo,qty,timeStamp`(Dtos.cs:11), 응답 `{result,chuteNo}`(절대규칙 #6 일치) 직접 확인.
+
+### C6 (개정·이번 핵심·회귀 0) base=SqlServer로 146 GREEN — PASS
+- working tree `src/Wcs.Api/appsettings.json` `"Provider": "SqlServer"`(grep L65 확인)·ConnectionString=`Server=localhost;Database=Rcs3dsInterlockingWcs;...`·`Transport=Rtu`·`SeedOnStartup=false`. 그 상태 그대로 `dotnet test Wcs.sln -p:NuGetAudit=false`:
+  → **`통과! - 실패: 0, 통과: 146, 건너뜀: 0, 전체: 146`, exit 0**. iter1의 105실패가 0이 됨(직접 재실행 입증). 인메모리 SQLite 더블로 동작.
+- tests diff 정밀 검사: 5개 `WebApplicationFactory` 팩토리 `ConfigureWebHost` 시작에 `builder.UseSetting("Database:Provider","Sqlite")` 1줄+주석씩만 추가. 단언/토폴로지/시드/146수 의미 변경 0(diff 확인).
+- 무변경 가드: `git status --porcelain -- src/Wcs.Core src/Wcs.PlcGateway src/Wcs.Sim3ds src/Wcs.Data src/Wcs.Migrations.SqlServer src/Wcs.Migrations.Sqlite docs/ERD.md` = **빈 출력**(보호영역 0줄). src/Wcs.Api는 appsettings.json만 변경.
+
+### C2 스키마(20%) — PASS
+- `SELECT COUNT(*) FROM sys.tables WHERE name<>'__EFMigrationHistory'` = **16**(총 17 = 16 도메인 + `__EFMigrationHistory` 비표준명).
+- FK delete_referential_action: `NO_ACTION 17`(전부). 비-NO_ACTION FK = **0건**(1785 캐스케이드 흔적 0). 207(존재하지 않는 컬럼) 흔적 0(스키마 정상 생성·DbInitializer Migrate 완료 로그 확인).
+
+### C1 IF-05(최우선 30%) — PASS (라이브 실 HTTP)
+- 앱 `ASPNETCORE_ENVIRONMENT=Production dotnet run --project src/Wcs.Api`(base=SqlServer+RTU)로 기동: `[DbInitializer] Migrate 시작(provider=...SqlServer) → Migrate 완료` → `Now listening on http://0.0.0.0:5080` → `Hosting environment: Production`. RTU COM1 미연결로 `FileNotFoundException: Could not find file 'COM1'` → 소터 OFFLINE 전이(예외 삼키지 않고 명시 처리). 기동은 막히지 않음.
+- IF-05 실 HTTP 응답(fresh 캡처):
+  - `0701-CELL-01` → `{"result":"OK","chuteNo":30}` (HTTP 200)
+  - `0701-CELL-08` → `{"result":"OK","chuteNo":30}` (HTTP 200)
+  - `0701-CELL-16` → `{"result":"OK","chuteNo":30}` (HTTP 200)
+  - 미적재 `0701-CELL-99` → `{"result":"NG","chuteNo":null}` (HTTP 200) — 음성 대조, 가짜 OK 방지 입증.
+- 소터 RTU OFFLINE이어도 IF-05가 DB dispatch라 OK 정상(계약 예측 일치). 검증 후 클린 종료(PID kill·포트 5080 해제 확인).
+
+### C3 데이터 정확성(20%) — PASS (실 SQL Server 쿼리)
+- 소터 destination: `ChuteNo=30·DestType=SORTER_3D·Floor=NULL·Status=NORMAL·IsActive=1`(1행).
+- 셀: 소터 소속 16개·`Capacity=3·Enabled=1·CellNo BETWEEN 1 AND 16` 정확히 **16행**(min1/max16/distinct16).
+- work_batch: `WorkDate=2026-07-01·BatchNo=FIELD-16·WaveNo=1·Status=RUNNING`(DbSeeder의 today,'SEED',1과 UQ 비충돌).
+- order_item: PlannedQty=3 **16행**, 바코드 집합 = {`0701-CELL-01`..`16`} 정확.
+
+### C4 N↔N + FK 무결성(15%) — PASS
+- cell_assignment 총 16건·활성(ReleasedAt NULL) **16건**·released(NOT NULL) 0건.
+- N↔N 결정적 매핑(`CellNo=N ↔ OrderNo=0701-CELL-N`) 활성 **16건** 1:1 정확(전체 매핑 표 육안 확인 — CellNo 1→0701-CELL-01 … 16→0701-CELL-16, ReleasedAt 전부 NULL).
+- 고아 FK: orphan_cell 0·orphan_order 0.
+
+### C5 멱등(10%) — PASS (스크립트 직접 2회 더 실행)
+- `sqlcmd -S localhost -d Rcs3dsInterlockingWcs -E -C -f 65001 -i scripts/seed-field-16cells.sql` **2회 연속** 추가 실행 → 둘 다 exit 0, 중복/키충돌/오류 0. 요약 출력 cells_16=16·items_16=16·assignments_NtoN_16=16.
+- 재실행 후 전수: dest30=1·cells=16·batch=1·orders=16·items=16·active_assign=16·piece=0 **불변**.
+
+### 정리(클린 시드 상태 복원)
+- IF-05 검증으로 생성된 산물(piece 4=3 RESERVED+1 DENIED·piece_event 8·ReservedQty 합 3) 정리: piece_event→piece 삭제 + ReservedQty/SortedQty 0 복원(QUOTED_IDENTIFIER ON 필요 — filtered index 테이블). 정리 후: **piece=0·piece_event=0·ReservedQty=0·SortedQty=0·cells=16·active_assign=16·items=16**(§4 명세 클린 상태).
+
+### 감점 트리거 점검 — 전부 미발생
+보호영역(Core·PlcGateway·Sim3ds·Data·양 마이그레이션·DbSeeder·WcsDbContext·ERD) 0줄 / 테스트 단언·토폴로지·시드·146수 의미 변경 0(provider 결선 1줄만) / 가짜 OK 0(미적재 NG 음성대조 입증) / 멱등 깨짐 0 / 1785·207 흔적 0.
+
+**APPROVED** — C1~C6 + §6 V-DI-1~5 시나리오 전부 fresh evidence로 PASS. 회귀 0.
+
+## Step 4.5 독립 코드리뷰 (orchestrator, opus, 팀 외부) — BLOCKING 0 / MAJOR 0 / MINOR 3
+
+독립 Opus 코드리뷰어가 Evaluator 미커버 영역(아키텍처·명명·주석·유지보수성·의미정확성·보안) 검토 → **BLOCKING 0·머지 가능**. seed SQL 스키마 정합을 SqlServer 마이그레이션 원본(`20260630012916_Initial.cs`)과 직접 대조(일치). 정보성 4건(품질 양호): N↔N가 문자열 파싱이 아닌 **구성(construction) 조인**이라 파싱 취약점 0 / `SET XACT_ABORT ON`+TX 원자성·chuteNo=30 비정상 점유 시 `THROW 50001` fail-loud / `Trusted_Connection`로 시크릿 평문 0 / seed 헤더 자기설명 우수.
+
+### Minor (비차단 — 전부 후속·범위 밖, 다음 sprint Generator 참고)
+- **MINOR-1 (유지보수)**: 5개 WebApplicationFactory에 `builder.UseSetting("Database:Provider","Sqlite")` 1줄+주석 **중복**(`ApiIntegrationTests.cs:72`·`E2E/E2EInfrastructure.cs:160`·`RcsPushTests.cs:189`·`ScenarioTests.cs:113·1091`). 메커니즘은 정확(minimal-API에서 `ConfigureAppConfiguration`/디스크립터 제거는 무효 — `UseSetting`만 builder 생성 시점 반영). → 공통 베이스 팩토리/헬퍼(`ForceInMemorySqlite`)로 추출 권고(별도 정리 sprint).
+- **MINOR-2 (테스트 커버리지 사각·중요)**: base=SqlServer + 전 팩토리 SQLite 강제 → 제품 `Program.cs:49-63`의 **SqlServer 부팅 분기(provider 선택·MigrationsAssembly 결선)를 어떤 `dotnet test`도 안 봄**. 회귀가 라이브 기동에서만 발현(이번엔 Evaluator가 라이브 C1·C2로 보강했으나 CI 자동화 빈틈). → SqlServer(LocalDB/Testcontainers) smoke 테스트 1개 후속 추가 검토.
+- **MINOR-3 (dev/sim DX)**: base가 SqlServer+RTU라 `appsettings.Development.json`이 Provider/Transport를 오버라이드 안 하면(현재 SeedOnStartup만) 로컬 dev·Tcp 시뮬레이터 워크플로가 명시 오버라이드 필요. → `appsettings.Development.json`에 `Provider=Sqlite`·`Transport=Tcp` 추가 후속 검토.
+
+→ MINOR 3건 전부 후속(범위 밖) → Step 5 커밋 진행.
+
+---
+
 # Sprint Feedback — S-M5-P1 (콜드스타트 프로비저닝 + Windows Service 호스팅) — APPROVED
 
 ## Phase 3 Evaluate (Evaluator fresh evidence, branch `feat/m5-coldstart-hosting`, 2026-06-29)
