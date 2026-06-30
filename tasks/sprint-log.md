@@ -1576,3 +1576,109 @@ Phase 1이 의도적으로 하드코딩하던 소터 `Full:false / Paused:false`
 - `dotnet test Wcs.sln` — **83/83 GREEN·exit 0**(기존 76 회귀 0 + 신규 7). `--blame-hang-timeout 120s`: 시퀀스 파일 미생성(hang 0).
 - 동시성/타이밍 표적(SorterCellFullnessTests + RcsPushTests 13개) **5회 연속 GREEN·exit 0**.
 - 기능 회귀 클래스(ApiIntegrationTests + ScenarioTests + P2bMultiSorterTests) 33/33 GREEN.
+
+---
+
+## BLOCKER — 계약 ACCEPTANCE 모순 (S-SQLSERVER-FK-CASCADE)
+
+> Generator(standalone) · 2026-06-30 · team-lead 결정 필요. **추측·단독 계약변경 금지로 에스컬레이션.**
+
+### 구현은 완료됨 (모델·마이그레이션·SQLite 전부 GREEN)
+- `WcsDbContext.OnModelCreating` — 1785 유발 **필수(non-null) FK 10개**를 `DeleteBehavior.Restrict`로 명시:
+  destination↔chute_detail(1:1) · cell→destination · destination_event→destination · cell_assignment→cell ·
+  cell_assignment→wcs_order · wcs_order→work_batch · order_item→wcs_order · piece_event→piece ·
+  sorter_command→piece · sorter_command→cell. (nullable FK 7개는 이미 EF 기본 비-Cascade라 미변경 — 스냅샷 노이즈 0.)
+- 신규 마이그레이션: SqlServer `20260630010605_FkRestrictNoCascade` / Sqlite `20260630010625_FkRestrictNoCascade`.
+  Up/Down 모두 **FK drop+recreate(onDelete Cascade↔Restrict)만** — 컬럼/테이블/인덱스 변경 0.
+- `dotnet build` 0 error / 신규 warning 0 (NU1903은 기존 transitive 취약성, 변경 무관).
+- `dotnet test` **146/146 GREEN · 회귀 0** (테스트/단언 변경 0).
+- 양 provider `has-pending-model-changes` = **No changes**.
+- 무변경 가드: git diff가 OnModelCreating + 양 ModelSnapshot + 양 신규 마이그레이션에 국한.
+
+### ❌ BLOCKER: §3 ① (최우선 40%) — 실 SQL Server `database update` 1785 재발
+**근본 원인(입증 완료):** `dotnet ef database update`(빈 DB)는 마이그레이션을 **순차 적용**한다.
+기존 **Initial 마이그레이션의 `CREATE TABLE [sorter_command] ... ON DELETE CASCADE`**(SqlServer Initial.cs L408-419)가
+가장 먼저 실행되며 **바로 이 시점에 1785**가 터진다. 신규 FkRestrictNoCascade는 Initial 적용 *이후*에야
+FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
+- 입증 로그: `Applying migration '20260616072550_Initial'.` → `Error Number:1785` (sorter_command).
+- idempotent 전체 스크립트도 L322에서 `CREATE TABLE sorter_command ... ON DELETE CASCADE`(Initial 단계) → L770~858에서야 NO ACTION 변경.
+- **SqlServer에는 "Initial이 적용된 DB"가 물리적으로 존재할 수 없다**(Initial 자체가 1785로 실패). 따라서 §3 ⑤가 보호하려는
+  "기존 적용 DB 증분 적용" 시나리오는 SqlServer에선 성립 불가. (SQLite는 미강제라 적용 가능했고 테스트는 EnsureCreated 경로.)
+
+### 계약 두 기준이 SqlServer에서 상호 배타
+- §3 ①(빈 DB `database update` 성공) ⟺ **Initial이 CASCADE 없이 생성되어야** 함.
+- §3 ⑤(기존 3 마이그레이션 무손상) ⟺ **Initial이 CASCADE 그대로**.
+→ 증분 마이그레이션 1개 추가만으로는 §3 ① 충족 불가. Generator 재량(behavior 선택) 밖의 **계약 수준 충돌**.
+
+### team-lead 결정 요청 (옵션)
+1. **(권장) Initial 마이그레이션 직접 수정**(SqlServer·Sqlite Initial.cs의 10개 FK CASCADE→NO ACTION/Restrict) + 신규 마이그레이션 폐기.
+   근거: SqlServer엔 Initial 적용 DB가 존재 불가 → 베이스라인 재작성의 실질 피해 0. 콜드스타트를 실제로 고치는 유일 경로.
+   대가: §3 ⑤·재개 노트 "기존 3 마이그레이션 무손상" 명시 위반 → **계약 개정 필요**(Planner/사용자 승인).
+2. 신규 마이그레이션 유지 + Initial도 병행 수정(혼합) — 불필요하게 복잡, 동일 계약 개정 필요.
+3. 그 외 사용자 지시.
+
+현 작업물(OnModelCreating + 신규 마이그레이션 2개 + 스냅샷 2개)은 디스크 보존. 결정 후 옵션1이면 신규 마이그레이션 remove + Initial 패치로 전환.
+
+---
+
+## UPDATE — Option 1 적용 + 2차 잠복 결함 발견 (S-SQLSERVER-FK-CASCADE)
+
+> Generator(standalone) · 2026-06-30 · team-lead 추가 결정 필요(207 잠복 버그).
+
+### Option 1 적용 완료 (FK 1785 해소)
+- 신규 마이그레이션 4파일 삭제: SqlServer/Sqlite `*_FkRestrictNoCascade.cs`/`.Designer.cs`. provider당 마이그레이션 3개(Initial·P2a·P1) 복귀.
+- 양 Initial.cs 직접 패치: 1785 유발 FK **10개** `onDelete: Cascade → NoAction`(ID·파일명 동일). diff = onDelete 줄만(20 ins/20 del/파일, 구조 변경 0). 남은 Cascade는 각 `FK_piece_destination_DestinationId` 1개(P2a가 drop 후 NoAction 재생성 — 의도적 유지).
+- ModelSnapshot은 이미 Restrict(=NoAction) → `migrations remove` 미사용, 신규 파일만 삭제해 스냅샷 보존.
+- OnModelCreating Restrict 10개 유지.
+- build 0 error / 신규 warning 0. test **146/146 GREEN**. 양 provider has-pending = **No changes**.
+
+### ✅ FK 1785 해소 입증 + ❌ 2차 잠복 버그(SQL Server 오류 207) 발견
+콜드스타트 `database update`(빈 SQL Server) 재실행 → **1785 사라짐**(Initial이 FK 단계 통과). 그러나 Initial 적용 중 **다음 단계에서 오류 207**:
+`열 이름 'is_active'이(가) 유효하지 않습니다` @ `Applying migration '20260616072550_Initial'`.
+- 원인: **SqlServer Initial.cs L517 `CreateIndex UQ_piece_pid_where_active ... filter: "[is_active] = 1"`** (snake_case) — 물리 컬럼은 `IsActive`(PascalCase, L299). SQL Server는 `is_active` 컬럼이 없어 207.
+- **기존 잠복 버그 입증**: `git show HEAD:...Initial.cs` L517도 `[is_active]`. 내 diff는 이 줄 미변경(FK onDelete만). 그동안 1785가 먼저 터져 이 207에 **도달한 적 없음**. SQLite는 컬럼명 대소문자 미구분 + Sqlite Initial은 filter 없는 복합 유니크(`UQ_piece_pid_is_active` on (PId,IsActive))라 무관.
+- P2a가 이 인덱스를 drop 후 `UQ_piece_pid_active_status`(filter `[IsActive]=1 AND...`)로 정상화하므로, **Initial만 통과하면 그 뒤 P2a/P1 정상**. 즉 Initial L517 한 줄이 콜드스타트의 마지막 장애물.
+- 부분 DB는 매 시도 후 drop, 잔여 0.
+
+### team-lead 결정 요청 (207)
+계약 §2 OUT은 "인덱스 구조 불변", 무변경 가드는 "FK onDelete 메타만". 그러나 §3①(콜드스타트 Initial 통과)은 207 해소 없이는 불가.
+- **(권장) SqlServer Initial.cs L517 필터 컬럼명만 `[is_active]`→`[IsActive]` 수정**(1줄). 인덱스 이름·컬럼·유니크·대상 테이블 전부 불변, **필터 표현식의 컬럼명을 물리명과 일치**시키는 오타 교정. 구조 변경 0. P2a가 곧 drop하는 인덱스라 모델/스냅샷 정합·has-pending에 영향 없음(검증 예정).
+- 또는 FK 스프린트 scope를 FK 1785로 한정하고 207은 별도 후속 스프린트로 분리(이 경우 §3① 콜드스타트 성공은 본 스프린트에서 미달, FK 1785 해소만으로 종료).
+- 그 외 지시.
+
+현 작업물 디스크 보존. 결정 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-SQLSERVER-FK-CASCADE)
+
+> Generator(standalone) · 2026-06-30 · 개정 2(스쿼시) 적용 완료. Evaluator 핸드오프 준비.
+
+### 수정 요약 (HOW)
+- **OnModelCreating (모델 원천, 유지)**: 1785 유발 필수 FK 10개를 `DeleteBehavior.Restrict`로 명시 —
+  destination↔chute_detail(1:1) · cell→destination · destination_event→destination · cell_assignment→cell ·
+  cell_assignment→wcs_order · wcs_order→work_batch · order_item→wcs_order · piece_event→piece ·
+  sorter_command→piece · sorter_command→cell. (nullable FK 7개는 EF 기본 비-Cascade 유지 — 미변경.)
+  EF는 Restrict를 SQL Server DDL `NO ACTION`으로 방출 → 다중 캐스케이드 경로 제거(1785 해소).
+- **마이그레이션 스쿼시(개정 2)**: 양 provider 기존 3개(Initial·P2a·P1_If09Arrival) + 그 스냅샷 전부 삭제 →
+  현재 검증된 모델에서 **단일 Initial** provider별 독립 재생성(각 design-time factory, --project/--startup-project=해당 마이그레이션 어셈블리).
+  - 삭제: SqlServer/Sqlite 각 6 .cs(.Designer 포함) + 구 WcsDbContextModelSnapshot.cs.
+  - 신규: SqlServer `20260630012916_Initial`(.cs/.Designer) + Sqlite `20260630012926_Initial`(.cs/.Designer) + 양 새 ModelSnapshot.
+  - 머신 생성이라 NoAction FK·올바른 컬럼명(`IsActive`)·올바른 filtered index가 모델에서 자동 반영 → **1785·207 동시 제거**.
+
+### 무결성 확인
+- 새 SqlServer Initial `is_active`(snake) **0건**(grep) → 207 재발 불가. filtered index 2개 모두 PascalCase:
+  `UQ_piece_pid_active_status [IsActive]=1 AND [Status] IN(...)`, `UQ_cell_assignment_cell_active [ReleasedAt] IS NULL`.
+- 구 마이그레이션 ID/클래스명을 참조하는 **코드 0건**(tests/DbInitializer/Program grep — tasks/docs 문서에만 존재, 코드 무영향).
+- CreateTable = **16테이블**(양 provider), onDelete 분포 = Restrict 10·Cascade 0.
+
+### 검증 결과 (fresh evidence, §4 전부)
+- `dotnet build Wcs.sln` — **오류 0 / 신규 warning 0**(경고 10개는 기존 NU1903 transitive 취약성, 변경 무관).
+- `dotnet test Wcs.sln` — **146/146 GREEN**(테스트/단언 변경 0, SQLite EnsureCreated 경로 무파손).
+- 양 provider `has-pending-model-changes` = **No changes**.
+- **콜드스타트 실 SQL Server 2025(localhost)**: `database update`(빈 DB WcsCascadeTest) →
+  `Applying migration '20260630012916_Initial'.` → `Done.` **exit 0, 1785·207 0건**.
+  생성 DB 검사: 사용자 테이블 **16개**(agv·alarm·cell·cell_assignment·chute_detail·destination·destination_event·induction·order_item·piece·piece_event·plc_event·printer·sorter_command·wcs_order·work_batch) +
+  FK **17개 전부 NO_ACTION**(CASCADE 0) + filtered index 2개 PascalCase 정상. 완료 후 `DROP DATABASE` — **잔여 0**.
+- 무변경 가드: `git diff` 코드 범위가 `src/Wcs.Data/WcsDbContext.cs`(OnDelete Restrict 10개+주석) + 양 `Migrations/`(스쿼시)에 **국한**.
+  Core/PlcGateway/Sim3ds/Api/Entities/DbSeeder **0줄**.

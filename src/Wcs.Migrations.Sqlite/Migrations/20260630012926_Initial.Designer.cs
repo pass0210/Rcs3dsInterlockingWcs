@@ -11,7 +11,7 @@ using Wcs.Data;
 namespace Wcs.Migrations.Sqlite.Migrations
 {
     [DbContext(typeof(WcsDbContext))]
-    [Migration("20260616072524_Initial")]
+    [Migration("20260630012926_Initial")]
     partial class Initial
     {
         /// <inheritdoc />
@@ -142,7 +142,10 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CellId");
+                    b.HasIndex("CellId")
+                        .IsUnique()
+                        .HasDatabaseName("UQ_cell_assignment_cell_active")
+                        .HasFilter("\"ReleasedAt\" IS NULL");
 
                     b.HasIndex("OrderId");
 
@@ -205,11 +208,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("INTEGER");
-
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("BLOB");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -314,11 +312,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<int>("ReservedQty")
                         .HasColumnType("INTEGER");
 
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("BLOB");
-
                     b.Property<int>("SortedQty")
                         .HasColumnType("INTEGER");
 
@@ -362,7 +355,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<DateTime?>("DepositedAt")
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("DestinationId")
+                    b.Property<long?>("DestinationId")
                         .HasColumnType("INTEGER");
 
                     b.Property<long?>("InductionId")
@@ -379,11 +372,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.Property<int>("Qty")
                         .HasColumnType("INTEGER");
-
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("BLOB");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -406,6 +394,11 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasIndex("OrderItemId")
                         .HasDatabaseName("IX_piece_order_item");
 
+                    b.HasIndex("PId")
+                        .IsUnique()
+                        .HasDatabaseName("UQ_piece_pid_active_status")
+                        .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED')");
+
                     b.HasIndex("Status")
                         .HasDatabaseName("IX_piece_status");
 
@@ -414,10 +407,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.HasIndex("DestinationId", "Status")
                         .HasDatabaseName("IX_piece_dest_status");
-
-                    b.HasIndex("PId", "IsActive")
-                        .IsUnique()
-                        .HasDatabaseName("UQ_piece_pid_is_active");
 
                     b.ToTable("piece", (string)null);
                 });
@@ -614,11 +603,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("BLOB");
-
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("TEXT");
 
@@ -671,11 +655,6 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<DateTime?>("OpenedAt")
                         .HasColumnType("TEXT");
 
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("BLOB");
-
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -717,7 +696,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Cells")
                         .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");
@@ -728,13 +707,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Cell", "Cell")
                         .WithMany("Assignments")
                         .HasForeignKey("CellId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.WcsOrder", "Order")
                         .WithMany("CellAssignments")
                         .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Cell");
@@ -747,7 +726,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithOne("ChuteDetail")
                         .HasForeignKey("Wcs.Data.ChuteDetail", "DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.Printer", "Printer")
@@ -764,7 +743,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Events")
                         .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");
@@ -775,7 +754,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.WcsOrder", "Order")
                         .WithMany("Items")
                         .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Order");
@@ -789,9 +768,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Pieces")
-                        .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .HasForeignKey("DestinationId");
 
                     b.HasOne("Wcs.Data.Induction", "Induction")
                         .WithMany()
@@ -815,7 +792,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Piece", "Piece")
                         .WithMany("Events")
                         .HasForeignKey("PieceId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Piece");
@@ -826,13 +803,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.Cell", "Cell")
                         .WithMany("Commands")
                         .HasForeignKey("CellId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.Piece", "Piece")
                         .WithMany("Commands")
                         .HasForeignKey("PieceId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Cell");
@@ -849,7 +826,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasOne("Wcs.Data.WorkBatch", "WorkBatch")
                         .WithMany("Orders")
                         .HasForeignKey("WorkBatchId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");

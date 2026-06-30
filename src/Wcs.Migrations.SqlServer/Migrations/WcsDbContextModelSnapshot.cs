@@ -733,7 +733,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Cells")
                         .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");
@@ -744,13 +744,13 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Cell", "Cell")
                         .WithMany("Assignments")
                         .HasForeignKey("CellId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.WcsOrder", "Order")
                         .WithMany("CellAssignments")
                         .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Cell");
@@ -763,7 +763,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithOne("ChuteDetail")
                         .HasForeignKey("Wcs.Data.ChuteDetail", "DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.Printer", "Printer")
@@ -780,7 +780,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Destination", "Destination")
                         .WithMany("Events")
                         .HasForeignKey("DestinationId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");
@@ -791,7 +791,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.WcsOrder", "Order")
                         .WithMany("Items")
                         .HasForeignKey("OrderId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Order");
@@ -829,7 +829,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Piece", "Piece")
                         .WithMany("Events")
                         .HasForeignKey("PieceId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Piece");
@@ -840,13 +840,13 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.Cell", "Cell")
                         .WithMany("Commands")
                         .HasForeignKey("CellId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("Wcs.Data.Piece", "Piece")
                         .WithMany("Commands")
                         .HasForeignKey("PieceId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Cell");
@@ -863,7 +863,7 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasOne("Wcs.Data.WorkBatch", "WorkBatch")
                         .WithMany("Orders")
                         .HasForeignKey("WorkBatchId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.Navigation("Destination");
