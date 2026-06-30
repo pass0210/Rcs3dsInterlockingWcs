@@ -2,6 +2,16 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-FIELD-SEED-16CELLS (실 3DS 16셀 작업 데이터 + 현장 SqlServer 구성) — APPROVED (2026-06-30, 2 iterations: iter1 BLOCKED→계약 개정→iter2 PASS)
+
+- **계약 acceptance 상호배타는 단독 수정 말고 입증과 함께 에스컬레이션 → 사용자 결정으로 해소 (S-SQLSERVER-FK-CASCADE 교훈 재적용)**: iter1에서 C6(146 GREEN) ↔ §2 IN(base appsettings=SqlServer)이 한 파일에서 상호 배타임을 Generator가 입증(SqlServer면 `WebApplicationFactory<Program>`가 EF SqlServer provider 등록·테스트 팩토리는 DbContextOptions만 SQLite 교체→"Only a single database provider" 105실패). 단독 개정 대신 에스컬레이션→사용자 "SqlServer로 전부 전환" 결정으로 base 커밋+테스트 provider 결선 수정 허용. iter2 PASS.
+- **provider 결선은 `UseSetting`(host setting)으로 — `ConfigureAppConfiguration`·디스크립터 제거는 무효**: `WebApplicationFactory<Program>`의 `ConfigureServices` 시점엔 EF/DbContext 디스크립터 0개(제거 대상 부재). `ConfigureAppConfiguration` 주입은 Program top-level Configuration 읽기 **이후** 병합돼 provider 선택 못 되돌림(즉시 평가). 해법 = `builder.UseSetting("Database:Provider","Sqlite")` — Configuration 읽기 **전** 반영→Program SQLite 분기→EF SqlServer provider 미등록(충돌 원천 제거). 5개 팩토리 각 1줄로 base=SqlServer에서 146 GREEN·단언/시드 0 변경.
+- **데이터 적재 스프린트 PASS 근거 = 실 prod provider(SqlServer) 직접 쿼리·코드 읽기 불가**: C2(sys.tables 16·FK 전부 NO_ACTION·1785/207 0)·C3·C4(N↔N 16·고아 0)·C5(스크립트 2회 재실행 행수 불변)를 실 SQL Server sqlcmd 전수. C1(IF-05)은 base=SqlServer+RTU 라이브 기동→실 HTTP `{result,chuteNo}`. RTU COM1 OFFLINE이어도 IF-05는 DB dispatch라 OK(소터 RTU와 무관).
+- **음성 대조로 가짜 OK 방지**: 적재 `0701-CELL-01/08/16`→OK+chuteNo=30 + 미적재 `0701-CELL-99`→NG+null 둘 다 입증해 "전부 OK" 거짓 PASS 배제.
+- **멱등 sqlcmd = IF NOT EXISTS/MERGE/NOT EXISTS + filtered index 테이블 QUOTED_IDENTIFIER ON 필수**: cell_assignment·piece 등 부분유니크 테이블 INSERT/DELETE는 `SET QUOTED_IDENTIFIER ON;SET ANSI_NULLS ON;` 요구(없으면 Msg 1934). DbSeeder 비충돌 식별자(BatchNo='FIELD-16' vs 'SEED'). 한글 주석 BOM-less는 `-f 65001`.
+- **검증 후 클린 시드 복원 의무**: IF-05 검증이 piece(RESERVED/DENIED)·piece_event·ReservedQty 차감 산물 생성 → piece_event→piece 삭제+ReservedQty/SortedQty 0 복원으로 §4 클린 상태(piece 0·active_assign 16·cells 16) 복원.
+- [CODE-REVIEW] sprint=S-FIELD-SEED-16CELLS critical=0 major=0 minor=3 iter=2 opus=yes (독립 Opus: BLOCKING 0. MINOR-1=5개 WebApplicationFactory `UseSetting` 1줄 중복→헬퍼 추출 후속 / MINOR-2=base=SqlServer+전 팩토리 SQLite 강제로 제품 SqlServer 부팅분기가 dotnet test 사각→SqlServer smoke 테스트 후속(중요) / MINOR-3=appsettings.Development.json이 Provider/Transport 미오버라이드→dev/sim DX 부채 후속. seed SQL을 마이그레이션 원본과 대조 일치·N↔N 구성조인(파싱취약 0)·XACT_ABORT TX·THROW fail-loud·Trusted_Connection 시크릿 0 = 정보성 양호.)
+
 ## S-M5-P1 (콜드스타트 프로비저닝 + Windows Service 호스팅) — APPROVED (2026-06-29, 1 iteration)
 
 - **콜드스타트 자동 provision = `app.Build()` 후 `app.Run()` 전 1회 `DbInitializer.ProvisionAsync`**: IHostedService(ChuteCapacityService·SorterRegistryFactory)가 DB를 조회하기 **전에** Migrate로 스키마를 보장. 직전 E2E 크래시(빈 wcs.db 기동 시 ChuteCapacityService `no such table: chute_detail` 사망)의 정식 해소. 라이브 Dev 재현으로 `슈트 수=6`·IF-05 OK·`no such table` 0건 입증.

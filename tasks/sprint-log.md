@@ -1,5 +1,119 @@
 # Sprint Log
 
+## IMPLEMENTATION COMPLETE (S-FIELD-SEED-16CELLS) — iteration 2 (계약 개정: SqlServer 전부 전환)
+
+작업: Generator(standalone) · 브랜치 `feat/field-16cell-seed` · 커밋 없음(working tree만, team-lead 커밋).
+
+> iteration 1에서 입증한 C6↔§2 모순을 사용자 결정("SQLite 안 씀 → SqlServer로 전부 전환")으로 해소.
+> base `appsettings.json`을 SqlServer 현장 구성으로 전환(커밋 대상)하고, 테스트 인프라를 provider 결선만
+> 수정해 **base=SqlServer에서 146 GREEN 회복**. (iteration 1 BLOCKED 기록은 아래에 입증 이력으로 보존.)
+
+### 근본 메커니즘 (iteration 1에서 미파악 → iteration 2에서 진단으로 확정)
+- iteration 1의 1차 시도(테스트 팩토리 `ConfigureAppConfiguration`에 `Database:Provider=Sqlite` 주입,
+  또는 EF SqlServer provider 서비스 디스크립터 제거)는 **모두 무효**였다. 진단 결과:
+  ① `WebApplicationFactory<Program>`의 `IWebHostBuilder.ConfigureServices`/`ConfigureTestServices` 콜백
+     시점에 **EF/DbContext 디스크립터가 0개**(Program의 minimal-API `AddDbContext` 등록이 그 컬렉션에 안 보임)
+     → "provider 서비스 디스크립터 제거" 접근은 제거할 대상이 없어 무효.
+  ② `ConfigureAppConfiguration` 주입은 Program top-level `builder.Configuration["Database:Provider"]`
+     **읽기 이후** 병합돼 provider 선택을 못 되돌림(즉시 평가 vs IOptions 지연 평가 차이 — RcsPush:* 는 IOptions라 먹혔음).
+- **해법(확정)**: `builder.UseSetting("Database:Provider", "Sqlite")` — host setting은 Program의
+  `builder.Configuration` 읽기 **전**에 반영돼 Program이 SQLite 분기로 등록한다(EF SqlServer provider
+  미등록 → "Only a single database provider" 충돌 원천 제거). 기존 named in-memory(anchor) DbContext
+  재등록 로직은 그대로 — provider 결선(host setting 1줄)만 추가.
+
+### 테스트 인프라 수정 (provider 결선만 — tests/, 단언·토폴로지·시드 0 변경)
+- 5개 `WebApplicationFactory<Program>` 팩토리의 `ConfigureWebHost` 시작에 `UseSetting("Database:Provider","Sqlite")` 1줄씩 추가:
+  `FakeModbusWebApplicationFactory`(ApiIntegrationTests.cs)·`RcsPushWebApplicationFactory`(RcsPushTests.cs)·
+  `SimWebApplicationFactory`·`S8ApplicationFactory`(ScenarioTests.cs)·`E2EWebApplicationFactory`(E2EInfrastructure.cs).
+- `Sorters[0].Transport=Rtu`(base)는 통합 테스트에 무해 — 모든 통합 팩토리가 `Sorters:i:Transport="Tcp"`를
+  config로 자체 오버라이드하거나 SorterRegistryFactory를 fake로 교체하므로 RTU 결선을 안 탐(확인).
+
+### 재검증 (fresh evidence)
+- **`dotnet test Wcs.sln`(base appsettings Provider=SqlServer 상태) → 146 GREEN / 실패 0 / 건너뜀 0**
+  (iteration 1의 105실패 → 0). 테스트는 여전히 인메모리 SQLite 더블로 동작(UseSetting으로 SQLite 분기).
+- 시드 멱등 재확인: `scripts/seed-field-16cells.sql` 재실행 후 cells16·items16·active_assign16 불변.
+- IF-05 재확인(appsettings 최종형 base=SqlServer+RTU, Production 기동 :5080):
+  `POST /api/v1/destination-query` → `0701-CELL-01` `{"result":"OK","chuteNo":30}`(HTTP 200),
+  `0701-CELL-99` `{"result":"NG","chuteNo":null}`. 기동 후 클린 종료, 검증 산물(piece) 정리해
+  시드 클린 상태(piece 0·ReservedQty 0·cells16·active_assign16) 복원.
+
+### appsettings 최종형 (base, 커밋 대상)
+- `Database:Provider="SqlServer"` · `ConnectionStrings:WcsDb="Server=localhost;Database=Rcs3dsInterlockingWcs;Trusted_Connection=True;TrustServerCertificate=True"` · `Database:SeedOnStartup=false`.
+- `Sorters[0].Transport="Rtu"` + RTU 시리얼 기존 기본값(COM1/9600/Even/One/1) 유지 + "★현장 확인 필요" 메모(§8 미확정).
+
+### 무변경 가드 (git diff 범위)
+- 커밋 대상 변경: `src/Wcs.Api/appsettings.json`(현장 구성) + `tests/Wcs.Tests/{ApiIntegrationTests,RcsPushTests,ScenarioTests,E2E/E2EInfrastructure}.cs`(각 UseSetting 1줄+주석) + 신규 `scripts/seed-field-16cells.sql`.
+- 제품코드(Core·PlcGateway·Sim3ds·Data·Api Controllers/Services/Repositories/Program/Startup)·마이그레이션(양 provider)·`DbSeeder.cs`·`WcsDbContext.cs`·`docs/ERD.md` **0줄**(git diff 필터 확인). DB 스키마 변경 0(데이터만).
+
+---
+
+## BLOCKED — ESCALATION (S-FIELD-SEED-16CELLS) [iteration 1 — 입증 이력, iteration 2에서 해소됨] — 실 3DS 16셀 시드 + 현장 구성
+
+작업: Generator(standalone) · 브랜치 `feat/field-16cell-seed` · 커밋 없음(working tree만, team-lead 커밋).
+
+> 데이터 적재·IF-05 기능검증·멱등은 전부 GREEN(C1·C2·C3·C4·C5 충족, fresh evidence).
+> **단, C6 `dotnet test` 146 GREEN ↔ §2 IN appsettings SqlServer 구성이 상호 배타**임이 구현 중 입증됨.
+> S-SQLSERVER-FK-CASCADE 교훈("계약 acceptance 모순은 입증으로 드러난다 — 단독 계약변경 대신 입증과 함께 에스컬레이션") 적용 → team-lead 에스컬레이션. 추측 금지(§8).
+
+### 완료된 작업 (fresh evidence)
+
+**C2 — DB 스키마 생성 (PASS):**
+- 빈 SQL Server `Rcs3dsInterlockingWcs`(localhost, Windows 인증)에 머지된 마이그레이션 적용:
+  `dotnet ef database update --project src/Wcs.Migrations.SqlServer --startup-project src/Wcs.Migrations.SqlServer --connection "Server=localhost;Database=Rcs3dsInterlockingWcs;Trusted_Connection=True;TrustServerCertificate=True"`
+  → `Applying migration '20260630012916_Initial'.` → `Done.` (exit 0, 1785·207 0건).
+- `sys.tables`: 도메인 16개(+ `__EFMigrationHistory` 비표준명 = 17 총합). FK **17개 전부 NO_ACTION**(CASCADE 0).
+  filtered index `UQ_piece_pid_active_status`·`UQ_cell_assignment_cell_active` has_filter=1 정상(207 재발 0).
+
+**C3·C4·C5 — 데이터 적재·멱등 (PASS):** 신규 `scripts/seed-field-16cells.sql`(멱등 — IF NOT EXISTS/MERGE/NOT EXISTS).
+- 실행: `sqlcmd -S localhost -d Rcs3dsInterlockingWcs -E -C -f 65001 -i scripts/seed-field-16cells.sql`
+  (★`-f 65001` = 파일이 UTF-8 BOM 없음이라 한글 주석 코드페이지 지정 필수. 또 스크립트 상단 `SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON;` — filtered index 테이블 INSERT 요구.)
+- V-DI-1: 셀 16(ChuteNo=30·Capacity=3·Enabled=1). V-DI-2: order_item 16(PlannedQty=3), 바코드 집합 = {0701-CELL-01..16} 정확.
+- V-DI-3: N↔N 활성 cell_assignment 16(CellNo=N ↔ OrderNo=0701-CELL-N), ReleasedAt 전부 NULL(NOT NULL 0). V-DI-5: 고아 FK 0.
+- 소터 destination: ChuteNo=30·SORTER_3D·NORMAL·IsActive=1. work_batch: WorkDate=2026-07-01·BatchNo='FIELD-16'·WaveNo=1·RUNNING
+  (DbSeeder의 (today,'SEED',1)과 UQ 비충돌). 오더: GENERAL·UPSTREAM·RUNNING·DestinationId=소터. piece 미생성.
+- V-DI-4 멱등: 스크립트 **3회 연속 실행** 후 dest30=1·cells=16·batch=1·orders=16·items=16·active_assign=16 불변(중복/오류 0).
+
+**C1 — IF-05 기능검증 (PASS, 최우선):** 앱을 SqlServer+RTU 구성으로 Production 환경 기동(`dotnet run --project src/Wcs.Api`, ASPNETCORE_ENVIRONMENT=Production, :5080 LISTENING).
+- IF-05 method/path = **`POST /api/v1/destination-query`**, 응답 `{result, chuteNo}`(RcsController.cs).
+- 적재 바코드 `0701-CELL-01`/`02`/`08`/`16` → 전부 **`{"result":"OK","chuteNo":30}`** (HTTP 200) — 실 응답 캡처.
+- 미적재 `0701-CELL-99` → **`{"result":"NG","chuteNo":null}`** (음성 대조 — 가짜 OK 방지 입증).
+- ★소터 RTU(COM1) 미연결로 `FileNotFoundException: Could not find file 'COM1'` → **소터 OFFLINE 전이**(예외 삼키지 않고 명시 처리). **기동은 막히지 않음**(:5080 listen). 계약 예측대로 IF-05는 DB 기반 dispatch라 소터 OFFLINE이어도 DB의 destination+cell로 OK 판정 — RTU 미연결과 무관.
+- 기동 후 깨끗이 종료(Stop-Process, 포트 해제 확인). IF-05 런타임 산물(piece 5·ReservedQty 차감)은 검증 후 정리해 시드를 §4 명세 클린 상태(piece 0·ReservedQty 0)로 복원.
+
+### BLOCKING — C6 ↔ §2 IN 상호 배타 (입증된 계약 모순)
+
+**증상:** appsettings.json `Database:Provider=SqlServer`(§2 IN 요구)로 두면 `dotnet test Wcs.sln` = **실패 105 / 통과 41 / 146**. baseline(`Provider=Sqlite`)로 되돌리면 **146 GREEN**(귀속: appsettings.json만 stash 대조).
+
+**근본 원인(fresh evidence — 단일 실패 테스트 예외 캡처):**
+```
+System.InvalidOperationException : Services for database providers
+'Microsoft.EntityFrameworkCore.SqlServer', 'Microsoft.EntityFrameworkCore.Sqlite'
+have been registered in the service provider. Only a single database provider can be registered...
+```
+- `WebApplicationFactory<Program>` 기반 테스트 팩토리(`RcsPushWebApplicationFactory`·`ApiIntegrationTests` 등)는 `Program.cs`를 부팅한다. `Program.cs`가 base appsettings.json의 `Database:Provider`를 읽어 `opts.UseSqlServer(...)`로 DbContext를 등록 → **SqlServer EF provider 서비스가 DI에 들어감**.
+- 팩토리는 `DbContextOptions<WcsDbContext>`·`WcsDbContext` **디스크립터만** `services.Remove` 후 SQLite로 재등록한다. 그러나 `UseSqlServer`가 함께 등록한 **provider 서비스(IDatabaseProvider 등)는 제거하지 않아** Sqlite와 공존 → EF "단일 provider" 규칙 위반으로 `WcsDbContext` 초기화 시 throw.
+- baseline(Provider=Sqlite)에선 양쪽 다 Sqlite라 충돌 없음. **즉 테스트 인프라가 base appsettings의 `Database:Provider`에 의존하는 사전 존재 결합**(이 스프린트가 유발한 게 아니라 노출).
+
+**왜 단독 해결 불가(추측·무변경 가드 준수):**
+- C6·§7-4는 "146 GREEN"을 명시 완료 조건으로, §2 IN은 "appsettings.json을 SqlServer로 구성"을 명시 산출물로 요구 → 한 파일이 두 acceptance를 동시에 못 만족.
+- 테스트 팩토리(provider 서비스까지 제거)나 `Program.cs`(provider 조건부 등록) 수정은 **§2 OUT 무변경 가드(src/tests 0줄) 위반** → 단독 금지.
+- §8 추측 금지 — 계약 단독 개정·범위 외 코드 수정 안 함.
+
+**team-lead 결정 요청 — 옵션(Generator 분석, 미적용):**
+- **(A) appsettings.json은 baseline(Sqlite) 유지 + 현장 SqlServer/RTU 구성을 `appsettings.Production.json` 신규 파일로 외부화.** 표준 ASP.NET Core 패턴. (a) `dotnet test`는 base(Sqlite)로 146 GREEN, (b) 현장은 `ASPNETCORE_ENVIRONMENT=Production`으로 SqlServer 적용. 무변경 가드 만족(신규 파일 + base 무변경). **단 §2 IN "appsettings.json 직접 수정" 문구와 형식 불일치 → 계약 §2 IN 대상 파일 변경 필요(개정).**
+- **(B) C6를 "base appsettings=Sqlite 기준 146 GREEN"으로 해석하고, 현장 SqlServer 구성은 배포 시점 오버레이로 분리(계약 §2 IN을 Production.json 또는 배포 문서로 명시).** A와 사실상 동일, 계약 문구만 정합화.
+- **(C) 테스트 팩토리가 provider 서비스까지 제거하도록 테스트 인프라 보강(별도 스프린트).** 근본 결합 해소이나 tests 변경 → 무변경 가드 밖, 본 스프린트 범위 외.
+- (D) §6 미확정과 동급으로 "appsettings SqlServer 전환은 현장 배포 항목, 146 GREEN은 base 기준"이라 계약 명시.
+
+권고: **(A)/(B)** — 데이터 적재·IF-05·멱등은 전부 입증 완료. 남은 건 "현장 SqlServer 구성을 base appsettings에 박을지(테스트와 충돌) vs Production 오버레이로 분리할지" 단 하나의 계약 정합화 결정뿐.
+
+### 무변경 가드 (현재 working tree)
+- 코드 변경: `src/Wcs.Api/appsettings.json`만(4+/3-, `git diff --stat -- src docs` 단일 파일). 제품코드·마이그레이션·DbSeeder·WcsDbContext·ERD **0줄**. DB 스키마 변경 0(데이터만).
+- 신규(untracked): `scripts/seed-field-16cells.sql`. appsettings 변경은 **커밋 안 됨**(working tree).
+- (`tasks/sprint-contract.md` M = Planner 작성분, Generator 무관. `.claude/` = 세션 디렉터리.)
+
+---
+
 ## IMPLEMENTATION COMPLETE (S-M5-P1) — 콜드스타트 프로비저닝 + Windows Service 호스팅
 
 작업: Generator(standalone) · 브랜치 `feat/m5-coldstart-hosting` · 커밋 없음(working tree만, team-lead 커밋).
