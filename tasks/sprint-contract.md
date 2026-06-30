@@ -1,138 +1,142 @@
-# Sprint Contract — S-M5-P1 (콜드스타트 프로비저닝 + Windows Service 호스팅)
+# Sprint Contract — S-SQLSERVER-FK-CASCADE (SQL Server 1785 FK 캐스케이드 순환 제거)
 
-> 작성: Planner Subagent · 2026-06-29 · 방식 확정(재질문 금지): M5는 P1 우선·라이브 구동은 M5 포함.
-> 이 계약은 **WHAT/WHERE/검증만** 규정한다. 구현 방법(조건부 적용 메커니즘·훅 시그니처·플래그/환경 게이트 방식)은 Generator가 결정한다.
-> 최우선 제약: **기존 전체 테스트 회귀 0**(사용자 제시 기준선 146 — Generator가 sprint 착수 시 `dotnet test` baseline 실측·기록).
+> 작성: Planner Subagent · 2026-06-30
+> 본 계약은 **WHAT / WHERE / 검증(Acceptance)** 만 규정한다. **HOW(어떤 FK에 어떤 DeleteBehavior를 줄지·마이그레이션 생성 절차)는 Generator가 결정**한다.
+> 3-Tier: Planner(이 문서) → 사용자 확인 → Generator ↔ Evaluator 루프.
 
----
-
-## 0. M5 전체 페이즈 분할안 (요약 — P1만 이번 계약)
-
-M5("운영 준비")는 직교 축이 5개라 한 스프린트에 다 넣지 않는다. 아래로 분할하고 **P1만 본 계약**으로 작성한다.
-
-| 페이즈 | 스코프 | unblock 대상 | 비고 |
-|--------|--------|-------------|------|
-| **P1 (본 계약)** | 콜드스타트 자동 provision(Migrate+dev 시드) + Windows Service 호스팅(`UseWindowsService`) + 재시작 레지스터 재독 확인 | **라이브 `dotnet run`·실 3DS HW 테스트의 직접 unblocker** | TASKS.md M5 "운영 자동 Migrate"(Program.cs:133 갭) + "Windows Service 호스팅"(Program.cs:20 TODO) |
-| P2 (제안) | Serilog 구조화 로깅(레지스터 변화 + API 원문, rolling) | 운영 관측성 | TASKS.md M5. ILogger→Serilog 교체. P1 무관 직교 축. |
-| P3 (제안) | OFFLINE 중 IF-05/08 응답 정책 **확정·검증** | 운영 정책 명문화 | ⚠ §6에서 판정: IF-08 폴링은 재설계로 폐지(push가 OFFLINE을 ready=false로 전달) → **"IF-08 부분 이미 충족"**. IF-05 OFFLINE 소터 NG 동작만 코드 확인해 "이미 충족 vs 추가" 판정 필요. 대부분 검증 스프린트일 가능성. |
-| P4 (제안) | 운영 README(서비스 등록·설치·RTU config·트러블슈팅) | 운영 인수인계 | TASKS.md M5 Done 항목. 서비스 등록 스크립트는 P1에 포함(아래 §3.4 참조) — README는 그 스크립트 사용법까지 포함해 P4로. |
-| P5 (제안) | 이연 findings 정리(F1b 핸드셰이크 직렬화 / IT4b 병렬격리 컬렉션 / 만재센서 / SPEC §7 문서부채 / dead-code 정리) | 기술부채 | tasks/todo.md 전 항목. 비차단. |
-
-**서비스 등록 스크립트 배치 제안**: P1에 **포함**(아래 §3.4). 이유 — "Windows Service 호스팅"이 P1이고, 호스팅이 동작함을 입증하려면 등록 스크립트가 같은 스프린트에 있어야 Done(콜드스타트→서비스 기동) 검증이 자기완결적이다. 사용법 문서화(README)만 P4로 분리.
+> ### 개정 (Amendment) — 2026-06-30 (사용자 승인, Option 1)
+> **사유**: Generator가 §3①(빈 SQL Server 콜드스타트 `database update` 성공)과 §3⑤(기존 3 마이그레이션 무손상)이 **SqlServer에서 상호 배타**임을 입증. 1785는 삭제 시점이 아니라 **제약 생성(CREATE TABLE) 시점**에 발생 → `database update`가 가장 먼저 적용하는 **Initial 마이그레이션의 `CREATE TABLE sorter_command ... ON DELETE CASCADE`에서 즉시 1785**로 중단되고, 그 뒤의 증분 마이그레이션엔 도달하지 못함. SqlServer엔 "Initial이 적용된 DB"가 물리적으로 존재할 수 없으므로(애초에 1785로 실패) §3⑤의 보호 의도(이미 배포된 DB의 증분 적용)는 SqlServer에서 공허.
+> **결정(사용자 승인)**: **Initial 마이그레이션 직접 수정** — 양 provider Initial.cs의 1785 유발 FK들을 NO ACTION으로 패치(마이그레이션 ID 동일 유지), 별도 신규 증분 마이그레이션은 폐기. SQLite는 캐스케이드 미강제·앱 캐스케이드 의존 0·EF 히스토리는 ID만 추적(콘텐츠 해시 아님)이라 기존 dev `wcs.db`도 무손상.
+> **영향**: 아래 §2(2·3), §3(①·⑤), §4의 "신규 마이그레이션 1개씩 추가" 프레이밍을 "Initial 직접 수정"으로 대체. 무변경 가드(FK onDelete 메타만·구조 변경 0)는 **불변**.
+>
+> ### 개정 2 (Amendment 2) — 2026-06-30 (사용자 승인, 스쿼시)
+> **사유**: Option 1로 FK 1785는 해소(콜드스타트가 FK 단계 통과 입증)됐으나, 직후 단계에서 **2차 잠복 버그(SQL Server 오류 207)** 발현 — SqlServer `Initial.cs`의 filtered unique index가 존재하지 않는 컬럼 `[is_active]`(물리명 `IsActive`) 참조(기존 타이핑 오류, `git show HEAD` 동일 확인). 더 중요한 사실: **Initial·P2a·P1 3개 마이그레이션 전부 SQL Server에서 한 번도 성공 적용된 적 없음**(1785가 늘 먼저 실패) → 히스토리 전체가 SQL Server 미검증, 207 외 하류 잠복 버그 잔존 가능. 문제 본질 = "SQLite로만 작성·검증돼 SQL Server 비호환 산출물이 누적된 미검증 히스토리".
+> **결정(사용자 승인)**: **마이그레이션 스쿼시** — 양 provider의 기존 3개 마이그레이션을 전부 폐기하고, **현재(검증된) 모델에서 단일 `Initial`을 provider별로 재생성**(S-M4-P1 이중 provider 절차: 각 design-time factory로 독립 `migrations add`). 머신 생성이라 NoAction FK·올바른 컬럼명·올바른 필터가 모델에서 자동 반영 → 1785·207·잠복버그 클래스 일괄 제거. `OnModelCreating`의 Restrict 10개는 **모델 원천이므로 유지**(스쿼시가 이를 반영해 생성).
+> **영향**: 아래 §2(2·3), §3⑤, §4의 "Initial 직접 수정/기존 3개 유지" 프레이밍을 **"양 provider 단일 Initial 재생성(스쿼시)"**으로 대체. 마이그레이션 ID는 새로 부여됨(베이스라인 무손상 기준 폐기 — 사용자 승인). 최종 **스키마(16테이블·FK·인덱스 구조)는 불변**(동일 모델에서 생성). 기존 dev `wcs.db`는 히스토리 불일치로 재생성 필요(소모성·테스트는 인메모리 SQLite라 무관).
 
 ---
 
-## 1. Goal (P1)
+## 0. 배경 / 결함 (확정 사실)
 
-빈 DB 상태의 production `dotnet run`(및 Windows Service)이 **자동으로 DB 스키마를 프로비저닝하고(콜드스타트 Migrate) 개발/빈-DB 한정 시드를 적용해 정상 기동**하도록 만든다. 직전 E2E 스프린트에서 발견된 크래시(빈 `wcs.db` 기동 시 `ChuteCapacityService`가 `no such table: chute_detail`로 죽음)를 정식 해소한다. 동시에 `builder.Host.UseWindowsService()`로 Windows Service 호스팅을 활성화하되 콘솔/테스트 실행을 깨지 않는다.
+실 SQL Server에 스키마 생성/콜드스타트 Migrate 시 **SQL Server 오류 1785** 발생:
+`FK_sorter_command_piece_PieceId` 등 FK가 "한 테이블로의 **다중 캐스케이드 경로** 또는 순환"을 만들어 SQL Server가 `CREATE TABLE`/FK 생성을 거부한다.
 
-**이것이 실 3DS 하드웨어 테스트의 직접 unblocker다** — 라이브 스택이 빈 DB에서 기동조차 못 하면 현장 테스트가 불가능하다.
+- **원인**: EF 기본 DeleteBehavior(필수 관계 = `Cascade`)가 적용되어 여러 FK가 같은 자식 테이블로 캐스케이드 경로를 중첩시킨다. SQLite는 이 제약을 강제하지 않아 지금까지 전 테스트·라이브(SQLite)에서 드러나지 않았고, **운영 provider인 SqlServer에서 처음 발현**.
+- **영향**: `dotnet ef database update`(SqlServer) 실패 + 앱 콜드스타트 자동 provision 실패. 콜드스타트 Migrate 경로는 `src/Wcs.Api/Startup/DbInitializer.cs`(M5-P1, `Database.Migrate()` — fail-loud로 전파)이므로 SqlServer 기동 자체가 막힌다.
+- **운영은 SqlServer라 반드시 수정 필요**(`appsettings`의 `Database:Provider`를 SqlServer로 두면 기동 불가).
 
----
+### 직접 확인한 다중 캐스케이드 경로 (현 Initial 마이그레이션 기준 — Generator 참고용, 해소 대상은 Generator가 최종 식별)
+모든 필수 FK가 `onDelete: Cascade`로 생성되어 다음 수렴이 발생:
+- `destination → cell`(Cascade) **그리고** `destination → piece`(Cascade)
+- `cell → sorter_command`(Cascade) **그리고** `piece → sorter_command`(Cascade)
+  → `destination`에서 `sorter_command`로 **두 캐스케이드 경로** = 1785 (대표 케이스, 메시지의 `FK_sorter_command_piece_PieceId`와 일치)
+- `cell → cell_assignment`(Cascade) **그리고** `wcs_order → cell_assignment`(Cascade) → `cell_assignment`로 다중 경로
+- `wcs_order → order_item → piece`, `destination → piece` 등 `piece` 및 그 자식(`piece_event`/`alarm`/`sorter_command`)으로의 다중 수렴.
 
-## 2. Detected Project Type
+> 주: `piece.OrderItemId`/`AgvId`/`InductionId`/`DestinationId`(P2a 이후 nullable), `wcs_order.DestinationId`, `chute_detail.PrinterId`, `alarm.PieceId`는 **nullable FK** → EF 기본이 이미 비-Cascade일 수 있으니 Generator가 현 ModelSnapshot/마이그레이션에서 실제 onDelete를 확인할 것. 필수 FK(non-null)가 Cascade인 것이 1785의 핵심.
 
-**Backend / API (.NET, ASP.NET Core Minimal-host + MVC Controller, EF Core, Modbus 게이트웨이).**
-신호: `src/Wcs.Api`(ASP.NET Core, `Program.cs` + `Controllers/`), `src/Wcs.Data`(EF Core `WcsDbContext`·`DbSeeder`), `src/Wcs.Migrations.{Sqlite,SqlServer}`(EF 마이그레이션 분리 어셈블리, 각 3개 마이그레이션), `src/Wcs.PlcGateway`(FluentModbus), `tests/Wcs.Tests`(xUnit, [Fact]/[Theory] 139건 + Theory 전개분 ⇒ 실행 ≈146). TargetFramework `net10.0`.
-→ Verification Scenarios 슬롯 = **콜드스타트→정상 시나리오 + 회귀 가드**. UI/Playwright 슬롯 = N/A(헤드리스 백엔드).
-
----
-
-## 3. Implementation Scope (WHAT / WHERE)
-
-### 3.1 콜드스타트 자동 Migrate (핵심)
-- **WHAT**: 실 호스트 기동 시 `WcsDbContext`에 대해 `Database.Migrate()`(또는 동등)를 실행해 빈/구버전 DB에 스키마를 적용한다. 적용 대상 provider는 appsettings `Database:Provider`(Sqlite/SqlServer) 분기를 따른다 — 마이그레이션 어셈블리는 이미 Program.cs:49/53에서 provider별로 지정됨(`Wcs.Migrations.Sqlite`/`Wcs.Migrations.SqlServer`).
-- **WHERE**: `src/Wcs.Api/Program.cs` — `app.Build()` 이후 `app.Run()` 이전 startup 구간(현 Program.cs:133 "운영 자동 Migrate는 M5" 주석 지점). 필요 시 별도 startup 훅/확장 메서드 신규 파일 허용(예: `src/Wcs.Api/Startup/DbInitializer.cs` — 파일명·구조는 Generator 재량).
-- **⚠ 최우선 무파손 제약(테스트 경로)**: 5개 테스트 팩토리(`FakeModbusWebApplicationFactory`·`SimWebApplicationFactory`(ScenarioTests)·`RcsPush…Factory`·`E2EWebApplicationFactory`·`ApiIntegrationTests.cs:1291/1373`의 인라인 팩토리)가 **모두 동일 패턴**으로 DB를 주입한다: `DbContextOptions<WcsDbContext>`/`WcsDbContext` 서비스 descriptor 제거 → named in-memory SQLite 재등록 → 별도 anchor 연결로 `db.Database.EnsureCreated()` + `DbSeeder.Seed(...)` 직접 호출. 콜드스타트 Migrate 코드가 이 경로에서 실행되면 (a) `EnsureCreated`로 만든 스키마에 `Migrate()`가 `__EFMigrationHistory` 부재로 충돌/중복 적용하거나 (b) 시드가 중복 삽입(UNIQUE 위반)될 수 있다. **따라서 자동 Migrate+시드는 실 호스트 startup에서만 실행되고 테스트 호스트에서는 실행되지 않아야 한다**(환경 게이트·플래그·테스트 오버라이드 등 — 메커니즘은 Generator가 설계·정당화). 테스트 배선 파일은 **수정 대상이 아니다**(무변경 가드). 단, 테스트가 깨지지 않도록 게이트를 추가하는 최소 배선(예: 테스트 팩토리가 이미 설정하는 환경/구성으로 자동 분기)이 필요하면 테스트 인프라 파일 1곳 이내 최소 변경은 허용하되, 사유를 sprint-feedback에 명시.
-
-### 3.2 dev / empty-DB 한정 시드 훅
-- **WHAT**: 라이브 `dotnet run`이 동작하려면 기준정보·최소 오더 시드가 필요하다(직전 E2E에서 빈 DB 크래시의 두 번째 원인). `DbSeeder.Seed(WcsDbContext, agvFloorMap?)`는 **이미 존재**(src/Wcs.Data/DbSeeder.cs)하나 Program.cs가 호출하지 않는다. 콜드스타트 시 dev/빈-DB 한정으로 이 시드를 호출한다.
-- **운영 안전 게이트(WHAT·필수)**: 운영(production)은 실제 마스터데이터를 쓰므로 **테스트 시드(슈트 1~5·소터 chuteNo=30·TEST-BARCODE-* 오더 등)를 절대 자동 삽입하면 안 된다**. 시드 적용은 환경(Development) 또는 명시적 설정 플래그로 게이트한다(예: `Database:SeedOnStartup` 또는 `ASPNETCORE_ENVIRONMENT=Development` — 키 이름·게이트 방식은 Generator 결정, appsettings 키는 하드코딩 금지 절대규칙 #7 준수, `_comment_`로 의도 문서화). 기본값은 **운영 안전쪽**(시드 off)으로 둔다.
-- **WHERE**: `src/Wcs.Api/Program.cs`(또는 §3.1 startup 훅) + `src/Wcs.Api/appsettings.json`(시드 게이트 키 신규) + 필요 시 `appsettings.Development.json` 신규. `DbSeeder` 본문은 무변경(이미 멱등).
-
-### 3.3 Windows Service 호스팅 (`UseWindowsService`)
-- **WHAT**: `builder.Host.UseWindowsService()`를 활성화(Program.cs:20 `TODO(M5)`). Windows Service로 실행 시 서비스 호스트로, 콘솔로 실행 시 콘솔로 동작하는 표준 패턴(`UseWindowsService`는 비-서비스 컨텍스트에서 no-op이라 콘솔/테스트 무파손이 기본이나, **WebApplicationFactory 테스트 호스트에서 부작용이 없음을 명시 확인**). `Microsoft.Extensions.Hosting.WindowsServices` 패키지 참조 추가(`src/Wcs.Api/Wcs.Api.csproj`).
-- **WHERE**: `src/Wcs.Api/Program.cs` + `src/Wcs.Api/Wcs.Api.csproj`.
-
-### 3.4 서비스 등록 스크립트
-- **WHAT**: Windows Service 등록/해제 스크립트(`sc.exe create … binPath= …` 또는 PowerShell `New-Service`). 서비스 이름·실행 경로·시작 모드(자동)·설명 포함. 운영 배포 경로·계정은 플레이스홀더 + 주석.
-- **WHERE**: 신규 — `scripts/`(예: `scripts/install-service.ps1`·`scripts/uninstall-service.ps1`) 또는 프로젝트 관행에 맞는 위치(Generator 재량). 사용법 상세 문서화는 P4(README)로 이연.
-
-### 3.5 재시작 레지스터 재독 동기화 (확인 후 WHAT)
-- **WHAT**: TASKS.md M5 "WCS 재시작 시 레지스터 재독 동기화". **코드 확인 결과**: 소터별 `PlcPollingService`가 `StartAsync`에서 폴 루프를 돌며 매 주기 `Latest` 스냅샷을 갱신한다(SorterRegistryFactory.StartAsync가 기동 시 폴링 시작). 즉 콜드스타트 시 게이트웨이가 이미 현재 레지스터값을 재독한다. **추가 동기화가 필요한지(예: 기동 직후 첫 스냅샷이 채워지기 전 들어온 IF-09/IF-10이 stale snapshot으로 오동작하는지) Generator가 코드로 확인**해 (a) 이미 충족이면 그 근거를 sprint-feedback에 명시하고 무변경, (b) 갭이 있으면 최소 WHAT(예: 기동 시 첫 폴 완료 대기 게이트)을 추가. **새 동기화 메커니즘을 추측으로 만들지 말 것** — 갭 없으면 "이미 충족" 판정이 정답.
-
-### 3.6 무변경 가드 (절대 건드리지 말 것)
-- **판정 의미 불변**: `Wcs.Core`(DepositDecider·RegisterMap) 순수성·판정 로직(절대규칙 #1~#5, #8) 무변경.
-- **Modbus 레지스터 맵**(D4 비트·D5·D6 의미·주소 오프셋) 무변경.
-- **C/R 핸드셰이크**(HandshakeOrchestrator·PlcPollingService 본문) 무변경 — DI 배선만.
-- **기존 테스트 배선 무변경**(원칙). §3.1의 게이트 배선 최소 예외만 허용(사유 명시 의무).
-- **스키마 정의 무변경**: `WcsDbContext.OnModelCreating`·`Entities.cs`·`DbSeeder` 토폴로지·기존 마이그레이션(`Wcs.Migrations.*` 3개) 무변경. **새 마이그레이션 생성 금지**(P1은 스키마 변경 없음 — 기존 마이그레이션을 적용만 한다).
-- **API 필드명·엔드포인트**(IF-05/09/10, `/api/v1/*`) 무변경.
+### 앱의 캐스케이드 삭제 의존성 — 없음 (확인 완료)
+`src/` 전체에 `.Remove(` / `.RemoveRange(` / `ExecuteDelete` / 명시적 `OnDelete`·`DeleteBehavior` 호출 **0건**(생성된 마이그레이션 파일 제외). 앱은 append-only 기록 + 일배치 퍼지(ERD §보존)로 동작하며 **FK 캐스케이드 삭제에 의존하지 않는다.** → 캐스케이드를 Restrict/NoAction으로 바꿔도 앱 동작 영향 0.
 
 ---
 
-## 4. Evaluation Criteria (가중치)
+## 1. Goal (목표)
 
-| # | 기준 | 가중치 | 합격선(Fresh evidence 필수) |
-|---|------|--------|------|
-| ① | **콜드스타트 자동 provision 정확성** | 30% | 빈 DB(또는 파일 없음)에서 startup이 Migrate로 스키마 생성 → dev 시드 적용 → 기동 성공. `ChuteCapacityService` 등 startup 서비스가 `no such table` 없이 동작. 실제 또는 통합 시나리오로 입증. |
-| ② | **기존 테스트 회귀 0 (테스트 경로 무파손)** | 30% | `dotnet test` 전체 GREEN — baseline 수(≈146, Generator 실측 기록) 유지. 자동 Migrate가 테스트 in-memory SQLite 경로를 타지 않음을 입증(테스트 호스트에서 Migrate/시드 미실행 또는 무해함). |
-| ③ | **호스팅 조건부 (콘솔/테스트 무파손)** | 15% | `UseWindowsService` 추가 후 콘솔 `dotnet run` 정상·WebApplicationFactory 테스트 정상. 서비스 컨텍스트 외 no-op 확인. |
-| ④ | **dev 시드 게이트 (운영 안전)** | 15% | 운영 기본값에서 테스트 시드 미삽입(게이트 off 시 빈 스키마만). Development/플래그 on 시에만 시드. 게이트 키 appsettings 외부화(하드코딩 0). |
-| ⑤ | **재시작 레지스터 재독 동기화** | 10% | §3.5 판정 — "이미 충족"이면 근거, 갭이면 최소 fix. 추측 신규 메커니즘 0. |
-
-**감점 트리거**: 새 마이그레이션 임의 생성 / 테스트 배선 광범위 수정 / `DbSeeder` 토폴로지 변경 / 운영에 테스트 시드 무조건 삽입 / 판정·Modbus맵·핸드셰이크 본문 변경 / 빈 DB 라이브 기동 미입증.
+SqlServer 마이그레이션이 **실 SQL Server에 성공적으로 적용**되도록 FK 캐스케이드 순환/다중경로를 제거한다(`OnModelCreating`에서 DeleteBehavior 명시).
+- **불변**: 테이블/컬럼/인덱스 구조, 엔티티 속성, 판정(Decide)·핸드셰이크·API 동작/필드, p_id 순환·이력 분리 원칙. **바뀌는 것은 FK 삭제 거동(메타)뿐**이며 앱은 캐스케이드 삭제에 의존하지 않으므로 동작 영향 0.
+- 양 provider(SqlServer·Sqlite) 모델 정합(둘 다 `has-pending-model-changes` = No changes).
 
 ---
 
-## 5. Completion (Done — P1)
+## 2. Scope — WHAT / WHERE
 
-- `dotnet build` 경고 0 / 에러 0.
-- `dotnet test` 전체 GREEN — baseline(≈146) 유지, 회귀 0.
-- **콜드스타트→정상 시나리오 통과**: 빈 DB → 자동 provision(Migrate + dev 시드) → 기동 → IF-05/핸드셰이크 동작(실 또는 통합 테스트로 입증). 직전 크래시(`no such table: chute_detail`) 해소 입증.
-- **라이브 `dotnet run`이 빈 DB에서 기동 성공** — 직전 E2E 발견 크래시가 재현되지 않음(orchestrator가 라이브 기동으로 육안 확인; APPROVED 후 step).
-- 서비스 등록 스크립트 존재(`scripts/`).
-- 변경은 Program.cs·startup 훅·appsettings 키·csproj 참조·스크립트에 국한(무변경 가드 §3.6 준수).
+### 변경 대상 (IN)
+1. **`src/Wcs.Data/WcsDbContext.cs` — `OnModelCreating`**: 1785를 유발하는 FK들의 `DeleteBehavior`를 명시(`.OnDelete(...)`).
+   - 현재 `OnModelCreating`에는 어떤 FK에도 명시적 `.OnDelete()`가 없음(전부 EF 기본). 여기에 명시 추가.
+2. **`src/Wcs.Migrations.SqlServer/Migrations/`** — **스쿼시**: 기존 마이그레이션 전부 삭제 후 현재 모델에서 **단일 `Initial` 재생성**(`SqlServerDesignTimeFactory` 경유, `--project`·`--startup-project` 둘 다 `Wcs.Migrations.SqlServer`) + 새 `WcsDbContextModelSnapshot.cs`. 마이그레이션 ID 새로 부여.
+3. **`src/Wcs.Migrations.Sqlite/Migrations/`** — 동일 **스쿼시**: 전부 삭제 후 단일 `Initial` 재생성(`SqliteDesignTimeFactory` 경유) + 새 스냅샷.
+   - 각 어셈블리는 **독립 ModelSnapshot 1개**(S-M4-P1 교훈). 양쪽 **독립**으로 `migrations add` → 양쪽 `has-pending-model-changes` = No changes 재확인.
+   - `OnModelCreating`의 Restrict 10개는 모델 원천이므로 유지 → 재생성된 Initial이 NoAction FK·올바른 컬럼명·필터를 자동 반영.
+   - (개정 전 신규 `FkRestrictNoCascade` 및 Option 1 in-place 산출물은 스쿼시로 모두 대체.)
 
----
+### 변경 금지 (OUT) — 무변경 가드
+- 테이블/컬럼/인덱스/UNIQUE/CHECK/PK 구조 — **새 컬럼·새 테이블·새 인덱스 0**. 변경되는 마이그레이션 산출물은 **FK 제약의 onDelete(ReferentialAction) 메타뿐**.
+- `src/Wcs.Core/`(판정 엔진)·`src/Wcs.PlcGateway/`·`src/Wcs.Sim3ds/` — 0줄.
+- API(`src/Wcs.Api/`)·핸드셰이크·DTO·엔티티 속성(`Entities.cs`) — 0줄(엔티티 nullable/타입 불변).
+- `DbInitializer.cs`·시드·appsettings — 0줄(코드 경로 불변, 스키마만 정상화).
+- provider 분기 동시성 토큰(RowVersion/XminRowVersion)·filtered index 분기 로직 — 불변.
 
-## 6. 미확정 사항 / 판정 (질문 또는 코드-확정)
-
-- **OFFLINE 중 IF-05/08 응답 정책 — P3 이연이나 현 상태 판정**: IF-08(deposit-permission 폴링)은 RCS 재설계로 **폐지**됨(Program.cs:132, ApiIntegrationTests `If08_DepositPermission_Removed_Returns404Or405`). 현재 IF-08은 WCS→RCS **아웃바운드 push**(`DestinationStatusPusher`)로 대체됐고, push는 `DestinationStatusService.Compute().Ready`를 전이 기준으로 산출한다 — OFFLINE(소켓 끊김/폴 실패)은 스냅샷 `Online=false`로 ready 산출에 반영되어 RCS에 ready=false로 전달된다. **따라서 "OFFLINE 중 IF-08 응답 정책"은 재설계로 이미 충족**(별도 IF-08 응답 경로 없음). 남는 것은 "OFFLINE 소터에 대한 **IF-05** dispatch NG 동작"이며, 이는 P3에서 `DestinationStatusService`/IF-05 NG 필터 코드를 확인해 "이미 충족 vs 추가"를 판정한다. **P1 스코프 아님** — 여기 기록만.
-- **콜드스타트 Migrate vs 테스트 EnsureCreated 게이트 메커니즘**: Generator가 결정(환경 변수 `ASPNETCORE_ENVIRONMENT` / 설정 플래그 / 테스트의 기존 구성 신호 등). 이미 모든 테스트 팩토리가 `ConfigureServices`로 DB descriptor를 교체하므로, 자동 Migrate를 "DI에 등록된 DbContext가 in-memory가 아닐 때만" 또는 "설정 플래그로만" 조건화하는 등 다수 안이 있음 — 방법 선택·정당화는 Generator·Evaluator 루프에서.
-- **시드 게이트 기본값**: 운영 안전(off)이 기본. dev에서 자동 on 하는 트리거(Development 환경 여부)는 Generator 결정.
-- **이 외 추측 금지**: 새 동기화·새 마이그레이션·새 판정은 만들지 않는다.
-
----
-
-## 7. Verification Scenarios (타입 슬롯: 콜드스타트 + 회귀)
-
-| VS | 시나리오 | 입증 방식 |
-|----|----------|----------|
-| VS-1 | 빈 DB 콜드스타트 → Migrate로 스키마 생성 → dev 시드 → 기동 성공 | 통합 테스트(임시 파일/빈 SQLite로 실 startup 경로) 또는 라이브 기동 로그 |
-| VS-2 | 콜드스타트 후 IF-05/핸드셰이크 정상 — `chute_detail` 등 테이블 존재 | 통합 또는 라이브 |
-| VS-3 | 기존 5개 팩토리 테스트 경로 무파손 — in-memory SQLite + EnsureCreated + DbSeeder 그대로, Migrate 미실행 | `dotnet test` 전체 GREEN |
-| VS-4 | `UseWindowsService` 추가 후 콘솔 실행·테스트 호스트 정상(no-op 확인) | `dotnet run` 콘솔 기동 + `dotnet test` |
-| VS-5 | 시드 게이트 off(운영 기본) → 테스트 시드 미삽입(빈 스키마만) | 통합(게이트 off 분기) |
-| VS-6 | 재시작 레지스터 재독 — 기동 후 첫 스냅샷 채워짐(§3.5 판정 결과 반영) | 통합 또는 코드 근거 |
+### DeleteBehavior 선택 원칙 (Generator 결정 — 계약은 제약만)
+- **유일 목표 제약**: SQL Server 1785(다중 캐스케이드 경로/순환) **해소**. 1785가 사라지는 한 구체 behavior 선택은 Generator 재량.
+- 필수 FK(non-null)로 캐스케이드 순환·다중경로를 만드는 것 → `Restrict`(= NoAction) 권장. 앱이 캐스케이드 삭제에 의존하지 않음이 확인됐으므로 안전.
+- nullable FK → 의미에 맞게 `SetNull` 또는 `NoAction`/`Restrict`. (단 SetNull도 SQL Server에선 "다중 SetNull 경로"가 또 다른 1785를 만들 수 있으니 검증으로 확인.)
+- **의미 보존 원칙**: 데이터 삭제 거동을 바꾸되 **앱 런타임 동작에 영향 0**이어야 한다(append-only + 배치 퍼지 전제). 캐스케이드에 의존하는 신규 코드 도입 금지.
+- 변경은 **필요한 FK에 국한**(1785 해소에 불필요한 FK까지 일괄 Restrict로 바꿔 스냅샷 노이즈를 키우지 말 것 — 단, 전역 일관 정책으로 규약 적용이 더 깔끔하다면 그 선택도 허용하되 무변경 가드는 "FK onDelete 메타만"을 유지).
 
 ---
 
-## 8. Parallel / Eval Dimensions
+## 3. Evaluation Criteria (가중치)
 
-- **Parallel Modules**: 단일 모듈(Program.cs startup 중심) — 기본 1 Generator. 굳이 팬아웃 불필요(콜드스타트·호스팅·시드가 모두 같은 startup 경로에 수렴).
-- **Evaluation Dimensions**: ①provision 정확성 ②회귀 0 ③호스팅 조건부 ④시드 게이트 ⑤재독 — 단일 Evaluator가 5차원 모두 fresh evidence로 검증(전문가 풀 팬아웃 불요).
-- **스케일링**: 기본 1/1/1 유지. (스코프가 startup 단일 경로로 좁고, 최우선 리스크가 "테스트 회귀"라 분산보다 단일 책임 추적이 유리.)
+| # | 기준 | 가중치 | 검증 방법(Fresh evidence 의무) |
+|---|------|--------|------------------------------|
+| ① | **SqlServer 스키마 실제 적용 성공** | **40%** | 실 SQL Server(**localhost = SQL Server 2025**, LocalDB 2019 사용 금지)에 `dotnet ef database update --project src/Wcs.Migrations.SqlServer --startup-project src/Wcs.Migrations.SqlServer --connection "Server=localhost;Database=WcsCascadeTest;Trusted_Connection=True;TrustServerCertificate=True"` → **1785 0건**, 전 16테이블 + 모든 FK 생성 성공. 검증 후 테스트 DB **drop**(흔적 0). 적용 로그/테이블 목록 캡처. (함정: `--startup-project`를 `Wcs.Data`로 하면 "Wcs.Migrations.X.dll not found" 실패 — `--project`·`--startup-project` 둘 다 마이그레이션 어셈블리로.) |
+| ② | 기존 **146 테스트(SQLite) GREEN · 회귀 0** | 25% | `dotnet test` 146/146 GREEN. split 불변. 단언/테스트 코드 변경 0(diff로 입증). |
+| ③ | 양 provider **`has-pending-model-changes` = No changes** | 20% | `dotnet ef migrations has-pending-model-changes` 를 SqlServer·Sqlite 양 project로 각각 실행 → 둘 다 "No changes"(M4-P1 함정: 스냅샷 모델 정합). |
+| ④ | **무변경 가드** | 10% | `git diff`가 `OnModelCreating` + 양 마이그레이션 신규 파일 + 양 ModelSnapshot에 국한. 신규 컬럼/테이블/인덱스 0. 마이그레이션 Up/Down이 **FK drop+recreate(onDelete 변경)만** 포함(컬럼 alter·테이블 변경 0). Core/PlcGateway/Sim3ds/API/Entities diff 0. |
+| ⑤ | 마이그레이션 **스쿼시 — 최종 스키마 불변** (개정 2) | 5% | 양 provider **단일 `Initial`로 스쿼시**(기존 3개 폐기·재생성). 재생성 Initial이 만드는 **최종 스키마 = 기존 모델과 동일**(16테이블·컬럼·인덱스·UNIQUE·CHECK·PK 불변, FK onDelete만 NoAction). 변경 = 마이그레이션 히스토리 표현뿐(ID 새로 부여). `git diff`가 양 Migrations 디렉터리 + `OnModelCreating`에 국한, 그 외 0줄. |
 
 ---
 
-## 9. Planner self-check
+## 4. Completion (Done 조건 — 전부 충족)
 
-- [x] WHAT/WHERE/검증만 기술 — 구현 방법(게이트 메커니즘·훅 시그니처·플래그 키 이름) 미결정, Generator 위임 명시.
-- [x] 필수 선행 직접 읽음: TASKS.md M5 / CLAUDE.md / SPEC §7·§7-A / lessons.md / todo.md(이연 전부) / Program.cs(호스팅·DI·DbContext 등록·TODO 마커) / WcsDbContext·DbSeeder / Migrations.{Sqlite,SqlServer}(각 3 마이그레이션 확인) / appsettings.json / 5개 테스트 팩토리 DB 배선(ApiIntegrationTests·E2EInfrastructure·ScenarioTests·RcsPushTests + grep 전수).
-- [x] 최우선 제약 = **테스트 146 무파손**을 ②30% 가중치 + 무변경 가드 + VS-3로 3중 고정.
-- [x] M5 페이즈 분할안 상단(§0) 요약 + 서비스 스크립트 배치 제안(P1 포함, README는 P4).
-- [x] OFFLINE 정책을 코드로 판정 — "IF-08 부분 재설계로 이미 충족, IF-05 부분만 P3 확인" 명시(재질문 회피).
-- [x] 라이브 M5 포함·M5 P1 우선은 재질문 안 함(사용자 확정).
-- [x] 추측 금지 항목(새 마이그레이션·새 동기화·새 판정) 명문화.
-- [ ] **사용자 확인 대기**: 페이즈 분할안 + P1 스코프 승인 → 승인 후 Generator↔Evaluator 루프 진입.
+- [ ] `dotnet build` 0 error / 0 warning.
+- [ ] `dotnet test` **146/146 GREEN**(회귀 0).
+- [ ] **SqlServer `dotnet ef database update`(실 SQL Server) 성공 — 1785·207 재발 0**, 전 16테이블+FK+인덱스 생성(단일 Initial 적용), 완료 후 DB drop.
+- [ ] **SQLite `dotnet ef database update` 성공**(또는 테스트의 EnsureCreated 경로 무파손 — SQLite 마이그레이션 적용도 1785 무관하게 정상).
+- [ ] 양 provider **`has-pending-model-changes` = No changes**.
+- [ ] `git diff`가 `src/Wcs.Data/WcsDbContext.cs`(OnModelCreating) + `src/Wcs.Migrations.SqlServer/Migrations/`(스쿼시: 기존 삭제+단일 Initial+스냅샷) + `src/Wcs.Migrations.Sqlite/Migrations/`(동일)에 **국한**. 그 외 0줄. 재생성 Initial의 최종 스키마가 기존과 동일(컬럼/테이블/인덱스/UNIQUE/CHECK/PK 불변, FK onDelete만 NoAction)임을 확인.
+- [ ] 콜드스타트 회귀(선택·가능 시): SqlServer provider로 앱 기동(빈 DB) 시 `DbInitializer` Migrate가 1785 없이 성공해 정상 기동(또는 동등하게 `database update` 성공으로 입증).
+
+---
+
+## 5. Detected Project Type & Verification Scenarios
+
+- **Project Type**: Backend / API (ASP.NET Core Minimal API + Controller + EF Core 이중 provider).
+- **타입 슬롯 Verification Scenarios**:
+  1. **SqlServer 적용 성공**: 실 SQL Server에 전 스키마 생성(1785 0) → drop.
+  2. **SQLite 회귀 0**: 146 테스트 GREEN + SQLite 마이그레이션/EnsureCreated 무파손.
+  3. **양 snapshot 정합**: SqlServer·Sqlite 둘 다 has-pending-model-changes No changes.
+  4. **캐스케이드 의미 보존**: 앱 동작(판정/핸드셰이크/API) 불변 — FK 삭제 거동만 변경, 캐스케이드 의존 코드 0(현 상태 유지).
+
+---
+
+## 6. 함정 / 선행 교훈 (반드시 회피)
+
+- **S-M4-P1 — EF 이중 provider 마이그레이션 함정**: 어셈블리당 ModelSnapshot 1개. provider별 output-dir만 나누고 스냅샷을 공유하면 마지막 생성 provider가 다른 쪽 스냅샷을 덮어 증분이 손상된다. → **양 provider 각각 독립적으로 마이그레이션 add**(각자의 design-time factory: `SqlServerDesignTimeFactory`·`SqliteDesignTimeFactory` 경유, `--project`를 해당 마이그레이션 어셈블리로 지정). add 후 **양쪽 `has-pending-model-changes` = No changes 재확인**.
+- **S-M4-P2a — Ignore() vs 물리 컬럼**: 문서/주장은 실제 마이그레이션 산출물과 대조(이번엔 컬럼 변경이 없어야 하므로, 마이그레이션 Up에 컬럼/테이블 alter가 끼면 스코프 위반).
+- **무변경 입증법**: 보호 영역 `git diff` 0바이트 + 146 split 불변(여러 회 GREEN). FK onDelete 외 산출물이 마이그레이션에 들어오면 즉시 스코프 위반.
+- **메타 교훈(반복 확인)**: 인메모리/SQLite 단일 경로 테스트는 실 SqlServer DDL 경로(1785 같은 provider 고유 제약)를 구조적으로 못 본다 → **이번 acceptance는 반드시 실 SQL Server `database update`를 fresh로 실행해 입증**(SQLite GREEN만으로 닫지 말 것).
+
+---
+
+## 7. 미확정 사항 / 사용자 확인 필요
+
+> 아래는 Generator/Evaluator 진행 중 막히면 사용자에게 질문. ("SqlServer 수정 진행" 자체는 재질문 금지 — 확정.)
+
+1. **실 SQL Server 테스트 DB 접속 정보**: ①번 acceptance를 위해 Generator/Evaluator가 사용할 localhost SQL Server 인스턴스·연결문자열(예: `Server=localhost;Database=WcsCascadeTest;Trusted_Connection=True;TrustServerCertificate=True;`)이 필요.
+   - **기본안: LocalDB(`(localdb)\mssqllocaldb`)로 검증**(SqlServerDesignTimeFactory 기본 연결과 동일 계열, LocalDB도 1785를 동일하게 강제하므로 검증 유효). 별도 인스턴스가 제공되면 `--connection` 인자로 그것 사용. 검증 후 DB drop.
+   - LocalDB/SQL Server가 머신에 미설치라 적용 실행 불가하면 그때 사용자에게 접속 정보를 질문.
+2. (정보) DeleteBehavior 구체 선택은 Generator 재량이나, 만약 nullable FK SetNull이 또 다른 1785/원치 않는 NULL화를 유발하면 NoAction/Restrict로 통일 — 진행 중 판단.
+
+---
+
+## 8. Planner Self-Check
+
+- [x] WHAT/WHERE/검증만 규정, HOW(구체 behavior·생성 절차)는 Generator에 위임.
+- [x] 절대규칙 점검: PLC 큐·TgtFloor·Ready 등 런타임 규칙과 무관(스키마 메타 변경). 절대규칙 8(연결문자열 하드코딩 금지)은 acceptance용 테스트 DB 연결을 `--connection` 인자/design-time factory로 처리(운영 appsettings 불변)하여 준수.
+- [x] 무변경 가드가 구조적 변경(컬럼/테이블/인덱스/판정/API)을 전부 배제하고 FK onDelete 메타로 한정.
+- [x] S-M4-P1 이중 provider 함정(독립 스냅샷·양쪽 No changes) 명시.
+- [x] 앱 캐스케이드 의존성 부재를 코드 grep으로 사전 확인(Restrict 안전성 근거).
+- [x] acceptance 최우선 = 실 SQL Server `database update` 성공(1785 0). SQLite GREEN만으로 닫지 않도록 명시.
+- [x] 기존 3 마이그레이션 유지 + 신규 1개씩 증분(베이스라인 무손상).
+- [x] 미확정(실 SQL Server 접속 정보)만 질문 슬롯으로 분리, 수정 진행 여부 재질문 없음.

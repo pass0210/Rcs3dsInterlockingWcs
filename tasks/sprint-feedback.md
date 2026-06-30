@@ -433,3 +433,68 @@ build 0/0·full GREEN exit 0·teardown 클린·표적 5회 flaky 0·무변경 �
 독립 코드리뷰 MAJOR-1·MINOR-2 해소 확인. 크로스-엔드포인트 불변식("IF-05 OK ⟺ SelectCell 적재 가능 ⟹ Capacity 초과 0")이 단일 공유 로직(SorterCellQty) + piece 단위 게이트(SorterCanAcceptBarcode) + EC-8/EC-9 명시 단언으로 보강됨. 회귀 0(90/90)·teardown exit 0·flaky 0(5/5)·무변경 zone diff 0. team-lead가 수정분 재리뷰 후 커밋 권고 — 신규 SorterCellQty.cs·SorterCellFullnessTests staging 포함 확인.
 
 **APPROVED (수정 후 재검증)**
+
+---
+
+# S-SQLSERVER-FK-CASCADE (SQL Server 1785 FK 캐스케이드 순환 제거 — 마이그레이션 스쿼시) — Evaluator 평가 (2026-06-30)
+
+> Evaluator(독립) · 개정 2(스쿼시) 기준 · 모든 증거 fresh 재실행 · 코드 미수정.
+> ground truth: branch=fix/sqlserver-fk-cascade, sprint-log.md L1596 `## IMPLEMENTATION COMPLETE (S-SQLSERVER-FK-CASCADE)` 마커 확인, diff 실재(57 ins / 7144 del) → 진성 핸드오프.
+
+## 판정: APPROVED — §3 ①~⑤ + §5 시나리오 1~4 전부 PASS (1 iteration)
+
+환경: dotnet SDK 10.0.300, EF CLI 9.0.10, sqlcmd 15.0, **SQL Server 2025 (RTM-GDR) 17.0.1115.1 Enterprise Developer @ localhost** (LocalDB 아님 — 계약 ① 요구 충족).
+
+### ① SqlServer 콜드스타트 실제 적용 (40%) — PASS
+독립 DB `WcsCascadeEval`(Generator의 WcsCascadeTest와 다른 이름)에 빈 DB부터 직접 적용:
+- `dotnet ef database update --project/--startup-project=Wcs.Migrations.SqlServer --connection "...Database=WcsCascadeEval..."` →
+  `Build succeeded.` → `Applying migration '20260630012916_Initial'.` → `Done.` **exit 0, 1785·207 0건**.
+- sqlcmd 생성 DB 직접 검사 (fresh):
+  - **사용자(도메인) 테이블 정확히 16개**: agv·alarm·cell·cell_assignment·chute_detail·destination·destination_event·induction·order_item·piece·piece_event·plc_event·printer·sorter_command·wcs_order·work_batch (+ 히스토리 테이블 `__EFMigrationHistory` 1개 = sys.tables 총 17. 히스토리명이 비표준 `__EFMigrationHistory`(중간 's' 없음)라 표준명 필터 미매칭 → 처음 17로 표시됐으나 실제 도메인 16 확정).
+  - **FK 17개 전부 delete_referential_action_desc=NO_ACTION, CASCADE 0건**(group-by `NO_ACTION 17` + `cascade_count=0` 이중 확인). 원 1785 메시지의 대표 FK `FK_sorter_command_piece_PieceId` → NO_ACTION 확인. (명시 Restrict 10 + nullable FK 7개 EF 기본 ClientSetNull→DDL NO ACTION = 17.)
+  - **filtered unique index 2개 모두 PascalCase**: `UQ_piece_pid_active_status = ([IsActive]=(1) AND ([Status] IN (...)))`, `UQ_cell_assignment_cell_active = ([ReleasedAt] IS NULL)`. snake `is_active` 0건 → 207 재발 불가.
+- 검사 후 `DROP DATABASE [WcsCascadeEval]` 완료, `WcsCascade%` 잔여 DB 0(흔적 0).
+
+### ② 146 테스트 GREEN·회귀 0 (25%) — PASS
+`dotnet test Wcs.sln` (fresh, 백그라운드 독립 실행) → `통과! - 실패: 0, 통과: 146, 건너뜀: 0, 전체: 146, 기간: 12s`, exit 0.
+경고는 기존 NU1903(SQLitePCLRaw transitive 취약성)뿐 — 본 변경 무관·신규 0. `git diff --stat -- tests/` 빈 출력 → 테스트/단언 코드 변경 0.
+
+### ③ 양 provider No changes (20%) — PASS
+- SqlServer: `has-pending-model-changes` → `No changes have been made to the model since the last migration.` exit 0.
+- Sqlite: 동일 → `No changes...` exit 0.
+→ 스쿼시된 단일 Initial이 현재 모델을 정확히 재현(스냅샷 정합).
+
+### ④ 무변경 가드 (10%) — PASS
+`git status --porcelain` 코드 범위 = `src/Wcs.Data/WcsDbContext.cs`(M) + 양 `Migrations/`(구 6.cs씩 D + 신규 Initial.cs/.Designer ?? + ModelSnapshot M)에 **국한**.
+- 보호 zone `git status -- src/Wcs.Core src/Wcs.PlcGateway src/Wcs.Sim3ds src/Wcs.Api Entities.cs` = **빈 출력(0줄)**. DbSeeder·DbInitializer·appsettings = 0줄.
+- WcsDbContext.cs 변경 본질 = 10개 FK에 `.OnDelete(DeleteBehavior.Restrict)` 체이닝 추가 + 주석. (diff의 `HasForeignKey(...);`→`HasForeignKey(...)` 라인은 `;` 종결자가 새 `.OnDelete()` 줄로 이동한 것뿐 — 구조 변경 아님.) 컬럼/테이블/인덱스/UNIQUE/CHECK/PK 변경 0.
+- 양 ModelSnapshot diff = **정확히 Cascade→Restrict 10건씩**(SqlServer 10, Sqlite 10), 그 외 0줄.
+- 신규 SqlServer Initial onDelete 분포 = Restrict 10 / Cascade 0. CreateTable 16(양 provider).
+
+### ⑤ 스쿼시 무결성 (5%) — PASS
+- provider당 단일 Initial(SqlServer `20260630012916_Initial`, Sqlite `20260630012926_Initial`). 구 3개(Initial·P2a·P1_If09Arrival)·구 스냅샷 전부 삭제.
+- 새 SqlServer Initial `is_active`(snake) **0건**(grep).
+- 구 마이그레이션 ID/클래스명(`20260616072550`·`P2a_PieceNullable`·`P1_If09Arrival`·`If09Arrival` 등) **src/tests 참조 0건**(docs/tasks 문서에만 — 코드 무영향).
+- 최종 스키마 불변 입증: 신규 단일 Initial = 구 3 마이그레이션 누적 효과와 동일. 구 첫 Initial 대비 unique index 9→10 차이는 P2a가 도입한 `UQ_cell_assignment_cell_active` 1개(+`UQ_piece_pid_active_status` 필터/컬럼 정정)로, **has-pending-model-changes=No changes**가 "현 모델 정확 재현"을 권위 입증. 구 P2a의 버그 인덱스 `UQ_piece_pid_where_active filter:[is_active]=1`(snake, 207 원흉)은 재생성 Initial에서 제거되고 올바른 `[IsActive]`로 대체됨(라이브 DB 검사와 일치).
+
+## §5 Verification Scenarios
+1. **SqlServer 적용 성공(1785 0→drop)** — PASS(① 증거).
+2. **SQLite 회귀 0(146 GREEN + 마이그레이션 무파손)** — PASS(② + Sqlite No changes + Sqlite Initial 16 CreateTable).
+3. **양 snapshot 정합(둘 다 No changes)** — PASS(③).
+4. **캐스케이드 의미 보존(앱 동작 불변·캐스케이드 의존 코드 0)** — PASS. Core/PlcGateway/Sim3ds/Api/Entities/DbSeeder diff 0줄(④). FK 삭제 거동(메타)만 Cascade→NoAction, 앱은 append-only+배치 퍼지로 캐스케이드 미의존(계약 §0 grep 확정 사실 재확인 — src 변경 0이 의존 미도입 입증).
+
+## 결론
+운영 provider(SqlServer 2025 실 인스턴스)에서 1785·207이 fresh 콜드스타트로 0건 입증됐고, 전 16 도메인 테이블 + 17 FK 전부 NO_ACTION + filtered index PascalCase가 ground-truth(sqlcmd sys.* 직접 조회)로 확인됨. 146/146 GREEN·회귀 0·양 provider No changes·무변경 가드(보호 zone 0줄)·스쿼시 단일 Initial 무결성 전부 PASS. 메타 교훈("SQLite 단일 경로는 SqlServer DDL 제약을 구조적으로 못 봄")을 실 SQL Server database update fresh 실행으로 정확히 닫음.
+
+**APPROVED**
+
+## Step 4.5 독립 코드리뷰 (orchestrator, opus, 팀 외부) — BLOCKING 0건
+
+독립 Opus 코드리뷰어가 Evaluator 미커버 영역(아키텍처/명명/주석/유지보수성/의미정확성/보안)을 검토 → **BLOCKING(Critical) 0건, 머지 가능**. 중점 5항목 전부 PASS:
+1. **FK 의미 정확성** — 필수 FK 정확히 10개 Restrict·nullable 7개 EF 기본 유지(1785 해소 필요·충분, 과소/과다 0). 앱 캐스케이드 미의존(.Remove/ExecuteDelete 0) → 런타임 무해. 부수 발견: 구 SqlServer Initial의 piece→destination Cascade 파일-스냅샷 드리프트를 스쿼시가 정정.
+2. **주석 품질** — "왜 Restrict인지" 수렴 지점별 한국어 설명. 3. **스쿼시 위생** — Down() 자식→부모 역순 정합·Designer 순수 생성물·스냅샷 diff 정확히 10 FK. 4. **양 provider 일관성** — 차이가 의도된 고유부에만 국한. 5. **보안/성능** — 인덱스 구조 불변·207 오타 해소 확인.
+
+### Minor (비차단 — 다음 sprint Generator 참고, fix-only iteration 불요)
+- **MINOR-A** (`src/Wcs.Data/WcsDbContext.cs` OnModelCreating, 대표 L104-107): 주석에 "이 `.OnDelete(Restrict)` 10개를 Cascade로 환원/제거 금지 — SQL Server 1785 재발(다중 캐스케이드 경로), 변경 시 실 SQL Server `database update` 재검증 필수" **명시적 회귀 금지 경고 부재**. EF는 필수 관계 기본이 Cascade라 `.OnDelete()` 줄을 단순 삭제만 해도 즉시 회귀(이 스프린트가 1785·207로 두 번 겪음). 한 줄 경고 추가 권고(+ `tasks/lessons.md` 등재).
+- **MINOR-B** (`docs/SPEC.md` L130): 스쿼시로 폐기된 마이그레이션명 `P2a_PieceNullableDestId_...`가 과거 완료 이력 로그에 잔존. forward 배포지시 아닌 과거 이력 항목이라 영향 경미 → "(2026-06-30 스쿼시로 단일 Initial 통합)" 각주 권고(필수 아님). 기존 `tasks/todo.md` SPEC.md 문서부채 항목과 함께 별도 문서 정리에서 처리.
+- **INFO**: 빌드 NU1903 경고 2건(SQLitePCLRaw transitive 취약성)은 사전존재·본 변경 무관(Done "0 warning"은 신규 warning 0 기준 — Evaluator가 기존 transitive advisory로 분류 확인).
