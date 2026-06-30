@@ -102,6 +102,19 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     // API 계층이 구독해 alarm 1행(전이당 1건) 영속화. 게이트웨이 본문 동작 무변경.
     public event Action<PlcSnapshot>? OnOfflineTransition;
 
+    // ── S-OBSERVABILITY 관측 훅 (부수 기록 전용 — 게이트웨이 의미·타이밍 0 변경) ─────
+    // EF 비의존 계층이라 DB를 직접 모른다. 콜백만 발화하고 Wcs.Api 측 싱크가 operation_log에 기록한다.
+    // 핸들러 예외가 폴/쓰기 루프를 죽이지 않도록 발화부를 try로 감싼다(fail-safe).
+
+    /// <summary>ONLINE 복구 전이(Online false→true) 시 1회 발화. STATE/ONLINE 로그용.</summary>
+    public event Action<PlcSnapshot>? OnOnlineTransition;
+
+    /// <summary>폴링 레지스터 전이(변화분) — (reg, old, new). 무변화 폴링은 발화 0(변화분 정책).</summary>
+    public event Action<string, int, int>? OnRegisterChange;
+
+    /// <summary>PLC 쓰기 완료 — (action, detailJson). SetTgtFloor·CellAssign·ClearR·RMW_D4 전수.</summary>
+    public event Action<string, string>? OnWrite;
+
     // OFFLINE 전이 원자 플래그 — 1=ONLINE(초기), 0=OFFLINE.
     // Interlocked.Exchange로 동시 호출(폴 루프 + 쓰기 컨슈머)에서 정확히 1회 발화 보장.
     private int _online = 1;
@@ -211,6 +224,9 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     {
         int failures = 0;
         bool prevRFlag = false;
+        // S-OBSERVABILITY: 전체 레지스터 전이 감지용 직전 스냅샷(변화분 정책 — 무변화는 발화 0).
+        // null = 첫 폴(직전값 없음 → 전이 기록 안 함, baseline만 설정).
+        PlcSnapshot? prevSnap = null;
 
         while (!ct.IsCancellationRequested)
         {
@@ -235,10 +251,22 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     _clientLock.Release();
                 }
 
+                var prevOnline = _latest.Online;
                 _latest  = snap;
                 failures = 0;
                 // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
                 Interlocked.Exchange(ref _online, 1);
+
+                // ONLINE 복구 전이(false→true) — 부수 기록(STATE/ONLINE). 핸들러 예외 격리.
+                if (!prevOnline)
+                {
+                    try { OnOnlineTransition?.Invoke(snap); } catch { }
+                }
+
+                // 레지스터 전이(변화분만) — 직전 스냅샷과 다른 값만 1건씩 발화. 핸들러 예외 격리(fail-safe).
+                if (prevSnap is { } p)
+                    EmitRegisterChanges(p, snap);
+                prevSnap = snap;
 
                 // R_Flag 상승 (0→1) 감지
                 if (!prevRFlag && snap.RFlag)
@@ -309,6 +337,30 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
             OnOfflineTransition?.Invoke(offlineSnap);
     }
 
+    // ── S-OBSERVABILITY: 레지스터 전이(변화분) 발화 ─────────────────────────────
+    // 직전 스냅샷과 다른 레지스터만 (reg, old, new) 1건씩 발화. 무변화면 발화 0(변화분 정책).
+    // OnRegisterChange 핸들러 예외가 폴 루프를 죽이지 않도록 전체를 try로 감싼다(fail-safe).
+    private void EmitRegisterChanges(PlcSnapshot prev, PlcSnapshot cur)
+    {
+        var h = OnRegisterChange;
+        if (h is null) return;
+
+        try
+        {
+            // D0~D6 + D4 비트(C_Flag·R_Flag·Ready). int(bool→0/1)로 old→new 표현.
+            if (prev.CCellNo  != cur.CCellNo)  h("C_CellNo", prev.CCellNo,  cur.CCellNo);
+            if (prev.CSeq     != cur.CSeq)     h("C_Seq",    prev.CSeq,     cur.CSeq);
+            if (prev.RCellNo  != cur.RCellNo)  h("R_CellNo", prev.RCellNo,  cur.RCellNo);
+            if (prev.RSeq     != cur.RSeq)     h("R_Seq",    prev.RSeq,     cur.RSeq);
+            if (prev.CFlag    != cur.CFlag)    h("C_Flag",   prev.CFlag ? 1 : 0, cur.CFlag ? 1 : 0);
+            if (prev.RFlag    != cur.RFlag)    h("R_Flag",   prev.RFlag ? 1 : 0, cur.RFlag ? 1 : 0);
+            if (prev.Ready    != cur.Ready)    h("Ready",    prev.Ready ? 1 : 0, cur.Ready ? 1 : 0);
+            if (prev.CurFloor != cur.CurFloor) h("CurFloor", prev.CurFloor, cur.CurFloor);
+            if (prev.TgtFloor != cur.TgtFloor) h("TgtFloor", prev.TgtFloor, cur.TgtFloor);
+        }
+        catch { /* 관측 훅 예외 격리 — 폴 루프 보존(fail-safe) */ }
+    }
+
     // ── 단일 쓰기 큐 컨슈머 (절대 규칙 #1) ──────────────────────────────────
 
     private async Task RunWriteConsumerAsync(CancellationToken ct)
@@ -350,6 +402,7 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     await _master.WriteSingleRegisterAsync(
                         RegisterMap.TgtFloor, (short)floor, ct).ConfigureAwait(false);
                     _log.LogInformation("[쓰기 큐] SetTgtFloor → D6={Floor}", floor);
+                    EmitWrite("SET_TGTFLOOR", $"{{\"reg\":\"D6\",\"floor\":{floor}}}");
                     break;
 
                 case PlcWrite.CellAssign(var cellNo, var seq):
@@ -368,6 +421,7 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     // D4 RMW — C_Flag set (read+write를 동일 임계구역에서 수행)
                     await RmwD4LockedAsync(set: RegisterMap.D4.C_Flag, clear: 0, ct).ConfigureAwait(false);
                     _log.LogInformation("[쓰기 큐] CellAssign → D0={CellNo}, D1={Seq}, C_Flag=1", cellNo, seq);
+                    EmitWrite("CELL_ASSIGN", $"{{\"cellNo\":{cellNo},\"cSeq\":{seq},\"cFlag\":1}}");
                     break;
 
                 case PlcWrite.ClearR:
@@ -379,6 +433,7 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     // D4 RMW — R_Flag clear (read+write를 동일 임계구역에서 수행)
                     await RmwD4LockedAsync(set: 0, clear: RegisterMap.D4.R_Flag, ct).ConfigureAwait(false);
                     _log.LogInformation("[쓰기 큐] ClearR → D2·D3=0, R_Flag=0");
+                    EmitWrite("CLEAR_R", "{\"reg\":\"D2,D3\",\"rFlag\":0}");
                     break;
             }
         }
@@ -411,5 +466,15 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
 
         _log.LogDebug("[RMW D4] {Before:X4} → set={Set:X4} clear={Clear:X4} → {After:X4}",
             current, set, clear, modified);
+        // D4 RMW before→after 전수 기록(부수 — 절대규칙 #1 단일 큐 경로 안에서의 부수 기록).
+        EmitWrite("RMW_D4",
+            $"{{\"reg\":\"D4\",\"before\":{current},\"set\":{set},\"clear\":{clear},\"after\":{modified}}}");
+    }
+
+    // ── S-OBSERVABILITY: PLC 쓰기 완료 발화(부수 — 핸들러 예외 격리) ────────────
+    private void EmitWrite(string action, string detailJson)
+    {
+        try { OnWrite?.Invoke(action, detailJson); }
+        catch { /* 관측 훅 예외 격리 — 쓰기 컨슈머 보존(fail-safe) */ }
     }
 }

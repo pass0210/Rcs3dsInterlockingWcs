@@ -16,8 +16,10 @@
 --   전 구간 IF NOT EXISTS / NOT EXISTS 가드 또는 UPDATE 보정으로 작성. 재실행해도
 --   셀 16·오더 16·order_item 16·cell_assignment 16 불변.
 --
--- DbSeeder 충돌 회피(계약 §0-6):
---   · 소터 destination chuteNo=30 : 이미 있으면(=DbSeeder가 만든 것) 재사용, 없으면 생성.
+-- DbSeeder 충돌 회피(계약 §0-6 / S-OBSERVABILITY 개정):
+--   · 소터 destination chuteNo=1 : 실 현장 3D Sorter 슈트번호. 이미 있으면 재사용, 없으면 생성.
+--     (실 현장 DB Rcs3dsInterlockingWcs는 SeedOnStartup=false라 DbSeeder가 안 돌아 CHUTE 1~5 시드 부재 →
+--      chuteNo=1 전역 유니크(UQ_destination_chute_no) 충돌 없음. dev DbSeeder는 소터 chuteNo=30 유지 — 형상 차이 의도적.)
 --   · work_batch : DbSeeder는 (WorkDate=today, BatchNo='SEED', WaveNo=1). 본 스크립트는
 --                  (WorkDate='2026-07-01', BatchNo='FIELD-16', WaveNo=1) — UQ(WorkDate,BatchNo,WaveNo) 비충돌.
 --   · cell 1~16  : UQ(DestinationId, CellNo)로 멱등. DbSeeder가 만든 cell 1~3(Capacity=NULL)이 있어도
@@ -37,14 +39,14 @@ DECLARE @now        datetime2 = SYSUTCDATETIME();
 DECLARE @workDate   date      = '2026-07-01';   -- 계약 §4: 내일
 DECLARE @batchNo    nvarchar(100) = 'FIELD-16'; -- DbSeeder 'SEED'와 비충돌
 DECLARE @waveNo     int       = 1;
-DECLARE @sorterChute int      = 30;             -- 3D Sorter 전용 슈트번호
+DECLARE @sorterChute int      = 1;              -- 3D Sorter 전용 슈트번호(실 현장값 — S-OBSERVABILITY)
 DECLARE @cellCap    int       = 3;
 DECLARE @plannedQty int       = 3;
 
 BEGIN TRANSACTION;
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 1) 소터 destination (SORTER_3D, ChuteNo=30) — 있으면 재사용, 없으면 생성
+-- 1) 소터 destination (SORTER_3D, ChuteNo=1) — 있으면 재사용, 없으면 생성
 -- ────────────────────────────────────────────────────────────────────────────
 IF NOT EXISTS (SELECT 1 FROM destination WHERE ChuteNo = @sorterChute)
 BEGIN
@@ -57,8 +59,8 @@ DECLARE @sorterId bigint =
 
 IF @sorterId IS NULL
 BEGIN
-    -- chuteNo=30이 SORTER_3D가 아닌 다른 타입으로 점유된 비정상 상태 — fail-loud.
-    THROW 50001, 'destination ChuteNo=30 이 SORTER_3D 타입이 아닙니다. 데이터 상태를 확인하세요.', 1;
+    -- chuteNo=1이 SORTER_3D가 아닌 다른 타입(예: CHUTE)으로 점유된 비정상 상태 — fail-loud.
+    THROW 50001, 'destination ChuteNo=1 이 SORTER_3D 타입이 아닙니다. 데이터 상태를 확인하세요.', 1;
 END
 
 -- ────────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using Microsoft.Extensions.Options;
+using Wcs.Data;
 
 namespace Wcs.Api;
 
@@ -50,15 +51,18 @@ public sealed class RcsPushClient : IRcsPushClient
     private readonly IHttpClientFactory     _httpFactory;
     private readonly RcsPushOptions         _opt;
     private readonly ILogger<RcsPushClient> _log;
+    private readonly IOperationLogger       _opLog;
 
     public RcsPushClient(
         IHttpClientFactory    httpFactory,
         IOptions<WcsOptions>  options,
-        ILogger<RcsPushClient> log)
+        ILogger<RcsPushClient> log,
+        IOperationLogger      opLog)
     {
         _httpFactory = httpFactory;
         _opt         = options.Value.RcsPush;
         _log         = log;
+        _opLog       = opLog;
     }
 
     /// <inheritdoc/>
@@ -95,6 +99,10 @@ public sealed class RcsPushClient : IRcsPushClient
                         _log.LogInformation(
                             "[IF-08푸시] 성공(재시도 {Attempt}회차): chuteNo={ChuteNo} ready={Ready}",
                             attempt, payload.ChuteNo, payload.Ready);
+                    // operation_log: IF-08 아웃바운드 푸시 전수(성공) — 부수 기록.
+                    _opLog.Log(OperationLogCategory.API, "IF08_PUSH",
+                        sorterChuteNo: payload.ChuteNo,
+                        detail: $"{{\"chuteNo\":{payload.ChuteNo},\"ready\":{(payload.Ready ? "true" : "false")},\"result\":\"OK\",\"attempt\":{attempt}}}");
                     return true;
                 }
 
@@ -136,6 +144,10 @@ public sealed class RcsPushClient : IRcsPushClient
             "[IF-08푸시] 재시도 소진({Max}회) — RCS 미도달: chuteNo={ChuteNo} ready={Ready}. " +
             "미알림 상태 유지 — RCS 복구 시 재푸시.",
             maxAttempts, payload.ChuteNo, payload.Ready);
+        // operation_log: IF-08 아웃바운드 푸시 전수(실패) — 부수 기록.
+        _opLog.Log(OperationLogCategory.API, "IF08_PUSH", level: OperationLogLevel.WARN,
+            sorterChuteNo: payload.ChuteNo,
+            detail: $"{{\"chuteNo\":{payload.ChuteNo},\"ready\":{(payload.Ready ? "true" : "false")},\"result\":\"FAIL\",\"attempts\":{maxAttempts}}}");
         return false;
     }
 

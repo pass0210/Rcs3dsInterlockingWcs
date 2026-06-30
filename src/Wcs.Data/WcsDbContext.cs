@@ -41,6 +41,8 @@ public class WcsDbContext : DbContext
     public DbSet<PlcEvent>        PlcEvents        { get; set; } = null!;
     public DbSet<Alarm>           Alarms           { get; set; } = null!;
     public DbSet<DestinationEvent> DestinationEvents { get; set; } = null!;
+    // 횡단 운영 로그(S-OBSERVABILITY) — 17번째 테이블
+    public DbSet<OperationLog>    OperationLogs    { get; set; } = null!;
 
     // ── 보조 프로퍼티 — 현재 provider 판별 ───────────────────────────────
     private bool IsSqlite    => Database.ProviderName == ProviderSqlite;
@@ -65,6 +67,7 @@ public class WcsDbContext : DbContext
         ConfigurePlcEvent(m);
         ConfigureAlarm(m);
         ConfigureDestinationEvent(m);
+        ConfigureOperationLog(m);
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -600,6 +603,47 @@ public class WcsDbContext : DbContext
              .WithMany(x => x.Events)
              .HasForeignKey(x => x.DestinationId)
              .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureOperationLog(ModelBuilder m)
+    {
+        m.Entity<OperationLog>(e =>
+        {
+            e.ToTable("operation_log");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedOnAdd();
+
+            // At — UTC 선두 인덱스(시계열 조회·퍼지). ERD 원칙 6.
+            e.Property(x => x.At).IsRequired();
+            e.HasIndex(x => x.At).HasDatabaseName("IX_operation_log_at");
+
+            // enum → string + 길이(CHECK 대체). Serilog 레벨과 정합.
+            e.Property(x => x.Category)
+             .HasConversion<string>()
+             .HasMaxLength(20)
+             .IsRequired();
+            e.Property(x => x.Action).HasMaxLength(40).IsRequired();
+            e.Property(x => x.Level)
+             .HasConversion<string>()
+             .HasMaxLength(10)
+             .IsRequired();
+
+            // ── 스냅샷 식별 컬럼(FK 아님 — 1785 회피·이력 불변 원칙 5) ──────────────
+            // operation_log는 어떤 마스터 테이블도 FK로 참조하지 않는다.
+            // → 다중 캐스케이드 경로(SQL Server 1785) 원천 차단 + 마스터 변경에도 로그 불변.
+            e.Property(x => x.SorterChuteNo).IsRequired(false);
+            e.Property(x => x.DestinationId).IsRequired(false);
+            e.Property(x => x.Barcode).HasMaxLength(200).IsRequired(false);
+            e.Property(x => x.PId).IsRequired(false);
+
+            // Detail — JSON nvarchar(max)(SQL Server) / TEXT(SQLite). 길이 미지정 = max.
+            e.Property(x => x.Detail).IsRequired(false);
+
+            // 보조 인덱스: (sorter_chute_no, at) — 특정 소터 시계열 조회.
+            // filtered index 아님 → 물리 컬럼명 대소문자 207 함정 비해당.
+            e.HasIndex(x => new { x.SorterChuteNo, x.At })
+             .HasDatabaseName("IX_operation_log_sorter_at");
         });
     }
 
