@@ -101,15 +101,22 @@ public class WcsDbContext : DbContext
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
             // 네비게이션 관계
+            // S-SQLSERVER-FK-CASCADE: 필수 FK는 Restrict(NoAction)로 명시 — SQL Server 1785
+            // (다중 캐스케이드 경로) 방지. 앱은 캐스케이드 삭제 미의존(append-only + 배치 퍼지)이라
+            // 런타임 동작 영향 0. destination→{chute_detail,cell,destination_event}는 각각
+            // sorter_command·cell_assignment 등으로 다시 수렴하므로 Cascade면 1785 유발.
             e.HasOne(x => x.ChuteDetail)
              .WithOne(x => x.Destination)
-             .HasForeignKey<ChuteDetail>(x => x.DestinationId);
+             .HasForeignKey<ChuteDetail>(x => x.DestinationId)
+             .OnDelete(DeleteBehavior.Restrict);
             e.HasMany(x => x.Cells)
              .WithOne(x => x.Destination)
-             .HasForeignKey(x => x.DestinationId);
+             .HasForeignKey(x => x.DestinationId)
+             .OnDelete(DeleteBehavior.Restrict);
             e.HasMany(x => x.Events)
              .WithOne(x => x.Destination)
-             .HasForeignKey(x => x.DestinationId);
+             .HasForeignKey(x => x.DestinationId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 
@@ -162,12 +169,16 @@ public class WcsDbContext : DbContext
                  .HasDatabaseName("UQ_cell_assignment_cell_active");
             }
 
+            // S-SQLSERVER-FK-CASCADE: cell_assignment는 cell·wcs_order 양쪽에서 수렴 →
+            // Cascade면 다중 경로(1785). 필수 FK Restrict 명시.
             e.HasOne(x => x.Cell)
              .WithMany(x => x.Assignments)
-             .HasForeignKey(x => x.CellId);
+             .HasForeignKey(x => x.CellId)
+             .OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Order)
              .WithMany(x => x.CellAssignments)
-             .HasForeignKey(x => x.OrderId);
+             .HasForeignKey(x => x.OrderId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 
@@ -321,9 +332,12 @@ public class WcsDbContext : DbContext
 
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
+            // S-SQLSERVER-FK-CASCADE: 필수 FK(work_batch) Restrict 명시. destination은 nullable
+            // FK라 이미 비-Cascade(EF 기본) — 변경 불요.
             e.HasOne(x => x.WorkBatch)
              .WithMany(x => x.Orders)
-             .HasForeignKey(x => x.WorkBatchId);
+             .HasForeignKey(x => x.WorkBatchId)
+             .OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Destination)
              .WithMany(x => x.Orders)
              .HasForeignKey(x => x.DestinationId)
@@ -353,9 +367,12 @@ public class WcsDbContext : DbContext
 
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
+            // S-SQLSERVER-FK-CASCADE: 필수 FK Restrict 명시(piece가 order_item·destination 등에서
+            // 다중 수렴 — Cascade면 1785).
             e.HasOne(x => x.Order)
              .WithMany(x => x.Items)
-             .HasForeignKey(x => x.OrderId);
+             .HasForeignKey(x => x.OrderId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 
@@ -465,9 +482,11 @@ public class WcsDbContext : DbContext
             e.HasIndex(x => x.At).HasDatabaseName("IX_piece_event_at");
             e.HasIndex(x => new { x.PieceId, x.At }).HasDatabaseName("IX_piece_event_piece_at");
 
+            // S-SQLSERVER-FK-CASCADE: 필수 FK Restrict 명시.
             e.HasOne(x => x.Piece)
              .WithMany(x => x.Events)
-             .HasForeignKey(x => x.PieceId);
+             .HasForeignKey(x => x.PieceId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 
@@ -491,12 +510,17 @@ public class WcsDbContext : DbContext
              .IsRequired();
             e.Property(x => x.CreatedAt).IsRequired();
 
+            // S-SQLSERVER-FK-CASCADE: sorter_command는 piece·cell 양쪽에서 수렴, 두 경로 모두
+            // destination으로 거슬러 올라가 다중 캐스케이드 경로(1785, 대표 케이스
+            // FK_sorter_command_piece_PieceId) 유발 → 필수 FK Restrict 명시.
             e.HasOne(x => x.Piece)
              .WithMany(x => x.Commands)
-             .HasForeignKey(x => x.PieceId);
+             .HasForeignKey(x => x.PieceId)
+             .OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Cell)
              .WithMany(x => x.Commands)
-             .HasForeignKey(x => x.CellId);
+             .HasForeignKey(x => x.CellId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 
@@ -571,9 +595,11 @@ public class WcsDbContext : DbContext
             e.HasIndex(x => new { x.DestinationId, x.At })
              .HasDatabaseName("IX_destination_event_dest_at");
 
+            // S-SQLSERVER-FK-CASCADE: 필수 FK Restrict 명시.
             e.HasOne(x => x.Destination)
              .WithMany(x => x.Events)
-             .HasForeignKey(x => x.DestinationId);
+             .HasForeignKey(x => x.DestinationId)
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 

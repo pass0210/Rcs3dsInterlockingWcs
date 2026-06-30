@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
-namespace Wcs.Migrations.Sqlite.Migrations
+namespace Wcs.Migrations.SqlServer.Migrations
 {
     /// <inheritdoc />
     public partial class Initial : Migration
@@ -15,12 +15,12 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "agv",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    AgvNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    Floor = table.Column<int>(type: "INTEGER", nullable: false),
-                    Enabled = table.Column<bool>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    AgvNo = table.Column<int>(type: "int", nullable: false),
+                    Floor = table.Column<int>(type: "int", nullable: false),
+                    Enabled = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -31,17 +31,16 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "destination",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    ChuteNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    DestType = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    Floor = table.Column<int>(type: "INTEGER", nullable: true),
-                    Status = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    IsActive = table.Column<bool>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "BLOB", rowVersion: true, nullable: true),
-                    XminRowVersion = table.Column<int>(type: "INTEGER", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    ChuteNo = table.Column<int>(type: "int", nullable: false),
+                    DestType = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    Floor = table.Column<int>(type: "int", nullable: true),
+                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RowVersion = table.Column<byte[]>(type: "rowversion", rowVersion: true, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -52,12 +51,12 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "induction",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    InductionNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    Floor = table.Column<int>(type: "INTEGER", nullable: false),
-                    Enabled = table.Column<bool>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    InductionNo = table.Column<int>(type: "int", nullable: false),
+                    Floor = table.Column<int>(type: "int", nullable: false),
+                    Enabled = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -68,13 +67,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "plc_event",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    Kind = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    Register = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    OldVal = table.Column<int>(type: "INTEGER", nullable: true),
-                    NewVal = table.Column<int>(type: "INTEGER", nullable: true),
-                    At = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    Kind = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    Register = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    OldVal = table.Column<int>(type: "int", nullable: true),
+                    NewVal = table.Column<int>(type: "int", nullable: true),
+                    At = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -85,13 +84,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "printer",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    PrinterNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    Name = table.Column<string>(type: "TEXT", maxLength: 200, nullable: false),
-                    ConnInfo = table.Column<string>(type: "TEXT", maxLength: 100, nullable: true),
-                    Enabled = table.Column<bool>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    PrinterNo = table.Column<int>(type: "int", nullable: false),
+                    Name = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    ConnInfo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    Enabled = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -102,18 +101,17 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "work_batch",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    WorkDate = table.Column<DateOnly>(type: "TEXT", nullable: false),
-                    BatchNo = table.Column<string>(type: "TEXT", maxLength: 100, nullable: false),
-                    WaveNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    Status = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    OpenedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    ClosedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "BLOB", rowVersion: true, nullable: true),
-                    XminRowVersion = table.Column<int>(type: "INTEGER", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    WorkDate = table.Column<DateOnly>(type: "date", nullable: false),
+                    BatchNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    WaveNo = table.Column<int>(type: "int", nullable: false),
+                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    OpenedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    ClosedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RowVersion = table.Column<byte[]>(type: "rowversion", rowVersion: true, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -124,13 +122,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "cell",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    DestinationId = table.Column<long>(type: "INTEGER", nullable: false),
-                    CellNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    Capacity = table.Column<int>(type: "INTEGER", nullable: true),
-                    Enabled = table.Column<bool>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    DestinationId = table.Column<long>(type: "bigint", nullable: false),
+                    CellNo = table.Column<int>(type: "int", nullable: false),
+                    Capacity = table.Column<int>(type: "int", nullable: true),
+                    Enabled = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -140,20 +138,20 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.DestinationId,
                         principalTable: "destination",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "destination_event",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    DestinationId = table.Column<long>(type: "INTEGER", nullable: false),
-                    EventType = table.Column<string>(type: "TEXT", maxLength: 30, nullable: false),
-                    DetailJson = table.Column<string>(type: "TEXT", nullable: true),
-                    OperatorId = table.Column<string>(type: "TEXT", maxLength: 100, nullable: true),
-                    At = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    DestinationId = table.Column<long>(type: "bigint", nullable: false),
+                    EventType = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: false),
+                    DetailJson = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    OperatorId = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    At = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -163,21 +161,21 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.DestinationId,
                         principalTable: "destination",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "chute_detail",
                 columns: table => new
                 {
-                    DestinationId = table.Column<long>(type: "INTEGER", nullable: false),
-                    DefaultFullQty = table.Column<int>(type: "INTEGER", nullable: false),
-                    WorkFullQty = table.Column<int>(type: "INTEGER", nullable: false),
-                    PrinterId = table.Column<long>(type: "INTEGER", nullable: true),
-                    LastClearedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    Zone = table.Column<string>(type: "TEXT", maxLength: 50, nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    DestinationId = table.Column<long>(type: "bigint", nullable: false),
+                    DefaultFullQty = table.Column<int>(type: "int", nullable: false),
+                    WorkFullQty = table.Column<int>(type: "int", nullable: false),
+                    PrinterId = table.Column<long>(type: "bigint", nullable: true),
+                    LastClearedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    Zone = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -187,7 +185,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.DestinationId,
                         principalTable: "destination",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
                         name: "FK_chute_detail_printer_PrinterId",
                         column: x => x.PrinterId,
@@ -199,23 +197,22 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "wcs_order",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    WorkBatchId = table.Column<long>(type: "INTEGER", nullable: false),
-                    OrderNo = table.Column<string>(type: "TEXT", maxLength: 100, nullable: false),
-                    OrderType = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    RefNo = table.Column<string>(type: "TEXT", maxLength: 200, nullable: true),
-                    RefName = table.Column<string>(type: "TEXT", maxLength: 200, nullable: true),
-                    DestinationId = table.Column<long>(type: "INTEGER", nullable: true),
-                    DestAssignType = table.Column<string>(type: "TEXT", maxLength: 20, nullable: true),
-                    DestAssignedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    Status = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    StartedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    ClosedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "BLOB", rowVersion: true, nullable: true),
-                    XminRowVersion = table.Column<int>(type: "INTEGER", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    WorkBatchId = table.Column<long>(type: "bigint", nullable: false),
+                    OrderNo = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    OrderType = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    RefNo = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    RefName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    DestinationId = table.Column<long>(type: "bigint", nullable: true),
+                    DestAssignType = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
+                    DestAssignedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    StartedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    ClosedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RowVersion = table.Column<byte[]>(type: "rowversion", rowVersion: true, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -230,20 +227,20 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.WorkBatchId,
                         principalTable: "work_batch",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "cell_assignment",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    CellId = table.Column<long>(type: "INTEGER", nullable: false),
-                    OrderId = table.Column<long>(type: "INTEGER", nullable: false),
-                    AssignedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    ReleasedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    CellId = table.Column<long>(type: "bigint", nullable: false),
+                    OrderId = table.Column<long>(type: "bigint", nullable: false),
+                    AssignedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    ReleasedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -253,30 +250,29 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.CellId,
                         principalTable: "cell",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
                         name: "FK_cell_assignment_wcs_order_OrderId",
                         column: x => x.OrderId,
                         principalTable: "wcs_order",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "order_item",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    OrderId = table.Column<long>(type: "INTEGER", nullable: false),
-                    Barcode = table.Column<string>(type: "TEXT", maxLength: 200, nullable: false),
-                    PlannedQty = table.Column<int>(type: "INTEGER", nullable: false),
-                    ReservedQty = table.Column<int>(type: "INTEGER", nullable: false),
-                    SortedQty = table.Column<int>(type: "INTEGER", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "BLOB", rowVersion: true, nullable: true),
-                    XminRowVersion = table.Column<int>(type: "INTEGER", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    OrderId = table.Column<long>(type: "bigint", nullable: false),
+                    Barcode = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    PlannedQty = table.Column<int>(type: "int", nullable: false),
+                    ReservedQty = table.Column<int>(type: "int", nullable: false),
+                    SortedQty = table.Column<int>(type: "int", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RowVersion = table.Column<byte[]>(type: "rowversion", rowVersion: true, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -286,30 +282,29 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.OrderId,
                         principalTable: "wcs_order",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "piece",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    PId = table.Column<int>(type: "INTEGER", nullable: false),
-                    IsActive = table.Column<bool>(type: "INTEGER", nullable: false),
-                    Barcode = table.Column<string>(type: "TEXT", maxLength: 200, nullable: false),
-                    Qty = table.Column<int>(type: "INTEGER", nullable: false),
-                    DepositedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    DestinationId = table.Column<long>(type: "INTEGER", nullable: false),
-                    OrderItemId = table.Column<long>(type: "INTEGER", nullable: true),
-                    AgvId = table.Column<long>(type: "INTEGER", nullable: true),
-                    InductionId = table.Column<long>(type: "INTEGER", nullable: true),
-                    Status = table.Column<string>(type: "TEXT", maxLength: 30, nullable: false),
-                    ClientTs = table.Column<string>(type: "TEXT", maxLength: 30, nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "BLOB", rowVersion: true, nullable: true),
-                    XminRowVersion = table.Column<int>(type: "INTEGER", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    PId = table.Column<int>(type: "int", nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    Barcode = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    Qty = table.Column<int>(type: "int", nullable: false),
+                    DepositedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    DestinationId = table.Column<long>(type: "bigint", nullable: true),
+                    OrderItemId = table.Column<long>(type: "bigint", nullable: true),
+                    AgvId = table.Column<long>(type: "bigint", nullable: true),
+                    InductionId = table.Column<long>(type: "bigint", nullable: true),
+                    Status = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: false),
+                    ClientTs = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RowVersion = table.Column<byte[]>(type: "rowversion", rowVersion: true, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -323,8 +318,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         name: "FK_piece_destination_DestinationId",
                         column: x => x.DestinationId,
                         principalTable: "destination",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        principalColumn: "Id");
                     table.ForeignKey(
                         name: "FK_piece_induction_InductionId",
                         column: x => x.InductionId,
@@ -341,15 +335,15 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "alarm",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    Code = table.Column<string>(type: "TEXT", maxLength: 100, nullable: false),
-                    Severity = table.Column<string>(type: "TEXT", maxLength: 10, nullable: false),
-                    PieceId = table.Column<long>(type: "INTEGER", nullable: true),
-                    Message = table.Column<string>(type: "TEXT", nullable: false),
-                    RaisedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    AckedAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    Code = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    Severity = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
+                    PieceId = table.Column<long>(type: "bigint", nullable: true),
+                    Message = table.Column<string>(type: "nvarchar(max)", nullable: false),
+                    RaisedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    AckedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -365,14 +359,14 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 name: "piece_event",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    PieceId = table.Column<long>(type: "INTEGER", nullable: false),
-                    EventType = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    Reason = table.Column<string>(type: "TEXT", maxLength: 100, nullable: true),
-                    PayloadJson = table.Column<string>(type: "TEXT", nullable: true),
-                    ClientTs = table.Column<string>(type: "TEXT", maxLength: 30, nullable: true),
-                    At = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    PieceId = table.Column<long>(type: "bigint", nullable: false),
+                    EventType = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    Reason = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    PayloadJson = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    ClientTs = table.Column<string>(type: "nvarchar(30)", maxLength: 30, nullable: true),
+                    At = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -382,25 +376,25 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.PieceId,
                         principalTable: "piece",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
                 name: "sorter_command",
                 columns: table => new
                 {
-                    Id = table.Column<long>(type: "INTEGER", nullable: false)
-                        .Annotation("Sqlite:Autoincrement", true),
-                    PieceId = table.Column<long>(type: "INTEGER", nullable: false),
-                    CellId = table.Column<long>(type: "INTEGER", nullable: false),
-                    CSeq = table.Column<int>(type: "INTEGER", nullable: false),
-                    CellNo = table.Column<int>(type: "INTEGER", nullable: false),
-                    CWrittenAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    RSeq = table.Column<int>(type: "INTEGER", nullable: true),
-                    RCellNo = table.Column<int>(type: "INTEGER", nullable: true),
-                    RFlagAt = table.Column<DateTime>(type: "TEXT", nullable: true),
-                    Status = table.Column<string>(type: "TEXT", maxLength: 20, nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false)
+                    Id = table.Column<long>(type: "bigint", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    PieceId = table.Column<long>(type: "bigint", nullable: false),
+                    CellId = table.Column<long>(type: "bigint", nullable: false),
+                    CSeq = table.Column<int>(type: "int", nullable: false),
+                    CellNo = table.Column<int>(type: "int", nullable: false),
+                    CWrittenAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    RSeq = table.Column<int>(type: "int", nullable: true),
+                    RCellNo = table.Column<int>(type: "int", nullable: true),
+                    RFlagAt = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    Status = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -410,13 +404,13 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         column: x => x.CellId,
                         principalTable: "cell",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
                         name: "FK_sorter_command_piece_PieceId",
                         column: x => x.PieceId,
                         principalTable: "piece",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateIndex(
@@ -442,14 +436,16 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_cell_assignment_CellId",
-                table: "cell_assignment",
-                column: "CellId");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_cell_assignment_OrderId",
                 table: "cell_assignment",
                 column: "OrderId");
+
+            migrationBuilder.CreateIndex(
+                name: "UQ_cell_assignment_cell_active",
+                table: "cell_assignment",
+                column: "CellId",
+                unique: true,
+                filter: "[ReleasedAt] IS NULL");
 
             migrationBuilder.CreateIndex(
                 name: "IX_chute_detail_PrinterId",
@@ -510,10 +506,11 @@ namespace Wcs.Migrations.Sqlite.Migrations
                 column: "Status");
 
             migrationBuilder.CreateIndex(
-                name: "UQ_piece_pid_is_active",
+                name: "UQ_piece_pid_active_status",
                 table: "piece",
-                columns: new[] { "PId", "IsActive" },
-                unique: true);
+                column: "PId",
+                unique: true,
+                filter: "[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED')");
 
             migrationBuilder.CreateIndex(
                 name: "IX_piece_event_at",
