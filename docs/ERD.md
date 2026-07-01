@@ -14,7 +14,7 @@
    비움 확인 = last_cleared_at 갱신 + destination_event(CLEARED) — 카운터 컬럼 금지(드리프트 원천 차단, 단일 진실=piece).
    오더 완료(OVER/COMPLETED)는 order_item reserved+sorted vs planned 계산 — 동일 원칙. 필요 시 뷰 v_destination_status.
 
-## 테이블 (16)
+## 테이블 (17)
 ### 기준정보
 - `destination` — id, chute_no UQ, dest_type CHECK('CHUTE','SORTER_3D'), floor int NULL(3D=NULL), status CHECK('NORMAL','PAUSED'), is_active bit
 - `cell` — id, destination_id FK(**SORTER_3D 목적지 소속** — dest_type='SORTER_3D' 검증은 앱 레벨), cell_no, **UQ(destination_id,cell_no)**, capacity int NULL, enabled bit
@@ -55,13 +55,28 @@
 - `destination_event` — id, destination_id FK, event_type CHECK('CLEARED','FULL_QTY_CHANGED','CLOSED','PAUSED','RESUMED'),
   detail_json NULL(old/new 값), operator_id NULL, at(UTC) · append-only — 운영 조작(비움/풀수량/마감/일시정지) 감사 단일 이력
 
+### 횡단 관측 (S-OBSERVABILITY)
+- `operation_log` — id, at datetime2(UTC, **선두 인덱스** IX_operation_log_at), category CHECK('API','PLC_WRITE','POLL_CHANGE','HANDSHAKE','STATE'),
+  action(IF05_REQ/IF05_RES/IF08_PUSH/IF09/IF10/SET_TGTFLOOR/CELL_ASSIGN/CLEAR_R/RMW_D4/REG_CHANGE/HS_C_SENT/HS_R_RECV/HS_RSEQ_MATCH/HS_RSEQ_MISMATCH/HS_CLEAR_R/HS_TIMEOUT/HS_CFLAG_TIMEOUT/HS_OFFLINE/OFFLINE/ONLINE/FULL/PAUSED/NORMAL),
+  level CHECK('INFO','WARN','ERROR'), sorter_chute_no NULL·destination_id NULL·barcode NULL·p_id NULL(**스냅샷 컬럼 — FK 아님**), detail nvarchar(max) NULL(JSON 상세)
+  · **FK 0개** — 1785(다중 캐스케이드 경로) 원천 차단 + 이력 불변(원칙 5). 어떤 마스터도 참조하지 않음.
+  · 보조 인덱스: (sorter_chute_no, at) — 특정 소터 시계열 조회. **filtered index 아님**(207 함정 비해당).
+  · **append-only**(UPDATE 없음). 비동기·단일경로·fail-safe 백그라운드 채널 싱크(OperationLogService)가 영속화 —
+    본 처리(150ms 폴·핸드셰이크·API 3s) 비지연. 기록 실패가 본 동작을 막지 않음(예외는 Serilog 자체 경고).
+  · **도메인 이벤트와의 관계 — 중복 아님**: piece_event/plc_event/alarm/destination_event/sorter_command가
+    정규화된 상태·이력(각 도메인별 행 수·의미 고정)이라면, operation_log는 "모든 동작을 단일 시계열로 한 테이블에서
+    관측"하는 **횡단(cross-cutting) 운영 스트림**이다. 기존 이벤트 테이블의 행을 더 넣거나 빼지 않는다(의미 0 변경).
+  · **기록 정책**: 전수(API 원문 IF-05/08-push/09/10·모든 PLC 쓰기·핸드셰이크 각 단계·상태 전이) /
+    **변화분만**(고빈도 폴링 150ms은 레지스터 값이 직전 스냅샷과 다를 때만 POLL_CHANGE 1행 — 무변화 폴링은 0행, DB 폭주 방지).
+
 ## 인덱스
 - piece: 필터드 UQ(p_id) WHERE is_active=1 · (status) · (destination_id,status) · (destination_id,deposited_at)
 - piece_event/plc_event: (at) 선두, piece_event 보조 (piece_id,at)
 - alarm: (acked_at) WHERE acked_at IS NULL
 - destination_event: (destination_id, at)
 - wcs_order: (work_batch_id, status) · piece 보조: (order_item_id)
+- operation_log: (at) 선두 IX_operation_log_at · 보조 (sorter_chute_no, at) IX_operation_log_sorter_at
 - SQLite(개발)엔 filtered index/rowversion 없음 → provider 분기: 일반 UNIQUE(p_id,is_active) + int 버전 컬럼
 
 ## 보존
-plc_event 7~14일 · piece_event 30~90일 · 나머지 영구. 일배치 퍼지(시간 인덱스 사용).
+plc_event 7~14일 · piece_event 30~90일 · operation_log 14일(plc_event 정합 — 고빈도 관측 스트림, at 인덱스로 일배치 퍼지) · 나머지 영구. 일배치 퍼지(시간 인덱스 사용). (operation_log 자동 퍼지 배치 구현은 후속 — 본 스프린트는 보존 기간 정의만.)

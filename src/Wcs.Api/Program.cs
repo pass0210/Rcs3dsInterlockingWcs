@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Serilog;
 using Wcs.Api;
 using Wcs.Api.Startup;
 using Wcs.Core;
@@ -25,7 +26,15 @@ var builder = WebApplication.CreateBuilder(args);
 // WebApplicationFactory 테스트 호스트) 아무것도 하지 않으므로 콘솔·테스트 무파손.
 // 서비스 등록 스크립트: scripts/install-service.ps1 / uninstall-service.ps1.
 builder.Host.UseWindowsService();
-// TODO(M5-P2): Serilog 구조화 로깅
+
+// ── Serilog 구조화 로깅 (M5-P2 / S-OBSERVABILITY) ────────────────────────────
+// 레벨·싱크(Console/File)·파일 경로·롤링 주기·보존·outputTemplate 전부 appsettings의
+// "Serilog" 섹션에서 읽는다(하드코딩 금지·절대규칙 #7). ReadFrom.Configuration이 그 섹션을 소비.
+// 기존 ILogger<T> 호출부는 Serilog 백엔드로 자동 라우팅(구조화 메시지 템플릿 속성 보존) —
+// 호출 코드 대량 변경 불요. ReadFrom.Services로 등록된 enricher/sink도 흡수.
+builder.Host.UseSerilog((context, services, configuration) => configuration
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services));
 
 // ════════════════════════════════════════════════════════════════════════════
 // (D) DI 배선
@@ -78,6 +87,15 @@ builder.Services.AddScoped<EfAlarmSink>();
 builder.Services.AddScoped<IAlarmSink>(sp => sp.GetRequiredService<EfAlarmSink>());
 builder.Services.AddScoped<EfSorterCommandJournal>();
 builder.Services.AddScoped<ISorterCommandJournal>(sp => sp.GetRequiredService<EfSorterCommandJournal>());
+
+// ── operation_log 비동기 싱크 (S-OBSERVABILITY) ─────────────────────────────
+// IOperationLogger(논블로킹 enqueue) + IHostedService(백그라운드 컨슈머)를 한 싱글톤으로.
+// 본 처리(폴·핸드셰이크·API) 비지연 + fail-safe. in-memory SQLite 테스트 더블에서도 무해.
+builder.Services.AddSingleton<OperationLogService>();
+builder.Services.AddSingleton<Wcs.Data.IOperationLogger>(sp =>
+    sp.GetRequiredService<OperationLogService>());
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<OperationLogService>());
 
 // ── ChuteCapacityService 싱글톤 (FULL/PAUSED 인메모리 집계) ──────────────────
 builder.Services.AddSingleton<ChuteCapacityService>();
@@ -143,6 +161,41 @@ var app = builder.Build();
 // (기존 5개 테스트 팩토리의 EnsureCreated+DbSeeder.Seed 경로 무파손).
 // ════════════════════════════════════════════════════════════════════════════
 await DbInitializer.ProvisionAsync(app);
+
+// ════════════════════════════════════════════════════════════════════════════
+// S-OBSERVABILITY: 슈트 FULL/PAUSED 상태 전이 → operation_log STATE 기록(전이당 1회)
+// ChuteCapacityService.OnChuteStateChanged(매 reserve/deposit/clear 발화)를 구독해
+// GetHold 전이(None↔Full↔Paused)만 1행 기록. 무변화는 0행(전이 정책). 부수 기록 — 도메인 의미 0 변경.
+// (소터 FULL은 DestinationStatusService.Compute 산출 — 본 스프린트는 슈트 capacity 전이를 STATE로 관측.)
+// ════════════════════════════════════════════════════════════════════════════
+{
+    // OnChuteStateChanged 이벤트는 구체 타입(ChuteCapacityService)에 정의됨 — 동일 싱글톤 인스턴스.
+    var chuteCap = app.Services.GetRequiredService<ChuteCapacityService>();
+    var opLogSink = app.Services.GetService<Wcs.Data.IOperationLogger>();
+    var lastHold = new System.Collections.Concurrent.ConcurrentDictionary<long, Wcs.Core.WcsHold>();
+    if (opLogSink is not null)
+    chuteCap.OnChuteStateChanged += destId =>
+    {
+        try
+        {
+            var hold = chuteCap.GetHold(destId);
+            var prev = lastHold.GetOrAdd(destId, Wcs.Core.WcsHold.None);
+            if (hold == prev) return;  // 무변화 — 기록 0(전이 정책).
+            lastHold[destId] = hold;
+
+            var (action, level) = hold switch
+            {
+                Wcs.Core.WcsHold.Full   => ("FULL",   Wcs.Data.OperationLogLevel.WARN),
+                Wcs.Core.WcsHold.Paused => ("PAUSED", Wcs.Data.OperationLogLevel.WARN),
+                _                       => ("NORMAL", Wcs.Data.OperationLogLevel.INFO),
+            };
+            opLogSink.Log(Wcs.Data.OperationLogCategory.STATE, action, level: level,
+                destinationId: destId,
+                detail: $"{{\"destId\":{destId},\"hold\":\"{hold}\",\"prev\":\"{prev}\"}}");
+        }
+        catch { /* 관측 훅 예외 격리 — 본 동작 보존(fail-safe) */ }
+    };
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10)
@@ -278,11 +331,47 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
         // ── 소터별 폴링 서비스 시작 + OFFLINE 전이 이벤트 구독 ────────────────
         // P3: OFFLINE 전이당 1건 alarm 영속화 — IServiceScopeFactory 경유 별도 스코프.
         // 폴링 시작 전에 구독하면 첫 폴 실패도 포착 가능(이벤트는 true→false 전이만 발화).
+        // S-OBSERVABILITY: operation_log 싱크(논블로킹 enqueue) — 관측 훅이 직접 호출.
+        // IOperationLogger는 싱글톤(OperationLogService)이라 폴/쓰기 스레드에서 직접 취득 안전.
+        // 소프트 의존: 미등록(IOperationLogger 없는 최소 호스트 — 일부 단위 테스트)이면 관측 훅 구독을
+        // 건너뛴다(게이트웨이 동작은 그대로 — 부수 기록만 비활성). 강제 의존을 만들지 않는다(fail-safe).
+        var opLog = _sp.GetService<Wcs.Data.IOperationLogger>();
+
         foreach (var bundle in bundles.Values)
         {
             // OFFLINE 이벤트 구독: 전이당 1회만 발화 — API 계층에서 alarm 기록
             var capturedDestId  = bundle.DestinationId;
             var capturedChuteNo = bundle.ChuteNo;
+
+            // ── S-OBSERVABILITY 관측 훅 구독(부수 기록 — 게이트웨이 의미·타이밍 0 변경) ──
+            // 모든 핸들러는 IOperationLogger.Log(논블로킹·fail-safe)만 호출 → 폴/쓰기 핫패스 비지연.
+            if (opLog is not null)
+            {
+                bundle.SubscribeWrite((action, detail) =>
+                    opLog.Log(Wcs.Data.OperationLogCategory.PLC_WRITE, action,
+                        sorterChuteNo: capturedChuteNo, destinationId: capturedDestId, detail: detail));
+                bundle.SubscribeRegisterChange((reg, oldV, newV) =>
+                    opLog.Log(Wcs.Data.OperationLogCategory.POLL_CHANGE, "REG_CHANGE",
+                        level: Wcs.Data.OperationLogLevel.INFO,
+                        sorterChuteNo: capturedChuteNo, destinationId: capturedDestId,
+                        detail: $"{{\"reg\":\"{reg}\",\"old\":{oldV},\"new\":{newV}}}"));
+                bundle.SubscribeHandshakeStage((action, detail) =>
+                    opLog.Log(Wcs.Data.OperationLogCategory.HANDSHAKE, action,
+                        level: action.Contains("MISMATCH") || action.Contains("TIMEOUT") || action.Contains("OFFLINE")
+                            ? Wcs.Data.OperationLogLevel.ERROR : Wcs.Data.OperationLogLevel.INFO,
+                        sorterChuteNo: capturedChuteNo, destinationId: capturedDestId, detail: detail));
+                bundle.SubscribeOnline(_ =>
+                    opLog.Log(Wcs.Data.OperationLogCategory.STATE, "ONLINE",
+                        sorterChuteNo: capturedChuteNo, destinationId: capturedDestId,
+                        detail: $"{{\"destId\":{capturedDestId},\"chuteNo\":{capturedChuteNo}}}"));
+                // STATE/OFFLINE operation_log(전이당 1회) — 기존 alarm 기록(아래 별도 구독)과 비중복(다른 테이블).
+                bundle.SubscribeOffline(_ =>
+                    opLog.Log(Wcs.Data.OperationLogCategory.STATE, "OFFLINE",
+                        level: Wcs.Data.OperationLogLevel.ERROR,
+                        sorterChuteNo: capturedChuteNo, destinationId: capturedDestId,
+                        detail: $"{{\"destId\":{capturedDestId},\"chuteNo\":{capturedChuteNo}}}"));
+            }
+
             bundle.SubscribeOffline(offlineSnap =>
             {
                 // 이 핸들러는 폴 스레드(RunPollLoopAsync)에서 직접 호출된다.

@@ -24,10 +24,12 @@ namespace Wcs.Api.Controllers;
 public sealed class RcsController : ControllerBase
 {
     private readonly ILogger<RcsController> _log;
+    private readonly IOperationLogger       _opLog;
 
-    public RcsController(ILogger<RcsController> log)
+    public RcsController(ILogger<RcsController> log, IOperationLogger opLog)
     {
-        _log = log;
+        _log   = log;
+        _opLog = opLog;
     }
 
     // ── IF-05 목적지 조회 ─────────────────────────────────────────────────────
@@ -48,6 +50,10 @@ public sealed class RcsController : ControllerBase
             return BadRequest(new { error = "barcode는 필수입니다." });
         if (req.Qty <= 0)
             return BadRequest(new { error = "qty는 1 이상이어야 합니다." });
+
+        // ── operation_log: IF-05 요청 원문 전수 기록(부수 — 응답 형상 0 변경) ───────
+        _opLog.Log(OperationLogCategory.API, "IF05_REQ", barcode: req.Barcode, pId: req.PId,
+            detail: $"{{\"agvNo\":{req.AgvNo},\"inductionNo\":{req.InductionNo},\"qty\":{req.Qty}}}");
 
         // ── 오더 매칭 → 목적지·상태 판정 (+ FULL/PAUSED 상류 필터) → OK 시 예약 차감 ─
         // FULL/PAUSED 차단은 배정 시점(IF-05)으로 상류 이동. 산출원은 DestinationStatusService(슈트·소터 공용).
@@ -85,6 +91,13 @@ public sealed class RcsController : ControllerBase
         _log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason(내부)={Reason}",
             req.PId, req.Barcode, result, chuteNo, reason);
 
+        // ── operation_log: IF-05 응답 전수 기록(result·chuteNo·내부 reason) ─────────
+        _opLog.Log(OperationLogCategory.API, "IF05_RES",
+            level: result == "OK" ? OperationLogLevel.INFO : OperationLogLevel.WARN,
+            sorterChuteNo: destType == DestinationType.Sorter3D ? chuteNo : null,
+            destinationId: destId, barcode: req.Barcode, pId: req.PId,
+            detail: $"{{\"result\":\"{result}\",\"chuteNo\":{(chuteNo.HasValue ? chuteNo.Value.ToString() : "null")},\"reason\":{(reason is null ? "null" : $"\"{reason}\"")}}}");
+
         // 응답은 {result, chuteNo} — reason 제거.
         return Ok(new DestinationQueryResponse(result, chuteNo));
     }
@@ -109,6 +122,10 @@ public sealed class RcsController : ControllerBase
             return BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
         if (req.ChuteNo <= 0)
             return BadRequest(new { error = "chuteNo는 양수여야 합니다." });
+
+        // ── operation_log: IF-09 요청 원문 전수 기록 ──────────────────────────────
+        _opLog.Log(OperationLogCategory.API, "IF09", sorterChuteNo: req.ChuteNo, pId: req.PId,
+            detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo}}}");
 
         // ── 도착 기록 (piece_event IF09_ARRIVAL — 상태 전이 없음) ───────────────
         var recorded = arrival.RecordArrival(req.PId, req.ChuteNo, req.AgvNo, req.TimeStamp);
@@ -207,6 +224,11 @@ public sealed class RcsController : ControllerBase
             return BadRequest(new { error = "barcode는 필수입니다." });
         if (req.ChuteNo <= 0)
             return BadRequest(new { error = "chuteNo는 양수여야 합니다." });
+
+        // ── operation_log: IF-10 요청 원문 전수 기록 ──────────────────────────────
+        _opLog.Log(OperationLogCategory.API, "IF10", sorterChuteNo: req.ChuteNo,
+            barcode: req.Barcode, pId: req.PId,
+            detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo}}}");
 
         // ── 투입 기록 + 멱등 ──────────────────────────────────────────────────────
         var isNewRecord = recorder.RecordDeposit(

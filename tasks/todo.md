@@ -1,5 +1,13 @@
 # TODO (sprint 간 추적 — Minor·이연 항목)
 
+## IF-05 동일 바코드 다중 목적지 (2026-06-30 조사 — 사용자 결정: SPEC 미확정 등재·후속)
+- [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
+- [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
+
+## S-OBSERVABILITY 후속 (코드리뷰 MINOR — 비차단)
+- [ ] [운영 전 필요] **operation_log 보존 14일 정의만·퍼지 일배치 미구현** → 무한 증가. 장기 운영 전 퍼지 배치 추가.
+- [ ] [정리] `OperationLogService` unbounded Channel → BoundedChannel(DropOldest)+appsettings capacity. Detail JSON 수기 보간 → System.Text.Json 직렬화. 5개 WebApplicationFactory `UseSetting` 중복 → 헬퍼 추출. `appsettings.Development.json`에 Provider=Sqlite/Transport=Tcp 오버라이드(dev/sim DX). 제품 SqlServer 부팅분기 dotnet test 사각 → SqlServer smoke 테스트.
+
 ## M5 / CI 이연
 - [x] [S-RCS-IF-REDESIGN P1] ~~full `dotnet test` teardown hang(BLOCKING-for-CI)~~ **해소됨(PR #12 teardown-fix 커밋)** — SorterBundleHandle.StopPollingAsync가 쓰기 큐 Writer.TryComplete()로 컨슈머 결정적 종료(빈 채널 CTS-only 취소 경쟁 해소). evaluator 6회 연속 exit0·70/70·hangdump0 + 독립 코드리뷰 APPROVE. PlcGateway 본문 무변경(Wcs.Api disposal 결선만).
 - [ ] [정리] 미등록 dead code `PlcPollingHostedAdapter.StopAsync`가 큐 완료 누락(production DI 미등록·P2a 레거시 — SorterRegistryFactory로 대체됨). 제거 또는 동일 complete 추가(라이브 위험 0, 함정 제거용). 독립 코드리뷰 MINOR.

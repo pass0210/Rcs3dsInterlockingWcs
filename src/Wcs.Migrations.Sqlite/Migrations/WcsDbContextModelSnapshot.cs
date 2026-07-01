@@ -286,6 +286,57 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.ToTable("induction", (string)null);
                 });
 
+            modelBuilder.Entity("Wcs.Data.OperationLog", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Barcode")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("DestinationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Detail")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Level")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("PId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("SorterChuteNo")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("At")
+                        .HasDatabaseName("IX_operation_log_at");
+
+                    b.HasIndex("SorterChuteNo", "At")
+                        .HasDatabaseName("IX_operation_log_sorter_at");
+
+                    b.ToTable("operation_log", (string)null);
+                });
+
             modelBuilder.Entity("Wcs.Data.OrderItem", b =>
                 {
                     b.Property<long>("Id")

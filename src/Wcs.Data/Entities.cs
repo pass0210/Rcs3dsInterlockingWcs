@@ -67,6 +67,27 @@ public enum DestinationEventType
     CLEARED, FULL_QTY_CHANGED, CLOSED, PAUSED, RESUMED
 }
 
+/// <summary>
+/// 운영 로그(operation_log) 대분류 — 모든 동작을 단일 시계열로 관측하는 횡단 스트림.
+/// 도메인 이벤트(piece_event·plc_event 등)의 중복이 아니라 통합 관측 스트림(ERD §operation_log).
+/// </summary>
+public enum OperationLogCategory
+{
+    /// <summary>API 인바운드(IF-05/09/10) + 아웃바운드(IF-08 push).</summary>
+    API,
+    /// <summary>PLC 쓰기(D4 RMW·D6 SetTgtFloor·CellAssign·ClearR).</summary>
+    PLC_WRITE,
+    /// <summary>고빈도 폴링 레지스터 전이(변화분만 — 무변화 폴링은 미기록).</summary>
+    POLL_CHANGE,
+    /// <summary>C/R 핸드셰이크 각 단계.</summary>
+    HANDSHAKE,
+    /// <summary>상태 전이(OFFLINE/ONLINE/FULL/PAUSED).</summary>
+    STATE,
+}
+
+/// <summary>운영 로그 심각도 — Serilog 레벨과 정합(INFO/WARN/ERROR).</summary>
+public enum OperationLogLevel { INFO, WARN, ERROR }
+
 // ─────────────────────────────────────────────
 // 기준정보 엔티티
 // ─────────────────────────────────────────────
@@ -384,4 +405,32 @@ public sealed class DestinationEvent
 
     // 네비게이션
     public Destination Destination { get; set; } = null!;
+}
+
+/// <summary>
+/// 운영 로그 — WCS의 모든 핵심 동작을 단일 시계열로 관측하는 횡단(cross-cutting) 스트림.
+/// append-only(UPDATE 없음). FK 없이 스냅샷 컬럼만 보유(SorterChuteNo·Barcode·PId) — 이력 불변
+/// 원칙(ERD §5)과 SQL Server 1785(다중 캐스케이드 경로) 회피(FK 0 → Cascade 경로 0).
+/// 도메인 이벤트(piece_event·plc_event 등)의 중복이 아니라 통합 관측 스트림(ERD §operation_log).
+///
+/// 기록 정책:
+///   · 전수 기록: API 원문(IF-05/08-push/09/10)·모든 PLC 쓰기·핸드셰이크 각 단계·상태 전이.
+///   · 변화분만: 고빈도 폴링(150ms)은 레지스터 값이 직전 스냅샷과 다를 때만 POLL_CHANGE 1행
+///     (무변화 폴링은 0행 — DB 폭주 방지).
+/// </summary>
+public sealed class OperationLog
+{
+    public long                 Id            { get; set; }  // PK 대리키 bigint identity
+    public DateTime             At            { get; set; }  // UTC, 선두 인덱스(시계열 조회)
+    public OperationLogCategory Category      { get; set; }  // 동작 대분류(enum→string)
+    public string               Action        { get; set; } = string.Empty; // 동작 세부(IF05_REQ 등)
+    public OperationLogLevel    Level         { get; set; }  // 심각도(Serilog 레벨 정합)
+
+    // ── 스냅샷 식별 컬럼(FK 아님 — 1785 회피·이력 불변) ──────────────────────────
+    public int?    SorterChuteNo { get; set; }  // 어느 소터/목적지 동작인가(멀티 소터 식별)
+    public long?   DestinationId { get; set; }  // 목적지 대리키 스냅샷(FK 아님)
+    public string? Barcode       { get; set; }  // 어느 piece 동작인가(API·핸드셰이크 시)
+    public int?    PId           { get; set; }  // 순환 piece 키 스냅샷
+
+    public string? Detail        { get; set; }  // 동작 상세 JSON(nvarchar(max)) — {reg,old,new}·요청/응답 발췌 등
 }

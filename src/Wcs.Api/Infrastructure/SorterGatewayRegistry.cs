@@ -84,6 +84,24 @@ public sealed class SorterBundleHandle
     /// </summary>
     public void SubscribeOffline(Action<Wcs.Core.PlcSnapshot> handler)
         => _polling.OnOfflineTransition += handler;
+
+    // ── S-OBSERVABILITY: 관측 훅 구독 노출(부수 기록 전용 — 게이트웨이 의미 0 변경) ──
+
+    /// <summary>ONLINE 복구 전이(false→true) 구독 — STATE/ONLINE 로그용.</summary>
+    public void SubscribeOnline(Action<Wcs.Core.PlcSnapshot> handler)
+        => _polling.OnOnlineTransition += handler;
+
+    /// <summary>폴링 레지스터 전이(변화분) 구독 — (reg, old, new). POLL_CHANGE 로그용.</summary>
+    public void SubscribeRegisterChange(Action<string, int, int> handler)
+        => _polling.OnRegisterChange += handler;
+
+    /// <summary>PLC 쓰기 완료 구독 — (action, detailJson). PLC_WRITE 로그용.</summary>
+    public void SubscribeWrite(Action<string, string> handler)
+        => _polling.OnWrite += handler;
+
+    /// <summary>핸드셰이크 단계 구독 — (action, detailJson). HANDSHAKE 로그용.</summary>
+    public void SubscribeHandshakeStage(Action<string, string> handler)
+        => _handshake.OnStage += handler;
 }
 
 // ── ISorterGatewayRegistry ───────────────────────────────────────────────────
