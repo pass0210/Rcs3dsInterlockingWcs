@@ -1,132 +1,139 @@
-# Sprint Contract — S-BACKEND-FOLDER (백엔드 .NET 세계 `backend/` 이전 · 순수 이동)
+# Sprint Contract — S-FE-AIRBNB (프론트 Airbnb 리스타일 · 스타일 전용)
 
-> 순수 폴더 이동 스프린트. **코드 의미 0 변경.** WHAT/WHERE/검증만 규정 — 구현 메커니즘(정확한 git mv 순서 등)은 Generator 재량.
+> **스타일 전용 스프린트.** DESIGN-airbnb.md 토큰을 기존 관제 콘솔에 적용한다. **로직·구조·데이터흐름·API·라우팅 0 변경.**
+> WHAT/WHERE/검증만 규정 — 정확한 hex 미세조정·유틸리티 vs @theme 토큰 선택 등 구현 메커니즘은 Generator 재량(단, 문서 토큰·의미 보존 제약 내).
+> 스타일 스펙의 단일 진실 = **`docs/DESIGN-airbnb.md`**. `docs/FRONTEND.md`(★확정 shadcn/ui+Tailwind 유지)는 스택 계약.
 
 ## 0. 메타
 
 | 항목 | 값 |
 |------|-----|
-| Sprint ID | S-BACKEND-FOLDER |
-| Branch | `refactor/backend-folder` |
-| Base | `develop` (= PR #26 병합, F1 프론트 포함) |
-| Detected Project Type | **Full-stack** (.NET 백엔드 + Vite/React 프론트) |
-| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (순수 이동 — 팬아웃/멀티인스턴스 없음) |
-| Test baseline | **161 GREEN** (146 + 신규 15 `MonitoringApiTests` = F1) |
-| 선례 | `tasks/feedback-archive.md` **S-FOLDER-ORG**(순수 이동 검증 정석) — 단 이번엔 `Wcs.sln`도 함께 이동(그 스프린트는 sln 위치 유지, 이번엔 트리째 이동) |
+| Sprint ID | S-FE-AIRBNB |
+| Branch | `feat/frontend-airbnb-restyle` |
+| Base | `refactor/backend-folder` (backend/ 구조 — vite outDir `../backend/src/Wcs.Api/wwwroot` 확인) |
+| Detected Project Type | **Full-stack**, 단 이 스프린트는 **Web/UI 전용**(frontend/ 스타일만) |
+| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 리스타일 — 팬아웃 없음. Evaluator가 Web/UI 슬롯 채움) |
+| Test baseline | **161 GREEN** (backend 무변경 → 회귀 대상 아님, git diff 0로 입증) |
+| 검증 도구 | `.mcp.json` Playwright(존재 확인, `--headless`) — 스크린샷 대조 필수 |
+| 선례 | F1(`tasks/feedback-archive.md` L326~) 프론트 스캐폴드 · S-BACKEND-FOLDER(순수 이동 diff 0 가드 패턴) |
 
 ## 1. 목표 (WHAT · 한 줄)
 
-.NET 세계 전체(`Wcs.sln` + `src/` + `tests/`)를 **`backend/` 하위로 git rename(R100) 순수 이동**하고, **바깥(frontend/·scripts/·루트 문서)→안** 참조 경로만 갱신한다. `.cs/.csproj/.sln` 및 appsettings 내용은 단 1바이트도 바꾸지 않는다.
+기존 "블루프린트 그래파이트" **다크 계기판 테마**를 DESIGN-airbnb.md의 **순백 캔버스 + 잉크 + Rausch 단일 액센트** 라이트 테마로 리스타일한다. 컴포넌트 구조·데이터 흐름·API·라우팅은 **바이트 단위로 불변**이고, 변경은 `index.css`의 `@theme` 토큰 값·컴포넌트/페이지의 `className`·`package.json`(폰트)·`index.html`(color-scheme)로 **국한**한다.
 
-확정 목표 구조(사용자 본인 제안 — 재론 금지):
-```
-backend/
-  Wcs.sln
-  src/      (Wcs.Core, Wcs.PlcGateway, Wcs.Api, Wcs.Data, Wcs.Sim3ds, Wcs.Migrations.Sqlite, Wcs.Migrations.SqlServer = 7)
-  tests/Wcs.Tests   (= 1)
-frontend/  docs/  scripts/  tasks/   ← 그대로 (미이동)
-```
-sln 프로젝트 노드 8개 = src 7 + tests 1.
+**핵심 레버리지**: 이 앱은 shadcn 표준 `:root{--primary}` HSL 레이어를 쓰지 않고 **Tailwind4 CSS-first `@theme --color-*` 커스텀 토큰**(`base·panel·elevated·line·ink·muted·faint·accent·online·offline·warn·busy`)을 직접 쓴다. 컴포넌트가 이 시맨틱 토큰명(`bg-panel`·`border-line`·`text-ink`…)을 참조하므로, **`@theme` 토큰 값 재매핑 하나로 다크→라이트가 전면 전환**되고 className 변경은 (a) 문서와 의미가 어긋나는 곳(활성 탭/내비, 라운딩, 그림자, 배지 필형)에만 국한된다.
 
 ## 2. Scope IN
 
-### 2A. 이동 (git rename · R100 · 내용 diff 0)
-| 이동 전 | 이동 후 | 비고 |
-|---------|---------|------|
-| `Wcs.sln` | `backend/Wcs.sln` | sln 내부 프로젝트 경로가 `src\Wcs.*\...`(상대) — 트리째 이동으로 **유효 유지, 편집 불요** |
-| `src/` (tracked 54파일, 7프로젝트) | `backend/src/` | SDK 암묵 글로빙(`**/*.cs`) → csproj 무편집으로 새 위치 자동 포착 |
-| `tests/Wcs.Tests` (tracked 20파일) | `backend/tests/Wcs.Tests` | `Wcs.Tests.csproj`의 `..\..\src\Wcs.*` ProjectReference — `..\..`가 이동 후 `backend/`를 가리켜 **여전히 유효, 편집 불요** |
+### 2A. `frontend/src/index.css` — `@theme` 토큰 재매핑 (최대 레버리지)
 
-- 검증 근거: `Wcs.sln`(L6~24 상대경로 `src\...`)·`tests/Wcs.Tests/Wcs.Tests.csproj`(L3~9 `..\..\src\...`) 실독 — 이동 전후 상대관계 불변 확인.
+문서 토큰은 **고정**(canvas/ink/hairline/muted/Rausch). 상태 의미색(green/amber/info)은 문서 미정의 도메인 색 → **백 배경 대비(WCAG AA)·상호 톤 구분·Rausch와 톤 구분** 제약 하에 재조정(Generator 미세조정 허용). 권고 목표값:
 
-### 2B. 참조 갱신 (바깥→안 · 경로 문자열만 · grep 전수 결과)
-| # | 파일 | 위치 | 변경 |
-|---|------|------|------|
-| 1 | `frontend/vite.config.ts` | L32 `outDir: '../src/Wcs.Api/wwwroot'` | → `'../backend/src/Wcs.Api/wwwroot'` (⚠ `../` 유지 — frontend/ 기준 상대) |
-| 1 | 〃 | L11 주석 `../src/Wcs.Api/wwwroot` | → `../backend/src/Wcs.Api/wwwroot` |
-| 2 | `.gitignore` | L18 `src/Wcs.Api/wwwroot/` | → `backend/src/Wcs.Api/wwwroot/` (**1줄만**; `*.db`/`logs/`/`frontend/*` 등 전역 패턴은 불변) |
-| 3 | `scripts/install-service.ps1` | L11 `dotnet publish src/Wcs.Api/Wcs.Api.csproj ...` | → `backend/src/Wcs.Api/Wcs.Api.csproj ...` |
-| 4a | `CLAUDE.md` | 솔루션 구조 블록 L35~40 (`src/Wcs.*`, `tests/Wcs.Tests`) | → `backend/src/*`, `backend/tests/*` |
-| 4a | 〃 | 빌드/테스트 명령 L45~49 | `dotnet build`→`dotnet build backend/Wcs.sln`; `dotnet test`→`dotnet test backend/Wcs.sln`; `dotnet test --filter Decider`→`dotnet test backend/Wcs.sln --filter Decider`; `dotnet run --project src/Wcs.Sim3ds`→`backend/src/Wcs.Sim3ds`; `--project src/Wcs.Api`→`backend/src/Wcs.Api` |
-| 4b | `README.md` | 구조 표 L33~38 + 빌드/테스트 명령 L52~56 | CLAUDE.md와 동일 패턴 |
-| 4c | `docs/FRONTEND.md` | L40, 43, 44, 45, 53, 58, 61, 241 (총 8곳) | 경로 토큰만: `src/Wcs.Api/wwwroot`→`backend/...`, `dotnet run --project src/Wcs.Api`→`backend/...`, `src/Wcs.*` 언급→`backend/src/Wcs.*`. **산문 재작성 금지 — 토큰 최소 치환** |
-| 4d | `docs/SPEC.md` | L98 `` `IModbusMaster` 인터페이스(src/Wcs.PlcGateway/IModbusMaster.cs) `` | → `backend/src/Wcs.PlcGateway/IModbusMaster.cs` |
-| 5 | `scripts/seed-field-16cells.sql` | — | **SQL — 경로 참조 0(grep 확인 완료). 변경 없음 · 확인만** |
+| 토큰(기존명 유지) | 현재값(다크) | 목표값 | 문서 근거 |
+|---|---|---|---|
+| `--color-base` | `#0d1520` | `#f7f7f7` | surface-soft (앱 셸 바닥 — 백 카드가 도드라지게) |
+| `--color-panel` | `#131e2c` | `#ffffff` | **canvas** (카드/서피스) |
+| `--color-elevated` | `#18273a` | `#f7f7f7` | surface-soft (헤더/thead/hover 채움) |
+| `--color-line` | `#24344c` | `#dddddd` | **hairline** (기본 경계) — 미세 구분엔 `/60` 등 알파 |
+| `--color-ink` | `#e7eef8` | `#222222` | **ink** (1차 텍스트) |
+| `--color-muted` | `#8fa3c0` | `#6a6a6a` | **muted** (2차) |
+| `--color-faint` | `#5f7290` | `#929292` | muted-soft (3차/캡션) |
+| `--color-accent` | `#38bdf8`(sky) | `#2563eb`(인디고) | **브랜드 아님** — in-progress 정보색(RESERVED/QUERIED/SENT). 백 대비 확보 |
+| `--color-busy` | `#22d3ee`(cyan) | `#0e7490`(틸) | in-progress 정보색(이동중/분류중/근접). accent와 톤 구분 |
+| `--color-online` | `#34d399` | `#0a7d33`(녹, 재조정) | 결정 #3 — ONLINE/COMPLETED/여유. **백 대비 확보**(기존 에메랄드는 백에서 저대비) |
+| `--color-offline` | `#fb7185` | `#c13515` | 결정 #3 + 문서 **error** — OFFLINE/MISMATCH. **Rausch와 톤 구분(⑥)** |
+| `--color-warn` | `#fbbf24` | `#b45309`(황, 재조정) | 결정 #3 — FULL. 백 대비 확보 |
+| **신규** `--color-brand` | — | `#ff385c` | **Rausch** — 주요 액션/브랜드/포커스/활성 마커 전용(절제) |
+| **신규** `--color-brand-active` | — | `#e00b41` | 프레스 |
+| **신규** `--color-brand-disabled` | — | `#ffd1da` | 비활성 CTA |
+| **신규** `--color-paused` | — | `#6a6a6a`(회) 또는 `#b45309`(황) | 결정 #3 — PAUSED, **OFFLINE 적과 구분**(StatusRail PAUSE 램프용) |
 
-`scripts/uninstall-service.ps1`: `src/` 경로 없음(grep 확인) — 0 변경.
+- **폰트**: `--font-sans` → `'Inter Variable','Inter','Malgun Gothic','Apple SD Gothic Neo',system-ui,-apple-system,sans-serif` (Inter 로컬 번들 + **한글 폴백 명시** — Inter엔 한글 글리프 없음, 타깃 Windows = Malgun Gothic). `--font-mono` **유지**(판독값 tabular-nums 계기 정서 — 색/브랜드 무관, 밀집 가독 기능).
+- **라디우스**: 문서(버튼 8px·카드 14px·필/배지 full) 반영 — @theme radius 토큰 재정의 또는 컴포넌트 arbitrary. ⚠ Tailwind 기본 `rounded-lg`=8px라 **바 재매핑만으론 카드 14px 미달**(§5 함정).
+- **그림자**: 문서 **단일 티어** `0 0 0 1px rgba(0,0,0,.02), 0 2px 6px 0 rgba(0,0,0,.04), 0 4px 8px 0 rgba(0,0,0,.1)` — @theme shadow 토큰 또는 arbitrary로 정의, Card·StatusRail 타일·Select 드롭다운에 적용. 기존 다크 인셋 그림자 제거.
+- **다크 잔재 제거/재조정**: body `background-image` **블루프린트 그리드 제거**(문서: 평면 백, 깊이는 헤어라인). `::selection` sky→Rausch/중립 은은. 스크롤바 다크(`#2c3f5b`)→라이트(`#c1c1c1` 계열). `:focus-visible` accent→ink 또는 brand(가시성 유지). `lamp-pulse`는 `currentColor` 기반이라 구조 불변(색은 램프 클래스에서 green으로).
+- **폰트 번들 임포트**: `@import "@fontsource-variable/inter";`를 파일 상단 `@import "tailwindcss";` 인접에 추가(모든 @import는 최상단). ⇒ **`main.tsx`(로직 파일) 미변경** — 폰트 결선을 CSS에 둔다.
+- **디스플레이 line-height ~2% 하향**(문서 §Note: Cereal→Inter 보정) — 헤딩 유틸(Layout h1·CardTitle) 적용.
 
-### 2C. 이동 잔여물(고아) 정리
-`git mv`는 **tracked만** 이동한다. 구 `src/`·`tests/`에 남는 untracked/ignored 산출물을 정리한다(전부 gitignore 대상 재생성물):
-- `src/**/{bin,obj}/`, `tests/**/{bin,obj}/` (빌드 산출물)
-- `src/Wcs.Api/logs/wcs-20260701.log`, `wcs-20260703.log` (런타임 로그)
-- `src/Wcs.Api/wwwroot/` (구 vite 산출물 — stale)
+### 2B. 컴포넌트/페이지 className — 문서와 의미 어긋나는 지점만 (구조 불변)
 
-→ git mv 후 구 `src/`·`tests/` 트리를 삭제(잔존물은 전부 재생성 가능). 신 wwwroot는 검증 ③의 `npm run build`가 `backend/src/Wcs.Api/wwwroot`에 재생성한다.
+| 파일 | 현재 | 목표(문서 매핑) |
+|---|---|---|
+| `components/Layout.tsx` | 로고박스 `border-accent/30 bg-accent/10 text-accent`; 활성 내비 `bg-accent/15 text-accent shadow-[…inset]`; 비활성 `text-muted hover:bg-elevated` | 로고 마크=**brand(Rausch)** 1점 액센트; **활성 내비=잉크 텍스트 + Rausch 마커/언더라인**(accent-fill 배경 제거, product-tab-active); 비활성=muted, hover=surface-soft. F2/F3 disabled 칩 유지 |
+| `components/StatusRail.tsx` | 타일 `bg-elevated`+`border-line`; PAUSE 램프 `tone="offline"`(적) | 타일=**property-card 유사**(white `panel` + hairline + **14px** + **단일 그림자**) + 상태 **필형 배지**; 램프 online=녹·FULL=황; **PAUSE 램프 tone=offline→paused(회/황)** — 결정 #3·**⑥ 필수**(OFFLINE 적과 구분). `Lamp` tone union에 paused 추가 허용(시각 상수) |
+| `components/ui/card.tsx` | `rounded-lg`(8px)·`bg-panel/80`·다크 인셋 그림자 | **14px**·white·**문서 단일 그림자**·hairline 보더; Title 잉크·타이포 스케일(title-md/display-sm) |
+| `components/ui/button.tsx` | `solid/outline/ghost`, `rounded-md`(6px) | **primary=Rausch fill·white·8px·height↑**(button-primary, F2/F3 CTA 상속); **secondary=white+잉크 아웃라인 8px**; ghost 재조정; 라디우스 8px |
+| `components/ui/badge.tsx` | `rounded-md`(6px) | **`rounded-full`(필형)**(guest-favorite-badge); 톤(online/offline/warn/busy/accent/neutral) 백 배경 대비 재조정 |
+| `components/ui/tabs.tsx` | 활성 `data-[state=active]:bg-accent/15 text-accent shadow-[…inset]` | **활성=잉크 텍스트 + 잉크 언더라인**(category-tab-active, accent-fill 제거); List 컨테이너 백/헤어라인 재조정 |
+| `components/ui/table.tsx` | thead `bg-elevated text-faint`; TR hover `bg-elevated/50`; `border-line/60` | 백 서피스·**헤어라인 행 구분**·잉크 텍스트·thead surface-soft; hover surface-soft |
+| `components/ui/select.tsx` | `bg-elevated`·`border-line`·`rounded-md`·hover accent | white/hairline·8px·포커스 잉크(text-input 유사) |
+| `components/ui/meter.tsx` | 트랙 `bg-base` | 트랙=surface-strong(`#f2f2f2`) 가시화; 채움 online/busy/warn 시맨틱 유지(용량 게이지·진행바 **유지**) |
+| `components/CursorPager.tsx`·`StateMessage.tsx`·`DataGrid.tsx` | 토큰 참조 | 대부분 @theme 재매핑으로 자동 전환 — 잔여 하드코딩 색/보더만 점검 |
+| `pages/MonitorPage.tsx`·`pages/sections/*` | 토큰 참조 + 셀타일 `rounded-md`·서브행 `bg-base/50`·`bg-elevated/60` | 셀 그리드 타일=**14px 라운딩 + 용량 게이지 유지 + 상태색 보더**; 아이템 서브행 mono 색(busy/online) 백 대비 재조정 — 나머지 토큰 자동 전환 |
+| `index.html` | `<meta name="color-scheme" content="dark">` | `content="light"` (다크모드 없음). title 불변. (선택)폰트 preload |
+| `package.json` | — | `@fontsource-variable/inter` **의존성 추가**(사내망 — CDN 금지, npm 번들). dev/build 스크립트 불변 |
 
-## 3. Scope OUT (0 변경 — 무변경 가드 대상)
+### 2C. Rausch 절제 원칙 (문서 §Overview — 화면의 ~90% 백+잉크)
 
-- **모든 `.cs` / `.csproj`**: 내용 0 (SDK 글로빙 + 상대 ProjectReference가 이동을 자동 흡수).
-- **`Wcs.sln` 내부**: 0 (내부 `src\...` 상대경로가 트리째 이동으로 유효 유지).
-- **`appsettings*.json`**: 0.
-- **frontend 소스 로직**: 0 (`vite.config.ts` 경로 2줄만; `package.json` L6 description의 "Wcs.Api"는 **이름**이지 경로 아님 → 무변경).
-- **테스트 코드**: 0.
-- **`tasks/**`, 루트 `TASKS.md`, `docs/*.html`, audit 문서, `feedback-archive`/`sprint-log`의 과거 기록**: 0 — 과거 실행 기록이므로 갱신 대상 아님(§4 ⑥ 잔존 grep의 **제외** 대상).
-- **`.claude/settings.json`**: 0 (config·미승인 — §5 함정 6).
-- **`.git/hooks/pre-commit`**: 0 (경로 의존 없음 — grep 확인, `tasks/sprint-contract.md` 존재만 검사).
+Rausch(`brand`)는 **① 로고 마크 ② 활성 내비 마커 ③ primary 버튼(F2/F3 상속) ④ (선택)포커스 링**에만. **상태 배지·진행바·in-progress에는 Rausch 금지**(그 자리는 accent/busy 정보색·online/offline/warn 의미색). RESERVED/QUERIED가 Rausch로 물들면 절제 원칙·⑥ 위반.
+
+## 3. Scope OUT (0 변경 — 무변경 가드)
+
+- **backend/ 전체**: **0줄**(git diff 0). 161 GREEN 회귀 대상 아님.
+- **`frontend/src/lib/*.ts`**: `api.ts`·`queries.ts`·`format.ts`·`utils.ts`·`status.ts` **0 변경**. 특히 `status.ts`(status→tone 매핑)와 `queries.ts`(POLL_MS·훅) 불변 — 색은 @theme 값·badge 클래스로만 재조정.
+- **데이터 흐름·상태관리**: TanStack Query 훅·커서 페이징 스택·행 확장·useEffect 기본선택 로직 불변.
+- **API·라우팅**: 엔드포인트·`App.tsx` 라우트·`vite.config.ts`(proxy/outDir) 불변.
+- **컴포넌트 구조·props 계약**: JSX 트리·컴포넌트 분해·props 시그니처 불변(예외: StatusRail `Lamp` tone union에 시각 상수 1개 추가 — 데이터 무관).
+- **`main.tsx`**: 불변(폰트는 index.css @import).
+- **`.mcp.json`·`eslint.config.js`·`tsconfig.json`·`.storybook`(없음)**: 불변.
+- **`docs/DESIGN-airbnb.md` 및 기타 문서**: 불변(문서가 스펙, 수정 대상 아님).
 
 ## 4. Deliverables & Evaluation Criteria (Completion Gate)
 
-> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw tool output(git 명령 원문 출력·`dotnet build/test` 라인·`npm run build` 출력·curl 응답 본문)을 `tasks/sprint-feedback.md`에 인용. Generator 성공 보고·추정만으론 PASS 금지.
+> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 출력(Playwright 스크린샷 파일·`npm run build`/`tsc`/`eslint` 라인·`git diff --stat`)을 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정만으론 PASS 금지.
 
-**① 순수 이동 입증 (핵심 · S-FOLDER-ORG 5중 증거)** — 이동 대상 `backend/Wcs.sln`·`backend/src/**`·`backend/tests/**`에 대해:
-- `git status --find-renames --porcelain` → 전 항목 `R `(순수 rename), `RM`(rename+modify)·`A`·`D` **0**.
-- `git diff -M --cached --stat` → "N files changed, **0 insertions(+), 0 deletions(-)**".
-- `git diff -M --cached --numstat` → 전 행 `0  0`.
-- `git diff -M --cached --summary` → 전 항목 `rename ... (100%)`.
-- ⚠ **`--cached` 필수** (staged 상태에서 unstaged `git diff -M`은 빈 출력 → R100 놓침, S-FOLDER-ORG 함정).
+**① 시각 적용 충실도 (최중요 · Playwright 스크린샷 ↔ 문서 토큰 대조)**
+- 데스크톱 **1128px**(문서 Desktop 기준) 스크린샷: 모니터링 3탭(작업/이동중/분류) + 행 확장 + 상단 StatusRail.
+- 대조 체크리스트: (a) **순백 캔버스**(#fff 지배·다크 잔재 0·블루프린트 그리드 제거) (b) **잉크 텍스트**(#222) (c) **Rausch 절제**(brand는 로고/활성마커/버튼에만, 상태색과 미혼용) (d) **라운딩**(카드/타일 14px·버튼/셀렉트 8px·배지 필형) (e) **헤어라인**(#ddd 행/카드 구분) (f) **단일 그림자 티어**(문서 정확 값) (g) **Inter 적용**(영문 Inter·한글 폴백 정상, 두부 없음).
+- **Web/UI 슬롯 필수**: 기본 상태 + **대체 상태**(빈/로딩/에러 — StateMessage 3종 스크린샷) + **반응형**(1128px 데스크톱 위주; 축소 시 셀 그리드 컬럼 감소 정상).
 
-**② 빌드 + 테스트 (baseline 회귀 0)**
-- `dotnet build backend/Wcs.sln --no-incremental` → **경고 0 / 오류 0** (csproj 무편집으로 SDK가 새 폴더 글로빙 입증).
-- `dotnet test backend/Wcs.sln` → **161 GREEN / 실패 0 / 건너뜀 0 / exit 0**. 동시성 민감 테스트 존재 → **fresh ≥3회 반복** 결정성 + `--blame-hang-timeout`로 teardown 시퀀스 파일 0(teardown 클린).
+**② 기능 무회귀 (클릭스루 · 콘솔 에러 0)**
+- 배치 셀렉트 변경·상태 필터·오더 행 확장→오더아이템 조회·in-flight/sorter-command 커서 페이징(이전/다음)·소터 셀렉트 변경·3초 폴링 갱신 — **전부 F1과 동일 동작**. 브라우저 콘솔 에러/경고 **0**.
 
-**③ 프론트 빌드 → backend wwwroot 산출**
-- `cd frontend && npm run build` → 산출물이 **`backend/src/Wcs.Api/wwwroot/`**(index.html + `assets/*`)에 생성. `find backend/src/Wcs.Api/wwwroot` 물리 확인. 구 `src/Wcs.Api/wwwroot` 재생성 안 됨(구 트리 삭제 확인).
+**③ 빌드·정적검사 GREEN**
+- `cd frontend && npm run build`(=`tsc --noEmit && vite build`) **성공**. `npm run lint`(eslint) **0 에러**(F1 warn 정책 유지·신규 warn 0). 산출물 `backend/src/Wcs.Api/wwwroot/` 정상 생성.
 
-**④ 단일 서버 스모크**
-- `dotnet run --project backend/src/Wcs.Api` → `:5080` LISTENING.
-- `curl :5080/` → 200 `text/html`(SPA index.html 셸). `curl :5080/api/monitor/sorters` → 200 JSON. IF-05 POST(바코드) → 정상 응답.
-- 전제: 현재 base `appsettings.json` = SqlServer(F1 검증과 동일 field DB). SQL Server 부재 시 dev Sqlite override로 대체 가능(스모크 목적은 "이동 후 호스팅·정적 서빙·wwwroot 해석 무파손" 확인).
+**④ backend 0줄 · 161 GREEN 불변**
+- `git diff --stat -- backend/` → **빈 출력**(backend 무변경 = 161 GREEN 자명 보존). 필요 시 확인적 `dotnet test backend/Wcs.sln` 1회 GREEN(회귀 아님·backend diff 0이 1차 증거).
 
-**⑤ EF design-time (이동이 디자인타임 발견 무영향)**
-- `dotnet ef migrations has-pending-model-changes --project backend/src/Wcs.Migrations.Sqlite --startup-project backend/src/Wcs.Migrations.Sqlite` → **"No changes"**.
-- 동일 명령 SqlServer(`backend/src/Wcs.Migrations.SqlServer`, project==startup-project) → **"No changes"**.
+**⑤ 로직 diff 0 (스타일 격리 입증)**
+- `git diff -- frontend/src/lib/` → **빈 출력**(api/queries/format/utils/status 불변). `frontend/src/App.tsx`·`frontend/vite.config.ts`·`frontend/src/main.tsx` diff **0**. `git diff` 전체를 판독해 변경이 **className·@theme·index.html color-scheme·package.json 의존성**에만 있음을 확인(JSX 트리 구조·props·데이터 훅 무접촉; StatusRail Lamp tone 상수 1개 예외는 데이터 무관 시각 상수로 명시).
 
-**⑥ 참조 갱신 전수 (구 경로 잔존 0)**
-- `grep -rnE "src[/\\]Wcs|tests[/\\]Wcs|Wcs\.sln"` 를 **갱신 대상 파일에 한정** — `CLAUDE.md README.md docs/FRONTEND.md docs/SPEC.md frontend/vite.config.ts .gitignore scripts/install-service.ps1` → **구 경로 잔존 0**(전부 `backend/` 접두 확인).
-- **제외 명시**(잔존 grep에서 제외 — 과거 기록/미승인 config): `tasks/**`, 루트 `TASKS.md`, `docs/*.html`, `.claude/**`, `feedback-archive`/`sprint-log` 등 이력 인용.
+**⑥ 상태색 의미 보존 (육안 · 최중요 회귀)**
+- ONLINE/COMPLETED=녹 · **OFFLINE/MISMATCH=적(#c13515, Rausch #ff385c와 톤 구분 육안 확인)** · FULL=황 · **PAUSED=회/황(OFFLINE 적과 구분)**. StatusRail 램프 3종(RDY/FULL/PAUSE)·배지 톤이 오프라인/일시정지/만재를 혼동 없이 구분. accent/busy(정보색)가 Rausch 아님 확인.
 
-**⑦ 무변경 가드**
-- `git diff -M --cached -- backend/Wcs.sln 'backend/src/**/*.cs' 'backend/src/**/*.csproj' 'backend/tests/**'` → rename만, 본문 diff 0.
-- `backend/src/Wcs.Api/appsettings*.json` diff 0 · frontend 소스(vite.config.ts 제외) diff 0 · 테스트 코드 diff 0.
+**Completion**: ①~⑥ 전부 PASS + **전후 스크린샷 비교 보존**(다크 before / 라이트 after, scratchpad 또는 sprint-feedback 첨부 경로 기록).
 
 ## 5. 함정 (Traps)
 
-1. **한글·공백 경로**("…\회사 자료\프로그램\…") — `git mv`·sln 로드·`dotnet`/`npm` 호출 시 경로 항상 인용. (S-FOLDER-ORG 선례에서 정상 동작 확인됨.)
-2. **루트에서 `dotnet build`/`dotnet test`가 sln 못 찾음** (MSB1009류) — 이동 후 루트에 sln 없음. 반드시 `backend/Wcs.sln` 명시 또는 `cd backend`. CLAUDE.md/README 명령 갱신(§2B 4a/4b)으로 문서화.
-3. **git mv 후 구 `src/`·`tests/`에 untracked `bin/obj/logs/wwwroot` 고아 잔존** — §2C로 삭제. 특히 구 wwwroot는 stale 산출물이고 신 wwwroot는 ③ npm build가 재생성. 로그 2개(`wcs-20260701/03.log`)도 고아.
-4. **`--cached` 누락** → R100 미검출(①의 핵심 함정, S-FOLDER-ORG 교훈).
-5. **vite 상대경로 오치환** — frontend/ 기준 `../src/...`를 단순히 `src`→`backend/src`로 바꾸면 안 됨. `../`를 **유지**하고 `backend/`만 삽입: `../backend/src/Wcs.Api/wwwroot`.
-6. **`.claude/settings.json` 권한 allowlist가 구 경로 참조** — `dotnet build "src/Wcs.Api/Wcs.Api.csproj"`·git-log의 `src/Wcs.Data/...`·`src/Wcs.Api/appsettings.json`. **스코프 밖**(config·미승인). 영향은 최악의 경우 추가 권한 프롬프트뿐(빌드/실행 실패 아님). 사용자 후속 결정 사항으로만 기록.
-7. **pre-commit hook** — 경로 의존 없음(grep 확인). `tasks/sprint-contract.md` 존재만 검사하며 tasks/는 미이동 → 이동 무영향.
-8. **프로젝트 수 혼동** — "8 프로젝트" = src 7(Core/PlcGateway/Api/Data/Sim3ds/Migrations.Sqlite/Migrations.SqlServer) + tests 1(Wcs.Tests). sln 8 노드 전부 `backend/` 내부 상대경로로 유효.
+1. **Tailwind4 @theme 재매핑 함정 — 라디우스**: 기본 `rounded-lg`=8px라 카드 14px 미달. @theme radius 토큰 재정의 또는 `rounded-[14px]` arbitrary 필요. 배지는 `rounded-md`→`rounded-full` 명시 변경(값 재매핑으로 안 됨).
+2. **shadcn CSS-var 충돌 = 이 프로젝트엔 N/A**: 표준 shadcn `:root{--primary…}` HSL 레이어가 **없음** — 테마는 전부 `@theme --color-*`. 새 shadcn 변수 레이어를 도입하지 말 것(불필요·혼선). 기존 토큰명 유지 + 값만 교체 + brand/paused 신규 토큰 추가가 정석.
+3. **Rausch 오남용 = ⑥/절제 위반**: `accent` 토큰을 Rausch로 매핑하면 statusTone의 RESERVED/QUERIED/SENT(=accent)가 전부 Rausch로 물듦. 반드시 **brand(Rausch) 신규 토큰 분리** + accent/busy는 정보색(청/틸) 유지. `status.ts` 매핑은 **건드리지 말 것**.
+4. **PAUSE 램프 적색 잔존**: StatusRail PAUSE가 현재 `tone="offline"`(적) — @theme만 바꾸면 OFFLINE과 동색 → ⑥ 실패. tone을 paused(회/황)로 **명시 변경**(Lamp 시각 상수 추가 허용, 데이터 무관).
+5. **Inter 한글 두부(tofu)**: Inter엔 한글 글리프 0 — font stack에 **Malgun Gothic/Apple SD Gothic Neo** 폴백 미명시 시 한글 깨짐. 스크린샷에 한글(모니터링/작업 데이터/여유/만재…) 정상 렌더 확인.
+6. **CDN 금지**: Google Fonts `<link>`·`@import url(https://…)` **금지**(사내망). `@fontsource-variable/inter` npm 번들만. 번들 사이즈 증가(F1-M4 391kB 기저에 폰트 추가)는 수용(로컬·오프라인 안전 우선) — 단 variable 서브셋(latin)로 과증 억제.
+7. **다크모드 없음**: 단일 라이트(문서: Airbnb 퍼블릭 다크 없음). `color-scheme: dark`→`light`, `@media(prefers-color-scheme:dark)` 분기 도입 금지.
+8. **백 배경 저대비**: 기존 상태색(에메랄드/앰버/로즈)은 다크 배경 최적화 값 — 백 배경에서 텍스트 대비 부족. online/warn을 어둡게 재조정(WCAG AA). offline은 문서 error #c13515(이미 백에 적합).
+9. **로직 파일 우회 유혹**: 색 분기·매핑을 `status.ts`/`queries.ts`에서 고치고 싶어질 수 있음 — **금지**(⑤). 모든 색은 @theme 값 + className으로.
+10. **vite outDir 산출물 오염**: `npm run build`가 `backend/src/Wcs.Api/wwwroot`를 재생성(gitignore) — backend/ **소스** diff와 혼동 말 것(④ `git diff --stat -- backend/`는 tracked 소스 대상, wwwroot는 ignored).
 
 ## 6. Planner Self-Check
 
-- [x] **Scope IN** = 이동 3항목(sln + src + tests, R100) + 참조 갱신 7파일(grep 전수: vite.config·.gitignore·install-service.ps1·CLAUDE.md·README.md·FRONTEND.md·SPEC.md) + 잔여물 정리(2C). seed SQL·uninstall.ps1은 무변경 확인 대상으로 명시.
-- [x] **Scope OUT** = `.cs`/`.csproj`/`.sln`/appsettings/테스트/frontend 로직 0 변경 · tasks/TASKS/이력/config/hook 0.
-- [x] **검증 7기준** 각각 fresh 명령 + 기대 출력 명시(순수이동·빌드·프론트빌드·스모크·EF·잔존grep·무변경가드).
-- [x] **함정 8개** (한글경로·루트sln·고아·--cached·vite상대·claude config·hook·프로젝트수).
-- [x] **코드 구현 0** — WHAT/WHERE/VERIFY만. 구현 순서/명령 재량은 Generator.
-- [x] **Detected Type** Full-stack, **Scaling** 1/1/1(팬아웃 없음) 명시.
-- [x] baseline 161 GREEN 확정(sprint-log #1881: 146+15 = F1 MonitoringApiTests).
-- [x] 실독 근거: `Wcs.sln`(상대경로)·`Wcs.Tests.csproj`(`..\..\src`)·`vite.config.ts`·`.gitignore`·`scripts/*.ps1`·`CLAUDE.md` + grep 전수(*.ts/json/md/ps1/html) + 고아 산출물/hook/root-config 확인.
+- [x] **Scope IN** = index.css @theme 값 재매핑(2A, 최대 레버리지) + 의미 어긋 지점 className(2B, 파일별 현재→목표 표) + package.json 폰트 + index.html color-scheme. 실독 근거: index.css·11개 컴포넌트·3 섹션·pages·lib 전수·vite.config·package.json·index.html·api.ts 형상.
+- [x] **Scope OUT** = backend 0줄 · lib/*.ts(api/queries/format/utils/status) 0 · 데이터흐름·API·라우팅·컴포넌트 구조·main.tsx 0. 무변경 가드(⑤ git diff) 명시.
+- [x] **사용자 확정 5항 반영**: ①문서 토큰 그대로(2A 표) ②Rausch 단일 액센트 절제(2C·함정3) ③상태 의미색 별도 유지·OFFLINE 적≠Rausch(2A·⑥·함정4·8) ④Inter 로컬 번들·한글 폴백(2A·함정5·6) ⑤로직 0 변경(§3·⑤·함정9).
+- [x] **검증 6기준** 각 fresh 명령/증거 + Web/UI 슬롯(기본·빈/로딩/에러·반응형 1128px) + 전후 스크린샷 보존. ①시각충실도 최중요, ⑥상태색 의미 회귀 최중요.
+- [x] **함정 10개** (라디우스·shadcn N/A·Rausch오남용·PAUSE적색·한글두부·CDN금지·다크모드·백대비·로직우회·outDir오염).
+- [x] **절대규칙 무관**: 프론트 스타일 전용 — PLC 쓰기/판정/타이밍 무접촉. backend 0줄로 #1~#8 전부 비해당.
+- [x] **코드 구현 0** — WHAT/WHERE/VERIFY만. 정확한 hex 미세조정·유틸 vs @theme 선택은 Generator 재량(문서 토큰·의미·대비 제약 내).
+- [x] **Detected Type** Full-stack(이 스프린트 Web/UI 전용) · **Scaling** 1/1/1 · baseline 161 GREEN(backend diff 0로 보존).
