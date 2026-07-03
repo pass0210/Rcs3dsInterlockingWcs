@@ -27,8 +27,8 @@ function SorterTile({ sorter }: { sorter: SorterStatus }) {
   return (
     <div
       className={cn(
-        'flex items-center gap-2.5 rounded-md border px-2.5 py-1.5',
-        online ? 'border-line bg-elevated' : 'border-offline/30 bg-offline/5',
+        'flex items-center gap-2.5 rounded-[14px] border bg-panel px-3 py-2 shadow-card',
+        online ? 'border-line' : 'border-offline/40',
       )}
       title={`소터 슈트 ${chuteNo} — ${online ? '온라인' : '오프라인'}`}
     >
@@ -49,15 +49,19 @@ function SorterTile({ sorter }: { sorter: SorterStatus }) {
       <div className="flex items-center gap-1.5 border-l border-line pl-2.5">
         <Lamp label="RDY" on={online && ready} tone="online" />
         <Lamp label="FULL" on={full} tone="warn" />
-        <Lamp label="PAUSE" on={paused} tone="offline" />
+        <Lamp label="PAUSE" on={paused} tone="paused" />
       </div>
     </div>
   )
 }
 
-function Lamp({ label, on, tone }: { label: string; on: boolean; tone: 'online' | 'warn' | 'offline' }) {
+// tone은 데이터 무관 시각 상수 — 'paused'는 OFFLINE 적과 구분되는 램프색(⑥).
+function Lamp({ label, on, tone }: { label: string; on: boolean; tone: 'online' | 'warn' | 'offline' | 'paused' }) {
   const color =
-    tone === 'online' ? 'bg-online' : tone === 'warn' ? 'bg-warn' : 'bg-offline'
+    tone === 'online' ? 'bg-online'
+    : tone === 'warn' ? 'bg-warn'
+    : tone === 'paused' ? 'bg-paused'
+    : 'bg-offline'
   return (
     <span className="flex items-center gap-1" title={`${label}: ${on ? 'ON' : 'off'}`}>
       <span className={cn('size-1.5 rounded-full', on ? color : 'bg-line')} />

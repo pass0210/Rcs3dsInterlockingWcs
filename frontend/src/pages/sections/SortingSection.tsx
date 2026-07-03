@@ -93,7 +93,7 @@ function CellTile({ cell }: { cell: CellStatus }) {
           : 'border-line'
 
   return (
-    <div className={cn('rounded-md border bg-elevated/60 p-2.5', border)}>
+    <div className={cn('rounded-[14px] border bg-panel p-2.5', border)}>
       <div className="flex items-center justify-between">
         <span className="font-mono text-[13px] font-semibold text-ink">
           셀 {String(cell.cellNo).padStart(2, '0')}

@@ -174,7 +174,7 @@ function OrderItemsSubRow({ orderId }: { orderId: number }) {
   if (!items || items.length === 0) return <EmptyRow label="아이템 없음" />
 
   return (
-    <div className="rounded-md border border-line bg-panel">
+    <div className="rounded-[14px] border border-line bg-panel">
       <div className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-faint">
         오더아이템 ({items.length})
       </div>

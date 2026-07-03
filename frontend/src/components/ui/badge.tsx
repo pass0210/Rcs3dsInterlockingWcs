@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 
 // 상태 태그 — 계기판 상태색 체계. 은은한 배경 + 선명한 텍스트/도트로 밀집 가독.
 const badgeVariants = cva(
-  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium leading-none whitespace-nowrap',
+  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium leading-none whitespace-nowrap',
   {
     variants: {
       tone: {

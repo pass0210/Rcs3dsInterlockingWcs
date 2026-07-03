@@ -1926,3 +1926,30 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
 - `.claude/settings.json` 권한 allowlist가 구 `src/Wcs.Api/...` 경로 참조(함정6) — 미승인 config·스코프 밖. 영향은 최악의 경우 권한 프롬프트 추가뿐(빌드/실행 실패 아님). 사용자 후속 결정.
 - `tasks/sprint-contract.md`는 착수 전부터 ` M`(unstaged·본 스프린트 계약 문서 자체) — 내 변경 아님. `.claude/`는 untracked(스코프 밖).
 - 커밋/브랜치 조작 없음. 스테이징 상태로 Evaluator 검증 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-FE-AIRBNB)
+
+**Generator: standalone. Branch `feat/frontend-airbnb-restyle`. 커밋/git 조작/push 없음.** DESIGN-airbnb.md 토큰을 기존 관제 콘솔에 적용 — 다크 "블루프린트 그래파이트" → 순백 캔버스 + 잉크 + Rausch 단일 액센트. **로직·구조·데이터흐름·API·라우팅 0 변경.**
+
+### 구현 (계약 §2 그대로 · 15파일)
+- **`index.css` @theme 재매핑(최대 레버리지)**: base #0d1520→#f7f7f7 · panel #131e2c→#fff · elevated→#f7f7f7 · line #24344c→#ddd · ink→#222 · muted→#6a6a6a · faint→#929292 · accent(sky)→#2563eb(인디고) · busy(cyan)→#0e7490(틸) · online→#0a7d33(녹, 백대비 재조정) · offline #fb7185→#c13515(error 적) · warn→#b45309(황). **신규 토큰**: `--color-brand:#ff385c`(+brand-active #e00b41·brand-disabled #ffd1da) · `--color-paused:#6a6a6a`(OFFLINE 적과 구분). `--shadow-card` 단일 티어(문서 정확값) · `--font-sans` Inter+한글 폴백. base 레이어: 블루프린트 그리드 **제거**·::selection Rausch 은은·스크롤바 라이트(#c1c1c1)·`:focus-visible` accent→**ink**(Airbnb text-input 정서, Rausch 절제). @import `@fontsource-variable/inter`(main.tsx 무변경).
+- **라디우스/그림자/타이포**: 카드·타일·서브패널·셀타일 `rounded-[14px]`(§5 함정1: 바 재매핑 아닌 arbitrary) · 버튼·셀렉트 `rounded-lg`(8px) · 배지 `rounded-md`→**`rounded-full`**(필형) · Card/StatusRail 타일 `shadow-card` 단일 그림자 · CardTitle·Layout h1 `tracking-[-0.01em] leading-tight`(Cereal→Inter ~2% 보정).
+- **className(의미 어긋 지점만)**: Layout 로고=**brand fill+white 아이콘**·활성 내비=잉크+**Rausch 좌측 inset 마커**(`shadow-[inset_3px_0_0_0_var(--color-brand)]`, accent-fill 제거)·nav/header `bg-panel`(white) · StatusRail 타일=14px white+shadow+hairline·**PAUSE 램프 tone offline→paused**(Lamp union에 'paused' 시각상수 1개 추가, 데이터 무관 — §3 예외) · button primary=**Rausch fill white**·secondary=white+잉크 아웃라인 · tabs 활성=**잉크 언더라인**(accent-fill/box 제거, List=border-b 스트립) · table thead text-faint→muted(백 대비 가독) · select white/hairline/8px/ink 포커스 · meter 트랙 `bg-[#f2f2f2]`(surface-strong 가시화) · 셀타일 white 14px.
+- **index.html** color-scheme dark→**light**. **package.json** `@fontsource-variable/inter@^5.2.8` 추가(사내망 npm 번들·CDN 0).
+- **Rausch 절제(2C)**: brand는 로고·활성 내비 마커·primary 버튼에만. 상태 배지/진행바는 accent(청)/busy(틸)/online·offline·warn 의미색 유지 — RESERVED/QUERIED Rausch 오염 0.
+
+### 검증 6기준 — 전부 fresh PASS
+- **③ 빌드·정적검사**: `npx tsc --noEmit` **exit 0** · `npm run lint`(eslint) **0 에러** · `npm run build` **성공**(1679 modules, css 22.64KB·js 391.40KB) → `backend/src/Wcs.Api/wwwroot/` 산출. 빌드 CSS 검증: `.shadow-card`(3-레이어 정확값)·`.bg-brand`(ff385c)·`.bg-paused`·`.rounded-full`·`.border-ink`·brand-active(e00b41)/disabled(ffd1da)·inset Rausch 마커·상태색 5종(0a7d33/c13515/b45309/0e7490/2563eb)·`Inter Variable` **전부 생성 확인**.
+- **④ backend 0줄·161 GREEN**: `git diff --stat -- backend/` **빈 출력** · 확인적 `dotnet test backend/Wcs.sln` → **실패 0·통과 161·건너뜀 0**(12s).
+- **⑤ 로직 diff 0**: `git diff -- frontend/src/lib/` **빈 출력**(api/queries/format/utils/status 불변) · `App.tsx`·`main.tsx`·`vite.config.ts`·`tsconfig.json`·`eslint.config.js` diff **0**. 변경 15파일 = index.html·package(2)·index.css·ui 6종·Layout·StatusRail·2섹션 뿐(90+/63−, className·@theme·color-scheme·의존성만).
+- **① 시각 충실도(라이브 Playwright 1128px, `screenshots/AIRBNB_after/`)**: 순백 캔버스(body bg=rgb(247,247,247)·블루프린트 0)·잉크(h1 color=rgb(34,34,34))·Rausch 절제(로고+활성마커; 정보배지는 청/틸)·14px 카드·헤어라인 행구분·단일 그림자·3탭(작업/이동중/분류)+행확장+셀그리드 전부 렌더. **대체상태**: in-flight·sorter_command **빈 상태**·pager 비활성 캡처.
+- **① Inter/한글**: 폰트 요청 로그 = **`inter-latin-wght-normal.woff2`(200) 단일**(cyrillic/greek/vietnamese 미fetch — unicode-range로 latin만 다운로드, §6 함정6 의도 충족). h1 computed font-family = `"Inter Variable", Inter, "Malgun Gothic", "Apple SD Gothic Neo", …`(한글 폴백)·weight 600 · Korean 두부 0(스크린샷 육안).
+- **⑥ 상태색 의미(육안)**: OFFLINE 소터 타일 램프=**적(#c13515)**, Rausch 로고(#ff385c)와 톤 구분 · 셀 범례 여유=녹·근접=틸·만재=황·비활성=회 전부 구분·Rausch 미혼용. PAUSE 램프 tone=paused(회 #6a6a6a, CSS `.bg-paused` 확인) — OFFLINE 적과 코드/CSS상 분리.
+- **② 기능 무회귀**: 탭 전환·배치/상태/소터 셀렉트·행 확장→오더아이템 조회·pager·3초 폴링 전부 동작. 브라우저 콘솔 = `/favicon.ico` 404 1건뿐(index.html 아이콘 링크 부재 — **F1부터 존재·스타일 무관·기능 영향 0**); 앱 JS/CSS/폰트/API 전부 200.
+
+### 주의 (스코프 밖 · 후속)
+- **백엔드 dev 기동 불가(2건, 프론트 무관)**: (a) SqlServer/Sqlite 콜드스타트 `DbSeeder.SeedWorkBatchAndOrders:214` "Sequence contains no elements" (b) dev 시드가 `chuteNo=30` 소터를 만드는데 현 `appsettings.Sorters[]`는 chuteNo=1 뿐 → `SorterRegistryFactory` fail-loud. 30→1 커밋(c4b4104) 이후 시드↔appsettings 드리프트로 추정. **backend 0줄 스코프**라 미수정. 라이브 검증은 fresh Sqlite(scratchpad) + 런타임 env override(`Sorters__1__ChuteNo=30`, 추적파일 무변경)로 우회 기동. 사용자/백엔드 후속.
+- 전후 스크린샷: before(다크)=`screenshots/F1_20260703-115749/`, after(라이트)=`screenshots/AIRBNB_after/`(둘 다 gitignored). `docs/DESIGN-airbnb.md`(untracked)·`tasks/sprint-contract.md`( M) = Planner 산출물, 내 변경 아님.
+- 커밋/브랜치 조작 없음. 워킹트리 상태로 Evaluator 검증 대기.

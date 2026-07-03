@@ -1,66 +1,85 @@
-# Sprint Feedback — S-BACKEND-FOLDER (.NET 세계 `backend/` 이전 · 순수 이동) — APPROVED
+# Sprint Feedback — S-FE-AIRBNB (프론트 Airbnb 리스타일 · 스타일 전용) — APPROVED
 
-## Phase 3 Evaluate (Evaluator fresh evidence, branch `refactor/backend-folder`, staged, 2026-07-03)
+## Phase 3 Evaluate (Evaluator fresh evidence, branch `feat/frontend-airbnb-restyle`, working tree, 2026-07-03)
 
-**최종 판정: APPROVED** — 검증 7기준 전부 PASS. 전 증거는 Evaluator가 지금 직접 재실행한 raw tool output.
-Generator 요약·"base develop 동일" 주장은 신뢰하지 않고 전부 fresh 재현. 코드 수정·커밋 없음.
+**최종 판정: APPROVED** — 검증 6기준 + Web/UI 슬롯 전부 PASS. 전 증거는 Evaluator가 지금 직접 재실행/재관찰한 raw tool output(Playwright computed style·스크린샷·명령 출력). Generator 요약은 신뢰하지 않고 전부 fresh 재현. 코드 수정·커밋 없음.
 
-핸드오프 마커 확인: `tasks/sprint-log.md:1898` `## IMPLEMENTATION COMPLETE (S-BACKEND-FOLDER)` 존재.
-
----
-
-### ① 순수 이동 5중 증거 — PASS
-- `git diff -M --cached --diff-filter=R --name-only | wc -l` → **75** rename.
-- `git diff -M --cached --summary | grep -c "(100%)"` → **75** (전부 R100). 비-100% rename **0**.
-- `git diff -M --cached --numstat` non-zero 행 = **오직 참조 7파일**(.gitignore 1/1, CLAUDE.md 11/11, README.md 11/11, docs/FRONTEND.md 8/8, docs/SPEC.md 1/1, frontend/vite.config.ts 2/2, scripts/install-service.ps1 1/1). → **75개 rename 전부 `0  0`**(본문 diff 0).
-- `git diff -M --cached --stat` 합계 → **82 files changed, 35 insertions(+), 35 deletions(-)** (= 75 R100 + 7 ref M).
-- `git status --find-renames --short` 코드 히스토그램: `R ` ×75, `M ` ×7(참조), ` M` ×2(tasks 산출물), `??` ×1(.claude). **RM/A/D 단독 0** (grep `^RM|^A |^D ` → 0).
-- 물리 소멸: 루트 `src/`·`tests/`·`Wcs.sln` **전부 GONE**. `backend/{Wcs.sln, src(7 프로젝트), tests/Wcs.Tests}` 존재 확인. (⚠ `--cached` 사용 — S-FOLDER-ORG 함정4 회피.)
-
-### ② 참조 갱신 7파일 diff 검사 — PASS (경로 문자열 치환만·로직 0)
-- `.gitignore` L18: `src/Wcs.Api/wwwroot/` → `backend/src/Wcs.Api/wwwroot/` (그 1줄만; 전역 패턴 불변).
-- `docs/SPEC.md` L98: `src/Wcs.PlcGateway/IModbusMaster.cs` → `backend/...` (산문 불변).
-- `frontend/vite.config.ts`: L11 주석 + L32 `outDir` → `../backend/src/Wcs.Api/wwwroot` (**`../` 유지** — 함정5 회피 확인).
-- `scripts/install-service.ps1` L11: publish csproj → `backend/src/Wcs.Api/...` (`-o C:\BOWOO\Wcs.Api` 배포경로 불변).
-- `CLAUDE.md`·`README.md`: 솔루션 구조 블록 + 빌드/테스트/실행 명령 → `backend/src/*`·`backend/tests/*`·`backend/Wcs.sln` 접두 (산문 무재작성, 토큰 치환만).
-- `docs/FRONTEND.md`: 8곳(L40·43·44·45·53·58·61·241) 경로 토큰 치환. (git 힌트 `@@ ... src/Wcs.Api/wwwroot/`는 hunk-label 휴리스틱 — 실제 L53은 `backend/src/...`로 확인.)
-- 잔존 grep(스코프 한정: 7파일 + scripts + frontend/src): `src[/\\]Wcs|tests[/\\]Wcs|Wcs\.sln` 중 **비-backend 접두 0** (전부 `backend/`). ⑥과 동일 결과.
-
-### ③ 빌드 + 테스트 — PASS
-- `dotnet build backend/Wcs.sln --no-incremental` → **오류 0**, 8 프로젝트 전부 `backend/...\bin\Debug\net10.0`로 산출(csproj 무편집으로 SDK가 새 폴더 글로빙 입증). 경과 19.77s.
-  - **경고 10 = NU1903** (SQLitePCLRaw.lib.e_sqlite3 2.1.10 known vulnerability advisory, GHSA-2m69-gcr7-jv3q). **NuGet audit 복원 advisory(컴파일 경고 아님)이며 본 스프린트가 도입한 것이 아님** — 경고를 내는 5개 csproj(Wcs.Data/Migrations.SqlServer/Migrations.Sqlite/Api/Tests)가 전부 R100 byte-identical(①의 내 자체 증거)이고 NU1903은 해석된 패키지 버전만으로 결정되므로 폴더 위치와 무관. 계약 §4② 문자 그대로의 "경고 0"은 미충족이나, 실질 의도("SDK 새 폴더 글로빙·0 오류")는 충족. → 근저 취약성은 스프린트 밖 기존 부채로 todo 등재.
-- `dotnet test backend/Wcs.sln --no-build` **×3회 연속** → 매회 **실패 0 / 통과 161 / 건너뜀 0 / 전체 161 / exit 0** (기간 14s·12s·14s, 결정적). 1회차 `--blame-hang-timeout 300s` → "시퀀스 파일이 생성되지 않습니다"(teardown 클린·hang/dump 0).
-
-### ④ 프론트 빌드 체인 — PASS
-- `cd frontend && npm run build` (tsc --noEmit + vite build) exit 0 → 산출 `../backend/src/Wcs.Api/wwwroot/`: index.html(0.48KB) + assets/index-*.css(21.46KB) + assets/index-*.js(391.43KB). `find` 물리 확인(3 파일).
-- 구 `src/Wcs.Api/wwwroot` 재생성 없음(구 트리 소멸·`../` 상대경로가 backend/로 정확 해석). `git check-ignore` → wwwroot ignored, git status에 wwwroot 미출현(오추적 0).
-
-### ⑤ 단일 서버 스모크 — PASS (Production, curl 검증)
-- `ASPNETCORE_ENVIRONMENT=Production dotnet run --project backend/src/Wcs.Api --no-build` → `:5080` LISTENING. **ContentRoot = `...\backend\src\Wcs.Api`** / Hosting environment: Production.
-- `GET /` → **200 text/html** (SPA `<!doctype html><html lang="ko">` 셸). `GET /monitor` → **200**, 본문이 `/`와 byte-identical(SPA fallback 정상). `GET /api/monitor/sorters` → **200 application/json** `[{"destId":1,"chuteNo":1,"online":false,...}]`. `GET /api/monitor/nonexistent` → **404**.
-- IF-05 `POST /api/v1/destination-query` (barcode `0701-CELL-16`) → **`{"result":"OK","chuteNo":1}` 200**.
-- COM1 FileNotFoundException 반복 = RTU 시리얼 부재(HW 없음·RTU OFFLINE 예상; IF-05는 DB dispatch라 무관). 종료 후 `:5080` FREE 확인.
-- **Playwright 갈음 사유**: 순수 이동 스프린트로 UI 소스(frontend/src) R100 무변경(numstat 0/0), UI 렌더 회귀는 F1(PR #26)에서 이미 브라우저 검증됨. 본 이동이 건드릴 수 있는 유일 위험 표면 = "새 ContentRoot에서 wwwroot 정적 해석 + SPA fallback"이며 이를 curl로 전수 입증(index 셸 200 + /monitor fallback identical + API JSON). 저회귀 R100 UI라 계약이 명시 허용한 curl 갈음 적용.
-
-### ⑥ EF design-time — PASS
-- Sqlite: `has-pending-model-changes --project backend/src/Wcs.Migrations.Sqlite --startup-project 동일` → **"No changes have been made to the model since the last migration."**
-- SqlServer: 동일 명령(`backend/src/Wcs.Migrations.SqlServer`, project==startup) → **"No changes..." · exit 0**. (dotnet-ef 9.0.10)
-
-### ⑦ 무변경 가드 — PASS
-- ①의 unfiltered `--numstat`에서 `backend/` 이동분 non-zero **0건** = 전 이동 `.cs/.csproj/.sln/appsettings*/tests` 본문 diff 0을 커버.
-- `git diff --numstat -- '*.csproj' '*.sln'` non-zero → **none**. appsettings 2종(`appsettings.json`·`appsettings.Development.json`) = `rename {src => backend/src}/... (100%)` R100 확인.
-- ⚠ 함정 기록: 계약 §4⑦의 `git diff -M --cached -- backend/src/**/*.cs ...` 경로한정 diff는 rename source(`src/`)를 필터로 배제해 **rename 짝맺기가 깨져 add로 오표시**(23940 insertions·"new file"). 이는 **path-filter 아티팩트**이며 실제 변경 아님 — 권위 증거는 ①의 unfiltered pairing(R100·0/0). (후속 스프린트 계약 작성 시 이 명령은 양측 경로 포함 또는 unfiltered numstat로 대체 권장.)
+핸드오프 마커 확인: `tasks/sprint-log.md:1932` `## IMPLEMENTATION COMPLETE (S-FE-AIRBNB)` 존재.
+검증 인프라: 백엔드 :5080(Sqlite dev seed, `Database__Provider=Sqlite` + `Sorters__0__ChuteNo=30` env override — 기존 dev 기동 드리프트는 스코프 밖 기등재) + vite dev :5173, Playwright 1128px 라이브 구동. 포트 정책: `ports.local.json` 부재이나 :5080=`appsettings.Urls`·:5173=`vite.config.server.port` committed config source-of-truth(F1 교훈) → 위반 아님.
 
 ---
 
-## Minor / 후속 (APPROVED 비차단)
-- **[S-BACKEND-FOLDER][기존부채] SQLitePCLRaw.lib.e_sqlite3 2.1.10 NU1903 high-severity advisory (GHSA-2m69-gcr7-jv3q)** — 5개 csproj 빌드 경고 10건. 본 이동과 무관·base develop 선재. EF Core Sqlite provider 갱신 또는 명시적 패키지 pin으로 해소 필요. todo.md 등재.
-- `.claude/settings.json` 권한 allowlist 구 `src/Wcs.Api/...` 경로 참조(계약 함정6) — 미승인 config·스코프 밖. 영향은 최악의 경우 권한 프롬프트 추가뿐(빌드/실행 실패 아님). 사용자 후속 결정.
+### ③ 빌드·정적검사 GREEN — PASS
+- `npx tsc --noEmit` → **exit 0**.
+- `npm run lint`(eslint .) → **exit 0** (신규 warn 0).
+- `npm run build`(tsc --noEmit && vite build) → **exit 0**, 1679 modules. 산출 `../backend/src/Wcs.Api/wwwroot/`: `index.html`(0.48KB)·`assets/index-*.css`(22.64KB)·`assets/index-*.js`(391.40KB) + Inter woff2 서브셋 8종. (런타임 폰트 fetch는 latin 서브셋만 — 아래 ① 참조.)
 
-## 핸드오프 상태 (검증 후 원복 유지)
-- 프로세스/포트 정리: `:5080` FREE, 스모크 서버 kill 완료. 신규 orphan 없음.
-- git 상태 불변: 75 R100 staged rename + 7 참조 M(staged) + `tasks/sprint-contract.md`·`tasks/sprint-log.md`( M unstaged·tasks 산출물) + `.claude/`(??). 커밋/브랜치 조작 없음.
+### ④ backend 0줄 · 161 GREEN 불변 — PASS
+- `git diff --stat -- backend/` → **빈 출력**(backend 소스 0줄, git status에도 backend/ 변경 0).
+- 확인적 `dotnet test backend/Wcs.sln` → **실패 0 · 통과 161 · 건너뜀 0 · 전체 161 · exit 0**(13s). NU1903(SQLitePCLRaw 2.1.10) 경고 10건은 **선재 부채**(base develop, 본 스프린트·frontend 무관, todo 기등재).
 
-## Step 4.5 코드리뷰 — 생략 (orchestrator 판단)
+### ⑤ 로직 diff 0 (스타일 격리) — PASS
+- `git diff -- frontend/src/lib/` → **빈 출력**(api·queries·format·utils·status 전부 0줄. status.ts 매핑 불변 재확인).
+- `git diff -- frontend/src/App.tsx frontend/src/main.tsx frontend/vite.config.ts` → **빈 출력**.
+- 변경 15파일 = `index.html`(color-scheme dark→light 1줄)·`package.json`+`package-lock.json`(@fontsource-variable/inter 의존성)·`index.css`(@theme 재매핑)·ui 6종(card/button/badge/tabs/table/select/meter)·Layout·StatusRail·2섹션(Sorting/WorkData). diff 직접 판독: **전부 className·@theme 토큰·arbitrary radius/shadow·color-scheme·의존성만**. JSX 트리 구조·props 시그니처·데이터 훅·useEffect·페이징 로직 무접촉.
+- 유일한 시그니처 변경 = `StatusRail.tsx` `Lamp` tone union에 `'paused'` 1개 추가 — 계약 §3 명시 예외(데이터 무관 시각 상수). 확인.
 
-순수 이동 스프린트: 이동분 75파일 전원 R100(내용 0 ins/0 del)이라 신규/변경 코드가 존재하지 않음 — 리뷰 도메인(아키텍처·명명·주석·보안) 무대상. 참조 갱신 7파일은 경로 토큰 치환뿐임을 Evaluator가 diff 직접 판독으로 확인(로직 0). S-FOLDER-ORG 전례 동일. 리뷰 생략이 은폐가 아님을 위해 사유를 여기 명기.
+### ① 시각 적용 충실도 (최중요 · Playwright 1128px) — PASS
+computed style raw(`screenshots/AIRBNB_eval/computed.json`·`token-colors.json`):
+- **순백 캔버스**: `body` bg = `rgb(247,247,247)`(#f7f7f7), `body` background-image = **`none`**(블루프린트 그리드 제거). 카드 bg = `rgb(255,255,255)`(#fff). 다크 잔재 0.
+- **잉크 텍스트**: h1 color = `rgb(34,34,34)`(#222).
+- **라운딩**: 카드/셀타일/서브행 `border-radius: 14px`(4셀 타일 전수 14px)·버튼/셀렉트 `8px`·배지 `rounded-full`(pill, 계기판식 rounded-md 아님).
+- **헤어라인**: `border-line` = `rgb(221,221,221)`(#ddd), thead/행 구분·카드 보더에 적용.
+- **단일 그림자 티어**: 카드·StatusRail 타일 box-shadow = `rgba(0,0,0,0.02) 0 0 0 1px, rgba(0,0,0,0.04) 0 2px 6px 0, rgba(0,0,0,0.1) 0 4px 8px 0` — 문서 정확 값 일치. 다크 인셋 그림자 제거.
+- **Inter + 한글 폴백**: h1 font-family = `"Inter Variable", Inter, "Malgun Gothic", "Apple SD Gothic Neo", system-ui, …` weight 600. 스크린샷 육안: 한글(WCS 관제·실시간 모니터링·작업 데이터·로봇 이동중·분류 현황·오더아이템·폴링 3s 등) **두부(tofu) 0**, 영문/숫자 Inter 정상. (F1 대비: F1은 Segoe UI, after는 Inter 적용.)
+- **활성 탭 = 잉크 언더라인**: activeTab color `rgb(34,34,34)`·border-bottom `2px rgb(34,34,34)`·weight 600(accent-fill/box 제거 확인).
+- 스크린샷: `01-work-data`·`02-work-expanded`·`03-inflight`·`04-sorting`·`05-sorting-full`·`06-statusrail`(`screenshots/AIRBNB_eval/`). before(다크)=`screenshots/F1_20260703-115749/` 대조 관찰: 딥블루 그래파이트+블루프린트 그리드 → 순백+헤어라인으로 전면 전환 확인.
+
+**Rausch 절제(2C) — PASS(오염 0)**: 전 DOM 요소 스캔(`rauschUsage`)에서 `rgb(255,56,92)`(#ff385c) 사용처 = **정확히 2곳**: ①로고 마크 div `bg-brand` ②활성 내비 링크 '모니터링' `box-shadow inset 3px 0 0 0` 좌측 마커. 상태 배지·테이블·진행바·in-progress·페이저에 Rausch **0건**. (primary 버튼은 이 관제 화면에 렌더 CTA 없음 — button.tsx solid=bg-brand 정의만 존재, 화면 오염 없음.)
+
+### ⑥ 상태색 의미 보존 (육안 + hex) — PASS
+token 유틸 클래스 computed 해상(`token-colors.json`):
+- `bg-brand`(Rausch) = `rgb(255,56,92)` #ff385c
+- `bg-offline`(OFFLINE/MISMATCH) = `rgb(193,53,21)` #c13515 → **Rausch와 hex·톤 구분**(brick-red vs hot-pink)
+- `bg-paused`(PAUSE 램프) = `rgb(106,106,106)` #6a6a6a → **OFFLINE 적과 명확 구분**(중립 회, 함정4 해소). StatusRail PAUSE tone offline→paused 코드 변경 확인.
+- `bg-online` = `rgb(10,125,51)` #0a7d33(녹) · `bg-warn` = `rgb(180,83,9)` #b45309(황) · `bg-busy` = `rgb(14,116,144)` #0e7490(틸) · accent = #2563eb(인디고, index.css @theme·source 확인) — 전부 상호 톤 구분, Rausch 아님.
+- **라이브 관측**: (a) StatusRail `06-statusrail.png` — 오프라인 소터 "3DS #30" 좌측 dot이 brick-red(#c13515), 로고 hot-pink(#ff385c)와 육안 확연 구분. (b) 분류 현황 `04-sorting.png` 셀 범례 pill: 여유=녹·근접=틸·만재=황·비활성=회 — 4색 구분·Rausch 미혼용. (c) 오더 배지 RUNNING = busy 틸 pill(status.ts RUNNING→busy), 서브행 예약=틸/분류=녹.
+- 대비: 백(#fff/#f7f7f7) 배경 위 잉크 #222·상태색 전부 가독(AA 스팟 체크 OK).
+- ⚠ 관측 한계(비차단): 현재 소터 offline이라 RDY/FULL/PAUSE 램프가 전부 off(bg-line #ddd)로 점등색을 라이브로 못 봄 → CSS 유틸 해상(bg-paused #6a6a6a ≠ bg-offline #c13515)으로 대체 입증 + 코드 tone 변경 확인으로 갈음. 점등 상태 육안은 후속(소터 online+paused 시드 필요).
+
+### ② 기능 무회귀 (클릭스루 · 콘솔) — PASS
+- **탭 전환**: 작업 데이터 / 로봇 이동중 / 분류 현황 3탭 전부 클릭 전환·렌더(스크린샷 01·03·04).
+- **행 확장→오더아이템**: ORD-005 expander 클릭 → 서브행 "오더아이템 (1)" + `TEST-BARCODE-PAUSED`(계획10·예약0틸·분류0녹) 조회 성공(`02-work-expanded.png`, 14px white 서브카드).
+- **셀렉트**: 배치(2026-07-03·SEED·W1·RUNNING)·상태 필터·소터(3DS #30 오프라인) 셀렉트 렌더·값 반영.
+- **페이징**: in-flight/sorter-command 커서 페이저 이전/다음 렌더, 빈 목록에서 disabled(정상 동작).
+- **폴링 재요청**: 좌하단 "폴링 3s" + 타임스탬프가 스크린샷 걸쳐 15:37:25→26→27→28 증가 = 3초 폴링 라이브 동작.
+- **콘솔(`screenshots/AIRBNB_eval/console.log`)**: 총 3줄 = `[vite] connecting/connected`(HMR)·React DevTools info뿐. **error 0·warning 0·pageerror 0·network 4xx/5xx 0**. (Generator 언급 favicon 404는 내 networkidle 관측창에서 미발현 — 무해·전가.)
+- **대체 상태(Web/UI 슬롯)**: 빈 상태 2종 라이브 캡처 — in-flight "현재 이동중인 piece가 없습니다"(`03`), sorter-command "적재 이력이 없습니다"(`04`), Inbox 아이콘. 로딩/에러는 `StateMessage.tsx`가 토큰 전용(Loading=text-muted·Error=text-offline·Empty=text-faint)이라 라이트 테마 자동 전환(하드코딩 다크색 0, 소스 확인) — 빈 상태 라이트 렌더 입증으로 갈음.
+- **반응형**: 1128px(문서 Desktop 기준) 전수 검증. 셀 그리드 3열 정상.
+
+**다크 잔재 스캔**: `frontend/src/` 전역 grep(bg-slate/gray/zinc/sky·다크 hex·rgba(56,189,…) 구 sky) → 잔재 0. `text-white`는 로고 아이콘·primary 버튼(on-brand 백색)뿐 = 정당.
+
+---
+
+## Minor / 후속 (APPROVED 비차단 — 다음 sprint Generator 읽음)
+- **[S-FE-AIRBNB] PAUSE/RDY/FULL 램프 점등색 라이브 미관측**: 현 시드가 소터 offline이라 램프 off(회)만 봄. bg-paused(#6a6a6a)≠bg-offline(#c13515) CSS 해상 + tone 코드 변경으로 갈음 입증했으나, 소터 online+paused/full 시드로 점등 육안 확인은 후속 권고.
+- **[S-FE-AIRBNB] 로딩/에러 StateMessage 라이브 미강제**: 빈 상태 2종은 라이브 캡처. 로딩/에러는 토큰 전용 소스라 자동 전환이나 강제 트리거 캡처는 미수행(비차단).
+- **[S-FE-AIRBNB][기존부채·backend] dev 콜드스타트 드리프트**: DbSeeder가 소터 chuteNo=30 시드 vs `appsettings.Sorters[0].ChuteNo=1` → SorterRegistryFactory fail-loud. 검증은 `Sorters__0__ChuteNo=30` env override(추적파일 무변경)로 우회. frontend 스코프 밖·기등재, backend 후속.
+- **[S-FE-AIRBNB][기존부채] NU1903** SQLitePCLRaw 2.1.10 high-severity advisory(빌드 경고 10) — 본 스프린트 무관, todo 기등재.
+
+## 핸드오프 상태 (검증 후 정리 완료)
+- 프로세스/포트: :5080·:5173 dev 서버 kill, 둘 다 **FREE** 확인. 신규 orphan 없음. 검증용 Sqlite(scratchpad)·screenshots만 산물.
+- git 상태 불변: 15 frontend 파일 M + `tasks/sprint-contract.md`·`tasks/sprint-log.md`(M, 하네스 산출물) + `.claude/`·`docs/DESIGN-airbnb.md`(??). 커밋/브랜치 조작 없음.
+
+## Step 4.5 독립 코드리뷰 (orchestrator — Evaluator의 무대상 판단 기각 후 실행) — BLOCKING 0 / MAJOR 2 / MINOR 5
+
+스코프 격리·다크 잔재 제거·Rausch 절제·상태색 분리는 견고(리뷰 확인). 실질 결함은 접근성 2건 — 값은 스펙 출처이나 적용이 WCAG AA 본문(4.5:1) 미달:
+
+### MAJOR (비차단 — F2 착수 시 처리, F2 Generator 필독)
+- **[RESTYLE-CR-M1]** 백 텍스트 on Rausch primary 버튼 = 3.52:1 (button.tsx solid, 13px 라벨). Airbnb 브랜드 고유 조합 + 계약이 명시 지시한 트레이드오프. AA 엄수 결정 시 안정 상태 fill을 brand-active(#e00b41, 4.89:1)로 — 스펙 이탈 없이 통과 가능. 사용자 판정 대기.
+- **[RESTYLE-CR-M2]** faint(#929292)=3.11:1이 정보성 캡션·타임스탬프·시퀀스 컬럼에 광용 — DESIGN 문서는 이 색을 "disabled 전용·very sparingly"로 스코프. 정보성 텍스트는 muted(#6a6a6a, 5.41:1)로 교체 권고(F2에서 1클래스 치환 수준).
+
+### MINOR (후속)
+- meter.tsx #f2f2f2 하드코딩×3 → @theme 토큰(--color-track) / rounded-[14px]×4 → --radius-card 토큰화 / shadow-card 주석의 Select 죽은 참조 제거 / 폰트 import를 @fontsource-variable/inter/latin.css로(현재 전 서브셋 dist 방출 — 런타임은 unicode-range로 latin만 다운로드라 무해) / 배지 warn·accent 틴트 위 4.39·4.49(경계 미달 — 틴트 /8 또는 텍스트 진하게).
+
+상태색 본체 전부 AA 통과(online 5.26·offline 5.54·warn 5.02·busy 5.36·accent 5.17·muted 5.41·ink 15.9 — WCAG 산술).

@@ -15,7 +15,7 @@ export function ProgressBar({
   const reservedPct = Math.min(100 - sortedPct, (Math.max(0, reserved) / total) * 100)
   return (
     <div className="flex items-center gap-2">
-      <div className="h-1.5 w-28 overflow-hidden rounded-full bg-base">
+      <div className="h-1.5 w-28 overflow-hidden rounded-full bg-[#f2f2f2]">
         <div className="flex h-full">
           <div className="h-full bg-online" style={{ width: `${sortedPct}%` }} />
           <div className="h-full bg-busy/50" style={{ width: `${reservedPct}%` }} />
@@ -40,7 +40,7 @@ export function CapacityMeter({
   if (capacity === null || capacity <= 0) {
     return (
       <div className="flex items-center gap-2">
-        <div className="h-1.5 w-20 rounded-full bg-base" />
+        <div className="h-1.5 w-20 rounded-full bg-[#f2f2f2]" />
         <span className="font-mono text-[11px] tabular-nums text-muted">{current}/∞</span>
       </div>
     )
@@ -51,7 +51,7 @@ export function CapacityMeter({
   const text = ratio >= 1 ? 'text-warn' : 'text-muted'
   return (
     <div className="flex items-center gap-2">
-      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-base">
+      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-[#f2f2f2]">
         <div className={cn('h-full transition-[width]', tone)} style={{ width: `${pct}%` }} />
       </div>
       <span className={cn('font-mono text-[11px] tabular-nums', text)}>

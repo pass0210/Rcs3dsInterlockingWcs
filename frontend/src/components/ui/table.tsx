@@ -14,7 +14,7 @@ export function THead({ className, ...props }: React.ComponentProps<'thead'>) {
   return (
     <thead
       className={cn(
-        'sticky top-0 z-10 bg-elevated text-[11px] font-semibold uppercase tracking-wider text-faint',
+        'sticky top-0 z-10 bg-elevated text-[11px] font-semibold uppercase tracking-wider text-muted',
         className,
       )}
       {...props}
