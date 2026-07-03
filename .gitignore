@@ -10,3 +10,12 @@ logs/
 *.db-shm
 *.db-wal
 TestResults/
+
+# ── 프론트엔드(F1) — Node 툴체인 + 빌드 산출물(소스만 커밋) ──
+frontend/node_modules/
+frontend/dist/
+# npm run build 산출물(vite build.outDir) — Wcs.Api 정적 서빙 대상, 소스 아님
+src/Wcs.Api/wwwroot/
+
+# 평가 산출물(스크린샷 증거 — 커밋 안 함)
+screenshots/
