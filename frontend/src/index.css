@@ -1,29 +1,44 @@
 @import "tailwindcss";
+/* Inter 로컬 번들 (사내망 안전 — CDN 미사용). variable latin 서브셋. */
+@import "@fontsource-variable/inter";
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   WCS 관제 콘솔 — "블루프린트 그래파이트" 계기판 테마 (단일 기본 테마, F1 다크 토글 없음)
-   설계 의도: SCADA/계기판 정서 — 순검정이 아닌 청회색 그래파이트 베이스 위에
-   기능적 상태색 체계(online/ready/full/busy)와 모노스페이스 계기 판독값.
-   외부 폰트 미로드(사내망 안전) — 시스템 산세리프 + 모노스페이스만.
+   WCS 관제 콘솔 — "Airbnb" 라이트 테마 (단일 테마, 다크모드 없음)
+   설계 의도: 순백 캔버스(#fff) + 잉크(#222) + Rausch(#ff385c) 단일 브랜드 액센트.
+   깊이는 헤어라인(#ddd)과 단일 그림자 티어로만 표현(블루프린트 그리드/인셋 제거).
+   토큰명은 유지(bg-panel·border-line·text-ink…)하고 값만 다크→라이트로 재매핑 —
+   컴포넌트 className 변경 최소화. 상태 의미색(online/offline/warn/busy/accent)은
+   백 배경 대비(WCAG AA)로 재조정하되 Rausch와 톤을 분리(상태 배지 오염 방지).
    ═══════════════════════════════════════════════════════════════════════════ */
 @theme {
-  --color-base:      #0d1520; /* 앱 배경 (딥 블루-그래파이트) */
-  --color-panel:     #131e2c; /* 카드/패널 */
-  --color-elevated:  #18273a; /* 헤더/호버 강조 */
-  --color-line:      #24344c; /* 경계선 */
+  --color-base:      #f7f7f7; /* 앱 셸 바닥(surface-soft) — 백 카드가 도드라지게 */
+  --color-panel:     #ffffff; /* 카드/서피스(canvas) */
+  --color-elevated:  #f7f7f7; /* 헤더/thead/hover 채움(surface-soft) */
+  --color-line:      #dddddd; /* 경계선(hairline) — 미세 구분엔 /60 등 알파 */
 
-  --color-ink:       #e7eef8; /* 1차 텍스트 */
-  --color-muted:     #8fa3c0; /* 2차 텍스트 */
-  --color-faint:     #5f7290; /* 3차 텍스트/캡션 */
+  --color-ink:       #222222; /* 1차 텍스트(ink) */
+  --color-muted:     #6a6a6a; /* 2차 텍스트(muted) */
+  --color-faint:     #929292; /* 3차 텍스트/캡션(muted-soft) */
 
-  --color-accent:    #38bdf8; /* 브랜드/포커스(스카이) — 절제 사용 */
-  --color-online:    #34d399; /* 온라인/준비(에메랄드) */
-  --color-offline:   #fb7185; /* 오프라인/에러(로즈) */
-  --color-warn:      #fbbf24; /* 만재/경고(앰버) */
-  --color-busy:      #22d3ee; /* 이동/분류중(시안) */
+  --color-accent:    #2563eb; /* 정보색(인디고) — RESERVED/QUERIED/SENT. 브랜드 아님 */
+  --color-online:    #0a7d33; /* 온라인/완료/여유(녹, 백 대비 재조정) */
+  --color-offline:   #c13515; /* 오프라인/미스매치(error 적) — Rausch와 톤 구분 */
+  --color-warn:      #b45309; /* 만재/경고(황, 백 대비 재조정) */
+  --color-busy:      #0e7490; /* 이동중/분류중/근접(틸) — accent와 톤 구분 */
 
-  --font-sans: "Segoe UI Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
+  /* Rausch — 브랜드 전용. 로고/활성 내비 마커/primary 버튼에만(절제). */
+  --color-brand:          #ff385c;
+  --color-brand-active:   #e00b41; /* 프레스 */
+  --color-brand-disabled: #ffd1da; /* 비활성 CTA */
+
+  /* PAUSED — OFFLINE 적과 구분되는 중립 회색(StatusRail PAUSE 램프용). */
+  --color-paused:    #6a6a6a;
+
+  --font-sans: "Inter Variable", "Inter", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+
+  /* 단일 그림자 티어(문서 정확 값) — Card·StatusRail 타일·Select 드롭다운. */
+  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.02), 0 2px 6px 0 rgba(0, 0, 0, 0.04), 0 4px 8px 0 rgba(0, 0, 0, 0.1);
 }
 
 @layer base {
@@ -38,33 +53,28 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* 계기판 배경: 미세한 블루프린트 그리드 */
-  body {
-    background-image:
-      linear-gradient(to right, rgba(56, 189, 248, 0.035) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(56, 189, 248, 0.035) 1px, transparent 1px);
-    background-size: 32px 32px;
-  }
+  /* 순백 라이트 테마 — 평면 배경(블루프린트 그리드 제거, 깊이는 헤어라인). */
 
-  ::selection { background: rgba(56, 189, 248, 0.28); }
+  ::selection { background: rgba(255, 56, 92, 0.16); } /* Rausch 은은 */
 
-  /* 얇은 스크롤바 — 밀집 운영툴 정서 */
-  * { scrollbar-width: thin; scrollbar-color: #2c3f5b transparent; }
+  /* 얇은 스크롤바 — 밀집 운영툴 정서(라이트). */
+  * { scrollbar-width: thin; scrollbar-color: #c1c1c1 transparent; }
   *::-webkit-scrollbar { width: 10px; height: 10px; }
   *::-webkit-scrollbar-thumb {
-    background: #2c3f5b; border-radius: 6px;
+    background: #c1c1c1; border-radius: 6px;
     border: 2px solid transparent; background-clip: content-box;
   }
-  *::-webkit-scrollbar-thumb:hover { background: #3a5170; background-clip: content-box; }
+  *::-webkit-scrollbar-thumb:hover { background: #a0a0a0; background-clip: content-box; }
 
+  /* 포커스 링 — 잉크(Airbnb text-input 정서: glow 없는 잉크 아웃라인). Rausch 절제. */
   :focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--color-ink);
     outline-offset: 1px;
     border-radius: 3px;
   }
 }
 
-/* 온라인 램프 펄스 — 신호 대기 애니메이션 (reduced-motion 존중) */
+/* 온라인 램프 펄스 — 신호 대기 애니메이션 (reduced-motion 존중). currentColor 기반. */
 @keyframes lamp-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }
   50%      { opacity: 0.75; box-shadow: 0 0 8px 1px currentColor; }

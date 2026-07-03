@@ -8,8 +8,8 @@ export function Select({ className, children, ...props }: React.ComponentProps<'
     <div className="relative inline-flex">
       <select
         className={cn(
-          'h-8 appearance-none rounded-md border border-line bg-elevated pl-3 pr-8 text-[13px] text-ink',
-          'hover:border-accent/40 focus-visible:outline-2 focus-visible:outline-accent',
+          'h-8 appearance-none rounded-lg border border-line bg-panel pl-3 pr-8 text-[13px] text-ink',
+          'hover:border-ink/40 focus-visible:outline-2 focus-visible:outline-ink',
           'disabled:opacity-40',
           className,
         )}
@@ -17,7 +17,7 @@ export function Select({ className, children, ...props }: React.ComponentProps<'
       >
         {children}
       </select>
-      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 text-faint" />
+      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 text-muted" />
     </div>
   )
 }

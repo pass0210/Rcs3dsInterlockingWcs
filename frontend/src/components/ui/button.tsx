@@ -3,17 +3,19 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 rounded-md text-[13px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent',
+  'inline-flex items-center justify-center gap-2 rounded-lg text-[13px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-ink',
   {
     variants: {
       variant: {
-        solid:   'bg-accent/15 text-accent border border-accent/30 hover:bg-accent/25',
-        outline: 'border border-line bg-elevated text-ink hover:bg-line/50',
+        // primary — Rausch fill, white, 프레스 시 brand-active (F2/F3 CTA 상속)
+        solid:   'bg-brand text-white border border-transparent hover:bg-brand-active disabled:bg-brand-disabled',
+        // secondary — white + 잉크 아웃라인
+        outline: 'border border-ink bg-panel text-ink hover:bg-elevated',
         ghost:   'text-muted hover:bg-elevated hover:text-ink',
       },
       size: {
-        sm: 'h-7 px-2.5',
-        md: 'h-8 px-3',
+        sm: 'h-8 px-3',
+        md: 'h-10 px-5',
       },
     },
     defaultVariants: { variant: 'outline', size: 'md' },

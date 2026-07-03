@@ -17,10 +17,10 @@ export function Layout() {
   return (
     <div className="flex h-full">
       {/* ── 좌측 내비 ─────────────────────────────────────────────── */}
-      <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-panel/60">
+      <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-panel">
         <div className="flex items-center gap-2.5 border-b border-line px-4 py-4">
-          <div className="flex size-8 items-center justify-center rounded-md border border-accent/30 bg-accent/10">
-            <Radio className="size-4 text-accent" />
+          <div className="flex size-8 items-center justify-center rounded-lg bg-brand">
+            <Radio className="size-4 text-white" />
           </div>
           <div className="leading-tight">
             <div className="text-[14px] font-semibold text-ink">WCS 관제</div>
@@ -54,7 +54,7 @@ export function Layout() {
                   cn(
                     'flex items-center gap-3 rounded-md px-3 py-2 text-[13px] font-medium transition-colors',
                     isActive
-                      ? 'bg-accent/15 text-accent shadow-[0_0_0_1px_rgba(56,189,248,0.25)_inset]'
+                      ? 'bg-elevated font-semibold text-ink shadow-[inset_3px_0_0_0_var(--color-brand)]'
                       : 'text-muted hover:bg-elevated hover:text-ink',
                   )
                 }
@@ -73,9 +73,9 @@ export function Layout() {
 
       {/* ── 메인 ──────────────────────────────────────────────────── */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between gap-4 border-b border-line bg-panel/40 px-5 py-3">
+        <header className="flex items-center justify-between gap-4 border-b border-line bg-panel px-5 py-3">
           <div>
-            <h1 className="text-[15px] font-semibold text-ink">실시간 모니터링</h1>
+            <h1 className="text-[16px] font-semibold leading-tight tracking-[-0.01em] text-ink">실시간 모니터링</h1>
             <p className="text-[12px] text-faint">작업 데이터 · 로봇 이동중 · 분류 현황</p>
           </div>
           <StatusRail />
