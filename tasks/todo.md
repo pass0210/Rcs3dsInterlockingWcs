@@ -1,5 +1,9 @@
 # TODO (sprint 간 추적 — Minor·이연 항목)
 
+## S-BACKEND-FOLDER 후속 (Minor — 비차단·기존 부채)
+- [ ] [S-BACKEND-FOLDER][기존부채·보안] **SQLitePCLRaw.lib.e_sqlite3 2.1.10 high-severity advisory (NU1903 / GHSA-2m69-gcr7-jv3q)** — 빌드 경고 10건(Wcs.Data/Migrations.SqlServer/Migrations.Sqlite/Api/Tests). 폴더 이동과 무관·base develop 선재. EF Core Sqlite provider 상향 또는 명시적 SQLitePCLRaw pin으로 해소. 계약의 "빌드 경고 0" 게이트를 다시 만족시키려면 필요.
+- [ ] [S-BACKEND-FOLDER][config·스코프밖] `.claude/settings.json` 권한 allowlist가 구 `src/Wcs.Api/...` 경로 참조 — 이동 후 최악의 경우 권한 프롬프트 추가뿐(빌드/실행 실패 아님). 사용자 후속 결정(config·미승인 영역).
+
 ## 2026-07-01 전체 감사(7차원×적대적 검증) — 신규 확정 23건 + minor/info 20건. **상세·근거·검증노트: `tasks/audit-20260701-full.md`** (사용자 결정: 기록만·착수는 후속)
 스프린트 묶음(감사 보고서 §D — 착수 시 이 단위로 계약):
 - [ ] **[묶음 A — 현장 quick-fix]** ①OFFLINE 지속 중 폴 루프가 매 150ms 스택 전문+거짓 '전이' ERROR 무억제 반복(`PlcGateway.cs:286` — failures 미리셋+isHardEx 매회, 전이 1회만 상세로) + Serilog File `rollOnFileSizeLimit` 미설정(1GB 도달 시 그날 로그 조용히 유실) ②`/health` 엔드포인트(생존·소터 Online·DB — AllBundles.Latest 읽기만) ③입력 상한: IF-05 qty(int 오버플로로 OVER 우회·ReservedQty 오염)·IF-10 음수 qty·barcode 200자/timeStamp 30자(초과 시 500+DENIED 감사행 롤백+operation_log 같은 배치 최대 255행 드롭).

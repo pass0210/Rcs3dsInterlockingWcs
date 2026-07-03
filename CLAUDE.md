@@ -32,21 +32,21 @@
 
 ## 솔루션 구조
 ```
-src/Wcs.Core        판정 엔진(순수 C#): RegisterMap, 모델, DepositDecider  ← 의존성 0
-src/Wcs.PlcGateway  FluentModbus 마스터: 폴링 스냅샷 캐시 + 쓰기 큐
-src/Wcs.Api         ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트
-src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그
-src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역
-tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정 케이스는 처음엔 RED가 정상, ToWire 검증은 GREEN)
+backend/src/Wcs.Core        판정 엔진(순수 C#): RegisterMap, 모델, DepositDecider  ← 의존성 0
+backend/src/Wcs.PlcGateway  FluentModbus 마스터: 폴링 스냅샷 캐시 + 쓰기 큐
+backend/src/Wcs.Api         ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트
+backend/src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그
+backend/src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역
+backend/tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정 케이스는 처음엔 RED가 정상, ToWire 검증은 GREEN)
 ```
 
 ## 빌드/테스트 명령
 ```bash
-dotnet build                     # 솔루션 빌드 (M0에서 sln 생성 후)
-dotnet test                      # 전체 테스트
-dotnet test --filter Decider     # 판정 테스트만
-dotnet run --project src/Wcs.Sim3ds   # 시뮬레이터 (기본 :1502)
-dotnet run --project src/Wcs.Api      # WCS API (기본 :5080)
+dotnet build backend/Wcs.sln                     # 솔루션 빌드 (M0에서 sln 생성 후)
+dotnet test backend/Wcs.sln                      # 전체 테스트
+dotnet test backend/Wcs.sln --filter Decider     # 판정 테스트만
+dotnet run --project backend/src/Wcs.Sim3ds   # 시뮬레이터 (기본 :1502)
+dotnet run --project backend/src/Wcs.Api      # WCS API (기본 :5080)
 ```
 TargetFramework은 `net10.0`. 설치된 SDK가 다르면(`dotnet --list-sdks`) 모든 csproj의
 TargetFramework을 설치 버전(LTS 권장)으로 일괄 변경하라.

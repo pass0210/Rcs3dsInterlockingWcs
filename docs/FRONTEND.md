@@ -37,12 +37,12 @@
 
 ### 1.1 프로젝트 배치 — 권고: 리포 루트 `frontend/` (별도 .NET 프로젝트 아님)
 
-현 솔루션(`Wcs.sln`)은 순수 .NET 8개 프로젝트로 구성되고 전부 `src/`·`tests/` 아래에 있다. React 앱은 .NET 프로젝트(.csproj)가 아니므로 `src/Wcs.*` 네이밍/`.sln` 등록 대상이 아니다.
+현 솔루션(`backend/Wcs.sln`)은 순수 .NET 8개 프로젝트로 구성되고 전부 `backend/src/`·`backend/tests/` 아래에 있다. React 앱은 .NET 프로젝트(.csproj)가 아니므로 `backend/src/Wcs.*` 네이밍/`.sln` 등록 대상이 아니다.
 
 **권고: 리포 루트에 `frontend/` 디렉터리(Node 툴체인 격리).**
-- 근거: (a) `.sln`을 순수 .NET으로 유지 — `dotnet build`/`dotnet test`/pre-commit hook 무영향. (b) npm/pnpm/node_modules를 .NET 빌드 그래프 밖에 둔다. (c) Windows Service 단일 배포 모델 유지를 위해 **빌드 산출물(`frontend/dist`)만 `src/Wcs.Api/wwwroot`로 복사**해 Wcs.Api가 정적 서빙(1.2 참조).
-- 대안 각하: `src/Wcs.Web/`(SpaProxy + SPA 템플릿) — MSBuild가 npm을 구동해 결합도가 높아지고, 현 단일-서비스·수동 배포 흐름과 마찰. `src/` 규칙(=.NET 프로젝트)과도 어긋남. 채택하지 않음.
-- `.gitignore` 추가 필요: `frontend/node_modules/`, `frontend/dist/`, `src/Wcs.Api/wwwroot/`(빌드 산출물 — 소스 아님). `frontend/`의 소스만 커밋.
+- 근거: (a) `.sln`을 순수 .NET으로 유지 — `dotnet build`/`dotnet test`/pre-commit hook 무영향. (b) npm/pnpm/node_modules를 .NET 빌드 그래프 밖에 둔다. (c) Windows Service 단일 배포 모델 유지를 위해 **빌드 산출물(`frontend/dist`)만 `backend/src/Wcs.Api/wwwroot`로 복사**해 Wcs.Api가 정적 서빙(1.2 참조).
+- 대안 각하: `backend/src/Wcs.Web/`(SpaProxy + SPA 템플릿) — MSBuild가 npm을 구동해 결합도가 높아지고, 현 단일-서비스·수동 배포 흐름과 마찰. `backend/src/` 규칙(=.NET 프로젝트)과도 어긋남. 채택하지 않음.
+- `.gitignore` 추가 필요: `frontend/node_modules/`, `frontend/dist/`, `backend/src/Wcs.Api/wwwroot/`(빌드 산출물 — 소스 아님). `frontend/`의 소스만 커밋.
 
 ```
 frontend/                 Vite + React + TS 소스 (npm 프로젝트, .sln 무등록)
@@ -50,15 +50,15 @@ frontend/                 Vite + React + TS 소스 (npm 프로젝트, .sln 무�
   index.html
   vite.config.ts          dev proxy → http://localhost:5080
   package.json
-src/Wcs.Api/wwwroot/      ← frontend/dist 복사본(정적 서빙 대상, .gitignore)
+backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, .gitignore)
 ```
 
 ### 1.2 배포·서빙 — 권고: Wcs.Api가 정적 서빙(단일 서비스 유지)
 
-- **운영**: `frontend`를 `npm run build` → `dist/`를 `src/Wcs.Api/wwwroot/`에 배치 → **Wcs.Api가 `UseStaticFiles()` + SPA fallback(`MapFallbackToFile("index.html")`)로 서빙**. Windows Service 하나로 API + UI를 함께 제공(기존 배포 모델·`install-service.ps1` 무변경).
+- **운영**: `frontend`를 `npm run build` → `dist/`를 `backend/src/Wcs.Api/wwwroot/`에 배치 → **Wcs.Api가 `UseStaticFiles()` + SPA fallback(`MapFallbackToFile("index.html")`)로 서빙**. Windows Service 하나로 API + UI를 함께 제공(기존 배포 모델·`install-service.ps1` 무변경).
   - Program.cs 현재 상태: `app.MapControllers(); app.Run();`뿐 — **정적 서빙 미들웨어 없음**. F1에서 추가한다. 순서 주의: `UseStaticFiles()` → (인증 미들웨어, F3) → `MapControllers()` → `MapFallbackToFile("index.html")`. fallback은 `/api/**`를 삼키지 않도록 API 라우트가 우선.
   - **A-12 정합**: Serilog 파일 경로가 상대경로(`logs/`)여서 서비스 CWD(System32) 문제가 있듯, `wwwroot`도 `ContentRootPath`(=`AppContext.BaseDirectory`, `UseWindowsService`가 설정) 기준으로 해석되는지 확인. `UseStaticFiles` 기본은 `IWebHostEnvironment.WebRootPath`(ContentRoot/wwwroot)라 서비스에서도 정상. 배포 README에 명기.
-- **개발**: Vite dev server(`npm run dev`, 기본 :5173) + `vite.config.ts` proxy로 `/api`·`/hubs`(SignalR) → `http://localhost:5080`. 프론트/백엔드 동시 기동(`dotnet run --project src/Wcs.Api` + `npm run dev`). 개발 중에만 cross-origin이므로 CORS는 dev 한정(1.4·4.5).
+- **개발**: Vite dev server(`npm run dev`, 기본 :5173) + `vite.config.ts` proxy로 `/api`·`/hubs`(SignalR) → `http://localhost:5080`. 프론트/백엔드 동시 기동(`dotnet run --project backend/src/Wcs.Api` + `npm run dev`). 개발 중에만 cross-origin이므로 CORS는 dev 한정(1.4·4.5).
 
 ### 1.3 라이브러리 선정 (최소 셋 — 과의존 금지)
 
@@ -238,7 +238,7 @@ src/Wcs.Api/wwwroot/      ← frontend/dist 복사본(정적 서빙 대상, .git
 
 ### F1 — 스캐폴드 + 정적 서빙 + 모니터링 읽기
 - 범위: `frontend/` Vite+React+TS 스캐폴드, antd/router/query 셋업, dev proxy. Wcs.Api `UseStaticFiles`+`MapFallbackToFile` + wwwroot 배치. `MonitoringController`(읽기 전용) + `IMonitoringQueries`(AsNoTracking). 페이지 ① 모니터링(A/B/C, 폴링). `.gitignore`·빌드 산출물 경로.
-- **Done**: `dotnet run --project src/Wcs.Api` 후 `:5080`에서 SPA가 서빙되고, 배치/오더/in-flight/셀/sorter_command가 폴링으로 표시. 기존 146 스위트 GREEN + 신규 MonitoringController 통합 테스트. Playwright로 페이지 로드·데이터 표시 검증(`.mcp.json` 필요·7장).
+- **Done**: `dotnet run --project backend/src/Wcs.Api` 후 `:5080`에서 SPA가 서빙되고, 배치/오더/in-flight/셀/sorter_command가 폴링으로 표시. 기존 146 스위트 GREEN + 신규 MonitoringController 통합 테스트. Playwright로 페이지 로드·데이터 표시 검증(`.mcp.json` 필요·7장).
 - 선행 결선: 없음(읽기만). 정적 서빙 미들웨어 순서 확정.
 
 ### F2 — SignalR 실시간 + 워드 뷰(읽기 전용)

@@ -2,6 +2,14 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-BACKEND-FOLDER (.NET 세계 `Wcs.sln`+`src/`+`tests/`를 `backend/` 하위로 트리째 순수 이동) — APPROVED (2026-07-03, 1 iteration)
+
+- **트리째 이동(sln 포함)도 순수 이동 입증법은 동일 — R100 + unfiltered numstat 0/0 (S-FOLDER-ORG 정석 재적용·확장)**: 75 rename 전부 `--summary` R100 + `--numstat` 0/0 + `--stat` "0 insertions/0 deletions"(이동분) + `status --find-renames`에 RM/A/D 단독 0 + 구 트리 물리 소멸. S-FOLDER-ORG(sln 위치 유지)와 달리 이번은 `Wcs.sln`+`src/`+`tests/`를 통째 옮겼으나, sln 내부 프로젝트 경로가 `src\...` 상대 + Wcs.Tests.csproj가 `..\..\src\...` 상대라 **트리째 이동 시 상대관계 불변 → csproj/sln 0 편집으로 유효 유지**. `--cached` 필수(staged에서 unstaged `-M`은 빈 출력·함정4).
+- **경로한정 diff(`-- backend/src/**`)는 rename source를 배제해 add로 오표시 — path-filter 아티팩트 (신규 함정·중요)**: 무변경 가드를 `git diff -M --cached -- backend/src/**/*.cs`처럼 **목적지 경로만** 필터하면 rename 짝(`src/...` source)이 필터 밖이라 rename 감지 실패 → 23940 insertions·"new file"로 오표시. 실제 변경 아님. 권위 증거는 **unfiltered** `--numstat`의 rename pairing(전 이동분 0/0)이며, appsettings 등도 `rename {src => backend/src}/... (100%)`로 확인. → 순수 이동 무변경 가드는 반드시 unfiltered numstat 또는 양측 경로 포함으로 검증. 계약 §4⑦ 명령 자체가 이 함정을 내포했으나 ①로 상쇄.
+- **NU1903류 NuGet audit 경고는 폴더 이동과 원인적으로 독립 — R100 csproj가 곧 "미도입" 증거**: 빌드 경고 10건(SQLitePCLRaw 2.1.10 GHSA-2m69) 발생했으나 경고 원천 5개 csproj가 R100 byte-identical(자체 증거)이고 NU1903은 해석 패키지 버전만으로 결정 → 이동이 도입할 수 없음. 계약의 "경고 0" 문자 미충족을 generator "base 동일" 주장에 기대지 않고 **Evaluator 자신의 R100 증거 + advisory의 버전-결정성**으로 독립 귀속. 근저 취약성은 기존 부채로 todo 분리(스프린트 게이트와 무관).
+- **이동-민감 유일 표면은 "새 ContentRoot의 wwwroot 정적 해석"이며 curl로 전수 검증 가능**: Full-stack 순수 이동에서 UI 소스 R100 무변경이면 브라우저 렌더 회귀는 선행 스프린트(F1) 검증분으로 커버되고, 이동이 실제 깰 수 있는 곳은 정적 서빙 경로 해석뿐. `GET /`(index 셸 200)+`GET /monitor`(fallback이 `/`와 byte-identical)+`/api/monitor/sorters`(JSON)+미존재(404)+IF-05(`{OK,chuteNo:1}`)로 서빙 체인 전수 → 계약 명시 허용한 Playwright 갈음의 정당한 적용(저회귀 R100 UI 한정). vite `outDir`는 `../` 유지하고 `backend/`만 삽입(함정5).
+- **프론트 산출물 재배치 검증 3종**: npm build가 신 `backend/src/Wcs.Api/wwwroot`에 산출 + 구 위치 미재생(구 트리 소멸) + 신 wwwroot가 갱신된 .gitignore로 ignored(`git check-ignore`·git status 미출현). 상대 outDir가 정확히 backend/로 해석됨을 물리 파일로 확인.
+
 ## S-OBSERVABILITY (현장 chuteNo 30→1 일원화 + 전 동작 Serilog 콘솔·operation_log DB 상세 로깅) — APPROVED (2026-06-30, 1 iteration)
 
 - **신규 마이그레이션 검증은 Generator와 다른 이름의 빈 SQL Server에 fresh database update로 (S-SQLSERVER-FK-CASCADE 교훈 재적용)**: Generator는 `WcsObsTest`로 C5를 했으나 Evaluator는 독립 `WcsObsEval`에 fresh `dotnet ef database update`(Initial+AddOperationLog) → exit 0·1785/207/오류 0·sqlcmd로 operation_log 1테이블·17 도메인테이블·FK 17개 전부 NO_ACTION(Cascade 0)·operation_log FK 0·인덱스 3(전부 has_filter=0). provider 고유 DDL 제약(다중 캐스케이드 경로 1785)은 in-memory SQLite 146 GREEN으로 못 닫는다 — 실 SQL Server fresh가 유일 검증. **함정: `sys.tables WHERE name<>'__EFMigrationsHistory'`(s 있음)는 비표준명 `__EFMigrationHistory`(s 없음)를 못 거른다 → 18 오인. 실제 테이블명을 나열해 17 확정.**
@@ -325,3 +333,4 @@
 - **라이브 검증 잔존물 정리 습관 — Generator "정리 완료" 보고를 DB로 재확인**: Generator 라이브 IF-05 검증 piece(PId12345·RESERVED)가 field DB에 잔존("정리 완료" 보고와 불일치). Evaluator가 QUOTED_IDENTIFIER ON 트랜잭션으로 baseline(piece0·ReservedQty0·cell16·active_assign16) 복원. field DB DML은 filtered index 때문에 `SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON` 필수(S-FIELD-SEED 교훈 반복).
 - **MINOR(비차단·후속)**: F1-M1 사전존재 flake 이름확정+병렬 직렬화(별도 스프린트) / F1-M2 stale `tasks/sprint-skip.txt`(이전 docs 스프린트 잔존·제거) / F1-M3 라이브 검증 DB 클린 확인 습관 / F1-M4 JS 번들 391kB route-level splitting 여지(F2+).
 - [CODE-REVIEW] sprint=F1 critical=0 major=1 minor=5 iter=1 opus=yes (독립 Opus: BLOCKING 0. MAJOR=IMonitoringQueries DI 미등록·요청당 손조립(무변경 가드 C7 부산물 — F2 착수 시 AddScoped 전환 필수). MINOR 5=E5 소터당 스코프 쿼리·DTO drift 무방어·take 매직넘버·meta.align 캐스트·LargeTake 자명 테스트. 보안 클린·N+1 0·catch-all vs /hubs 충돌 없음 검증.)
+- [CODE-REVIEW] sprint=S-BACKEND-FOLDER skipped(순수 이동 R100·내용 diff 0 — 리뷰 무대상, Evaluator가 참조 7파일 diff 판독) critical=0 major=0 minor=0
