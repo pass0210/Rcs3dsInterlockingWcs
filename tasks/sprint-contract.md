@@ -1,199 +1,206 @@
-# Sprint Contract — S-OBSERVABILITY (현장 chuteNo 30→1 일원화 + 전 동작 콘솔(Serilog)·DB(operation_log) 상세 로깅)
+# Sprint Contract — F1 (프론트엔드 스캐폴드 + 정적 서빙 + 모니터링 읽기 표면)
 
-> 작성: Planner Subagent · 2026-06-30
-> 본 계약은 **WHAT / WHERE / 검증(Acceptance)** 만 규정한다. **HOW(Serilog 부트스트랩 방식·싱크 구성 코드·operation_log 기록 서비스의 채널/배치 구현·변화분 감지 자료구조·각 동작 지점의 로그 호출 위치 세부)는 Generator가 결정**한다.
+> 작성: Planner Subagent · 2026-07-03 · 브랜치 `feat/frontend-f1`
+> 본 계약은 **WHAT / WHERE / 검증(Acceptance)** 만 규정한다. **HOW(Vite/shadcn 부트스트랩 방식·컴포넌트 트리·TanStack Query 훅 구성·IMonitoringQueries 쿼리 구현·커서 인코딩·정적 서빙 미들웨어 배선 세부·wwwroot 산출 배치 메커니즘)는 Generator가 결정**한다.
 > 3-Tier: Planner(이 문서) → 사용자 확인 → Generator ↔ Evaluator 루프.
-> 직전 스프린트(S-FIELD-SEED-16CELLS)는 PR #22로 **이미 머지됨**(실 3DS 16셀 데이터 + base appsettings=SqlServer 전환). 이 계약은 그 결과를 전제로 한다.
-
-> ### 개정 (Amendment) — 2026-06-30 (사용자 확인, chuteNo 범위 = 현장 데이터만)
-> **결정**: chuteNo 30→1은 **현장 데이터(appsettings + seed-field-16cells.sql) 2지점만** 적용. **`DbSeeder.cs`는 변경하지 않는다**(dev/테스트 소터 chuteNo=30 유지 — 테스트 placeholder·실 3DS와 무관). 사유: DbSeeder가 이미 CHUTE 1~5를 시드해 소터 chuteNo=1이 `UQ_destination_chute_no` 전역 유니크와 충돌하고, 146 테스트가 DbSeeder 토폴로지(chuteNo=30)에 의존하므로 dev까지 바꾸면 CHUTE 재배치·테스트 영향 발생. 현장 DB(`Rcs3dsInterlockingWcs`, SeedOnStartup=false)엔 DbSeeder가 안 돌아 충돌 없음.
-> **영향**: §2 IN A의 DbSeeder 변경(item 3) 철회. 단 base appsettings `Sorters[0].ChuteNo=1`이 테스트에 누설돼 DbSeeder 소터(30)와 불일치하면 146이 깨질 수 있으므로, **테스트 Sorters 구성이 chuteNo=30을 쓰도록 보장**(테스트 결선만 — DbSeeder/단언 토폴로지 의미 0 변경)해 C6(146 GREEN)을 충족하는 것은 Generator 책임.
+> 근거 설계: **`docs/FRONTEND.md` §6 F1 그대로**(재설계 금지 — 계약으로 구체화만). ★확정 결정 6건(shadcn/ui+Tailwind+TanStack Table·인증 없음·안전 3종·frontend 루트+정적 서빙 등)을 전제. develop = PR #25 병합(FRONTEND.md 확정 설계 포함).
 
 ---
 
-## 0. 배경 / 전제 (확정 사실 — 추측 아님, 코드/문서 직접 확인됨)
+## 0. 배경 / 전제 (확정 사실 — 추측 아님, 코드/환경 직접 확인됨)
 
-- **현장 데이터 정정**: 3D Sorter 슈트번호가 그동안 `30`(임의 placeholder)으로 시드/구성돼 있었으나, **실 현장 16셀 데이터의 슈트번호는 `1`**이다. 사용자 확정. chuteNo=30이 박힌 지점 3곳을 `1`로 일원화하고 실 DB를 클린 재적재한다.
-  - `src/Wcs.Api/appsettings.json` → `Sorters[0].ChuteNo: 30`
-  - `scripts/seed-field-16cells.sql` → `DECLARE @sorterChute int = 30`
-  - `src/Wcs.Data/DbSeeder.cs` → `SeedDestinations`의 `chuteNo=30`(dev 콜드스타트 시드 전용) + 주석 문구
-- **⚠ chuteNo=1 충돌 주의(현장 확인 §로 격상 — 아래 §8)**: 현재 `DbSeeder.SeedDestinations`는 **슈트 1~5를 CHUTE 타입**으로 시드한다(`chuteNo=1`은 이미 CHUTE 점유). `destination`은 `UQ_destination_chute_no`(chute_no 전역 유니크)라 **같은 chute_no=1을 CHUTE와 SORTER_3D 둘 다로 만들 수 없다**. 따라서 dev DbSeeder에서 소터를 chuteNo=1로 바꾸면 기존 CHUTE chuteNo=1과 충돌한다. 실 현장 DB(seed-field-16cells.sql 대상)에는 CHUTE 1~5 시드가 없으므로 충돌이 없을 수 있으나, **dev 시드와 실 DB의 데이터 형상이 다르다.** → 이 충돌 해소(HOW)는 Generator가 결정하되, **반드시 입증으로 드러내고 재적재가 클린 성공해야** 한다(§5 Acceptance C7). dev/실DB 형상 차이는 Generator가 명시 문서화.
-- **로깅 현황**: 현재 전 계층이 `ILogger<T>` 기본 콘솔 로깅만 사용. 구조화 싱크·파일 싱크·DB 영속화 없음. `src/Wcs.Api/Program.cs:28`에 `// TODO(M5-P2): Serilog 구조화 로깅` 명시 마커 존재. 프로젝트 CLAUDE.md 코딩 컨벤션 = "M5에서 Serilog 도입(레지스터 변화 + API 원문 구조화 기록)". 본 스프린트가 그 M5-P2 항목을 이행한다.
-- **DB 스키마**: `src/Wcs.Data` EF Core, ERD.md 16테이블. provider 분기(SqlServer 운영 / SQLite 테스트·dev). 마이그레이션은 **양 provider 독립 어셈블리**(`Wcs.Migrations.SqlServer` / `Wcs.Migrations.Sqlite`), 각각 독립 ModelSnapshot. base appsettings `Database:Provider=SqlServer`(운영), 테스트 5개 팩토리는 `UseSetting("Database:Provider","Sqlite")`로 인메모리 SQLite 더블 강제.
-- **FK 거동(절대 — 회귀 0)**: S-SQLSERVER-FK-CASCADE에서 **필수 FK 10개를 `OnDelete(DeleteBehavior.Restrict)` 명시**해 SQL Server 1785(다중 캐스케이드 경로)를 제거했다. 신규 테이블의 FK가 **Cascade를 도입하면 1785 재발**. 신규 FK는 Restrict(또는 nullable FK의 EF 기본 NO_ACTION)여야 한다. filtered index 컬럼명은 **물리 PascalCase**(`[IsActive]` 등)를 쓴다(207 오타 재발 금지).
-- **이미 존재하는 도메인 이벤트 테이블(의미 변경 0)**: `piece_event`(IF05/08/10 REQ/RES·IF09_ARRIVAL·DECISION), `plc_event`(REG_CHANGE·WRITE·ONLINE·OFFLINE), `alarm`, `destination_event`, `sorter_command`. **이들은 그대로 둔다.** operation_log는 이들과 **중복 구현이 아니라**, "모든 동작을 단일 시계열로 한 테이블에서 관측"하는 **횡단(cross-cutting) 운영 로그**다(도메인 이벤트는 정규화된 상태/이력, operation_log는 통합 관측 스트림). 기존 테이블에 행을 더 넣거나 빼지 않는다.
-- **절대규칙 재확인**: #1 PLC 쓰기는 **여전히 단일 큐(Channel)** 통과 — 로깅 추가가 큐를 우회하거나 추가 Modbus 호출을 만들지 않는다(로그는 부수 기록). #7 모든 시간/경로/레벨/롤링 설정은 appsettings(하드코딩 금지) — Serilog 레벨·싱크·파일 경로·롤링 주기·보존도 전부 appsettings. #8 판정 로직(DepositDecider)은 순수함수 유지 — 로깅 의존 0.
+- **툴체인 존재 확인 완료**: `node v22.17.0` + `npm 11.4.2` 설치됨(이 세션에서 실행 확인). `.NET SDK 10.0.301`(net10.0 타깃 정상). → Node 미설치 리스크는 해소됐으나, Generator는 스캐폴드 착수 직전 `node --version`으로 재확인한다(글로벌 규칙).
+- **Program.cs 현재 상태**(정적 서빙 미들웨어 없음): `await DbInitializer.ProvisionAsync(app);` → (관측 훅 구독 블록) → `app.MapControllers();` → `app.Run();`. **정적 서빙·SPA fallback 미들웨어가 전혀 없다.** `Program.cs`는 top-level statements + 클래스 선언(`SorterRegistryFactory` 등)이 `app.Run()` 뒤에 이어지는 단일 파일이다. 삽입은 `app.Run()` 앞 구간에서만 한다.
+- **컨트롤러 패턴**(`src/Wcs.Api/Controllers/RcsController.cs`): `[ApiController]` + `[Route("api/v1")]`, `sealed class : ControllerBase`, 생성자 주입(`ILogger<T>`·`IOperationLogger`), 핸들러 파라미터에 `[FromServices]` 주입, `[FromBody]` 요청 레코드. **신규 `MonitoringController`는 이 패턴을 따르되 라우트는 `api/monitor`로 분리**한다(RcsController 무변경).
+- **재사용 산출원(신규 구현 금지 — 기존 것 호출)**:
+  - `IDestinationStatusService.Compute(long destinationId, DestType destType)` → `DestinationReadiness(Ready, Full, Paused, Online, Reason)`. 싱글톤 등록됨(`src/Wcs.Api/Services/DestinationStatusService.cs`). 소터 readiness(online/full/paused/ready) 산출에 그대로 사용.
+  - `SorterCellQty.LoadedQtyByCell(db, destId, cellIds)` + `IsCellAtCapacity(capacity, current)` — `internal static`(`src/Wcs.Api/Services/SorterCellQty.cs`, `namespace Wcs.Api`). 셀 현재 투입 수량 산출에 재사용(byte-consistent). MonitoringController도 `Wcs.Api`이므로 접근 가능.
+  - `ISorterGatewayRegistry.AllBundles` / `GetBundle(destId)` / `.Latest`(Online 포함) — 소터 목록·온라인 상태 원천.
+- **엔티티(조회 대상)**: `WorkBatch`·`WcsOrder`·`OrderItem`·`Piece`·`Cell`·`CellAssignment`·`SorterCommand`(`src/Wcs.Data/Entities.cs`). `WcsDbContext`에 17 DbSet. 오더 진행 집계(planned/reserved/sorted)는 `OrderItem.PlannedQty/ReservedQty/SortedQty` 합.
+- **테스트 더블 패턴(회귀 게이트 핵심)**: 통합 테스트는 `WebApplicationFactory<Program>` + **`builder.UseSetting("Database:Provider","Sqlite")`**(Program이 즉시 평가하는 `Database:Provider`를 호스트 세팅으로 override — `ConfigureAppConfiguration`/디스크립터 제거는 무효, lessons.md 2026-06-30) + named in-memory SQLite anchor + `EnsureCreated()` + `DbSeeder.Seed(...)`. base appsettings는 `Database:Provider=SqlServer`. **현재 146 GREEN**. 신규 MonitoringController 통합 테스트도 이 패턴을 그대로 재사용한다.
+- **16셀 시드 데이터**: `DbSeeder.Seed` + `scripts/seed-field-16cells.sql`로 소터(chuteNo=1)·셀 16·오더 16·order_item 16·active cell_assignment 16이 존재(S-FIELD-SEED-16CELLS). Evaluator의 브라우저 fresh evidence는 이 실 데이터를 활용할 수 있다.
+- **절대규칙 무관 확인**: F1은 **읽기 전용**이라 PLC 쓰기(#1·#2·#3)·핸드셰이크·판정(#8)에 손대지 않는다. 정적 서빙·읽기 조회만 추가. #7(설정 외부화)은 dev proxy 타깃·폴 주기 등 신규 상수를 하드코딩하지 않는 선에서 준수(프론트 폴 주기는 코드 상수 허용 — 백엔드 appsettings 대상 아님, 단 dev proxy 타깃 URL은 vite config에 명시).
 
 ---
 
 ## 1. Goal (목표)
 
-**(a) 현장 데이터 chuteNo 30→1 일원화**: 3D Sorter 슈트번호를 실 현장값 `1`로 통일(appsettings·seed 스크립트·dev DbSeeder 3지점) + 실 SQL Server DB 클린 재적재. 그 결과 **IF-05가 해당 소터 오더에 대해 chuteNo=1을 반환**한다.
+**(a) 프론트엔드 스캐폴드 확립**: 리포 루트 `frontend/`에 Vite + React + TypeScript SPA 스캐폴드(React Router · TanStack Query · **TanStack Table** · **shadcn/ui + Tailwind CSS**). `vite.config.ts` dev proxy(`/api` → `http://localhost:5080`). Node 산출물(`node_modules`·`dist`)과 `wwwroot`(빌드 산출)를 `.gitignore`에 등재.
 
-**(b) 전 동작 관측성 확보 — 콘솔(Serilog) + DB(operation_log) 상세·구조화 로깅**: WCS의 모든 핵심 동작을 ①Serilog 구조화 콘솔 + 롤링 파일 싱크, ②신규 `operation_log` 단일 테이블에 시각·종류·상세로 기록한다. 고빈도 폴링(150ms)은 **변화분만**(레지스터 값 전이 시), 모든 쓰기·핸드셰이크 단계·상태전이·API 원문은 **전수** 기록한다.
+**(b) Wcs.Api 단일 서비스 정적 서빙**: `UseStaticFiles()` + SPA fallback(`MapFallbackToFile("index.html")`)을 Program.cs에 삽입해, `npm run build` 산출물을 `src/Wcs.Api/wwwroot`에서 서빙. **API 라우트(`/api/**`)가 우선**하고 fallback이 `/api`를 삼키지 않는다. Windows Service ContentRoot(=`AppContext.BaseDirectory`)에서도 정상 서빙.
 
-**불변 (절대규칙·동작 보존)**: PLC 쓰기는 여전히 단일 큐 통과. 판정/핸드셰이크/레지스터맵의 **의미는 0 변경**(로그 호출만 부가). 기존 도메인 이벤트 테이블 의미 0 변경. 로깅 추가가 폴링(150ms)·핸드셰이크 타이밍·API 3s를 지연시키지 않는다. 로그 기록 실패가 본 동작(PLC/배정/핸드셰이크)을 막지 않는다(fail-safe, 단 삼키지 말고 자체 경고).
+**(c) 읽기 전용 모니터링 API 표면**: 신규 `MonitoringController`(`/api/monitor/*`) + 신규 `IMonitoringQueries`(EF `AsNoTracking`, `Wcs.Api`) — **기존 `DbRepositories`·리포지토리 무변경**. F1 페이지가 소비하는 엔드포인트만(§4) 구현. piece·sorter_command 등 대량 테이블은 커서/키셋 페이징 + `take` 상한.
+
+**(d) 모니터링 페이지 ①(폴링)**: FRONTEND.md §5 페이지 ① — **A 작업 데이터**(배치→오더→오더아이템) / **B 로봇 이동중**(in-flight piece) / **C 분류 데이터**(소터별 셀 현황 + sorter_command 이력). TanStack Query **폴링만**(SignalR·실시간 push는 F2). 좌측 내비 + 상단 상태바(소터 Online/Offline)로 페이지가 앱에 연결(고아 페이지 금지).
+
+**(e) Playwright MCP 설정**: `.mcp.json` 신설(Evaluator 브라우저 검증용).
+
+**불변 (동작 보존)**: 기존 146 테스트 무변경 GREEN. RcsController·PlcGateway·Core·기존 DbRepositories·마이그레이션·DbSeeder **0줄 변경**(정적 서빙 위한 Program.cs 최소 삽입 + 신규 파일만). 읽기 조회가 기존 상태·이력을 변경하지 않음(부수효과 0).
 
 ---
 
 ## 2. Scope — IN / OUT (파일·모듈 구체)
 
-### IN (이번 스프린트가 만지는 것)
+### IN (이번 스프린트가 만드는/만지는 것)
 
-**A. chuteNo 30→1 일원화 (3지점 + 재적재)**
-1. `src/Wcs.Api/appsettings.json` — `Sorters[0].ChuteNo`: `30` → `1`.
-2. `scripts/seed-field-16cells.sql` — `@sorterChute` 기본값 `30` → `1`(+ 주석·요약 출력의 30 언급 정정).
-3. ~~`src/Wcs.Data/DbSeeder.cs`~~ **(개정: 변경 안 함)** — DbSeeder 소터 `chuteNo=30` **유지**(dev/테스트 placeholder). CHUTE 1~5 전역유니크 충돌 회피 + 146 테스트 토폴로지 보존. **대신** base appsettings `Sorters[0].ChuteNo=1`이 테스트에 누설돼 DbSeeder 소터(30)와 불일치하지 않도록, **테스트 Sorters 구성이 chuteNo=30을 쓰도록 결선**(테스트 인프라만 — 단언/토폴로지 의미 0 변경)해 C6 충족. HOW는 Generator.
-4. **실 SQL Server DB 클린 재적재**: 기존 chuteNo=30 데이터를 정리하고 chuteNo=1로 재적재해 §5 클린 상태(소터 destination 1개·셀 16·오더 16·order_item 16·active cell_assignment 16·piece 0) 달성. 재적재 방법(스크립트 재실행·기존 행 정리 절차)은 Generator 결정.
+**A. 프론트 스캐폴드 (`frontend/` — 신규, .NET 프로젝트 아님·.sln 무등록)**
+1. `frontend/` Vite + React + TS 프로젝트: `package.json`·`vite.config.ts`(dev proxy `/api`→`:5080`)·`tsconfig.json`·`index.html`·`src/`(엔트리·라우터·페이지·API client·shadcn 셋업). 의존: `react` `react-dom` `react-router-dom` `@tanstack/react-query` `@tanstack/react-table` + `tailwindcss`(+shadcn/ui 컴포넌트, radix 프리미티브 수반). 빌드: `vite` `typescript` `@vitejs/plugin-react`. (SignalR·@microsoft/signalr는 F2 — 이번엔 미설치 권장, 설치해도 미사용.)
+2. 모니터링 페이지 ①(§5 A/B/C) + 전역 레이아웃(좌측 내비 + 상단 상태바). 데이터 표시는 TanStack Query 폴링. 필터(배치·상태)·행 확장(오더→아이템)·페이징(in-flight/sorter-command)을 TanStack Table로.
+3. 프론트 lint/타입체크 스크립트(`tsc --noEmit` + eslint 또는 동등 — Generator 선택). 프론트 단위/컴포넌트 테스트(Vitest)는 **선택**(권장이나 F1 필수 아님 — 필수 검증은 통합 테스트 + Playwright).
 
-**B. Serilog 도입 (콘솔 + 롤링 파일 구조화 싱크)**
-5. `src/Wcs.Api/Wcs.Api.csproj` — Serilog 패키지 추가(Serilog.AspNetCore + Console/File 싱크 + Settings.Configuration 류 — 구체 패키지는 Generator 결정, 안정 버전 우선).
-6. `src/Wcs.Api/Program.cs` — `// TODO(M5-P2): Serilog` 마커 지점에 Serilog 부트스트랩(`UseSerilog` 등). **레벨·싱크·파일 경로·롤링 주기·보존·출력 템플릿은 appsettings의 `Serilog` 섹션에서 읽는다(하드코딩 금지, 절대규칙 #7).** 기존 `ILogger<T>` 호출부는 Serilog 백엔드로 흘러가므로 호출 코드 대량 변경 불요(구조화 메시지 템플릿은 이미 다수 사용 중 — 보존).
-7. `src/Wcs.Api/appsettings.json` + `appsettings.Development.json` — `Serilog` 설정 섹션 추가(MinimumLevel·WriteTo Console/File·rollingInterval·retainedFileCountLimit·outputTemplate·경로 등). 파일 경로는 운영/개발 분리 가능.
+**B. 빌드 체인 / 정적 서빙**
+4. `npm run build` 산출물이 `src/Wcs.Api/wwwroot`에 배치되어 Wcs.Api 단일 서버가 SPA+API를 함께 제공한다. **복사 자동화 여부(Q6) = 자동(수동 복사 단계 없음)으로 확정** — 단일 문서화된 명령(예: vite `build.outDir`를 wwwroot로 지정 또는 build script)으로 산출. 정확한 메커니즘은 Generator(MSBuild가 npm을 구동하는 결합은 금지 — FRONTEND.md 각하안).
+5. `src/Wcs.Api/Program.cs` — `app.Run()` 앞에 정적 서빙 삽입: `UseStaticFiles()` → `MapControllers()`(기존) → `MapFallbackToFile("index.html")`. **fallback이 `/api/**`를 가로채지 않게** 한다(API 우선). ContentRoot/wwwroot 기준 해석 확인.
+6. `.gitignore` — `frontend/node_modules/`·`frontend/dist/`·`src/Wcs.Api/wwwroot/` 추가(현재 미등재). `frontend/`의 소스만 커밋.
 
-**C. operation_log 테이블 신설 (DB 상세 로깅 — 단일 횡단 테이블)**
-8. `src/Wcs.Data/Entities.cs` — `OperationLog` 엔티티 + 카테고리/액션 enum(또는 string + CHECK). ERD 원칙 준수: 대리키 `Id bigint identity`, `At datetime2(UTC)` 선두 인덱스, **append-only(이력 — UPDATE 없음)**.
-9. `src/Wcs.Data/WcsDbContext.cs` — `DbSet<OperationLog>` + `ConfigureOperationLog` 매핑(테이블명 snake_case `operation_log`, enum→string+길이, 인덱스, **FK는 신중히 — pieceId/destinationId 등을 참조한다면 nullable FK(NO_ACTION) 또는 FK 없이 스냅샷 컬럼만**으로 1785 회피. Generator는 FK 도입 시 Restrict 명시).
-10. **양 provider 마이그레이션 신규 추가**: `Wcs.Migrations.SqlServer` + `Wcs.Migrations.Sqlite` 각각에 `operation_log` 테이블 추가 마이그레이션. **`--project`/`--startup-project` 둘 다 마이그레이션 어셈블리 지정**(S-M4-P1 교훈). 각 provider 독립 ModelSnapshot 갱신. (HOW: `dotnet ef migrations add` 명령 세부는 Generator.)
-11. `docs/ERD.md` — operation_log를 16테이블 목록에 **17번째로 추가 정의**(컬럼·인덱스·보존·"도메인 이벤트와의 관계: 횡단 관측 스트림이지 중복 아님" 명문화). 테이블 수 16→17 갱신.
+**C. 읽기 전용 API 표면 (`src/Wcs.Api` — 신규 파일)**
+7. `MonitoringController`(`[Route("api/monitor")]`, 읽기 전용, RcsController 패턴) — §4 F1 엔드포인트.
+8. `IMonitoringQueries` + EF 구현(`Wcs.Api`, `AsNoTracking`) — 기존 `DbRepositories` 무변경·신규 인터페이스. `IDestinationStatusService`·`SorterCellQty` 재사용. 커서/키셋 페이징 + `take` 상한(설정 상수 or 하드 상한 — Generator, 단 명시).
+9. 신규 통합 테스트(`tests/Wcs.Tests/` — 기존 파일 무변경, 신규 파일 추가): MonitoringController 조회 형상·페이징·에러케이스. 기존 `WebApplicationFactory` + `UseSetting("Database:Provider","Sqlite")` + in-memory SQLite 더블 패턴 재사용.
 
-**D. DB 기록 서비스/싱크 (비동기·단일 경로·fail-safe)**
-12. operation_log 기록 진입점(예: `IOperationLogger` 인터페이스 + EF 구현 — 위치는 `src/Wcs.Api` 또는 `src/Wcs.Data`, Generator 결정). **본 처리(150ms 폴·핸드셰이크·API 3s)를 블로킹하지 않도록 비동기·배치 또는 백그라운드 채널**로 기록. 기록 실패가 본 동작을 막지 않음(fail-safe — 예외를 삼키지 말고 Serilog로 자체 경고). DB 컨텍스트 수명(Scoped vs 백그라운드 스코프)은 기존 패턴(IServiceScopeFactory) 준수.
-
-**E. 각 동작 지점에 로그 호출 부가 (의미 변경 0 — 부수 기록만)**
-13. **API 원문(전수)**: `src/Wcs.Api/Controllers/RcsController.cs` — IF-05(destination-query)·IF-09(arrival-report)·IF-10(deposit-report) 요청/응답 원문. **IF-08은 폐지된 폴링이 아니라 WCS→RCS 푸시**(`src/Wcs.Api/Services/DestinationStatusPusher.cs`·`RcsPushClient.cs`)이므로 그 **아웃바운드 푸시 전송**을 IF-08 동작으로 기록.
-14. **PLC 쓰기(전수)**: `src/Wcs.PlcGateway/PlcGateway.cs` — 단일 쓰기 큐 컨슈머의 SetTgtFloor(D6)·CellAssign(D0/D1+C_Flag)·ClearR(D2/D3+R_Flag)·**D4 RMW**(before→after) 각 쓰기. (게이트웨이 본문 의미 변경 0 — 로그 호출만. 게이트웨이는 Core/PlcGateway 계층이라 DB 직접 의존 금지 → 로깅 훅 방식은 Generator 결정: 이벤트/콜백 또는 ILogger 경유 후 Serilog→DB 싱크. **operation_log DB 기록이 PlcGateway에 EF 의존을 새로 끌어들이지 않게** 한다 — 의존성 방향 보존.)
-15. **핸드셰이크 단계(전수)**: `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` — C단계 투입·R_Flag 수신·R_Seq 대사(일치/불일치)·ClearR·타임아웃/OFFLINE outcome 각 단계.
-16. **상태 전이(전수)**: OFFLINE(`PlcPollingService.PublishOffline`/`OnOfflineTransition` — 전이당 1회)·FULL/PAUSED(`ChuteCapacityService` 상태 변화·소터 full)·ONLINE 복구.
-17. **고빈도 폴링 변화분(변화 시에만)**: `src/Wcs.PlcGateway/PlcGateway.cs`의 폴 루프 — R_Flag·Ready·CurFloor·TgtFloor·R_Seq·C_Flag·R_CellNo·C_CellNo·C_Seq 등 레지스터 값이 **직전 스냅샷과 달라진 경우에만** 1행 기록(전이 old→new). 매 폴링 스냅샷(무변화)은 **기록하지 않는다.** (현재 폴 루프는 `prevRFlag`만 추적 — 전체 레지스터 전이 감지로 확장. 단 게이트웨이 의미·타이밍 보존.)
+**D. 도구 설정**
+10. `.mcp.json`(리포 루트) — Playwright MCP: `{"mcpServers":{"playwright":{"command":"cmd","args":["/c","npx","@playwright/mcp@latest","--headless"],"disabled":false}}}`.
 
 ### OUT (이번 스프린트가 절대 건드리지 않는 것)
-- **판정 로직**: `src/Wcs.Core/DepositDecider`(순수함수)·`RegisterMap`·`PlcSnapshot` 모델 — 의미 0 변경(로깅 의존 0, 절대규칙 #8).
-- **핸드셰이크 의미**: C/R 시퀀스·C_Seq 증가·R_Seq 대사 로직·타임아웃 값 산출 — 0 변경(로그 호출만 부가).
-- **단일 쓰기 큐 구조**: PlcWriteQueue Channel 단일화 — 위반 0(절대규칙 #1). 로깅이 큐를 우회하거나 별도 Modbus 호출 추가 0.
-- **기존 도메인 이벤트 테이블**: piece_event·plc_event·alarm·destination_event·sorter_command 의 스키마·기록 의미·행 수 — 0 변경.
-- **기존 16테이블 스키마**: operation_log 외 어떤 기존 테이블 컬럼/인덱스/FK도 변경 0(신규 17번째 테이블만 추가).
-- **RTU 시리얼 파라미터 현장 실측값**(PortName·BaudRate·Parity 등) — 직전 스프린트와 동일 placeholder 유지(이 스프린트 범위 아님, §8).
-- **테스트를 실 SqlServer로 이전**: 테스트는 인메모리 SQLite 더블 유지(S-FIELD-SEED 결정 계승). operation_log 마이그레이션은 SQLite 테스트 더블에서도 EnsureCreated로 생성돼야 하고, 실 SqlServer fresh database update로 별도 검증(§5 C5).
+- **`src/Wcs.Api/Controllers/RcsController.cs`** (IF-05/09/10) — 0줄.
+- **`src/Wcs.PlcGateway/**`·`src/Wcs.Core/**`·`src/Wcs.Sim3ds/**`** — 0줄(읽기만·PLC 무관).
+- **기존 `DbRepositories`·`Ef*Repository`·`ICellSelector`·`IOrderRepository` 등 기존 리포지토리** — 0줄(신규 `IMonitoringQueries`만 추가).
+- **마이그레이션(`Wcs.Migrations.*`)·`DbSeeder.cs`·`WcsDbContext` 매핑** — 0줄. **인덱스 추가 금지**(감사 묶음 C의 `order_item(Barcode)`·`piece(PId,IsActive)` 인덱스는 F1 스코프 **밖** — 명시 제외. F1 조회는 인덱스 없이도 성립하도록 §4의 `take` 상한·상태 필터·정렬로 범위 강제).
+- **SignalR/실시간 push**(F2), **워드 쓰기·운영자 제어(clear/pause/resume)·OpsController·인증**(F3). F1은 폴링·읽기·인증 없음.
+- **operation-log·alarms·destinations 엔드포인트** — F1 페이지 ①(A/B/C)가 쓰지 않으므로 **F1 제외**(operation-log 테일·알람 배지는 F2 페이지 ②/상태바 확장). FRONTEND.md §3.1 전체 표 중 F1은 §4의 7개만.
+- **`src/Wcs.Api/appsettings*.json`** — 정적 서빙은 코드 미들웨어라 설정 변경 불요. (Serilog·DB·RcsPush 설정 0 변경.)
+- **다크 모드 토글·테마 전환** — F1 미구현(단일 기본 테마). 후속 페이즈 여지.
 
 ---
 
 ## 3. Detected Project Type
 
-**Backend/API** — 근거(프로젝트 신호, 사용자 표현 아님): 서버측 라우트/컨트롤러(`src/Wcs.Api/Controllers/RcsController.cs`, ASP.NET Core `MapControllers`·`app.Run()`) + 서버 진입점(`Program.cs`)이 존재하고, 같은 레포에 브라우저 대면 UI 트리(HTML 셸/클라이언트 렌더 컴포넌트)가 없다. 멀티-스택 요소(C# 백엔드 + Modbus 게이트웨이 + EF DB)는 전부 서버측이며 단일 언어(C#)다.
+**Full-stack** — 근거(프로젝트 신호, 사용자 표현 아님): 이 스프린트 후 같은 레포에 **브라우저 대면 진입점**(`frontend/index.html` + React 컴포넌트 트리, `src/Wcs.Api/wwwroot`로 서빙)과 **서버측 라우트/컨트롤러**(`MonitoringController` + 기존 `RcsController`, ASP.NET Core `MapControllers`/`app.Run()`)가 **공존**한다. F1이 브라우저 진입점을 신설하므로 프로젝트 타입이 기존 Backend/API에서 Full-stack으로 전이한다. 스택 경계: TypeScript 프론트 ↔ C# 백엔드 — 경계 검사(API 계약 형상 일치·직렬화 호환)를 검증 시나리오에 포함한다.
 
 ---
 
-## 4. 로깅 대상 동작 명세 (operation_log 필드 + 콘솔 출력)
+## 4. API 표면 명세 — F1 엔드포인트 (WHAT을 반환 — 정확한 타입·커서 인코딩은 Generator)
 
-> **HOW 아님 — WHAT을 남길지의 명세.** 정확한 컬럼 타입·enum vs string·채널 구현은 Generator 결정. 아래는 "어떤 동작을 어떤 의미로 기록해야 PASS인지"의 스펙.
+> 전부 `GET /api/monitor/*`, 읽기 전용, `AsNoTracking`. 반환 필드명은 카멜케이스 JSON. **piece·sorter_command는 커서/키셋 페이징 + `take` 상한 필수**(A-3 풀스캔 방어). 반환 형상은 아래 "의미"가 고정, 컬럼명 미세조정은 Generator 가능.
 
-### 4-1. operation_log 권장 필드(의미 — 컬럼명·타입은 Generator 미세조정 가능, 의미는 고정)
-| 필드 | 의미 |
-|---|---|
-| `Id` | 대리키 bigint identity (ERD 원칙 1) |
-| `At` | 동작 발생 시각 datetime2(UTC) — **선두 인덱스**(시계열 조회·퍼지) |
-| `Category` | 동작 대분류: `API`(IF-05/08/09/10) · `PLC_WRITE`(D4 RMW·D6·CellAssign·ClearR) · `POLL_CHANGE`(레지스터 전이) · `HANDSHAKE`(C/R 단계) · `STATE`(OFFLINE/ONLINE/FULL/PAUSED) |
-| `Action` | 동작 세부: 예) `IF05_REQ`/`IF05_RES`/`IF08_PUSH`/`IF09`/`IF10`/`SET_TGTFLOOR`/`RMW_D4`/`CELL_ASSIGN`/`CLEAR_R`/`REG_CHANGE`/`HS_C_SENT`/`HS_R_RECV`/`HS_RSEQ_MATCH`/`HS_RSEQ_MISMATCH`/`HS_TIMEOUT`/`OFFLINE`/`ONLINE`/`FULL`/`PAUSED` |
-| `Level` | 심각도: INFO/WARN/ERROR (Serilog 레벨과 정합) |
-| `SorterChuteNo` 또는 `DestinationId` | 어느 소터/목적지 동작인가(멀티 소터 식별, nullable) |
-| `Barcode` / `PId` | 어느 piece 동작인가(API·핸드셰이크 시, nullable) |
-| `Detail` (JSON) | 동작 상세 — 레지스터 전이는 `{reg, old, new}`, API는 요청/응답 원문 발췌, 핸드셰이크는 `{cSeq, rSeq, cellNo, outcome}` 등 |
+| # | 엔드포인트 | 반환(의미) | 원천 / 재사용 |
+|---|---|---|---|
+| E1 | `GET /api/monitor/batches` | work_batch 목록: id·workDate·batchNo·waveNo·status·openedAt·closedAt. 최신순 정렬 + take 상한 | `WorkBatch` |
+| E2 | `GET /api/monitor/orders?batchId=&status=` | 오더 진행: id·orderNo·orderType·destinationChuteNo·status·plannedQty·reservedQty·sortedQty(order_item 합계) | `WcsOrder` + `OrderItem` 집계. take 상한 |
+| E3 | `GET /api/monitor/orders/{id}/items` | 오더아이템: id·barcode·plannedQty·reservedQty·sortedQty | `OrderItem`(OrderId=id) |
+| E4 | `GET /api/monitor/pieces/in-flight?take=&cursor=` | 이동중 piece: pId·barcode·qty·destinationChuteNo·agvNo·inductionNo·status·시각. 최신순 | `Piece`(IsActive && Status∈{QUERIED,RESERVED,PERMITTED}). **커서 페이징 + take 상한** |
+| E5 | `GET /api/monitor/sorters` | 소터 목록 + readiness: destId·chuteNo·online·ready·full·paused | `ISorterGatewayRegistry.AllBundles` + `IDestinationStatusService.Compute(destId, SORTER_3D)` |
+| E6 | `GET /api/monitor/sorters/{destId}/cells` | 셀 현황: cellNo·capacity·currentQty·occupied·enabled·assignedOrderNo? | `Cell`·`CellAssignment`(active) + `SorterCellQty.LoadedQtyByCell`(재사용) |
+| E7 | `GET /api/monitor/sorter-commands?destId=&take=&cursor=` | 적재 이력: id·pId·barcode?·cellNo·cSeq·rSeq·status·cWrittenAt·rFlagAt. 최신순 | `SorterCommand` JOIN `Cell`(destId)·`Piece`. **커서 페이징 + take 상한** |
 
-- **FK 정책**: PId/DestinationId를 FK로 걸 경우 **nullable FK(EF 기본 NO_ACTION)** 또는 **FK 없이 스냅샷 값 컬럼**만(1785 회피·이력 불변 원칙 5). Generator가 FK 도입 시 Restrict 명시.
-
-### 4-2. 기록 정책(이것이 PASS/FAIL 핵심)
-- **전수 기록(매 발생)**: API 요청/응답 원문(IF-05/08-push/09/10)·모든 PLC 쓰기(SetTgtFloor·CellAssign·ClearR·D4 RMW before→after)·핸드셰이크 각 단계·상태 전이(OFFLINE/ONLINE/FULL/PAUSED).
-- **변화분만 기록(고빈도 폴링 150ms)**: 레지스터(R_Flag·Ready·CurFloor·TgtFloor·R_Seq·C_Flag·R_CellNo·C_CellNo·C_Seq) 값이 **직전 스냅샷과 다를 때만** `POLL_CHANGE` 1행(old→new). **무변화 폴링 스냅샷은 0행** — 이게 핵심 검증 포인트(150ms × 무변화 = DB 폭주 방지).
-
-### 4-3. 콘솔(Serilog) 출력 예시(의미 — 정확한 템플릿은 appsettings outputTemplate)
-```
-[12:00:01 INF] [IF-05] pId=101 barcode=0701-CELL-01 → result=OK chuteNo=1
-[12:00:01 DBG] [RMW D4] 0004 → set=0001 clear=0000 → 0005
-[12:00:02 INF] [핸드셰이크] R_Flag=1 수신: R_CellNo=1 R_Seq=1 (기대 C_Seq=1)
-[12:00:02 WRN] [폴링] REG_CHANGE Ready 1→0
-[12:00:05 ERR] [상태] 소터 OFFLINE 전이 destId=1 chuteNo=1
-```
-- 구조화: 메시지 템플릿 속성(pId·barcode·chuteNo·cSeq·reg·old·new 등)이 **구조화 속성**으로 보존돼야 한다(단순 문자열 보간 아님 — Serilog 구조화 로깅의 핵심).
+- **페이징 규칙**: E4·E7은 키셋 커서(`id` 또는 `at` 기준)로 페이징하고 `take`에 상한(예: ≤200 — Generator가 상수·명시). 상한 초과 요청은 상한으로 clamp(또는 400 — Generator 정책 명시). E1·E2는 필터 + take 상한으로 범위 강제.
+- **레지스터 스냅샷(D0~D6 raw) 노출은 F1 제외** — E5는 identity·online·readiness만. 레지스터 패널은 F2 페이지 ②.
+- **SqlServer 전용 SQL 금지**: 조회는 provider-agnostic LINQ(`AsNoTracking`)로만. raw SQL·SqlServer 고유 함수 금지(테스트는 in-memory SQLite 더블 — lessons: 읽기라 실 SqlServer 검증 불요하나 SQLite에서 깨지면 안 됨).
 
 ---
 
-## 5. Evaluation Criteria (가중치) — Evaluator가 fresh evidence로 판정
+## 5. Evaluation Criteria (가중치) — Full-stack 통합 판정 (Evaluator fresh evidence 필수)
 
-> 모든 PASS는 **"지금 실제로 돌렸다"는 fresh tool output**(HTTP 응답 본문·실 SqlServer sqlcmd 결과·콘솔 로그 발췌·파일 싱크 tail·`dotnet test` raw line)을 sprint-feedback.md에 인용해야 한다. Generator의 success 보고·이전 스프린트 결과·추정만으론 PASS 금지.
+> 모든 PASS는 **"지금 실제로 돌렸다"는 fresh tool output**(HTTP 응답 본문·`dotnet test` raw line·`npm run build` 출력·Playwright 스크린샷 파일 경로·`console.log` 발췌)을 sprint-feedback.md에 인용. Generator success 보고·추정만으론 PASS 금지. URL은 `.claude/ports.local.json`에서 읽는다(하드코딩 금지).
 
-### ★★★ API Design Quality (가중치 25%)
-- IF-05가 chuteNo **1** 반환(30 아님) — 실 HTTP 왕복으로 입증.
-- operation_log 기록이 API 응답 계약(`{result, chuteNo}`·`{result:"OK"}`)을 **변경하지 않음**(로그는 부수 — 응답 형상 0 변경).
+### ★★★ Integration Quality (가중치 30%)
+- **빌드 체인 단일 서버**: `npm run build` → `src/Wcs.Api/wwwroot` 배치 → `dotnet run --project src/Wcs.Api` → **`:5080` 단일 서버에서 SPA + `/api/monitor/*`가 함께 동작**(브라우저가 :5080에서 SPA 로드 + 같은 출처로 API 호출). API 계약 형상(카멜케이스 JSON)이 프론트 타입과 일치.
+- **API 우선·fallback 비삼킴**: `/api/monitor/<존재하지 않는 경로>`가 index.html(HTML 200)로 떨어지지 않고 404 계열(또는 API 에러) — fallback이 `/api`를 가로채지 않음을 실 요청으로 입증(음성 대조).
 
-### ★★★ Architecture Originality (가중치 25%)
-- operation_log가 기존 도메인 이벤트 테이블의 **중복이 아니라 횡단 관측 스트림**임이 ERD.md에 명문화되고 구현에 반영(piece_event/plc_event 행 수·의미 0 변경).
-- DB 기록이 **비동기·단일 경로·fail-safe**로, 절대규칙 #1(단일 쓰기 큐)·의존성 방향(PlcGateway가 EF에 새로 의존 안 함)을 보존.
+### ★★★ Per-layer Quality (가중치 25%) — 프론트(Web/UI) + 백엔드(Backend/API) 각각
+- **프론트(Web/UI)**: 모니터링 페이지 ①이 A/B/C 3종을 밀집 데이터 레이아웃으로 표시, 좌측 내비 + 상단 상태바로 앱에 연결(고아 페이지 아님). shadcn/ui + Tailwind 일관 사용. **디자인 품질·크래프트**(타이포·간격·대비 — `frontend-design` 스킬 참조). AI-slop 아닌 의도된 밀집 운영툴 룩.
+- **백엔드(Backend/API)**: `/api/monitor/*` 일관 네이밍·RESTful·읽기 전용·`AsNoTracking`. 페이징 계약(커서·take 상한) 일관. 기존 리포지토리 무변경(신규 `IMonitoringQueries`).
 
 ### ★★ Craft (가중치 20%)
-- **변화분 정책 동작**: 무변화 폴링이 operation_log에 `POLL_CHANGE` 0행, 레지스터 전이 시에만 1행 — 실 관찰(라이브 기동 후 일정 시간 무변화 구간 카운트 0 + 전이 1건 입증).
-- **하드코딩 0**: Serilog 레벨·경로·롤링·보존이 전부 appsettings `Serilog` 섹션(절대규칙 #7) — appsettings 값 변경이 실제 반영됨을 입증(예: MinimumLevel 변경 또는 파일 경로 확인).
-- **성능 가드**: 로깅 추가 후에도 폴링 주기·핸드셰이크·API 응답이 지연 없이 동작(라이브 기동에서 폴 루프 정상·핸드셰이크 완료 관찰).
+- **회귀 0**: 기존 146 GREEN 유지(base=SqlServer + 테스트 SQLite 더블). 정적 서빙 미들웨어·MonitoringController 추가가 기존 테스트를 깨지 않음(특히 test 호스트에 wwwroot/index.html 부재가 무해).
+- **무변경 가드**: RcsController·PlcGateway·Core·기존 DbRepositories·마이그레이션·DbSeeder `git diff` 0줄. Program.cs 변경은 정적 서빙 삽입에 한정.
+- **프론트 lint/tsc 0 에러**: `tsc --noEmit`(및 eslint if configured) 클린. 콘솔/pageerror 0(React dev warning·uncaught 없음).
+- **범위 강제(A-3)**: in-flight piece·sorter-command 조회가 `take` 상한·상태 필터·정렬로 범위 강제(무한/풀스캔 아님) — 코드·응답으로 입증.
 
-### ★★ Functionality (가중치 30%)
-- **라이브 기동 후 IF-05/핸드셰이크 시 콘솔에 구조화 로그 출현** + **롤링 파일 싱크에 동일 로그 기록**(파일 생성·tail 확인).
-- **operation_log에 행 적재**(실 SqlServer 직접 쿼리) — API 원문·PLC 쓰기·핸드셰이크·상태전이가 전수 기록되고 변화분 정책이 적용됨.
-- chuteNo=1로 재적재된 실 DB에서 IF-05 OK·chuteNo=1(음성 대조: chuteNo=30 더는 매칭 안 됨 또는 미적재 바코드 NG).
-
-### Completion Conditions (최소 통과 — 전부 충족해야 APPROVED)
-- **C1**: 라이브 기동(base=SqlServer) 후 IF-05 실 HTTP `{result:"OK", chuteNo:1}` (30 아님). 음성 대조 1건(미적재/오매칭 → NG 또는 chuteNo≠1 미발생).
-- **C2**: 콘솔에 Serilog 구조화 로그 출현(IF-05·RMW·핸드셰이크·상태전이) + **롤링 파일 싱크 파일 생성·해당 라인 존재**(fresh tail).
-- **C3**: 실 SqlServer `SELECT ... FROM operation_log`로 행 적재 확인 — 전수 대상(API/PLC 쓰기/핸드셰이크/상태전이) 각 ≥1행 + Category/Action/At/Detail 채워짐.
-- **C4 (변화분 정책)**: 무변화 폴링 구간에서 `POLL_CHANGE` 행이 **늘지 않음**(일정 시간 카운트 불변) + 실제 레지스터 전이 시 1행 증가 — 둘 다 입증(거짓 PASS 방지 음성 대조).
-- **C5 (신규 마이그레이션 실 SQL Server fresh)**: operation_log 신규 마이그레이션이 **빈 SQL Server에 `dotnet ef database update` fresh 적용 성공**(exit 0·**1785/207/오류 0**) + sqlcmd로 `operation_log` 테이블·인덱스·(FK 있으면)NO_ACTION 확인. (S-SQLSERVER-FK-CASCADE 교훈 — provider 고유 DDL 제약은 실 SqlServer fresh로만 닫힌다.)
-- **C6 (회귀 0)**: `dotnet test` **146 GREEN**(또는 현 baseline 수)·exit 0 — 로그 부가가 회귀 0, DB 기록 서비스가 인메모리 SQLite 테스트 더블에서 무해(테스트 블로킹·예외 0). 동시성/타이밍 민감 테스트가 있으므로 **fresh ≥3회 반복**으로 결정성 확인(간헐 flake 적발 — S-E2E 교훈).
-- **C7 (재적재 클린)**: 재적재 후 실 SqlServer에서 소터 destination 1개(chuteNo=1)·셀 16·오더 16·order_item 16·active cell_assignment 16·piece 0(또는 검증 산물 복원). chuteNo=30 잔존 0. dev DbSeeder chuteNo=1 충돌이 해소돼 콜드스타트(dev SQLite)도 기동 성공.
-- **C8 (양 provider No changes)**: operation_log 추가 후 `dotnet ef migrations has-pending-model-changes`가 **양 provider 모두 "No changes"**(모델 ↔ 마이그레이션 정합). 보호 zone(Core·DepositDecider·RegisterMap·기존 16테이블 매핑·핸드셰이크 의미·단일 큐) git diff 의미 변경 0.
+### ★★ Functionality (가중치 25%)
+- **모니터링 3종이 실 DB 데이터로 브라우저에 표시**: 16셀 시드 데이터 활용 — 배치 선택 → 오더 표시 → 행 확장 → 오더아이템 / in-flight piece 목록 / 소터 셀 현황(16셀) + sorter_command 이력이 Playwright fresh evidence로 렌더 확인.
+- **폴링 갱신**: TanStack Query 폴링으로 데이터가 주기 갱신(로딩/에러 상태 처리). 필터·페이징 상호작용 동작.
+- **dev 워크플로**: `npm run dev`(Vite :5173) + proxy로 `/api`가 `:5080`으로 프록시돼 프론트/백 동시 기동 개발이 동작(문서화 + 관찰).
 
 ---
 
-## 6. 성능 / 볼륨 가드 (명시)
-- **본 처리 비지연**: DB(operation_log) 기록은 **비동기·배치 또는 별도 채널**로 수행해 150ms 폴링·핸드셰이크 타이밍·API 3s 응답을 지연시키지 않는다. 동기 EF SaveChanges를 폴 루프/핸드셰이크/HTTP 핸들러 핫패스에서 블로킹 호출하지 않는다.
-- **변화분으로 볼륨 억제**: 150ms 폴링 × 무변화 = operation_log 0행(전이 시만 기록). 이게 DB 폭주의 1차 방어선.
-- **Fail-safe**: operation_log 기록 실패(DB 다운·연결 끊김 등)가 PLC 쓰기·배정·핸드셰이크·API 응답을 막지 않는다. **단 예외를 삼키지 않고** Serilog로 자체 경고(절대규칙 Fail Loud — 조용한 실패 금지).
-- **파일 싱크 롤링·보존**: Serilog 파일 싱크는 rollingInterval·retainedFileCountLimit으로 디스크 무한 증가 방지(전부 appsettings). plc_event 7~14일 / piece_event 30~90일 보존 원칙(ERD §보존)과 정합하는 operation_log 보존 정책을 ERD.md에 명기(퍼지 구현은 본 스프린트 범위 밖이나 보존 기간 정의는 포함).
+## 6. Completion Conditions (최소 통과 — 전부 충족해야 APPROVED)
+
+- **C1 (스캐폴드)**: `frontend/`에 Vite+React+TS + React Router + TanStack Query + TanStack Table + shadcn/ui + Tailwind 스캐폴드 생성. `npm install` 성공 + `npm run build` exit 0(dist/wwwroot 산출). `tsc --noEmit`(및 lint) 0 에러.
+- **C2 (정적 서빙 단일 서버)**: `npm run build` 후 `dotnet run --project src/Wcs.Api` 기동 → `:5080`(ports.local.json) 루트에서 SPA index.html 서빙 + SPA 라우트 딥링크가 fallback으로 index.html 반환. **`/api/monitor/*`는 정상 JSON**, `/api/monitor/<미존재>`는 index.html로 안 떨어짐(fallback 비삼킴 음성 대조).
+- **C3 (모니터링 API)**: E1~E7 각 엔드포인트가 실 HTTP로 기대 형상 JSON 반환(16셀 시드 데이터 기준 비어있지 않음) + E4·E7 커서 페이징·take 상한 동작. E3(존재하는 오더 id)·E6(존재하는 destId) 정상, 미존재 id/destId는 빈 목록 또는 404(정책 일관).
+- **C4 (브라우저 표시 — Playwright fresh)**: `:5080`에서 모니터링 페이지 ① 로드 → A(배치→오더→아이템 확장)·B(in-flight)·C(셀 16·sorter_command) 3종이 실 데이터로 렌더. 좌측 내비/상단 상태바로 페이지 도달(직접 URL 아님). 번호 스크린샷 + `console.log`(pageerror·React warning 0).
+- **C5 (통합 테스트)**: MonitoringController 통합 테스트 추가(WebApplicationFactory + `UseSetting("Database:Provider","Sqlite")` + in-memory SQLite 더블) — 조회 형상·페이징·에러케이스 커버. 신규 테스트 GREEN.
+- **C6 (회귀 0)**: `dotnet test` **기존 146 + 신규 = 전부 GREEN**·exit 0. base=SqlServer. 정적 서빙/컨트롤러 추가가 회귀 0. (동시성 민감 테스트 있으므로 **fresh ≥3회 반복**으로 결정성 확인 — S-E2E 교훈.)
+- **C7 (무변경 가드)**: `git diff` — RcsController·`src/Wcs.PlcGateway/`·`src/Wcs.Core/`·`src/Wcs.Sim3ds/`·기존 DbRepositories·`Wcs.Migrations.*`·`DbSeeder.cs`·`WcsDbContext.cs`·`appsettings*.json` **0줄**. Program.cs 변경은 정적 서빙 삽입에 한정. `.sln`에 프론트 미등록.
+- **C8 (dev 워크플로 + 도구)**: `npm run dev` + vite proxy로 `/api`가 `:5080`으로 프록시됨(관찰 또는 문서화된 재현). `.mcp.json` 신설(Playwright MCP). `.gitignore`에 node_modules·dist·wwwroot 등재(빌드 산출물 미커밋).
 
 ---
 
 ## 7. Parallel Modules / Evaluation Dimensions
 
-- **Parallel Modules**: N/A (single sprint, single Generator). chuteNo 정정·Serilog·operation_log·로그 호출 부가는 강하게 상호 의존(같은 Program.cs·appsettings·DbContext·마이그레이션을 공유)하므로 모듈 경계로 깨끗이 분할 불가 → 순차 단일 Generator가 정답.
-- **Evaluation Dimensions**: functional only (단일 차원). 보안·성능 민감 신규 표면 없음(로깅은 기존 동작에 부수·DB 추가 1테이블). 성능 가드(§6)는 functional Evaluator가 라이브 관찰로 흡수. 4-Tier 독립 code-reviewer(Step 4.5)가 아키텍처·의존성 방향·중복 여부를 별도 검토(런타임 Evaluator와 비중복).
+- **Parallel Modules**: **N/A (단일 Generator).** 프론트(`frontend/` TS)와 백엔드(`MonitoringController`)가 파일 경계로는 안 겹치나, **API 계약 형상이 강한 공유 인터페이스**라 병렬화하려면 계약을 먼저 동결해야 하고, E2E/통합 검증이 양 계층을 함께 배선해야 한다. 첫 Full-stack 스프린트에서 계약 형상이 반복 조정될 여지가 있어 순차 단일 Generator가 안전(기본 1/1/1 유지 — "When unsure, start with Generate-Verify").
+- **Evaluation Dimensions**: **functional only(단일 차원).** Full-stack 통합 평가 기준(§5)이 프론트(Web/UI)·백엔드(Backend/API)·통합·기능을 한 리뷰에서 흡수한다. 보안·성능 민감 신규 표면 없음(읽기 전용·인증 없음은 설계 확정). 4-Tier 독립 code-reviewer(Step 4.5)가 아키텍처·중복·의존성 방향을 별도 검토(런타임 Evaluator와 비중복).
 
 ---
 
-## 8. 현장 확인 / 미확정 (구현 중 추측 금지 — 기록·필요 시 질문)
-- **chuteNo=1 충돌(우선 확인 대상)**: dev `DbSeeder`의 CHUTE 1~5와 소터 chuteNo=1이 `UQ_destination_chute_no`에서 충돌 가능. **실 현장 DB(seed-field-16cells.sql)에는 CHUTE 1~5 시드가 없으므로** 충돌 없이 chuteNo=1 소터가 들어갈 수 있으나, **dev 시드 형상과 실 DB 형상이 달라진다.** Generator는 dev 충돌을 어떻게 해소할지(예: dev에서 CHUTE를 2~5로 조정, 또는 소터를 별도 처리) 결정하고 **입증과 함께 문서화**. 의미상 모호하면(현장 CHUTE가 정말 chuteNo 1을 안 쓰는지 등) docs/SPEC.md 미확정에 기록하고 사용자에게 질문.
-- **RTU 시리얼 파라미터**: PortName·BaudRate·Parity·StopBits·UnitId 실측값은 직전 스프린트와 동일(이 스프린트 범위 아님 — placeholder 유지).
-- **operation_log 보존·퍼지 배치**: 보존 기간 정의는 ERD.md에 포함하되, 자동 퍼지 일배치 구현은 본 스프린트 범위 밖(후속 — 정의만).
+## 8. 함정 섹션 (기존 교훈·구조적 트랩 — Generator 필독)
+
+1. **`MapFallbackToFile`이 `/api` 404를 삼키는 함정(핵심)**: fallback은 매치 안 된 모든 요청을 index.html로 보낸다 → `/api/monitor/오타`가 HTML 200으로 응답돼 프론트 fetch가 JSON 파싱 실패로 조용히 깨진다. fallback이 `/api`를 제외하도록 배선(패턴·라우트 순서). C2·§5 Integration에 음성 대조로 검증됨.
+2. **테스트 provider override는 `UseSetting`으로만**(lessons.md 2026-06-30 / S-FIELD-SEED): `WebApplicationFactory<Program>`에서 base=SqlServer를 SQLite로 되돌리려면 `builder.UseSetting("Database:Provider","Sqlite")`. `ConfigureAppConfiguration`·EF 디스크립터 제거는 **무효**(Program 즉시 평가·콜백 시점 디스크립터 0). 신규 MonitoringController 테스트도 이 1줄 필수. base=SqlServer 146 GREEN 규칙 준수.
+3. **SqlServer 전용 SQL 금지**: 운영=SQL Server지만 F1은 읽기라 실 SqlServer 검증 불필요. 단 조회가 SqlServer 고유 SQL/raw를 쓰면 in-memory SQLite 테스트 더블에서 깨진다 → provider-agnostic LINQ만.
+4. **piece 풀스캔(A-3)**: in-flight piece(E4)·sorter-command(E7)는 인덱스가 없다(인덱스 추가는 F1 OUT). `take` 상한 + 상태 필터 + 정렬(키셋)로 범위 강제 — 무한/전건 로드 금지. 감사 묶음 C의 `order_item(Barcode)`·`piece(PId,IsActive)` 인덱스는 **스코프 밖**(명시 제외) — MonitoringController가 이 인덱스에 의존하지 않게 설계.
+5. **Windows Service ContentRoot(A-12 유사)**: `UseWindowsService()`가 ContentRoot=`AppContext.BaseDirectory`로 설정 → `UseStaticFiles` 기본 WebRootPath(ContentRoot/wwwroot)가 서비스 배포에서도 유효한지 확인. F1의 blocking 검증은 `dotnet run` 단일 서버(FRONTEND.md F1 Done)이며, 실 Windows Service 배포 검증은 배포 README 명기로 대체(F1 blocking 아님).
+6. **wwwroot는 gitignored 빌드 산출물**: fresh clone/CI/test 호스트에 wwwroot·index.html이 없다 → 정적 서빙 미들웨어가 파일 부재에서 무해해야 한다(146 테스트는 wwwroot 없이 GREEN 유지). `dotnet run` 서빙 검증은 `npm run build` 선행 필수.
+7. **Node/npm 실행**: 확인된 버전(node v22.17.0/npm 11.4.2)이나 Windows 환경 — npm 스크립트·경로에 공백(`회사 자료`) 포함 경로 주의. 셸은 PowerShell/Git Bash 양쪽 동작 확인.
+8. **`.sln` 순수 .NET 유지**: `frontend/`를 `.sln`·`src/Wcs.*` 네이밍에 등록하지 않는다(FRONTEND.md §1.1) — `dotnet build`/`dotnet test`/pre-commit hook 무영향.
 
 ---
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints touched [IF-05 destination-query / IF-09 arrival-report / IF-10 deposit-report / IF-08 outbound push], happy path per endpoint, relevant error cases per endpoint). All slots filled: yes.
+## 9. 미확정 (구현 중 추측 금지 — 필요 시 사용자 질문)
+
+- **E5 `/sorters` 소터 0대·OFFLINE 시 형상**: 소터가 미기동/OFFLINE(번들 없음)이면 `online:false`로 반환(DestinationStatusService가 이미 그렇게 산출). 빈 목록 vs online:false 항목 — Generator가 일관 정책으로 명시(추가 사용자 확인 불요, 기존 산출 따름).
+- **take 상한 값·초과 정책(clamp vs 400)**: Generator가 상수·정책을 정하고 명시(설계 확정 대상 아님 — 방어 로직 선택).
+- 그 외 F1 범위 내 미확정 없음(FRONTEND.md §8 6개 질문 전건 확정됨 — §0 전제).
 
 ---
 
-## Verification Scenarios (Backend/API — mandatory)
+> Planner self-check — Detected project type: **Full-stack**. Required scenario slots: **3** (Web/UI frontend scenarios, Backend/API scenarios, End-to-end cross-layer data-flow). All slots filled: **yes**.
 
-### Slot 1 — Explicit list of endpoints touched by this sprint (method + path)
-1. `POST /api/v1/destination-query` (IF-05) — chuteNo=1 반환 + operation_log API_REQ/RES 전수 기록.
-2. `POST /api/v1/arrival-report` (IF-09) — 도착 기록 + (소터면) 운영층 정렬 쓰기 → PLC_WRITE 로그.
-3. `POST /api/v1/deposit-report` (IF-10) — 투입 보고 + (3D면) IF-11 핸드셰이크 트리거 → HANDSHAKE 단계 로그.
-4. **아웃바운드** `POST {RcsBaseUrl}/api/v1/destination-status` (IF-08 push, WCS→RCS) — 푸시 전송 시 operation_log `API`/`IF08_PUSH` 기록(BaseUrl 미설정 시 비활성이므로 설정된 환경 또는 Fake RCS로 관찰).
+---
 
-### Slot 2 — Happy path per endpoint (expected input → expected output shape + 로그 부수효과)
-- **IF-05**: `{pId,agvNo,barcode(=0701-CELL-01),inductionNo,qty,timeStamp}` → `200 {result:"OK", chuteNo:1}`. 부수: operation_log에 `API/IF05_REQ`+`API/IF05_RES`(barcode·pId·chuteNo=1·result) 2행 이상 + 콘솔/파일 Serilog 구조화 라인.
-- **IF-09**: `{pId,chuteNo:1,agvNo,timeStamp}` → `200 {result:"OK"}`. 부수: 소터면 SetTgtFloor 큐 투입 시 `PLC_WRITE/SET_TGTFLOOR`(조건 충족 시) + 도착 기록 로그.
-- **IF-10**: `{pId,barcode,chuteNo:1,agvNo}` → `200 {result:"OK"}`. 부수: 3D면 핸드셰이크 트리거 → `HANDSHAKE/HS_C_SENT`→`HS_R_RECV`→`HS_RSEQ_MATCH`(또는 mismatch/timeout) + `PLC_WRITE/CELL_ASSIGN`·`CLEAR_R`·`RMW_D4` 행들. (실 Sim 또는 라이브 핸드셰이크로 관찰.)
-- **IF-08 push**: 소터 상태 전이 시 WCS가 RCS로 푸시 → operation_log `API/IF08_PUSH`(destinationId·payload 발췌) 1행/전이.
+## Verification Scenarios (Full-stack — mandatory)
 
-### Slot 3 — Relevant error cases per endpoint (Planner가 해당되는 것만 — 패딩 없음)
-- **IF-05 400**: `pId` 범위 밖(`<1 || >30000`)·`barcode` 공백·`qty<=0` → `400 {error}`. 부수: 검증 실패도 operation_log에 기록되는지(또는 의도적 미기록인지) Generator 정책 명시 — Evaluator는 응답 형상(400)이 로깅으로 안 바뀌는지 확인.
-- **IF-05 NG(200)**: 미적재/오매칭 바코드 → `200 {result:"NG", chuteNo:null}`(음성 대조 — chuteNo=1이 잘못 나오지 않음). 부수: piece DENIED + operation_log `API/IF05_RES` reason 기록.
-- **IF-09 / IF-10 400**: `pId` 범위 밖·`chuteNo<=0`·(IF-10)`barcode` 공백 → `400`. 미존재/비활성 chuteNo는 **500 금지**(200 + 기록만) — 로깅이 이 정책을 깨지 않음 확인.
-- **상태 전이 ERROR**: 소터 OFFLINE(읽기 실패 주입) → operation_log `STATE/OFFLINE` ERROR 1행(전이당 1회 — 폴마다 반복 0). R_Seq 불일치 → `HANDSHAKE/HS_RSEQ_MISMATCH` ERROR + 기존 alarm 테이블 의미 불변(중복 기록이 alarm 행 수를 바꾸지 않음).
+### Slot 1 — Web/UI 시나리오 (프론트 surface: 모니터링 페이지 ① + 전역 레이아웃)
+- **각 surface 기본 상태**:
+  - 모니터링 페이지 ① 최초 로드 — 좌측 내비 + 상단 상태바(소터 Online/Offline) + A/B/C 3개 섹션 기본 렌더(16셀 시드 데이터).
+  - A 작업 데이터: 배치 목록/선택 UI + 선택 배치의 오더 테이블(order_no·type·destination·status·planned/reserved/sorted).
+  - B 로봇 이동중: in-flight piece 테이블(pId·barcode·qty·chuteNo·agvNo·inductionNo·status·시각).
+  - C 분류: 소터 선택 + 셀 현황 테이블(16셀: cellNo·capacity·currentQty·occupied·enabled) + sorter_command 이력 테이블.
+- **각 대체 상태(sprint가 도입)**:
+  - 배치 선택 시 오더 테이블 갱신(selected) / 오더 행 확장 → order_item 표시(expanded).
+  - in-flight·sorter-command 페이징(다음 페이지 로드).
+  - 필터 적용(배치·상태) 결과 반영.
+  - 로딩 상태(폴링/최초 fetch)와 데이터 도착 전환.
+- **관련 empty/error 상태**: 데이터 없는 배치/소터 선택 시 빈-상태 메시지(빈 테이블 crash 아님). API 에러(예: 정지된 백엔드) 시 에러 상태 표시(무한 스피너·앱 크래시 아님).
+- **다크 모드**: **N/A** — F1은 다크 모드 토글 미구현(단일 기본 테마). 사유: F1은 모니터링 골격 확립 범위이며 테마 전환은 후속 페이즈 여지(FRONTEND.md F1 Done에 다크모드 없음).
+- **핵심 상호작용 흐름(sprint가 만드는 사용자 가시 동작)**: 앱 로드 → 좌측 내비로 모니터링 페이지 이동 → 배치 선택 → 오더 테이블 표시 → 오더 행 확장 → order_item 확인 → in-flight/셀/sorter_command 3종이 폴링으로 갱신되는 것을 관찰. (Playwright: navigate → click(배치) → assert(오더 행) → click(행 확장) → assert(아이템) → 페이징 click → assert. 번호 스크린샷 + console.log 캡처, pageerror·React warning 0.)
+
+### Slot 2 — Backend/API 시나리오 (백엔드 surface: `/api/monitor/*`)
+- **엔드포인트(method + path)**: E1 `GET /api/monitor/batches` · E2 `GET /api/monitor/orders?batchId=&status=` · E3 `GET /api/monitor/orders/{id}/items` · E4 `GET /api/monitor/pieces/in-flight?take=&cursor=` · E5 `GET /api/monitor/sorters` · E6 `GET /api/monitor/sorters/{destId}/cells` · E7 `GET /api/monitor/sorter-commands?destId=&take=&cursor=`.
+- **엔드포인트별 해피패스(입력→출력 형상)**:
+  - E1 → 200 배열[{id,workDate,batchNo,waveNo,status,openedAt,closedAt}] 최신순·take 상한 이하.
+  - E2(batchId 지정) → 200 배열[{id,orderNo,orderType,destinationChuteNo,status,plannedQty,reservedQty,sortedQty}] 집계 정확(order_item 합).
+  - E3(존재 오더 id) → 200 배열[{id,barcode,plannedQty,reservedQty,sortedQty}].
+  - E4 → 200 배열(status∈QUERIED/RESERVED/PERMITTED만) + take 상한 + 커서로 다음 페이지.
+  - E5 → 200 배열[{destId,chuteNo,online,ready,full,paused}](DestinationStatusService 산출 일치).
+  - E6(존재 destId) → 200 배열 16셀[{cellNo,capacity,currentQty,occupied,enabled,assignedOrderNo?}](SorterCellQty 수량 일치).
+  - E7 → 200 배열[{id,pId,barcode?,cellNo,cSeq,rSeq,status,cWrittenAt,rFlagAt}] 최신순 + take 상한 + 커서.
+- **엔드포인트별 관련 에러케이스(해당되는 것만 — 패딩 없음)**:
+  - E3/E6 미존재 id/destId → 빈 배열 또는 404(정책 일관 — Generator 명시, Evaluator는 500 아님·일관성 확인).
+  - E4/E7 `take` 상한 초과 요청 → clamp 또는 400(정책 일관·무한 로드 아님 입증).
+  - E4/E7 잘못된 커서 → 400 또는 빈 결과(500 아님).
+  - **fallback 비삼킴(음성 대조)**: `GET /api/monitor/<미존재 경로>` → index.html(HTML 200) 반환 안 됨(404 계열).
+
+### Slot 3 — End-to-end cross-layer 데이터 흐름 시나리오 (2+ 계층 관통)
+- **빌드→서빙→조회→렌더 관통**: `npm run build`로 프론트 산출물이 `src/Wcs.Api/wwwroot`에 배치 → `dotnet run --project src/Wcs.Api`(:5080) 단일 서버 기동 → 브라우저가 **:5080에서 SPA를 로드**(같은 출처) → SPA가 `/api/monitor/sorters`·`/orders`·`/pieces/in-flight`·`/sorters/{destId}/cells`를 호출 → **실 DB(16셀 시드)의 데이터가 페이지 ① A/B/C 테이블에 렌더**된다. (프론트 라우팅 딥링크 → fallback → index.html → SPA가 다시 API 호출로 데이터 복원까지 관통 확인. dev 경로 대체 검증: `npm run dev`(:5173) + proxy로 `/api`→:5080 동작.)

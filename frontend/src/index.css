@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WCS 관제 콘솔 — "블루프린트 그래파이트" 계기판 테마 (단일 기본 테마, F1 다크 토글 없음)
+   설계 의도: SCADA/계기판 정서 — 순검정이 아닌 청회색 그래파이트 베이스 위에
+   기능적 상태색 체계(online/ready/full/busy)와 모노스페이스 계기 판독값.
+   외부 폰트 미로드(사내망 안전) — 시스템 산세리프 + 모노스페이스만.
+   ═══════════════════════════════════════════════════════════════════════════ */
+@theme {
+  --color-base:      #0d1520; /* 앱 배경 (딥 블루-그래파이트) */
+  --color-panel:     #131e2c; /* 카드/패널 */
+  --color-elevated:  #18273a; /* 헤더/호버 강조 */
+  --color-line:      #24344c; /* 경계선 */
+
+  --color-ink:       #e7eef8; /* 1차 텍스트 */
+  --color-muted:     #8fa3c0; /* 2차 텍스트 */
+  --color-faint:     #5f7290; /* 3차 텍스트/캡션 */
+
+  --color-accent:    #38bdf8; /* 브랜드/포커스(스카이) — 절제 사용 */
+  --color-online:    #34d399; /* 온라인/준비(에메랄드) */
+  --color-offline:   #fb7185; /* 오프라인/에러(로즈) */
+  --color-warn:      #fbbf24; /* 만재/경고(앰버) */
+  --color-busy:      #22d3ee; /* 이동/분류중(시안) */
+
+  --font-sans: "Segoe UI Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    margin: 0;
+    background-color: var(--color-base);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 계기판 배경: 미세한 블루프린트 그리드 */
+  body {
+    background-image:
+      linear-gradient(to right, rgba(56, 189, 248, 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(56, 189, 248, 0.035) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  ::selection { background: rgba(56, 189, 248, 0.28); }
+
+  /* 얇은 스크롤바 — 밀집 운영툴 정서 */
+  * { scrollbar-width: thin; scrollbar-color: #2c3f5b transparent; }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-thumb {
+    background: #2c3f5b; border-radius: 6px;
+    border: 2px solid transparent; background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover { background: #3a5170; background-clip: content-box; }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+    border-radius: 3px;
+  }
+}
+
+/* 온라인 램프 펄스 — 신호 대기 애니메이션 (reduced-motion 존중) */
+@keyframes lamp-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }
+  50%      { opacity: 0.75; box-shadow: 0 0 8px 1px currentColor; }
+}
+.lamp-live { animation: lamp-pulse 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp-live { animation: none; }
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

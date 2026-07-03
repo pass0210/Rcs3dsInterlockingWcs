@@ -198,10 +198,29 @@ await DbInitializer.ProvisionAsync(app);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10)
+// (F1) SPA 정적 서빙 — UseStaticFiles는 라우팅/엔드포인트 이전 미들웨어여야 한다.
+// npm run build 산출물을 src/Wcs.Api/wwwroot(기본 WebRootPath)에서 서빙.
+// wwwroot 부재(테스트 호스트·fresh clone·CI)면 WebRootFileProvider가 NullFileProvider라
+// 무해 — 기존 146 테스트는 wwwroot 없이 GREEN 유지(함정 #6). Windows Service ContentRoot
+// (=AppContext.BaseDirectory)에서도 WebRootPath=ContentRoot/wwwroot 기준으로 정상 서빙(함정 #5).
+// ════════════════════════════════════════════════════════════════════════════
+app.UseStaticFiles();
+
+// ════════════════════════════════════════════════════════════════════════════
+// (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10, MonitoringController: /api/monitor)
 // IF-08 투입 가부 폴링(deposit-permission)은 폐지 — Phase 2 WCS→RCS 푸시로 대체.
 // ════════════════════════════════════════════════════════════════════════════
 app.MapControllers();
+
+// ════════════════════════════════════════════════════════════════════════════
+// (F1) SPA fallback — API 우선·fallback이 /api/**를 삼키지 않게(함정 #1·음성 대조 C2).
+// /api/** 미매치 요청은 여기서 404로 확정한다(이 catch-all은 MapFallbackToFile보다 우선순위가
+// 높고, 리터럴 컨트롤러 라우트보다는 낮아 실 API는 그대로 컨트롤러가 처리). 이렇게 하지 않으면
+// /api/monitor/오타 같은 요청이 index.html(HTML 200)로 떨어져 프론트 fetch가 JSON 파싱에
+// 조용히 실패한다. 그 외 경로(SPA 딥링크)만 index.html로 폴백 — wwwroot/index.html 부재 시 404(무해).
+// ════════════════════════════════════════════════════════════════════════════
+app.Map("/api/{**rest}", () => Results.NotFound());
+app.MapFallbackToFile("index.html");
 
 app.Run();
 
