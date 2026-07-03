@@ -1852,3 +1852,43 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
 ### 미해결/주의
 - PLC_WRITE·POLL_CHANGE·HANDSHAKE-success·ONLINE의 실 DB 입증은 Sim 백업(TCP override)으로 수행 — 현장 RTU HW 부재(placeholder). Production RTU 기동은 OFFLINE(예상)이나 IF-05는 DB dispatch라 chuteNo=1 정상.
 - operation_log 자동 퍼지 일배치는 본 스프린트 범위 밖(ERD에 보존 14일 정의만).
+
+---
+
+## IMPLEMENTATION COMPLETE (F1) — 프론트엔드 스캐폴드 + 정적 서빙 + 모니터링 읽기 (2026-07-03, Generator)
+
+브랜치 `feat/frontend-f1`. 계약 §2 IN 전건 구현. 커밋 없음(team-lead 커밋).
+
+### 생성/변경 파일
+**백엔드(신규)**
+- `src/Wcs.Api/Monitoring/MonitoringDtos.cs` — E1~E7 반환 DTO(카멜케이스) + `PagedResult<T>`(키셋 커서).
+- `src/Wcs.Api/Monitoring/MonitoringQueries.cs` — `IMonitoringQueries` + EF 구현(AsNoTracking). `IDestinationStatusService.Compute`·`SorterCellQty.LoadedQtyByCell` 재사용(신규 산출 0). take clamp(TakeDefault=50·TakeMax=200)·키셋 커서(Id 내림차순). provider-agnostic LINQ(enum→string은 materialize 후 C#).
+- `src/Wcs.Api/Controllers/MonitoringController.cs` — `[Route("api/monitor")]` 읽기 전용 7개(E1~E7). DI 배선 결정: IMonitoringQueries를 Program.cs에 등록하지 않고 이미 등록된 WcsDbContext(scoped)+싱글톤 2종을 주입받아 요청당 조립 → **Program.cs 변경을 정적 서빙 삽입에만 한정(C7 준수)**.
+**백엔드(변경 — 정적 서빙만)**
+- `src/Wcs.Api/Program.cs` — `app.Run()` 앞 +20/-1: `UseStaticFiles()`(MapControllers 앞) + `app.Map("/api/{**rest}", ()=>Results.NotFound())`(fallback 이전·컨트롤러 이후 = /api 비삼킴) + `MapFallbackToFile("index.html")`.
+**프론트(신규 `frontend/`)** — Vite6+React19+TS + React Router7 + TanStack Query5 + TanStack Table8 + Tailwind4(@tailwindcss/vite)+shadcn식 자작 컴포넌트. 25개 src 파일: `lib/{api,queries,format,status,utils}.ts`, `components/ui/{card,badge,button,table,tabs,select,meter}.tsx`, `components/{Layout,StatusRail,StateMessage,DataGrid,CursorPager}.tsx`, `pages/MonitorPage.tsx` + `sections/{WorkData,InFlight,Sorting}Section.tsx`. `vite.config.ts`: dev proxy `/api`→:5080 + `build.outDir=../src/Wcs.Api/wwwroot`(수동 복사 0). eslint flat config·tsconfig(paths @/*).
+**테스트(신규)** — `tests/Wcs.Tests/MonitoringApiTests.cs`: 15 테스트(E1~E7 형상·집계·상태필터·키셋 페이징·take clamp·잘못된 커서 400·미존재 id 빈배열·fallback 404 음성대조·ClampTake 단위). 전용 `MonitoringWebApplicationFactory`(인스턴스 고유 DB — 아래 finding).
+**도구** — `.mcp.json`(Playwright MCP). `.gitignore` +frontend/node_modules·dist·wwwroot.
+
+### 페이지 ① (FRONTEND.md §5) — 좌측 내비 + 상단 상태바(소터 상태 레일=시그니처) + 탭 A/B/C
+- A 작업데이터: 배치 select + 상태 필터 + 오더 테이블(TanStack Table 행 확장 → order_item 서브테이블) + 진행바.
+- B 로봇 이동중: in-flight piece 테이블 + 커서 페이저(이전/다음).
+- C 분류: 소터 select + 셀 현황 그리드(색상 태그·용량 게이지) + sorter_command 이력 테이블 + 커서 페이저.
+- TanStack Query 폴링 3s. 로딩/에러/빈-상태 처리. 다크 인더스트리얼 계기판 테마(외부 폰트 미로드).
+
+### C1~C8 검증 증거 (fresh)
+- **C1**: `npm install`(0 vuln) → `tsc --noEmit` 0에러 → `npm run lint`(eslint) **0에러 0경고** → `npm run build` exit0, `src/Wcs.Api/wwwroot`에 index.html+assets(css 21KB·js 391KB) 산출.
+- **C6(회귀 0)**: `dotnet test Wcs.sln` base=SqlServer **161 통과·0 실패 × 3회 연속**(기존 146 + 신규 15). 결정적.
+- **C2/C3(단일 서버·Production·실 SQL Server field DB)**: `dotnet run --project src/Wcs.Api`(RTU COM1 OFFLINE·예상) → :5080. `/`·`/monitor` → 200 text/html(index.html SPA 셸). `/assets/*.css` → 200 text/css. E1~E7 curl 실 16셀 데이터: sorters=[chuteNo1,online:false], batches=[FIELD-16], cells=16(capacity3·assignedOrderNo 0701-CELL-NN), orders=16, order-items(0701-CELL-16 planned3), in-flight/sorter-commands=빈 페이지(라이브 piece 없음).
+- **C2 fallback 음성대조**: `/api/monitor/bad-route`·`/api/nonexistent`·`/api/v1/deposit-permission` → **404 (content-type 공백 — index.html 미삼킴)**. 기존 `/api/v1/destination-query` POST → `{"result":"OK","chuteNo":1}`(불변).
+- **C5(통합 테스트)**: 15개 GREEN(UseSetting Provider=Sqlite + in-memory SQLite 더블 + DbSeeder). in-flight status Contains(정적배열)→OR 명시로 EF 파라미터 평가 이슈 수정.
+- **C7(무변경 가드)**: RcsController·PlcGateway·Core·Sim3ds·DbRepositories·Migrations·DbSeeder·WcsDbContext·Entities·appsettings*·기존 테스트 파일 **git diff 0줄**. Program.cs만 +20/-1(정적 서빙). `.sln` 프론트 미등록.
+- **C8(dev 워크플로)**: `npm run dev`(:5173) + proxy → `:5173/api/monitor/sorters`·`/sorters/1/cells`(16셀)가 :5080으로 프록시돼 JSON 반환. `.mcp.json` 신설.
+
+### 정책 결정(계약 §9 미확정 해소)
+- take 상한=200·기본=50, 초과는 clamp(400 아님). 잘못된 커서는 [ApiController] 자동 400. 미존재 id/destId(E2·E3·E6)는 200 빈 배열(일관). E5는 registry.AllBundles 기준(등록 소터만·OFFLINE은 online:false — 기존 산출 따름).
+
+### FINDING(주의 — Evaluator/후속)
+- **테스트 격리**: `ApiIntegrationTests.FakeModbusWebApplicationFactory._dbName`이 `static readonly`라 모든 인스턴스가 단일 in-memory DB 공유(IClassFixture 단일 인스턴스 전제). 이를 per-test로 재사용하면 EnsureCreated/시드 충돌·교차오염 발생(초기 시도에서 기존 테스트까지 collateral 실패 관찰). 기존 파일 무변경 원칙상 그 static 필드 수정 불가 → 공개 헬퍼 클래스만 재사용하고 **인스턴스 고유 DB를 쓰는 전용 `MonitoringWebApplicationFactory`**를 신규 파일에 정의(격리 해소·161 GREEN). → todo 정리 후보: 그 `_dbName`을 인스턴스 필드로 승격하면 재사용성↑.
+- 라이브 검증 시 소터는 RTU COM1 부재로 OFFLINE(현장 HW 없음·예상). 모니터링 조회는 PLC 무관(DB 기반)이라 전 엔드포인트 실데이터 정상. Playwright 정밀 렌더 검증은 Evaluator 몫(.mcp.json 준비됨).
+- 검증 후 :5080·node 프로세스 종료·정리 완료.
