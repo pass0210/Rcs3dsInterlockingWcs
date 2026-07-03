@@ -8,7 +8,7 @@
     운영 배포 경로·서비스 계정은 아래 플레이스홀더를 환경에 맞게 수정 후 실행.
 
     사전 준비(게시):
-      dotnet publish src/Wcs.Api/Wcs.Api.csproj -c Release -r win-x64 --self-contained false -o C:\BOWOO\Wcs.Api
+      dotnet publish backend/src/Wcs.Api/Wcs.Api.csproj -c Release -r win-x64 --self-contained false -o C:\BOWOO\Wcs.Api
     그 후 관리자 PowerShell에서 이 스크립트 실행.
 
     DB 프로비저닝: 서비스 기동 시 DbInitializer가 자동 Migrate(Database:MigrateOnStartup=true)로

@@ -30,12 +30,12 @@
 
 | 프로젝트 | 역할 |
 |---|---|
-| `src/Wcs.Core` | 판정 엔진(순수 C#): RegisterMap·모델·DepositDecider — 의존성 0 |
-| `src/Wcs.PlcGateway` | FluentModbus 마스터: 폴링 스냅샷 캐시 + 단일 쓰기 큐 |
-| `src/Wcs.Api` | ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트 |
-| `src/Wcs.Data` | EF Core: 오더·예약·pId 이력·트랜잭션 로그 |
-| `src/Wcs.Sim3ds` | 3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역 |
-| `tests/Wcs.Tests` | xUnit — `DepositDeciderTests`가 판정 스펙 그 자체 |
+| `backend/src/Wcs.Core` | 판정 엔진(순수 C#): RegisterMap·모델·DepositDecider — 의존성 0 |
+| `backend/src/Wcs.PlcGateway` | FluentModbus 마스터: 폴링 스냅샷 캐시 + 단일 쓰기 큐 |
+| `backend/src/Wcs.Api` | ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트 |
+| `backend/src/Wcs.Data` | EF Core: 오더·예약·pId 이력·트랜잭션 로그 |
+| `backend/src/Wcs.Sim3ds` | 3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역 |
+| `backend/tests/Wcs.Tests` | xUnit — `DepositDeciderTests`가 판정 스펙 그 자체 |
 
 ## 기술 스택
 
@@ -49,11 +49,11 @@
 ## 빌드 / 실행
 
 ```bash
-dotnet build                          # 솔루션 빌드 (M0에서 sln 구성 후)
-dotnet test                           # 전체 테스트
-dotnet test --filter Decider          # 판정 테스트만
-dotnet run --project src/Wcs.Sim3ds   # 3DS 시뮬레이터 (기본 :1502)
-dotnet run --project src/Wcs.Api      # WCS API (기본 :5080)
+dotnet build backend/Wcs.sln          # 솔루션 빌드 (M0에서 sln 구성 후)
+dotnet test backend/Wcs.sln           # 전체 테스트
+dotnet test backend/Wcs.sln --filter Decider   # 판정 테스트만
+dotnet run --project backend/src/Wcs.Sim3ds   # 3DS 시뮬레이터 (기본 :1502)
+dotnet run --project backend/src/Wcs.Api      # WCS API (기본 :5080)
 ```
 
 모든 시간값(폴 주기, 재호출 간격, R_Flag 타임아웃 등)과 접속 정보는 `appsettings.json`에서 설정한다(하드코딩 금지).
