@@ -1892,3 +1892,37 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
 - **테스트 격리**: `ApiIntegrationTests.FakeModbusWebApplicationFactory._dbName`이 `static readonly`라 모든 인스턴스가 단일 in-memory DB 공유(IClassFixture 단일 인스턴스 전제). 이를 per-test로 재사용하면 EnsureCreated/시드 충돌·교차오염 발생(초기 시도에서 기존 테스트까지 collateral 실패 관찰). 기존 파일 무변경 원칙상 그 static 필드 수정 불가 → 공개 헬퍼 클래스만 재사용하고 **인스턴스 고유 DB를 쓰는 전용 `MonitoringWebApplicationFactory`**를 신규 파일에 정의(격리 해소·161 GREEN). → todo 정리 후보: 그 `_dbName`을 인스턴스 필드로 승격하면 재사용성↑.
 - 라이브 검증 시 소터는 RTU COM1 부재로 OFFLINE(현장 HW 없음·예상). 모니터링 조회는 PLC 무관(DB 기반)이라 전 엔드포인트 실데이터 정상. Playwright 정밀 렌더 검증은 Evaluator 몫(.mcp.json 준비됨).
 - 검증 후 :5080·node 프로세스 종료·정리 완료.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-BACKEND-FOLDER)
+
+**Generator: standalone. Branch `refactor/backend-folder`. 커밋/push 없음(스테이징까지).** .NET 세계 전체(`Wcs.sln`+`src/`+`tests/`)를 `backend/` 하위로 R100 순수 이동 + 바깥→안 참조 7파일 경로 갱신. 코드 의미 0 변경.
+
+### 이동 결과 (git mv)
+- **75개 rename**: `Wcs.sln`(1) + `src/**`(54, 7프로젝트) + `tests/Wcs.Tests/**`(20) → 각각 `backend/` 하위. 구 `src/`·`tests/` 디렉터리 **완전 소멸**(파일시스템 확인).
+- git mv 시 Windows 디렉터리 rename이 IDE Dev Kit build host + MSBuild nodeReuse 노드의 `bin/obj` 핸들에 막혀 "Permission denied" → `dotnet build-server shutdown` + 구 `bin/obj/logs/wwwroot`(§2C 고아·전부 gitignore·재생성물) 선삭제 후 재시도 성공. **§2C 정리를 이동 전에 수행**(순서만 다름·종점 동일).
+
+### 참조 갱신 7파일 (경로 토큰만·산문 무재작성)
+1. `frontend/vite.config.ts` L11 주석·L32 `outDir` → `../backend/src/Wcs.Api/wwwroot`(`../` 유지·함정5 회피).
+2. `.gitignore` L18 → `backend/src/Wcs.Api/wwwroot/`(그 1줄만).
+3. `scripts/install-service.ps1` L11 publish csproj → `backend/src/Wcs.Api/Wcs.Api.csproj`(`-o C:\BOWOO\Wcs.Api` 배포경로 불변).
+4. `CLAUDE.md` 솔루션 구조 6줄 + 빌드/테스트/실행 명령 5줄(build/test→`backend/Wcs.sln`, run→`backend/src/...`).
+5. `README.md` 구조 표 6줄 + 명령 5줄(동일 패턴).
+6. `docs/FRONTEND.md` 8곳(L40·43·44·45·53·58·61·241).
+7. `docs/SPEC.md` L98 `backend/src/Wcs.PlcGateway/IModbusMaster.cs`.
+- 무변경 확인: `scripts/uninstall-service.ps1`·`scripts/seed-field-16cells.sql`(경로 참조 0).
+
+### 검증 7기준 — 전부 fresh PASS
+- **① 순수 이동(5중)**: `git diff -M --cached --diff-filter=R` → `--stat` **75 files changed, 0 insertions(+), 0 deletions(-)**; `--numstat` 전 행 `0  0`; `--summary` **75/75 rename (100%)**; `git status --find-renames` 전 `R `(RM/A/D 0). `--cached` 사용(함정4 회피).
+- **② 빌드+테스트**: `dotnet build backend/Wcs.sln --no-incremental` → **오류 0**(경고 10 = NU1903 SQLitePCLRaw 2.1.10 취약성 advisory — csproj byte-identical R100이므로 **이동과 무관한 기존 패키지 경고**·base develop 동일). `dotnet test backend/Wcs.sln --blame-hang-timeout 300s` → **161 통과/0 실패/0 건너뜀 × 3회 연속·exit 0**, Blame "시퀀스 파일 미생성"(teardown 클린).
+- **③ 프론트 빌드**: `cd frontend && npm run build` exit0 → `../backend/src/Wcs.Api/wwwroot/`에 index.html+assets(css 21.46KB·js 391.43KB) 산출(물리 확인). 구 `src/Wcs.Api/wwwroot` 미재생(구 트리 소멸). 신 wwwroot는 갱신된 .gitignore로 **ignored**(`git check-ignore` 확인).
+- **④ 단일 서버 스모크**: `dotnet run --project backend/src/Wcs.Api`(Production) → `:5080` LISTENING·ContentRoot=`backend/src/Wcs.Api`. `GET /` → **200 text/html**(SPA 셸·ETag). `GET /api/monitor/sorters` → **200 JSON** `[{destId:1,chuteNo:1,online:false,...}]`. `POST /api/v1/destination-query`(barcode 0701-CELL-16) → **`{"result":"OK","chuteNo":1}`**. 종료·정리 완료(:5080 released). (RTU COM1 OFFLINE은 HW 부재·예상.)
+- **⑤ EF design-time**: `has-pending-model-changes` Sqlite·SqlServer(각 project==startup-project) → **둘 다 "No changes"**·exit 0.
+- **⑥ 구경로 잔존 0**: 갱신 7파일 grep `src[/\\]Wcs|tests[/\\]Wcs|Wcs\.sln` → 전 hit `backend/` 접두(비-backend 잔존 0).
+- **⑦ 무변경 가드**: ①의 `--numstat` 0 0가 모든 이동 `.cs/.csproj/appsettings*/tests` 포함 입증(본문 diff 0). staged 비-rename 항목 = 참조 7파일 M **뿐**.
+
+### 스코프 밖·주의(후속 사용자 결정)
+- `.claude/settings.json` 권한 allowlist가 구 `src/Wcs.Api/...` 경로 참조(함정6) — 미승인 config·스코프 밖. 영향은 최악의 경우 권한 프롬프트 추가뿐(빌드/실행 실패 아님). 사용자 후속 결정.
+- `tasks/sprint-contract.md`는 착수 전부터 ` M`(unstaged·본 스프린트 계약 문서 자체) — 내 변경 아님. `.claude/`는 untracked(스코프 밖).
+- 커밋/브랜치 조작 없음. 스테이징 상태로 Evaluator 검증 대기.
