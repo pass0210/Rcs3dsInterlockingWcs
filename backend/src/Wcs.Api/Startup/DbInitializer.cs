@@ -41,6 +41,18 @@ public static class DbInitializer
     public const string SeedOnStartupKey = "Database:SeedOnStartup";
 
     /// <summary>
+    /// 시드 게이트 — 콜드스타트 dev 시드를 실행할지 판정하는 순수 함수.
+    /// 명시 <c>Database:SeedOnStartup=true</c>일 때만 <c>true</c>. null/false/미지정은 전부 <c>false</c>.
+    /// ⚠ 환경 기반 암묵 발동(과거 <c>?? IsDevelopment()</c>) 제거 —
+    ///   ASPNETCORE_ENVIRONMENT=Development만으로는 절대 시드가 발동하지 않는다.
+    ///   (2026-07-03 현장 SqlServer DB 오염 사고 재발 방지 — 시드는 명시 설정으로만.)
+    /// I/O·WebApplication·DI 의존 0 — 절대규칙 #8(판정 로직은 순수 함수·테스트가 스펙).
+    /// </summary>
+    /// <param name="seedOnStartup">appsettings의 <c>Database:SeedOnStartup</c> 값(bool?, 미지정=null).</param>
+    /// <returns>명시 <c>true</c>면 시드 실행, 그 외(null/false)는 시드 안 함.</returns>
+    public static bool ShouldSeed(bool? seedOnStartup) => seedOnStartup == true;
+
+    /// <summary>
     /// 콜드스타트 프로비저닝 실행. 실 호스트 startup에서만 호출.
     /// </summary>
     /// <param name="app">빌드된 WebApplication.</param>
@@ -82,27 +94,38 @@ public static class DbInitializer
                 MigrateOnStartupKey);
         }
 
-        // ── ② dev/빈-DB 한정 시드 (운영 안전 게이트) ───────────────────────────
+        // ── ② dev/빈-DB 한정 시드 (명시 게이트) ───────────────────────────────
         // 운영(production)은 실제 마스터데이터를 쓰므로 테스트 시드 자동 삽입 금지.
-        // 게이트: SeedOnStartup=true(명시) 또는 Development 환경에서만 on. 기본 off.
+        // 게이트: 명시 SeedOnStartup=true일 때만 on(ShouldSeed). null/false/미지정=시드 안 함.
+        // ⚠ 환경 암묵 발동 제거 — 과거 `?? IsDevelopment()`는 SeedOnStartup 미지정 시
+        //   ASPNETCORE_ENVIRONMENT=Development면 자동 시드했고, Development.json이 켠
+        //   SeedOnStartup=true가 Provider/연결 오버라이드 없이 base(SqlServer·현장 연결문자열)로
+        //   직행해 현장 DB를 오염시켰다(2026-07-03 사고). 환경만으로는 절대 발동하지 않게 한다.
         var seedOnStartup = config.GetValue<bool?>(SeedOnStartupKey);
-        var seedEnabled = seedOnStartup ?? app.Environment.IsDevelopment();
-        if (seedEnabled)
+        if (ShouldSeed(seedOnStartup))
         {
-            // 시드는 멱등(DbSeeder.Seed가 존재 행을 스킵). 그래도 운영 안전을 위해
-            // 게이트 통과 시에만 호출한다.
+            // 여기 도달 시 db는 비 in-memory(실 파일/SqlServer) — in-memory는 위 IsInMemorySqlite 가드에서 이미 조기 return.
+            // 명시 SeedOnStartup=true는 정당한 요청이므로 거부(throw)하지 않는다. 다만 실 DB에
+            // 시드를 주입하는 위험한 동작이므로 Fail Loud로 눈에 띄는 WARNING을 남긴다(오염 감지 실마리).
+            var conn = db.Database.GetDbConnection();
+            log.LogWarning(
+                "[DbInitializer] {Key}=true — 비 in-memory DB에 dev 시드를 주입합니다. " +
+                "provider={Provider}, database={Database}, dataSource={DataSource}. " +
+                "⚠ 현장 운영 DB라면 마스터데이터가 오염될 수 있습니다 — Provider/ConnectionStrings가 " +
+                "dev 전용으로 오버라이드됐는지 반드시 확인하십시오.",
+                SeedOnStartupKey, db.Database.ProviderName, conn.Database, conn.DataSource);
+
+            // 시드는 멱등(DbSeeder.Seed가 존재 행을 스킵).
             var agvFloorMap = config.GetSection("Floors:AgvNoToFloor")
                                     .Get<Dictionary<string, int>>();
             DbSeeder.Seed(db, agvFloorMap);
-            log.LogInformation(
-                "[DbInitializer] dev 시드 적용됨 (트리거: {Trigger}).",
-                seedOnStartup.HasValue ? $"{SeedOnStartupKey}=true" : "Development 환경");
+            log.LogInformation("[DbInitializer] dev 시드 적용됨 (트리거: {Key}=true 명시).", SeedOnStartupKey);
         }
         else
         {
             log.LogInformation(
                 "[DbInitializer] 시드 게이트 off(운영 안전) — 빈 스키마만 프로비저닝. " +
-                "dev 시드가 필요하면 {Key}=true 또는 ASPNETCORE_ENVIRONMENT=Development.",
+                "dev 시드가 필요하면 {Key}=true를 명시하십시오(환경만으로는 발동하지 않음).",
                 SeedOnStartupKey);
         }
     }
