@@ -1,5 +1,104 @@
 # Sprint Log
 
+## FIX ITERATION COMPLETE (S-FRONTEND-F2 — 코드리뷰 M1·M2 해소)
+
+작업: Generator(standalone) fix-only iteration · 브랜치 `feat/frontend-f2` · 커밋 0. 지시된 2건 외 변경 0(MINOR 5건 미접촉 — sprint-feedback 이연).
+
+### 수정 내역
+- **M2 (`frontend/src/lib/signalr.ts`) — 장시간 다운 후 영구 단절 해소**:
+  ① `withAutomaticReconnect({ nextRetryDelayInMilliseconds })`로 **무한 상한 백오프**(0→2s→10s→30s, 이후 30s 고정 —
+  항상 숫자 반환·포기 없음). 기본 정책(4회 ~42s 소진 후 포기) 대체.
+  ② `connect()`의 `startPromise`를 **성공 경로에서도 리셋**(기존엔 성공 후 잔존 → 이후 재접속 경로 이중 차단 — L128-140).
+  ③ `onclose` 안전망: 비복구 종료 도달 시 2s 후 `connect()` 재기동(이 클라이언트는 명시 stop 경로가 없어 자동 재기동 안전).
+  재접속 성공 시 부트스트랩(서버 OnConnectedAsync 재전송)·POLL_CHANGE 옵트인 재적용은 기존 onreconnected/시작 경로와 동일.
+- **M1 (`MonitorRelayService.cs`) — 주석만 정정**: StopAsync 해제는 opLog(OnEntry) 핸들러 한정임을 명시.
+  PLC 훅(Subscribe*) 구독은 host-lifetime 싱글톤 의도(번들에 해제 API 없음·기존 관측 구독자와 동일 convention·
+  둘 다 싱글톤이라 수명 누수 없음)임을 주석으로 명문화. 코드 변경 0.
+
+### 검증 (fresh)
+- `npx tsc --noEmit` 0 · `npx eslint .` 0 · `npm run build` OK(신규 번들 wwwroot 배치) · `dotnet test backend/Wcs.sln` **169/169 GREEN**.
+- **M2 라이브 재현(핵심)**: Sim3ds+API(Tcp)+빌드된 SPA(:5080/sorters)를 실 브라우저로 열어둔 채 —
+  `t0` 연결 확인 → API kill → **`t+65s` badge="reconnecting"**(계속 재시도 중 — 구 정책이면 ~42s에 소진·영구 disconnected)
+  → API 재기동(`t+73s`, **총 다운타임 >60s**) → **`t+81s` 새로고침 0회(framenavigated 감시 reloaded=false)로
+  자체 재접속 + 부트스트랩 복구**(badge="실시간 연결됨"·워드 패널 데이터 표시). `=== M2 RESULT === PASS`.
+  스크린샷: `tasks/evidence/f2-m2-{1-connected,2-down65s,3-recovered}.png`.
+- **클린 복원**: operation_log 20행(Id>174 삭제)·alarm 10·piece/piece_event/sorter_command 0·Reserved/Sorted 0·
+  cell_assignment 16/16 = baseline 동일. 포트 5080/1502/5173 free·오펀 0·gitignored logs 제거·임시 검증 스크립트는 scratchpad 한정(리포 산출물 0).
+
+## IMPLEMENTATION COMPLETE (S-FRONTEND-F2)
+
+작업: Generator(standalone) · 브랜치 `feat/frontend-f2` · 커밋 없음(working tree만, team-lead 커밋).
+
+### 구현 요약 (계약 2A~2H 전항)
+
+**백엔드 (Wcs.Api만 — PlcGateway/Core/Data 스키마 0 변경)**
+- **2A 허브**: `backend/src/Wcs.Api/Hubs/WcsMonitorHub.cs`(신규) — `/hubs/monitor`, 인증 없음.
+  `OnConnectedAsync`에서 `AllBundles.Latest` 전체 워드 스냅샷을 접속 클라이언트에 1회 `Bootstrap` 전송(재연결 복구 동일 경로).
+  구독 그룹: `sorters`(워드)·`oplog`(기본 테일) 자동 가입 + `oplog-poll`(POLL_CHANGE)은 허브 메서드
+  `SubscribePollChange`/`UnsubscribePollChange`로 명시 옵트인. payload 계약: `backend/src/Wcs.Api/Hubs/MonitorHubContracts.cs`
+  (SorterWordDto/RegisterDeltaDto/SorterTransitionDto/OpLogEntryDto — 프론트 TS 타입과 1:1 카멜케이스).
+- **2B relay**: `backend/src/Wcs.Api/Services/MonitorRelayService.cs`(신규 IHostedService) — **신규 폴 루프 0**.
+  ① 워드 스트림: 각 번들 `SubscribeRegisterChange/Online/Offline` **추가 구독**(멀티캐스트 — 기존 oplog 구독과 나란히, 훅 시그니처 0 변경)
+  → `RegisterDelta`/`SorterTransition` push + 저빈도 `Heartbeat`(전체 스냅샷 — 주기 appsettings).
+  ② oplog 테일: `OperationLogService`에 `OnEntry` 이벤트 추가(컨슈머가 SaveChanges **이전** 발화 — 기록↔스트림 상호 비차단,
+  배치/teardown/fail-safe 불변) → relay가 POLL_CHANGE는 `oplog-poll` 그룹, 나머지는 `oplog` 그룹으로.
+  **불변식**: 모든 브로드캐스트는 `IHubContext` fire-and-forget(`ContinueWith(OnlyOnFaulted)` 관찰) + 콜백 전체 예외 흡수 —
+  폴/핸드셰이크/컨슈머 스레드 비지연(S-OBSERVABILITY 동형). **구독 시점**: relay를 SorterRegistryFactory 등록 **이후**
+  IHostedService로 등록(등록 순서 = 기동 순서) → StartAsync 시점 AllBundles 유효(라이브 로그 "소터 1대 구독"으로 실증).
+- **2C 결선**: Program.cs — `AddSignalR().AddJsonProtocol(CamelCase)` + `MapHub<WcsMonitorHub>("/hubs/monitor")`
+  (MapControllers 뒤·`/api/{**rest}` catch-all·MapFallbackToFile 앞). 신규 타이밍 `Wcs:Monitor:HeartbeatMs=5000`
+  appsettings 외부화(절대규칙 #7 — 코드 상수 0). `MonitorOptions`는 `Infrastructure/WcsOptions.cs`에 추가.
+- **2D**: **F1-CR-M1 해소** — `AddScoped<IMonitoringQueries, MonitoringQueries>()` 등록 + MonitoringController 생성자
+  주입 전환(요청당 손조립 제거). **`GET /api/monitor/operation-log`** 신설(category/level/sorterChuteNo/take/cursor —
+  키셋 커서·take clamp(E7 패턴)·AsNoTracking·**category 미지정 시 POLL_CHANGE 기본 제외(옵트인)**·스키마 0 변경).
+
+**프론트 (frontend/)**
+- **2E**: `src/lib/signalr.ts`(신규) — HubConnection 싱글톤 래퍼(`withAutomaticReconnect`·재연결 시 서버 Bootstrap 재수신으로
+  복구)·`useSyncExternalStore` 기반 `useMonitorState()`(소터별 워드 + 필드별 changedAt/flashSeq). `src/lib/useMonitorHub.ts`(신규) —
+  Layout 마운트 시 연결 + oplog 이벤트→TanStack `invalidateQueries`(API→orders/inFlight/batches·HANDSHAKE→sorterCommands/cells/orders/inFlight·
+  STATE→sorters/cells·PLC_WRITE→cells, 500ms 디바운스 배치 — 행 push 남발 금지 원칙 준수).
+  페이지 ② `src/pages/SortersPage.tsx` + `sections/WordPanel.tsx`(D0~D6·D4 비트 분해·Online — **읽기 전용**, 변경 하이라이트
+  `value-flash` + 필드별 마지막 변경 시각) + `sections/OpLogTail.tsx`(REST 백로그→SignalR append, category/level 필터,
+  자동 스크롤 토글, POLL_CHANGE 옵트인 체크박스+서버 그룹 구독 동기화, 최대 500행). App.tsx `/sorters` 라우트 +
+  Layout NAV "3DS 워드" 활성화(F2 배지 제거). api.ts에 `operationLog` 클라이언트 추가.
+- **2F 명암비**: button.tsx `solid` 안정 fill `bg-brand`→`bg-brand-active`(#e00b41, 백 라벨 4.89:1 AA — hover도 유지, 되돌리면 미달).
+  정보성 `text-faint`→`text-muted`(#6a6a6a, 5.41:1): SortingSection(C_Seq/R_Seq/C 기입/R 수신/배정오더) ·
+  InFlightSection(등록 시각) · CursorPager(페이지 카운트). 장식/비활성 faint(비활성 nav·off 램프·로고 서브캡션·빈상태 아이콘 행)는 유지.
+  +index.html 인라인 data-URI favicon(브라우저 자동 /favicon.ico 404 콘솔 에러 제거 — "콘솔 에러 0" 게이트).
+- **2G**: `@microsoft/signalr@^8.0.17` 추가. vite.config.ts `/hubs` proxy + **`ws:true`**(별도 항목·기존 `/api` 불변).
+
+**2H 테스트**: `backend/tests/Wcs.Tests/MonitorHubTests.cs`(신규 5건) — TestServer websocket 한계 회피:
+HubConnection을 `f.Server.CreateHandler()` + **LongPolling** 트랜스포트로 결선. ①접속→Bootstrap 스냅샷 수신
+②레지스터 변화→RegisterDelta push ③oplog API 엔트리 수신+POLL_CHANGE 기본 미포함 ④negotiate 200(catch-all 미삼킴 — 검증⑥ 결선)
+⑤operation-log REST 형상·필터·키셋 페이징·잘못된 category 빈 결과. 전용 `HubWebApplicationFactory`
+(인스턴스-고유 in-memory SQLite + relay/oplog hosted 재등록) + **비병렬 컬렉션**(`DisableParallelization` — 함정 §5-4·E2E 부하 교훈).
+
+### 검증 증거 (fresh)
+
+- **tsc/eslint/build**: `npx tsc --noEmit` 0 에러 · `npx eslint .` 0 · `npm run build` 성공(wwwroot 산출·gitignored).
+- **`dotnet test backend/Wcs.sln`**: **169/169 GREEN**(기존 164 + 신규 5). 반복 안정성: 총 **44회 반복**(30회 배치 30/30 GREEN +
+  비병렬 컬렉션 적용 후 8/8 GREEN + 단발 6회) 중 초기 1회만 168/169(1건 간헐 — 이후 43회 연속 GREEN·기존 저빈도 flake 클래스
+  귀속, relay는 비허브 테스트 팩토리에서 DI 미등록이라 구조적 무관). 신규 5건 표적 반복 3회 연속 GREEN.
+- **라이브 실시간(핵심·검증①②)**: Sim3ds(:1502) + API(`Sorters__0__Transport=Tcp`, Production·**시드 게이트 off — 실 DB 시드 0**) 기동 →
+  - 실 SignalR 클라이언트로 IF-05→09→10 1사이클: **Bootstrap 1회 수신 → RegisterDelta 13건 push**
+    (`TgtFloor:0→2, CurFloor:1→2, Ready 전이, R_CellNo/R_Seq/R_Flag 0→1→0` — 핸드셰이크 타이밍 차트 정합) +
+    **oplog 테일 13건(API/PLC_WRITE/HANDSHAKE) 스트리밍 · POLL_CHANGE 0건(기본 옵트아웃 실증)** + Heartbeat 5s 주기 수신.
+  - **재연결 부트스트랩 복구**: 접속 유지 중 API kill→재기동 → `[reconnecting]→[reconnected]→Bootstrap #2` 수신(전체 워드 복구).
+  - **브라우저(:5080 운영 서빙 경로 /sorters)**: 페이지 ②에서 사이클 유발 → 워드 push 갱신·value-flash 하이라이트·
+    마지막 변경 시각 표시·oplog 테일 append **육안+DOM 확인, 콘솔 에러 0**. 스크린샷 3장 보존:
+    `tasks/evidence/f2-sorters-{bootstrap,delta-highlight,handshake-oplog}.png`.
+- **negotiate 결선(검증⑥)**: 라이브 `POST /hubs/monitor/negotiate` → 200(404 아님) + 통합 테스트 ④ 고정.
+- **무변경 가드(검증⑥)**: `git diff -- backend/src/Wcs.PlcGateway backend/src/Wcs.Core` **빈 출력** ·
+  마이그레이션/DbSeeder/RcsController diff 0 · appsettings는 `Wcs:Monitor` 섹션 추가만(Sorters/Provider/ConnectionStrings 불변).
+- **검증 산물 클린 복원**: 실 SqlServer 전후 대사 — piece 0·piece_event 0·sorter_command 0·operation_log 20(Id>174 삭제)·
+  alarm 10(Id>16 삭제)·ReservedQty/SortedQty 합 0·cell_assignment 16/16 활성(검증 중 released 3행 복원+신규 1행 삭제) = 기동 전 baseline 동일.
+  임시 스크립트(hubcheck/reconncheck.mjs) 삭제·gitignored logs/ 제거·프로세스 종료(:5080/:1502/:5173 free·오펀 0).
+
+### 비고
+- 허브 델타 테스트 초안이 클래스 일괄 실행에서 결정적 실패 → 근본원인: **폴링 baseline 확립 전 레지스터 변경은 "변화분"으로
+  관측 안 됨**(baseline이 이미 새 값). Online baseline 대기 후 현재값과 다른 값으로 변경하는 방식으로 근본 수정(고정 sleep 0).
+- frontend/index.html favicon 추가는 계약 명시 항목은 아니나 "콘솔 에러 0" 게이트 달성의 최소 근본 수정(사전 존재 F1 갭).
+
 ## IMPLEMENTATION COMPLETE (S-FIELD-SEED-16CELLS) — iteration 2 (계약 개정: SqlServer 전부 전환)
 
 작업: Generator(standalone) · 브랜치 `feat/field-16cell-seed` · 커밋 없음(working tree만, team-lead 커밋).
