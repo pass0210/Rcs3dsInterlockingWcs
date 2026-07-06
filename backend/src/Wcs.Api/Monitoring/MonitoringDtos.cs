@@ -81,6 +81,22 @@ public sealed record SorterCommandDto(
     DateTime? RFlagAt);
 
 /// <summary>
+/// F2 operation_log 조회 항목 — 테일 초기 백로그(읽기 전용·커서 페이징). enum→문자열.
+/// SignalR OpLog push payload(OpLogEntryDto)와 형상 호환(프론트 통합 소비).
+/// </summary>
+public sealed record OperationLogDto(
+    long     Id,
+    DateTime At,
+    string   Category,        // OperationLogCategory(API/PLC_WRITE/POLL_CHANGE/HANDSHAKE/STATE)
+    string   Action,
+    string   Level,           // OperationLogLevel(INFO/WARN/ERROR)
+    int?     SorterChuteNo,
+    long?    DestinationId,
+    string?  Barcode,
+    int?     PId,
+    string?  Detail);
+
+/// <summary>
 /// 키셋(커서) 페이징 결과. NextCursor가 null이면 마지막 페이지.
 /// 커서는 마지막 항목의 Id(내림차순 정렬 → 다음 페이지는 Id &lt; cursor).
 /// </summary>

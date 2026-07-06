@@ -29,6 +29,8 @@ public interface IMonitoringQueries
     IReadOnlyList<SorterStatusDto>   GetSorters();
     IReadOnlyList<CellStatusDto>     GetCells(long destId);
     PagedResult<SorterCommandDto>    GetSorterCommands(long? destId, int take, long? cursor);
+    PagedResult<OperationLogDto>     GetOperationLog(
+        string? category, string? level, int? sorterChuteNo, int take, long? cursor);
 }
 
 /// <summary>
@@ -258,5 +260,63 @@ public sealed class MonitoringQueries : IMonitoringQueries
 
         long? next = hasMore && page.Count > 0 ? page[^1].Id : null;
         return new PagedResult<SorterCommandDto>(page, next);
+    }
+
+    // ── F2 operation_log (테일 백로그 — 키셋 커서·필터·POLL_CHANGE 기본 제외) ─────
+    // 선두 인덱스(at/id) 활용: Id 내림차순 키셋(최신순). take clamp(E7 패턴 재사용).
+    // category 미지정 → 고빈도 POLL_CHANGE 기본 제외(테일 폭주 방지·스트림 정책과 동형).
+    // 명시 category=POLL_CHANGE면 그 카테고리만(옵트인). AsNoTracking·기존 리포지토리 무변경·스키마 0.
+    public PagedResult<OperationLogDto> GetOperationLog(
+        string? category, string? level, int? sorterChuteNo, int take, long? cursor)
+    {
+        var q = _db.OperationLogs.AsNoTracking().AsQueryable();
+
+        // category: 유효 enum이면 그 카테고리만, 미지정이면 POLL_CHANGE 제외, 잘못된 값이면 빈 결과(일관·500 아님).
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            if (Enum.TryParse<OperationLogCategory>(category, ignoreCase: true, out var cat))
+                q = q.Where(x => x.Category == cat);
+            else
+                return new PagedResult<OperationLogDto>(Array.Empty<OperationLogDto>(), null);
+        }
+        else
+        {
+            q = q.Where(x => x.Category != OperationLogCategory.POLL_CHANGE);  // 기본 제외(옵트인).
+        }
+
+        // level 필터(선택): 유효 enum이면 적용, 잘못된 값이면 빈 결과(일관).
+        if (!string.IsNullOrWhiteSpace(level))
+        {
+            if (Enum.TryParse<OperationLogLevel>(level, ignoreCase: true, out var lvl))
+                q = q.Where(x => x.Level == lvl);
+            else
+                return new PagedResult<OperationLogDto>(Array.Empty<OperationLogDto>(), null);
+        }
+
+        if (sorterChuteNo.HasValue)
+            q = q.Where(x => x.SorterChuteNo == sorterChuteNo.Value);
+
+        if (cursor.HasValue)
+            q = q.Where(x => x.Id < cursor.Value);
+
+        var rows = q
+            .OrderByDescending(x => x.Id)
+            .Take(take + 1)
+            .Select(x => new
+            {
+                x.Id, x.At, x.Category, x.Action, x.Level,
+                x.SorterChuteNo, x.DestinationId, x.Barcode, x.PId, x.Detail,
+            })
+            .ToList();
+
+        bool hasMore = rows.Count > take;
+        var page = (hasMore ? rows.Take(take) : rows)
+            .Select(x => new OperationLogDto(
+                x.Id, x.At, x.Category.ToString(), x.Action, x.Level.ToString(),
+                x.SorterChuteNo, x.DestinationId, x.Barcode, x.PId, x.Detail))
+            .ToList();
+
+        long? next = hasMore && page.Count > 0 ? page[^1].Id : null;
+        return new PagedResult<OperationLogDto>(page, next);
     }
 }

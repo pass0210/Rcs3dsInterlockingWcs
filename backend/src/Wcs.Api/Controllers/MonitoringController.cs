@@ -10,12 +10,11 @@ namespace Wcs.Api.Controllers;
 // RcsController(/api/v1, IF-05/09/10)와 완전 분리된 신규 라우트. 읽기 전용·부수효과 0.
 // 조회는 IMonitoringQueries(AsNoTracking)로 위임 — 기존 리포지토리 무변경.
 //
-// DI 배선 결정(계약 C7 준수): IMonitoringQueries를 Program.cs에 등록하지 않고, 이미 등록된
-//   요청 스코프 WcsDbContext + 싱글톤(ISorterGatewayRegistry·IDestinationStatusService)을
-//   주입받아 요청당 조립한다. → Program.cs 변경은 정적 서빙 삽입에만 한정(무변경 가드).
-//   RcsController도 동일하게 WcsDbContext·레지스트리·상태서비스를 직접 주입받는 패턴.
+// DI 배선(F1-CR-M1 해소): IMonitoringQueries를 Program.cs에 AddScoped로 등록하고 생성자 주입.
+//   (요청당 new MonitoringQueries(...) 손조립 폐지 — 표준 DI 수명 관리.)
+//   수명: WcsDbContext(scoped) + 싱글톤(레지스트리·상태서비스) → scoped 해석 정상.
 //
-// 페이징(E4·E7): take 상한 clamp(MonitoringQueries.TakeMax=200) + 키셋 커서(Id 내림차순).
+// 페이징(E4·E7·operation-log): take 상한 clamp(MonitoringQueries.TakeMax=200) + 키셋 커서(Id 내림차순).
 //   잘못된 커서(비-정수)는 [ApiController] 모델 바인딩이 자동 400(long? 파싱 실패).
 // 미존재 id/destId(E2·E3·E6): 빈 배열 + 200(정책 일관 — 500 아님).
 // ════════════════════════════════════════════════════════════════════════════
@@ -26,12 +25,9 @@ public sealed class MonitoringController : ControllerBase
 {
     private readonly IMonitoringQueries _queries;
 
-    public MonitoringController(
-        WcsDbContext              db,
-        ISorterGatewayRegistry    registry,
-        IDestinationStatusService status)
+    public MonitoringController(IMonitoringQueries queries)
     {
-        _queries = new MonitoringQueries(db, registry, status);
+        _queries = queries;
     }
 
     // ── E1 GET /api/monitor/batches ────────────────────────────────────────────
@@ -76,4 +72,17 @@ public sealed class MonitoringController : ControllerBase
         [FromQuery] int? take,
         [FromQuery] long? cursor)
         => Ok(_queries.GetSorterCommands(destId, MonitoringQueries.ClampTake(take), cursor));
+
+    // ── F2 GET /api/monitor/operation-log?category=&level=&sorterChuteNo=&take=&cursor= ──
+    // 테일 초기 백로그(읽기 전용·커서 페이징·take clamp). category 미지정 시 고빈도
+    // POLL_CHANGE 기본 제외(옵트인 — 명시 category=POLL_CHANGE로만 조회). 스키마 0 변경(조회만).
+    [HttpGet("operation-log")]
+    public IActionResult GetOperationLog(
+        [FromQuery] string? category,
+        [FromQuery] string? level,
+        [FromQuery] int? sorterChuteNo,
+        [FromQuery] int? take,
+        [FromQuery] long? cursor)
+        => Ok(_queries.GetOperationLog(
+            category, level, sorterChuteNo, MonitoringQueries.ClampTake(take), cursor));
 }

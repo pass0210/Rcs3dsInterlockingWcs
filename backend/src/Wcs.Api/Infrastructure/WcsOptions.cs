@@ -20,6 +20,28 @@ public sealed record WcsOptions
     /// Phase 2 — RCS base URL·재시도·타이밍 전부 설정화(하드코딩 금지, 절대규칙 #7).
     /// </summary>
     public RcsPushOptions RcsPush { get; init; } = new();
+
+    /// <summary>
+    /// F2 실시간 모니터링(SignalR relay) 타이밍 설정(appsettings "Wcs:Monitor").
+    /// 하트비트 주기 등 신규 타이밍은 전부 여기서 읽는다(하드코딩 금지, 절대규칙 #7).
+    /// </summary>
+    public MonitorOptions Monitor { get; init; } = new();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MonitorOptions — F2 실시간 relay 타이밍 (appsettings "Wcs:Monitor" 섹션).
+// 하트비트(저빈도 전체 스냅샷 재전송)로 델타 유실·재연결 갭을 보정한다.
+// 절대규칙 #7: 주기 하드코딩 금지 — 설정에서 읽는다.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>appsettings.json "Wcs:Monitor" 섹션 — SignalR relay 타이밍.</summary>
+public sealed record MonitorOptions
+{
+    /// <summary>
+    /// 하트비트 주기(ms). 이 주기마다 전체 소터 워드 스냅샷을 sorters 그룹에 1회 push해
+    /// 델타 유실·재연결 갭을 보정한다. ≤0이면 하트비트 비활성. 기본 5000ms(저빈도).
+    /// </summary>
+    public int HeartbeatMs { get; init; } = 5000;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
