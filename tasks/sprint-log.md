@@ -1953,3 +1953,35 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
 - **백엔드 dev 기동 불가(2건, 프론트 무관)**: (a) SqlServer/Sqlite 콜드스타트 `DbSeeder.SeedWorkBatchAndOrders:214` "Sequence contains no elements" (b) dev 시드가 `chuteNo=30` 소터를 만드는데 현 `appsettings.Sorters[]`는 chuteNo=1 뿐 → `SorterRegistryFactory` fail-loud. 30→1 커밋(c4b4104) 이후 시드↔appsettings 드리프트로 추정. **backend 0줄 스코프**라 미수정. 라이브 검증은 fresh Sqlite(scratchpad) + 런타임 env override(`Sorters__1__ChuteNo=30`, 추적파일 무변경)로 우회 기동. 사용자/백엔드 후속.
 - 전후 스크린샷: before(다크)=`screenshots/F1_20260703-115749/`, after(라이트)=`screenshots/AIRBNB_after/`(둘 다 gitignored). `docs/DESIGN-airbnb.md`(untracked)·`tasks/sprint-contract.md`( M) = Planner 산출물, 내 변경 아님.
 - 커밋/브랜치 조작 없음. 워킹트리 상태로 Evaluator 검증 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-DEV-SEED-GUARD)
+
+**Generator standalone · branch `fix/dev-seed-guard` · 커밋/push 없음 (워킹트리 상태로 Evaluator 검증 대기).**
+
+### 목표
+2026-07-03 현장 사고(Development 기동 → dev 시드가 현장 SqlServer DB 오염 → SORTER_3D chuteNo=30↔Sorters[ChuteNo=1] 미스매치 → SorterRegistry fail-loud 기동 거부) 재발 방지. 환경 암묵 발동(`SeedOnStartup ?? IsDevelopment()`) 제거 → **명시 `SeedOnStartup=true`일 때만** 시드.
+
+### 구현 (Scope IN 4곳)
+1. **`backend/src/Wcs.Api/Startup/DbInitializer.cs`**: `?? app.Environment.IsDevelopment()` fallback 제거. 순수 정적 함수 `public static bool ShouldSeed(bool? seedOnStartup) => seedOnStartup == true;` 추출(I/O·DI 의존 0, 절대규칙 #8). `ProvisionAsync`가 `ShouldSeed(seedOnStartup)`로 배선. 비 in-memory DB 시드 직전 **WARNING 1줄**(provider+database+dataSource, Fail Loud — 거부는 안 함). 로그/주석 환경 트리거 서술 제거(else 안내문 `SeedOnStartup=true` 명시만).
+2. **`appsettings.Development.json`**: `SeedOnStartup: true → false`. `_comment` 허위 주석 정정(launchSettings 부재 → `dotnet run` 기본=Production, 이 파일은 ASPNETCORE_ENVIRONMENT=Development 명시 시에만 적용). `_comment_SeedOnStartup` 경고 주석(자동 시드 금지·필요 시 명시 true+Provider/ConnectionStrings dev 오버라이드 필수).
+3. **`appsettings.json`**: `_comment_SeedOnStartup` 동기화("명시 true일 때만·환경 암묵 시드 없음·null/미지정=시드 안 함"). 값(false)·Sorters[]·Provider·ConnectionStrings 불변.
+4. **`backend/tests/Wcs.Tests/DbSeedGateTests.cs`** (신규): `ShouldSeed(null)==false`·`(false)==false`·`(true)==true`.
+
+### 검증 (fresh evidence)
+- **① 전체 테스트**: `dotnet test backend/Wcs.sln` → **실패 0, 통과 164** (기존 161 + 신규 3). 15s.
+- **② 게이트 3케이스**: `--filter DbSeedGateTests` → 3/3 GREEN (16ms).
+- **③ Development 라이브 음성 재현** (빈 스크래치 DB `WcsSeedGuardTest`, `ConnectionStrings__WcsDb` env 오버라이드 — 현장 DB `Rcs3dsInterlockingWcs` 미접속):
+  - (a) `ASPNETCORE_ENVIRONMENT=Development` 기동 → 로그 `[DbInitializer] 시드 게이트 off(운영 안전) — 빈 스키마만 프로비저닝. dev 시드가 필요하면 Database:SeedOnStartup=true를 명시하십시오(환경만으로는 발동하지 않음).`
+  - (b) 스크래치 DB 도메인 테이블 17종 **전부 0행 (TOTAL_DOMAIN_ROWS=0)** — destination=0·cell=0·agv=0·wcs_order=0 등. 스키마만 생성(Migrate)·시드 0.
+  - (c) SORTER_3D 0대 → **fail-loud throw 없이 정상 기동** (`Application started` · `Hosting environment: Development` · :5080 LISTENING).
+  - **대조(명시 경로 생존 + 사고 재현)**: `Database__SeedOnStartup=true` + 빈 스크래치 DB 기동 → WARNING(`비 in-memory DB에 dev 시드를 주입합니다. provider=...SqlServer, database=WcsSeedGuardTest`) → `dev 시드 적용됨(트리거: SeedOnStartup=true 명시)` → 슈트 6·SORTER_3D 1대 → **SORTER_3D chuteNo=30 ↔ Sorters[ChuteNo=1] 미스매치 fail-loud**(사고 메커니즘 정밀 재현). 검증 후 스크래치 DB DROP·프로세스 종료·포트 free.
+- **④ 무변경 가드**: `git diff --stat` = DbInitializer.cs / appsettings.Development.json / appsettings.json 3파일 + 신규 DbSeedGateTests.cs만. DbSeeder.cs·frontend·migrations diff **빈 출력**. appsettings.json은 `_comment_SeedOnStartup` 주석 1줄만 변경(SeedOnStartup=false·Sorters/Provider/ConnectionStrings 불변).
+
+### Completion 부수 등재
+- `tasks/todo.md`: `## S-DEV-SEED-GUARD 후속`에 DbSeeder `First(ChuteNo==1&&CHUTE)` 크래시 `FirstOrDefault`+skip 하드닝 항목 등재.
+- `tasks/lessons.md`: "환경만으로 자동 시드 발동 = 실 DB 오염 벡터; 명시 설정으로만·Development.json은 반드시 Provider/연결 오버라이드 동반" 1행 추가.
+
+### 상태
+①~④ 전부 PASS. 커밋/git 조작 없음. Evaluator 검증 대기.

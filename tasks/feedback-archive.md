@@ -2,7 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
-## S-BACKEND-FOLDER (.NET 세계 `Wcs.sln`+`src/`+`tests/`를 `backend/` 하위로 트리째 순수 이동) — APPROVED (2026-07-03, 1 iteration)
+## S-DEV-SEED-GUARD (환경 암묵 자동 시드 제거 — 명시 `SeedOnStartup=true`만 · 실사고 재발 방지) — APPROVED (2026-07-03, 1 iteration)
+
+- **환경만으로 자동 시드 발동 = 실 DB 오염 벡터; 사고의 근본은 S-M5-P1가 심은 `?? IsDevelopment()` fallback**: S-M5-P1 archive(line 39)가 "운영 안전 게이트"로 도입한 `SeedOnStartup ?? IsDevelopment()`가 바로 사고 원인 — 미지정+Development면 자동 on, Development.json이 켠 `SeedOnStartup=true`가 Provider/ConnectionStrings 오버라이드 없이 base(SqlServer·현장 연결문자열)로 직행. 수정 = 환경 fallback 제거·순수 함수 `ShouldSeed(bool?) => seedOnStartup==true`. "운영 안전"으로 도입한 게이트가 다음 사고의 벡터가 될 수 있다 — 암묵 발동은 언제나 위험.
+- **순수 bool 게이트 추출이 유일한 회귀 고정 경로(호스트 경유 관측 불가)**: 전 인메모리 팩토리가 `IsInMemorySqlite`에서 `ProvisionAsync`를 조기 no-op → `WebApplicationFactory`로는 시드 코드에 도달조차 못 함. 판정을 `ShouldSeed(bool?)` 순수 함수로 추출해 직접 단위 테스트(null/false→false, true→true)가 사고 핵심(미명시→시드 안 함)을 고정하는 유일한 방법. 절대규칙 #8(순수 함수·테스트가 스펙)의 정석 적용.
+- **음성 재현은 빈 스크래치 DB(Generator와 다른 이름)+연결 오버라이드로 — 현장 DB 무접촉이 최우선 안전 제약**: `WcsSeedGuardEval`(Generator `WcsSeedGuardTest`와 다른 이름) + `ConnectionStrings__WcsDb` env 오버라이드로 현장 `Rcs3dsInterlockingWcs` 미접속. Development 기동 → "시드 게이트 off" 로그 + 도메인 17테이블 0행(`__EFMigrationHistory` 2행은 마이그레이션 bookkeeping·시드 아님) + SORTER_3D 0대라 fail-loud 없이 정상 기동. 현장 DB 카운트 전후 불변(dest 1·piece 0·cell/order/item/assign 16) + 스크래치 DB DROP으로 무접촉 입증.
+- **양성 대조가 명시 경로 생존 + 사고 메커니즘 동시 입증**: 같은 스크래치 DB + `Database__SeedOnStartup=true` → WARNING(비 in-memory 시드 경고, throw 아님) + "dev 시드 적용됨" + 슈트 6·SORTER_3D 1대 → 시드된 chuteNo=30 ↔ appsettings Sorters[ChuteNo=1] 미스매치로 SorterRegistry fail-loud. 게이트가 명시 true를 막지 않음(정당한 요청)을 확인하는 동시에 "오버라이드 없는 명시 true의 위험성"이라는 사고 벡터를 스크래치에서 정밀 재현.
+- **비 in-memory 시드 방어는 WARNING까지(거부 아님)**: 명시 `SeedOnStartup=true`를 throw로 막으면 "명시 설정으로만 시드" 방향과 모순·정당한 dev 시드를 깨뜨림. Fail Loud는 provider+database+dataSource를 찍는 WARNING 1줄로 오염 감지 실마리만 제공하고 실행은 통과.
+
+
 
 - **트리째 이동(sln 포함)도 순수 이동 입증법은 동일 — R100 + unfiltered numstat 0/0 (S-FOLDER-ORG 정석 재적용·확장)**: 75 rename 전부 `--summary` R100 + `--numstat` 0/0 + `--stat` "0 insertions/0 deletions"(이동분) + `status --find-renames`에 RM/A/D 단독 0 + 구 트리 물리 소멸. S-FOLDER-ORG(sln 위치 유지)와 달리 이번은 `Wcs.sln`+`src/`+`tests/`를 통째 옮겼으나, sln 내부 프로젝트 경로가 `src\...` 상대 + Wcs.Tests.csproj가 `..\..\src\...` 상대라 **트리째 이동 시 상대관계 불변 → csproj/sln 0 편집으로 유효 유지**. `--cached` 필수(staged에서 unstaged `-M`은 빈 출력·함정4).
 - **경로한정 diff(`-- backend/src/**`)는 rename source를 배제해 add로 오표시 — path-filter 아티팩트 (신규 함정·중요)**: 무변경 가드를 `git diff -M --cached -- backend/src/**/*.cs`처럼 **목적지 경로만** 필터하면 rename 짝(`src/...` source)이 필터 밖이라 rename 감지 실패 → 23940 insertions·"new file"로 오표시. 실제 변경 아님. 권위 증거는 **unfiltered** `--numstat`의 rename pairing(전 이동분 0/0)이며, appsettings 등도 `rename {src => backend/src}/... (100%)`로 확인. → 순수 이동 무변경 가드는 반드시 unfiltered numstat 또는 양측 경로 포함으로 검증. 계약 §4⑦ 명령 자체가 이 함정을 내포했으나 ①로 상쇄.
@@ -344,3 +352,4 @@
 - **Inter 한글 두부(tofu) 방지 = font stack Malgun Gothic/Apple SD Gothic Neo 폴백 명시 + 폰트 결선을 index.css @import에 둬 main.tsx 무변경**: Inter엔 한글 글리프 0. `@fontsource-variable/inter` npm 번들(CDN 금지·사내망) + font-sans에 한글 폴백. 런타임 폰트 fetch는 unicode-range로 latin 서브셋만(과증 억제). 스크린샷 육안으로 한글 정상 렌더 확인 필수.
 - **포트 source-of-truth 재확인(F1 교훈 반복)**: `ports.local.json` 부재여도 :5080=`appsettings.Urls`·:5173=`vite.config.server.port` committed config가 결정적 source → 포트 정책 위반 오판 금지. dev 콜드스타트 드리프트(DbSeeder chuteNo=30 vs appsettings Sorters ChuteNo=1)는 스코프 밖 기등재라 `Sorters__0__ChuteNo=30` env override(추적파일 무변경)로 우회 기동 — 인프라 미실행 스킵 아님·직접 시작 원칙 준수.
 - [CODE-REVIEW] sprint=S-FE-AIRBNB critical=0 major=2 minor=5 iter=1 opus=yes (Evaluator의 "무대상" 선판단을 orchestrator가 기각하고 실제 리뷰 실행 — 90+/63− 스타일 코드는 리뷰 표면 존재. MAJOR 2=접근성 명암비: M1 백 텍스트 on Rausch 버튼 3.52:1(브랜드 트레이드오프 — Airbnb 자체가 이 조합·AA 요구 시 brand-active #e00b41=4.89로)·M2 faint #929292 3.11:1이 정보성 캡션/타임스탬프에 광용(DESIGN은 disabled 전용 스코프 — muted #6a6a6a 5.41:1로 교체 권고). MINOR 5=meter #f2f2f2 하드코딩×3·rounded-[14px]×4 토큰화 여지·shadow-card 주석 죽은참조·폰트 전 서브셋 import(/latin.css로)·배지 warn/accent 틴트 위 4.39/4.49. 상태색 본체는 전부 AA 통과(WCAG 산술). 교훈: 스타일-전용이어도 접근성·토큰위생 리뷰 도메인은 존재 — "무대상" 판단은 내용 diff 0(순수 이동)일 때만.)
+- [CODE-REVIEW] sprint=S-DEV-SEED-GUARD critical=0 major=0 minor=1 iter=1 opus=yes (MINOR=주석 stale 라인참조 — 커밋 전 정정 완료. ShouldSeed bool? 설계·WARNING 로그·주석 일관성 전부 검증 통과.)
