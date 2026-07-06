@@ -17,6 +17,8 @@
     </PackageReference>
     <!-- WebApplicationFactory: ASP.NET Core 통합 테스트 호스트 -->
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.5" />
+    <!-- F2: SignalR 허브 통합 테스트 클라이언트(HubConnection). TestServer 핸들러 + LongPolling 트랜스포트. -->
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="9.0.5" />
   </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>

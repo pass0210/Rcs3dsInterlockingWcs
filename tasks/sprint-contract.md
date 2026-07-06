@@ -1,100 +1,126 @@
-# Sprint Contract — S-DEV-SEED-GUARD (자동 시드 전면 차단 · 실사고 재발 방지)
+# Sprint Contract — S-FRONTEND-F2 (SignalR 실시간 + 3DS 워드 뷰(읽기 전용) + oplog 라이브 테일)
 
-> **미니 스프린트.** 2026-07-03 실사고(Development 기동 → dev 시드가 현장 SqlServer DB 오염 → SorterRegistry fail-loud로 전체 기동 거부; 감사 E⑤/A-4 실현) 재발 방지.
-> **방향(사용자 확정)**: 자동 시드 전면 차단 — 시드는 **명시 설정(`SeedOnStartup=true`) 또는 스크립트로만**. **SQLite 테스트 더블은 유지**(속도 우선), 재발 방지는 **SQLite를 런타임 재도입하지 않고** 게이트 로직으로 해결.
-> WHAT/WHERE/검증만 규정 — 정확한 시그니처·로그 문안은 Generator 재량(제약 내).
+> **프론트엔드 F2 스프린트** — `docs/FRONTEND.md` §2(실시간 설계)·§5 페이지 ②·§6 F2가 **범위의 단일 진실. 재설계 금지.**
+> WHAT/WHERE/검증만 규정 — 정확한 시그니처·허브 메서드명·컴포넌트 구조·타이밍 상수 값은 **Generator 재량(제약 내)**. 코드 구현 0.
+> F1(스캐폴드·정적 서빙·모니터링 읽기·Airbnb 라이트 테마) 병합 완료 위에 실시간 계층을 얹는다.
 
 ## 0. 메타
 
 | 항목 | 값 |
 |------|-----|
-| Sprint ID | S-DEV-SEED-GUARD |
-| Branch | `fix/dev-seed-guard` |
-| Base | `develop` (PR #28까지 병합) |
-| Detected Project Type | Full-stack (이 스프린트는 **backend 설정/시드-게이트 전용**) |
-| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (좁은 버그 수정 — 팬아웃 없음) |
-| Test baseline | **161 GREEN** (완료 시 161 전원 GREEN 유지 + 신규 게이트 테스트 = 161+N) |
-| 근거 감사 | `tasks/audit-20260701-full.md` A-4(MAJOR/docs, E⑤ 예측) · A-19(MINOR/docs, Development.json 허위 주석) |
+| Sprint ID | S-FRONTEND-F2 |
+| Branch | `feat/frontend-f2` |
+| Base | `develop` (PR #29까지 병합 — backend/ 구조·F1 모니터링·Airbnb 라이트 테마·시드 가드) |
+| Detected Project Type | **Full-stack (Web/UI)** — `.mcp.json` Playwright 존재(F1 신설). Evaluator 브라우저 검증 슬롯 발동. |
+| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 페이즈·팬아웃 없음) |
+| Test baseline | **164 GREEN** (완료 시 164 전원 GREEN 유지 + 신규 허브 통합 테스트 = 164+N) |
+| 스펙 소스 | `docs/FRONTEND.md` §2·§5 페이지 ②·§6 F2 / `docs/DESIGN-airbnb.md`(토큰) / `docs/SPEC.md`(레지스터 맵 D0~D6) |
+| 이월 처리 | **F1-CR-M1**(IMonitoringQueries DI AddScoped) · **RESTYLE-CR-M1**(Rausch 버튼 AA) · **RESTYLE-CR-M2**(faint 정보성 텍스트 AA) — 3건 전부 이번 스프린트 IN |
 
 ## 1. 목표 (WHAT · 한 줄)
 
-콜드스타트 자동 시드가 **환경(ASPNETCORE_ENVIRONMENT=Development)만으로 암묵 발동**하던 경로를 제거해, 시드는 **명시 `Database:SeedOnStartup=true`일 때만** 실행되도록 한다. `appsettings.Development.json`의 위험한 `SeedOnStartup=true`와 허위 주석을 바로잡고, 신규 회귀 테스트로 "Development 기동 + SeedOnStartup 미명시 → 시드 미실행"을 고정한다.
+`Wcs.Api`에 SignalR 허브(`/hubs/monitor`)와 relay 서비스를 신설해 **기존 관측 훅을 재사용(신규 폴 루프 0)** 으로 소터 워드(D0~D6+Online) 변화분·operation_log 엔트리를 실시간 push하고, 프론트에 **읽기 전용 3DS 워드 페이지 ②**(변경 하이라이트·재연결 부트스트랩 복구)와 **operation_log 라이브 테일**을 추가하며, TanStack Query를 SignalR 이벤트로 무효화 연동한다. 동시에 이월 3건(DI AddScoped·명암비 2건)을 해소한다. **쓰기·제어·인증은 F3 — 이 스프린트는 관측/뷰 전용.**
 
-**사고의 본질**: 시드 게이트가 `seedOnStartup ?? IsDevelopment()`였다 — 즉 `SeedOnStartup` 미지정 시 **환경이 Development이면 자동 on**. Development.json은 `SeedOnStartup=true`를 켰고 **연결/Provider 오버라이드가 없어** base의 `Provider=SqlServer` + 현장 연결문자열(`Rcs3dsInterlockingWcs`)로 직행 → dev 시드가 **실 현장 DB에 주입**. 환경 기반 암묵 발동을 근절하는 것이 재발 방지의 본질이다.
+**relay 불변식(핵심)**: 훅 콜백은 **논블로킹·예외 격리**, `IHubContext`는 **fire-and-forget**. 관측이 폴(150ms)·핸드셰이크·API 본 동작을 지연시키지 않는다(S-OBSERVABILITY 계약과 동형). **PlcGateway/Wcs.Core 의미·훅 시그니처 0 변경.**
 
 ## 2. Scope IN
 
-### 2A. `backend/src/Wcs.Api/Startup/DbInitializer.cs` — 시드 게이트: 환경 암묵 발동 제거 (핵심)
-- L89 `var seedEnabled = seedOnStartup ?? app.Environment.IsDevelopment();` → **`IsDevelopment()` fallback 제거**. 게이트는 **명시 `SeedOnStartup==true`일 때만 true**(null/false/미지정 = 시드 안 함).
-- **게이트 판정을 순수 정적 함수로 추출**(예: `public static bool ShouldSeed(bool? seedOnStartup)` → `seedOnStartup == true`). I/O·`WebApplication`·DI 의존 0 — CLAUDE.md 절대규칙 #8(순수 함수·테스트가 스펙) 정신. `ProvisionAsync`는 이 함수를 호출하도록 배선.
-  - ⚠ **회귀 테스트가 이 함수를 직접 호출한다**(§4-③). 전 인메모리 팩토리는 `IsInMemorySqlite`에서 `ProvisionAsync`를 조기 no-op하므로(L57-62) **게이트는 어떤 테스트로도 호스트 경유로는 관측 불가** — 추출 없이는 회귀 고정 불가.
-- L87·L98-99·L103-106 로그·주석: 환경 트리거 서술 제거. else 브랜치 안내문에서 "또는 ASPNETCORE_ENVIRONMENT=Development" 삭제(`SeedOnStartup=true`만 안내).
-- **(판단·경량 이중방어)** 시드 실행 직전, 대상이 **비 in-memory(실 파일/SqlServer)**이면 **눈에 띄는 WARNING 로그 1줄**(provider + 대상 DB/연결 요약) — Fail Loud. **거부(throw)는 하지 않음**(명시 `SeedOnStartup=true`는 정당한 요청이므로 차단하면 "명시 설정으로만" 방향과 모순). Generator가 과설계로 판단하면 로그 1줄로 최소화.
+### 2A. `Wcs.Api` — SignalR 허브 `WcsMonitorHub` (`/hubs/monitor`)
+- **신규 파일**(예: `backend/src/Wcs.Api/Hubs/WcsMonitorHub.cs`). `Hub` 파생, 인증 없음(사용자 확정).
+- **부트스트랩(§2.1)**: `OnConnectedAsync`에서 `ISorterGatewayRegistry.AllBundles`의 각 `Latest`(전체 D0~D6 + Online) 스냅샷을 **접속 클라이언트에 1회 전송** → 늦게 접속한 클라이언트도 즉시 완전 상태 확보. 재연결 시에도 동일 경로로 복구.
+- **구독 그룹**: oplog 테일 구독(그룹 `oplog`)과 소터 워드 구독을 클라이언트가 선택 가능(허브 메서드). **고빈도 `POLL_CHANGE`는 oplog 기본 스트림에서 제외 또는 명시 옵트인**(콘솔/테일 폭주 방지 — DB 정책과 동형). 초기엔 소터 워드 델타는 전량 push + 클라이언트 필터로 단순화 가능(§2.1·§2.2).
+- 소터 워드 변화분 델타(reg·old·new·chuteNo)·Online/Offline 전이·하트비트 스냅샷·oplog 엔트리를 클라이언트로 push하는 메시지 계약(메서드명·payload 형상은 Generator 재량, 프론트 타입과 1:1).
 
-### 2B. `backend/src/Wcs.Api/appsettings.Development.json` — 위험 기본값·허위 주석 정정
-- L5 `"SeedOnStartup": true` → **`false`** (또는 키 제거 — 게이트가 명시 true만 보므로 부재=시드 안 함). Development 기동이 자동으로 현장 DB를 시드하지 않도록.
-- L2 허위 주석 정정(A-19): "dotnet run 기본 환경" → **"launchSettings.json 부재로 `dotnet run` 기본 환경은 Production. 이 파일은 ASPNETCORE_ENVIRONMENT=Development를 명시 설정한 경우에만 적용됨."**
-- L4 `_comment_SeedOnStartup`: **경고 주석**으로 교체 — "자동 시드 금지(환경만으로 발동 안 함). dev 시드가 필요하면 SeedOnStartup=true를 명시하고, **반드시 Provider/ConnectionStrings를 dev 전용으로 오버라이드**(현장 SqlServer DB 오염 방지). base는 Provider=SqlServer·현장 연결문자열임."
+### 2B. `Wcs.Api` — relay 서비스 (기존 훅 재사용 · 신규 폴 루프 0)
+- **신규 relay 서비스**(IHostedService 등 — HOW는 Generator). 두 소스를 `IHubContext<WcsMonitorHub>`로 fire-and-forget 브로드캐스트:
+  - **① 소터 워드 스트림**: `SorterBundleHandle`의 `SubscribeRegisterChange`(reg,old,new)·`SubscribeOnline`·`SubscribeOffline`를 relay가 **추가 구독**(기존 operation_log 구독과 나란히 — 훅은 멀티캐스트 이벤트). 변화분만 push(무변화 0). + **저빈도 하트비트**: 주기적으로 `AllBundles`의 `Latest` 전체 스냅샷 1회 push(델타 유실·재연결 갭 보정).
+  - **② operation_log 테일 스트림**: 단일 초크포인트 `OperationLogService`(단일 컨슈머)에서 각 엔트리를 그룹 `oplog`로 브로드캐스트. **DB 영속화와 별개 경로**(기록 실패가 스트림을, 스트림 실패가 기록을 막지 않음). `POLL_CHANGE`는 기본 제외/옵트인(2A).
+- **relay 안전 요건(불변식)**: 모든 콜백/브로드캐스트는 **논블로킹·예외 흡수(fail-safe)**. 폴/쓰기/핸드셰이크 스레드에서 직접 호출되므로 예외가 새어나가 루프를 죽이면 안 됨(기존 훅 계약·Program.cs L365-419·PlcGateway `EmitRegisterChanges` try/catch와 동형).
+- **⚠ 구독 시점 순서**: `AllBundles`는 `SorterRegistryFactory.StartAsync` 완료 후에만 채워진다. relay 구독은 **레지스트리 초기화 이후**에 이뤄져야 한다(IHostedService 등록 순서로 보장하거나 registry StartAsync 내에서 나란히 구독 — Generator 판단, 검증 필수).
 
-### 2C. `backend/src/Wcs.Api/appsettings.json` — base 주석 동기화 (값 불변)
-- L99 `_comment_SeedOnStartup`의 "명시 true 또는 ASPNETCORE_ENVIRONMENT=Development일 때만 시드. null(미지정)이면 Development 환경에서만 자동 on." → **"명시 `SeedOnStartup=true`일 때만 시드. 환경 기반 암묵 시드 없음(2026-07-03 현장 DB 오염 사고 재발 방지). null/미지정=시드 안 함."** `SeedOnStartup=false` 값은 불변.
+### 2C. `Wcs.Api` — Program.cs 결선 + appsettings 타이밍 외부화
+- `builder.Services.AddSignalR()` 등록. relay 서비스·IHubContext 결선.
+- **`app.MapHub<WcsMonitorHub>("/hubs/monitor")`** 매핑. 미들웨어/엔드포인트 순서: `UseStaticFiles()`(기존 L207) → `MapControllers()`(L213) → **`MapHub`** → `app.Map("/api/{**rest}", …)` catch-all(L222) → `MapFallbackToFile`(L223). catch-all은 `/api/**`만 매치하므로 `/hubs/monitor`를 삼키지 않음(함정 §5-1 — 검증 결선).
+- **신규 타이밍은 전부 appsettings**(절대규칙 #7 — 하드코딩 금지): 하트비트 주기·(있으면)버퍼/스로틀 주기 등을 신규 섹션(예: `Wcs:Monitor:HeartbeatMs`)에 두고 바인딩. 코드 상수 금지.
 
-### 2D. 신규 회귀 테스트 (`backend/tests/Wcs.Tests/`)
-- 추출된 게이트 함수(`ShouldSeed`)를 직접 호출하는 xUnit 테스트를 **신규 파일 또는 기존 적합 파일**에 추가. 최소 고정:
-  - `ShouldSeed(null) == false` — **미명시(Development 포함 어떤 환경이든) → 시드 안 함**(사고의 핵심 회귀 방지).
-  - `ShouldSeed(false) == false`.
-  - `ShouldSeed(true) == true` — 명시 경로만 시드.
-- SQLite·호스트·DB 불요(순수 bool). 기존 인메모리 더블 배선은 **불변**(§3).
+### 2D. `Wcs.Api` — IMonitoringQueries AddScoped 전환(F1-CR-M1) + operation-log 백로그 엔드포인트
+- **F1-CR-M1 해소**: `MonitoringController`가 생성자에서 `new MonitoringQueries(db, registry, status)`로 **요청당 손조립**하던 것을 제거하고, Program.cs에 **`AddScoped<IMonitoringQueries, MonitoringQueries>()`** 등록 → 컨트롤러는 `IMonitoringQueries`를 **주입**받는다. (deps: WcsDbContext scoped·ISorterGatewayRegistry/IDestinationStatusService 싱글톤 — scoped 수명 해석 정상.)
+- **operation-log REST 백로그(§2.2·§3.1 — 테일 초기 N행 소스)**: `IMonitoringQueries` + `MonitoringController`에 **읽기 전용** `GET /api/monitor/operation-log?category=&level=&sorterChuteNo=&take=&cursor=` 추가. `operation_log` 테이블 조회(선두 인덱스 `at`/`id` 활용·키셋 커서·take clamp — E7 sorter-commands 패턴 재사용). **AsNoTracking·기존 리포지토리 무변경.** operation_log **스키마 0 변경**(조회만).
+
+### 2E. `frontend` — SignalR 클라이언트 + 페이지 ②(읽기 전용) + oplog 테일 + 무효화
+- **@microsoft/signalr 클라이언트 래퍼**(신규 `frontend/src/lib/signalr.ts` 등): 접속·재연결(withAutomaticReconnect)·부트스트랩 스냅샷 수신·델타/전이/하트비트/oplog 이벤트 수신. `/hubs/monitor` 상대 경로(운영=동일 출처, dev=vite proxy).
+- **페이지 ② 레지스터 패널(§5 페이지 ②·읽기 전용)**: D0 C_CellNo·D1 C_Seq·D2 R_CellNo·D3 R_Seq·D4 비트(C_Flag·R_Flag·Ready)·D5 CurFloor·D6 TgtFloor·Online. SignalR 스트림으로 갱신, **변경값 하이라이트(깜빡임)** + 각 값 **마지막 변경 시각**. 소터 N대 선택(기존 `useSorters`/소터 목록 재사용). **쓰기/편집 컨트롤 없음**(F3). 신규 라우트(`/sorters` 또는 `/sorters/:destId` — App.tsx Route 추가) + `Layout.tsx` NAV의 "3DS 워드"(현재 `enabled:false`·phase F2 배지) **활성화**.
+- **operation_log 라이브 테일(§2.2)**: 하단 패널. category/level 필터, 자동 스크롤 토글, **`POLL_CHANGE` 기본 접힘(옵트인)**. 접속 시 REST 백로그(2D) 로드 후 SignalR로 append(무한 스크롤/테일).
+- **TanStack Query ↔ SignalR 무효화(§2.3)**: 행 단위 push 남발 금지 — SignalR API/HANDSHAKE/STATE 이벤트 수신 시 `invalidateQueries`로 배치/오더/in-flight/셀/sorter_command/소터 readiness를 **근실시간 보정**. 고빈도·저지연(워드·oplog)=push, 집계·목록=폴링+이벤트 무효화 원칙 유지.
+
+### 2F. `frontend` — 명암비 2건(이월 · 확정)
+- **RESTYLE-CR-M1(버튼)**: `components/ui/button.tsx` `solid` variant의 **안정 상태 fill을 `bg-brand-active`(#e00b41, 4.89:1)로 채택**(현재 `bg-brand` #ff385c=3.52:1). 사용자 확정(스펙 내 토큰·시각 차이 미미). 백색 라벨 AA(≥4.5:1) 충족.
+- **RESTYLE-CR-M2(정보성 텍스트)**: **데이터를 담는 정보성 `text-faint`(#929292, 3.11:1)를 `text-muted`(#6a6a6a, 5.41:1)로 치환** — 타임스탬프·시퀀스 컬럼·배정오더·페이저 카운트 등(예: `SortingSection.tsx` C_Seq/R_Seq/C 기입/R 수신/assignedOrderNo·`InFlightSection.tsx` createdAt·`CursorPager.tsx` 위치). **장식/비활성 용도의 faint(비활성 nav `text-faint/70`·off 램프 라벨·순수 라벨·로고 서브캡션)는 DESIGN 문서 스코프상 유지 가능** — Generator가 "데이터 가독성 필요 여부"로 판단, **데이터 담는 것은 전부 AA**. (DESIGN: faint=disabled 전용·very sparingly.)
+
+### 2G. `frontend` — 빌드/개발 결선
+- `package.json`에 **`@microsoft/signalr`** 추가(F1에서 의도적 미설치). 런타임 의존 셋 최소 유지.
+- `vite.config.ts` dev proxy에 **`/hubs` 추가 + `ws: true`**(websocket proxy) → `http://localhost:5080`. 기존 `/api` proxy 불변.
+
+### 2H. 신규 테스트 (`backend/tests/Wcs.Tests/`)
+- **허브 통합 테스트**(WebApplicationFactory 기반 — `MonitoringApiTests`의 인스턴스-고유 in-memory SQLite 팩토리 패턴 재사용): 최소 고정
+  - **접속 → 부트스트랩 스냅샷 수신**(AllBundles Latest 1회 전송 확인).
+  - **레지스터 변화 → 델타 push 수신**(관측 훅 발화 → 허브 브로드캐스트 → 클라이언트 수신).
+  - (가능하면) **operation_log append → 테일 수신** / **POLL_CHANGE 기본 미포함**.
+- operation-log REST 엔드포인트(2D) 형상·페이징·필터 통합 테스트(E-시리즈 패턴).
+- **⚠ TestServer websocket**: `WebApplicationFactory` TestServer는 SignalR 기본 WebSocket 협상을 그대로 지원하지 않을 수 있음 → HubConnection을 TestServer `HttpMessageHandler`/`WebSocketFactory`로 결선하거나 **LongPolling 트랜스포트 대체** 검토(함정 §5-4).
 
 ## 3. Scope OUT (0 변경 — 무변경 가드)
 
-- **SQLite 테스트 더블 제거 없음.** 7개 인메모리 팩토리(`ApiIntegrationTests`·`RcsPushTests`·`MonitoringApiTests`·`ScenarioTests`×2·`E2EInfrastructure`)의 `UseSetting("Database:Provider","Sqlite")` + `EnsureCreated()` + `DbSeeder.Seed(...)` 배선 **불변**.
-- **`DbSeeder.cs` 토폴로지 불변** — 슈트 1~5·SORTER_3D chuteNo=30·TEST-BARCODE-* 오더·셀·AGV 시드 데이터 **0 변경**.
-  - 특히 `SeedWorkBatchAndOrders`의 `First(ChuteNo==1 && CHUTE)` 크래시(현장-토폴로지 DB에서 "Sequence contains no elements")는 **이 스프린트 OUT**. 자동 시드가 차단되면 사고 경로에선 도달 불가. → `tasks/todo.md`에 "DbSeeder First(ChuteNo==1&&CHUTE)는 명시 SeedOnStartup=true를 현장-토폴로지 DB에 걸면 여전히 크래시 — FirstOrDefault+skip 하드닝 검토"로 등재만.
-- **`appsettings.json` Sorters[](ChuteNo=1)·Provider(SqlServer)·ConnectionStrings·기타 값 불변.**
-- **마이그레이션 0** — 스키마·EF 모델 무접촉. `MigrateOnStartup` 경로 불변.
-- **frontend 0** — `git diff -- frontend/` 빈 출력.
-- **`Program.cs` 배선 불변**(L163 `ProvisionAsync(app)` 호출 위치·순서 그대로).
+- **PlcGateway/Wcs.Core 의미 0**: `PlcGateway.cs`·`HandshakeOrchestrator.cs`·`Models.cs`(PlcSnapshot·RegisterMap)·관측 훅 시그니처(`OnRegisterChange`/`OnWrite`/`OnStage`/`OnOnline/OfflineTransition`·`SorterBundleHandle.Subscribe*`) **불변**. relay는 **소비만**. `git diff -- backend/src/Wcs.PlcGateway backend/src/Wcs.Core` 빈 출력.
+- **쓰기/제어/인증 = F3**: `OpsController` 신설·워드 쓰기(SetTgtFloor/ClearR/CellAssign enqueue)·clear/pause/resume·`OnCleared` 결선·PAUSED/RESUMED 전이·로그인/바인딩 제한 **전부 OUT**. 페이지 ②는 **읽기 전용**(편집 컨트롤 0).
+- **RcsController(`/api/v1`) 불변**(IF-05/09/10). RcsPush·DestinationStatusPusher·핸드셰이크 로직 무접촉.
+- **operation_log 스키마 0**·**마이그레이션 0**(조회 엔드포인트만 추가). `OperationLogService` 컨슈머 로직은 브로드캐스트 얹기 외 동작(배치·teardown·fail-safe) 불변.
+- **DbSeeder 토폴로지 불변**·**appsettings Sorters[]/Provider/ConnectionStrings 값 불변**(신규 `Wcs:Monitor` 타이밍 섹션 추가만).
+- **F1 모니터링 표면(E1~E7)·라이트 테마 토큰(index.css @theme) 값 불변**(명암비 2건 치환 외). 신규 상태색 토큰 도입 없음.
 
 ## 4. Deliverables & 검증 (Completion Gate)
 
-> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 출력(테스트 러너 요약·`dotnet run` 콘솔 로그·DB 카운트 쿼리·`git diff --stat`)을 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정만으론 PASS 금지.
+> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 증거(테스트 러너 요약·Playwright 스크린샷/DOM computed 값·`dotnet run`+`Sim3ds` 콘솔·`git diff --stat`)를 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정만으론 PASS 금지. (가중치·Web/UI Full-stack 슬롯.)
 
-**① 전체 테스트 GREEN**
-- `dotnet test backend/Wcs.sln` → **기존 161 전원 GREEN 유지 + 신규 게이트 테스트 GREEN**(합계 161+N). 실패 0. (게이트 fallback 제거는 인메모리 no-op 경로라 기존 테스트에 영향 0 — 이를 결과로 입증.)
+**① 실시간 워드 동작 (Playwright · 핵심)**
+- `dotnet run --project backend/src/Wcs.Sim3ds`(:1502) + `dotnet run --project backend/src/Wcs.Api`(소터 online) 기동 후 페이지 ②에서:
+  - D0~D6 값이 **폴링 없이 SignalR push로 갱신**(핸드셰이크/이동으로 CurFloor·C_Seq·R_Seq·Ready 등 변화)·**변경 하이라이트** 육안 확인.
+  - **재연결 시 부트스트랩 스냅샷 복구**(허브 재접속 후 전체 D0~D6+Online 즉시 표시). raw 증거(스크린샷/네트워크 프레임).
 
-**② 신규 회귀 테스트가 사고 핵심을 고정**
-- `ShouldSeed(null)==false`(미명시→시드 안 함), `(false)==false`, `(true)==true` 3케이스 GREEN. raw 출력 인용.
+**② operation_log 테일 스트림**
+- 핸드셰이크/전이 발생 → 하단 테일에 엔트리 append 스트리밍(자동 스크롤). **`POLL_CHANGE` 기본 접힘(옵트인)** 확인(고빈도가 기본 스트림 폭주 안 함).
 
-**③ Development 기동 라이브 재현 — 실 DB에 시드 0행 (음성 재현)**
-- ⚠ **안전 제약**: 현장 운영 DB(`Rcs3dsInterlockingWcs`)에 절대 붙이지 말 것. **빈 스크래치 SqlServer DB**(별도 DB명, ConnectionStrings 임시 오버라이드)로 재현하거나, 최소한 시드 삽입이 물리적으로 발생하지 않음을 로그로 입증.
-- `ASPNETCORE_ENVIRONMENT=Development`로 `dotnet run --project backend/src/Wcs.Api` 기동 → 확인:
-  - (a) 콘솔에 **"[DbInitializer] 시드 게이트 off …"** 로그 출현(시드 미실행).
-  - (b) 대상 DB `destination`(및 시드 테이블) **행 0**(사고 시나리오의 오염이 발생하지 않음) — 카운트 쿼리 raw 인용.
-  - (c) 빈 DB + 시드 off이므로 활성 SORTER_3D 부재 → **SorterRegistry fail-loud throw 없이 정상 기동**(사고의 기동 거부 증상도 소멸). 기동 로그 인용.
-- **대조(사고 재현 확인용, 선택)**: 임시로 `SeedOnStartup=true` + 빈 스크래치 DB로 1회 기동 시 시드가 실행됨을 로그로 확인 → 명시 경로는 살아있음 입증(수행 후 원복).
+**③ 기존 164 GREEN + 신규 테스트**
+- `dotnet test backend/Wcs.sln` → 기존 164 전원 GREEN + 허브 통합/operation-log 엔드포인트 테스트 GREEN(합계 164+N). 실패 0. raw 요약 인용.
 
-**④ 무변경 가드 (스코프 격리 입증)**
-- `git diff --stat` 판독 → 변경이 **`DbInitializer.cs` · `appsettings.Development.json` · `appsettings.json`(주석) · 신규 테스트 파일**에만 국한. `git diff -- frontend/` = 빈 출력. `git diff -- backend/src/Wcs.Data/DbSeeder.cs` = **빈 출력**(토폴로지 불변). 마이그레이션 디렉터리 diff 0. Sorters[]·Provider·ConnectionStrings diff 0.
+**④ relay 무영향 (핸드셰이크 타이밍 회귀 0)**
+- **기존 E2E GREEN이 증거**: E2E 그룹(A~I)·소터 핸드셰이크 통합 테스트가 relay 얹은 뒤에도 GREEN 유지. 동시성/타이밍 취약 스위트는 **≥5회 반복 + stash 대조**로 회귀 귀속(S-E2E-MULTI-AGV·S9 flake 교훈 — 1회 GREEN 신뢰 금지). relay 콜백 논블로킹·예외 격리 소스 확인.
 
-**Completion**: ①~④ 전부 PASS + `tasks/todo.md`에 DbSeeder First 크래시 하드닝 항목 등재 + `tasks/lessons.md`에 "환경만으로 자동 시드 발동 = 실 DB 오염 벡터; 명시 설정으로만 · Development.json은 반드시 Provider/연결 오버라이드 동반" 교훈 1행 추가.
+**⑤ 명암비 2건 해소 (computed)**
+- 브라우저 computed 색상으로 RESTYLE-CR-M1(버튼 solid fill=#e00b41 → 백 라벨 ≥4.5:1)·RESTYLE-CR-M2(정보성 데이터 텍스트 muted #6a6a6a=5.41:1) **AA 산술 통과** 확인. 장식/비활성 faint 잔존은 데이터 비담지로 정당함 명시.
+
+**⑥ 무변경 가드 (스코프 격리)**
+- `git diff --stat` 판독 → 변경이 **§2 IN 파일에만 국한**. `git diff -- backend/src/Wcs.PlcGateway backend/src/Wcs.Core` = 빈 출력(훅 시그니처·판정 의미 불변). 마이그레이션 디렉터리·DbSeeder·RcsController·appsettings Sorters/Provider/ConnectionStrings diff 0(신규 `Wcs:Monitor` 타이밍 섹션 추가만). `/api/{**rest}` catch-all이 `/hubs/monitor`를 삼키지 않음을 negotiate 응답(200/101, not 404)으로 입증.
+
+**Completion**: ①~⑥ 전부 PASS + `tasks/lessons.md`에 F2 교훈(relay 무영향 입증법·TestServer websocket 처리·POLL_CHANGE 옵트인) 1행 + 프로세스/포트 정리(:5080·:5173·:1502 free) + git status 핸드오프 동일.
 
 ## 5. 함정 (Traps)
 
-1. **호스트 경유 게이트 테스트 불가**: 전 인메모리 팩토리는 `IsInMemorySqlite`에서 `ProvisionAsync`를 조기 no-op(L57-62). `WebApplicationFactory`로 "시드 안 됨"을 관측하려 해도 애초에 시드 코드에 도달하지 않음 + 팩토리는 별도로 `DbSeeder.Seed`를 항상 호출. → **게이트를 순수 함수로 추출해 직접 단위 테스트**(§2A·§2D). 호스트 경유 관측 시도 금지.
-2. **SQLite 런타임 재도입 금지**(사용자 확정): 회귀 테스트에 실 파일 SQLite/DB를 새로 붙이지 말 것 — 순수 bool 게이트로 충분. 인메모리 더블 배선도 불변(§3).
-3. **키 제거 vs false**: Development.json에서 `SeedOnStartup`를 제거해도 게이트가 "명시 true만"이므로 안전(부재=시드 안 함). 단 base(false)를 상속하므로 명시 `false`가 의도를 더 뚜렷이 함 — Generator 재량이나 **절대 true로 남기지 말 것**.
-4. **거부(throw)로 확대 금지**: 비 in-memory 시드에 대한 방어는 **WARNING 로그**까지. 명시 `SeedOnStartup=true`를 throw로 막으면 "명시 설정으로만 시드" 방향과 모순되고 정당한 dev 시드를 깨뜨림.
-5. **현장 DB 접속 금지**: ③ 라이브 재현에서 base ConnectionStrings(`Rcs3dsInterlockingWcs`)에 그대로 붙지 말 것 — 빈 스크래치 DB로. 사고를 다시 재현시키지 말 것.
-6. **DbSeeder 손대지 말 것**: First 크래시가 눈에 띄어도 이 스프린트는 게이트만 — 토폴로지·시더 로직 수정은 OUT(todo 등재로 이관). 무변경 가드 ④에서 DbSeeder diff 0 검증.
+1. **`/api/{**rest}` catch-all(L222) vs `/hubs`**: catch-all은 `/api/**`만 매치하므로 `/hubs/monitor`는 안전하나(F1 리뷰 확인 "catch-all vs /hubs 충돌 없음") **MapHub가 실제로 매핑됐고 negotiate가 404 아님**을 검증 결선. fallback(`index.html`)이 `/hubs`를 삼키지 않게 순서 확인.
+2. **UseStaticFiles ↔ SignalR 순서**: `UseStaticFiles`(라우팅 이전 미들웨어) → 엔드포인트(`MapControllers`/`MapHub`). WebApplication 최소 호스팅에서 MapHub가 라우팅 자동 추가 — 순서 역전 주의.
+3. **vite dev proxy `/hubs` websocket**: `ws: true` 없으면 dev에서 SignalR 핸드셰이크(101 Upgrade) 실패. `/api` proxy와 별도 항목.
+4. **TestServer websocket 한계**: `WebApplicationFactory` TestServer는 SignalR 기본 WebSocket 협상을 그대로 못 할 수 있음 → HubConnection을 TestServer 핸들러(`Server.CreateHandler()`/`WebSocketFactory`)로 결선하거나 **LongPolling 대체**. 무거운 실-Sim 허브 테스트는 직렬 컬렉션 고려(E2E 병렬 부하 flake 교훈).
+5. **POLL_CHANGE 폭주**: 150ms 폴에서 레지스터가 자주 변하면 oplog 테일이 폭주 → **기본 스트림에서 제외/옵트인**. 단 소터 워드 스트림(페이지 ②)은 델타가 목적이므로 push 유지하되 **소터별 그룹/구독**으로 관심 없는 클라이언트엔 미전송(선택). fire-and-forget이라도 브로드캐스트 빈도가 relay 스레드/네트워크 부담이 되지 않게.
+6. **relay 구독 시점**: `AllBundles`는 `SorterRegistryFactory.StartAsync` 후에만 채워짐 — relay가 그 전에 구독하면 빈 세트. IHostedService 등록 순서 또는 registry StartAsync 내 나란히 구독으로 보장(§2B ⚠).
+7. **relay가 본 동작 지연 금지(절대규칙·S-OBSERVABILITY)**: 훅 콜백에서 동기 I/O·블로킹 금지. `IHubContext` fire-and-forget + 예외 흡수. 폴/핸드셰이크 핫패스 비지연을 ④로 실증.
+8. **라이브 검증 환경 드리프트(기등재)**: DbSeeder는 소터 `chuteNo=30` 시드 vs `appsettings.Sorters[0].ChuteNo=1` → dev 콜드스타트 시 `SorterRegistryFactory` fail-loud. ①/② 라이브는 F1 Evaluator처럼 `Sorters__0__ChuteNo=30` env override(추적파일 무변경)로 소터 online 확보. frontend 스코프 밖·backend 후속.
 
 ## 6. Planner Self-Check
 
-- [x] **Scope IN** = DbInitializer 게이트(env fallback 제거 + 순수 함수 추출 + 로그/주석, 2A) · Development.json(SeedOnStartup=false + 허위 주석 2건 정정, 2B) · base appsettings 주석 동기화(2C) · 신규 순수 게이트 회귀 테스트(2D). 실독 근거: DbInitializer.cs L55-108·Development.json·appsettings.json L94-104·ApiIntegrationTests 팩토리 배선·audit A-4/A-19·grep(IsDevelopment/SeedOnStartup 전 참조).
-- [x] **핵심 설계 판단**: 전 인메모리 팩토리가 ProvisionAsync를 조기 no-op → 게이트는 호스트 경유 관측 불가 → **순수 함수 추출 + 직접 단위 테스트**가 유일한 회귀 고정 경로(함정1). 사용자의 "인메모리 더블 게이트 검증" 의도를 순수 추출로 더 정확히 충족(SQLite 재도입 0).
-- [x] **사용자 확정 반영**: ①SQLite 더블 유지(§3·함정2) ②자동 시드 전면 차단=env 암묵 발동 제거, 명시 true만(2A·②) ③재질문 없음.
-- [x] **Scope OUT** = SQLite 제거 0 · DbSeeder 토폴로지/로직 0(First 크래시는 todo 이관) · Sorters[]/Provider/ConnectionStrings 0 · 마이그레이션 0 · frontend 0 · Program.cs 배선 0. 무변경 가드 ④ git diff로 입증.
-- [x] **검증 4기준** 각 fresh 증거: ①161+N GREEN ②게이트 3케이스 ③Development 라이브 음성 재현(시드 0행·정상 기동·안전 제약) ④무변경 가드. Completion에 todo·lessons 등재 포함.
-- [x] **후보 판정**: #1 IN(2B) · #2 IN(2A, fallback 제거=본질) · #3 IN-경량(WARNING 로그만, 거부 아님) · #4 IN(2D, 순수 추출로 재정의) · #5 OUT+todo(사용자 권장대로).
-- [x] **절대규칙 무관**: PLC 쓰기/TgtFloor/Ready/타이밍 무접촉. 시드 게이트=순수 함수(#8 정신). backend 설정·기동 프로비저닝 한정.
-- [x] **코드 구현 0** — WHAT/WHERE/VERIFY만. 정확한 함수 시그니처·로그 문안·키 제거 여부는 Generator 재량(제약 내).
+- [x] **Scope IN** = 허브(2A)·relay 서비스(2B)·Program 결선+타이밍 외부화(2C)·IMonitoringQueries AddScoped + operation-log 백로그(2D)·프론트 signalr client·페이지 ② 읽기전용·oplog 테일·무효화(2E)·명암비 2건(2F)·vite proxy/의존/nav(2G)·허브 통합 테스트(2H). 실독 근거: FRONTEND.md §2·§5·§6 / Program.cs(DI·훅 구독 블록 L154-198·L357-419·MapControllers L213·catch-all L222) / OperationLogService.cs(단일 컨슈머) / SorterGatewayRegistry.cs(Subscribe*·Latest·AllBundles) / MonitoringController.cs(손조립 현황·E1~E7) / PlcGateway.cs(EmitRegisterChanges reg명·fail-safe try/catch) / Models.cs(PlcSnapshot D0~D6) / frontend(api.ts·queries.ts·App.tsx·Layout.tsx·index.css @theme·button.tsx·meter.tsx·SortingSection/InFlightSection faint 사용처) / MonitoringApiTests 팩토리 패턴 / feedback-archive F1 CR-MAJOR·sprint-feedback RESTYLE-CR-M1/M2.
+- [x] **사용자 확정 반영(재질문 0)**: F2 범위=허브+relay(신규 폴 0)+페이지 ② 읽기전용+oplog 테일+무효화 / 이월 3건 IN(RESTYLE-CR-M1은 **brand-active #e00b41 fill 확정 명기**) / 인증 없음 / @microsoft/signalr 추가.
+- [x] **절대규칙 점검**: #1(PLC 쓰기 무관 — relay는 관측만) · #7(하트비트/버퍼 신규 타이밍 appsettings 외부화·2C) · #8(판정 순수함수 무접촉 — 신규 판정 0). relay 콜백 논블로킹·예외격리·`IHubContext` fire-and-forget = S-OBSERVABILITY 계약 동형(2B·함정7).
+- [x] **Scope OUT** = PlcGateway/Core 의미·훅 시그니처 0 / 쓰기·제어·인증(F3) / RcsController / operation_log 스키마·마이그레이션 0 / DbSeeder·Sorters/Provider/ConnectionStrings 값 0. 무변경 가드 ⑥ git diff로 입증.
+- [x] **검증(가중치·Full-stack 슬롯)**: ①실시간 워드 push+하이라이트+재연결 부트스트랩(Playwright) ②oplog 테일(POLL_CHANGE 접힘) ③164+N GREEN ④relay 무영향(기존 E2E GREEN·≥5회 반복+stash 대조) ⑤명암비 2건 computed AA ⑥무변경 가드. 각 fresh evidence 의무.
+- [x] **함정 8종**: catch-all/hubs·미들웨어 순서·vite ws proxy·TestServer websocket·POLL_CHANGE 폭주·relay 구독 시점·relay 본동작 지연 금지·라이브 드리프트 env override. F1 리뷰 i3·S-OBSERVABILITY·S-E2E flake 교훈 결선.
+- [x] **코드 구현 0** — WHAT/WHERE/VERIFY만. 허브 메서드명·payload 형상·컴포넌트 구조·타이밍 값·라우팅 shape·TestServer 결선 방식은 Generator 재량(제약 내).

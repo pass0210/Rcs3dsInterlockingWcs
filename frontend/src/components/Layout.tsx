@@ -4,16 +4,19 @@ import { useEffect, useState } from 'react'
 import { StatusRail } from './StatusRail'
 import { fmtClock } from '@/lib/format'
 import { POLL_MS } from '@/lib/queries'
+import { useHubLifecycle } from '@/lib/useMonitorHub'
 import { cn } from '@/lib/utils'
 
-// 좌측 내비 항목 — 모니터링(F1)만 활성. F2/F3는 배지로 예고(고아 링크 아님).
+// 좌측 내비 항목 — 모니터링(F1)·3DS 워드(F2) 활성. 운영 제어(F3)는 배지로 예고(고아 링크 아님).
 const NAV = [
   { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null as string | null },
-  { to: '#', label: '3DS 워드', icon: Cpu, enabled: false, phase: 'F2' },
+  { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null as string | null },
   { to: '#', label: '운영 제어', icon: SlidersHorizontal, enabled: false, phase: 'F3' },
 ]
 
 export function Layout() {
+  // 앱 수명 동안 SignalR 실시간 연결 유지 + oplog 이벤트 → TanStack Query 무효화(§2.3).
+  useHubLifecycle()
   return (
     <div className="flex h-full">
       {/* ── 좌측 내비 ─────────────────────────────────────────────── */}

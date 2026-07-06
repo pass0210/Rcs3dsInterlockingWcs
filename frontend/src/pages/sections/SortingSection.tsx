@@ -111,7 +111,7 @@ function CellTile({ cell }: { cell: CellStatus }) {
       <div className="mt-2">
         <CapacityMeter current={cell.currentQty} capacity={cell.capacity} />
       </div>
-      <div className="mt-1.5 truncate font-mono text-[11px] text-faint" title={cell.assignedOrderNo ?? ''}>
+      <div className="mt-1.5 truncate font-mono text-[11px] text-muted" title={cell.assignedOrderNo ?? ''}>
         {cell.assignedOrderNo ? `▸ ${cell.assignedOrderNo}` : '미배정'}
       </div>
     </div>
@@ -131,11 +131,11 @@ function CommandsCard({ destId }: { destId: number | null }) {
     { header: 'pId', accessorKey: 'pId', cell: ({ getValue }) => <span className="font-mono tabular-nums text-ink">{dash(getValue<number | null>())}</span> },
     { header: '바코드', accessorKey: 'barcode', cell: ({ getValue }) => <span className="font-mono text-muted">{dash(getValue<string | null>())}</span> },
     { header: '셀', accessorKey: 'cellNo', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{getValue<number>()}</span> },
-    { header: 'C_Seq', accessorKey: 'cSeq', cell: ({ getValue }) => <span className="font-mono tabular-nums text-faint">{getValue<number>()}</span> },
-    { header: 'R_Seq', accessorKey: 'rSeq', cell: ({ getValue }) => <span className="font-mono tabular-nums text-faint">{dash(getValue<number | null>())}</span> },
+    { header: 'C_Seq', accessorKey: 'cSeq', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{getValue<number>()}</span> },
+    { header: 'R_Seq', accessorKey: 'rSeq', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{dash(getValue<number | null>())}</span> },
     { header: '상태', accessorKey: 'status', cell: ({ getValue }) => { const s = getValue<string>(); return <Badge tone={statusTone(s)}>{s}</Badge> } },
-    { header: 'C 기입', accessorKey: 'cWrittenAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-faint">{fmtTime(getValue<string>())}</span> },
-    { header: 'R 수신', accessorKey: 'rFlagAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-faint">{fmtTime(getValue<string | null>())}</span> },
+    { header: 'C 기입', accessorKey: 'cWrittenAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{fmtTime(getValue<string>())}</span> },
+    { header: 'R 수신', accessorKey: 'rFlagAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{fmtTime(getValue<string | null>())}</span> },
   ]
 
   const items = data?.items ?? []

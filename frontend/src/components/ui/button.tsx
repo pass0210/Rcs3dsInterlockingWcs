@@ -7,8 +7,9 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // primary — Rausch fill, white, 프레스 시 brand-active (F2/F3 CTA 상속)
-        solid:   'bg-brand text-white border border-transparent hover:bg-brand-active disabled:bg-brand-disabled',
+        // primary — Rausch fill(안정 상태 brand-active #e00b41, 백 라벨 AA 4.89:1 — RESTYLE-CR-M1).
+        // 안정/hover 모두 brand-active 유지(hover에서 밝은 #ff385c로 되돌리면 3.52:1로 AA 미달하므로 고정).
+        solid:   'bg-brand-active text-white border border-transparent disabled:bg-brand-disabled',
         // secondary — white + 잉크 아웃라인
         outline: 'border border-ink bg-panel text-ink hover:bg-elevated',
         ghost:   'text-muted hover:bg-elevated hover:text-ink',

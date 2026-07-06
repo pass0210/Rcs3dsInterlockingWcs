@@ -78,6 +78,19 @@ export interface SorterCommand {
   rFlagAt: string | null
 }
 
+export interface OperationLog {
+  id: number
+  at: string
+  category: string
+  action: string
+  level: string
+  sorterChuteNo: number | null
+  destinationId: number | null
+  barcode: string | null
+  pId: number | null
+  detail: string | null
+}
+
 export interface Paged<T> {
   items: T[]
   nextCursor: number | null
@@ -121,4 +134,24 @@ export const api = {
 
   sorterCommands: (destId?: number, take = 50, cursor?: number | null) =>
     getJson<Paged<SorterCommand>>(`/sorter-commands${qs({ destId, take, cursor })}`),
+
+  // operation_log 테일 백로그(F2). category 미지정 시 POLL_CHANGE 기본 제외(옵트인).
+  operationLog: (
+    opts: {
+      category?: string
+      level?: string
+      sorterChuteNo?: number
+      take?: number
+      cursor?: number | null
+    } = {},
+  ) =>
+    getJson<Paged<OperationLog>>(
+      `/operation-log${qs({
+        category: opts.category,
+        level: opts.level,
+        sorterChuteNo: opts.sorterChuteNo,
+        take: opts.take ?? 100,
+        cursor: opts.cursor,
+      })}`,
+    ),
 }

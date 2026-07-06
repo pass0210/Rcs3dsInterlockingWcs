@@ -53,6 +53,17 @@ builder.Services.Configure<WcsOptions>(builder.Configuration.GetSection("Wcs"));
 builder.Services.AddControllers(o =>
     o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true);
 
+// ── SignalR 허브 (F2 실시간 관측 — WcsMonitorHub) ────────────────────────────
+// payload는 프론트 TS 타입과 1:1 카멜케이스로 직렬화(명시 — 기본값에 의존하지 않음).
+// 인증 없음(사용자 확정 — F3). MapHub 결선은 미들웨어 순서 섹션에서 수행.
+builder.Services.AddSignalR()
+    .AddJsonProtocol(o =>
+        o.PayloadSerializerOptions.PropertyNamingPolicy =
+            System.Text.Json.JsonNamingPolicy.CamelCase);
+
+// ── F2 실시간 relay 타이밍 바인딩 (Wcs:Monitor — 하드코딩 금지·절대규칙 #7) ────
+builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection("Wcs:Monitor"));
+
 // ── WcsDbContext 등록 (appsettings에서 provider·연결문자열 선택) ──────────────
 // 절대규칙 8: 연결문자열·provider 하드코딩 금지.
 var dbProvider       = builder.Configuration["Database:Provider"] ?? "Sqlite";
@@ -151,6 +162,18 @@ builder.Services.AddSingleton<IDestinationChangeNotifier>(sp =>
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<DestinationStatusPusher>());
 
+// ── F1-CR-M1 해소: IMonitoringQueries DI 등록 (요청당 손조립 제거) ─────────────
+// MonitoringController가 생성자에서 new MonitoringQueries(...)로 조립하던 것을 폐지하고
+// AddScoped로 주입한다. 수명: WcsDbContext(scoped) + 싱글톤(레지스트리·상태서비스) → scoped 정상 해석.
+builder.Services.AddScoped<Wcs.Api.Monitoring.IMonitoringQueries, Wcs.Api.Monitoring.MonitoringQueries>();
+
+// ── F2 실시간 relay (MonitorRelayService) ────────────────────────────────────
+// ⚠ 구독 시점(함정6): AllBundles는 SorterRegistryFactory.StartAsync 완료 후 채워진다.
+// IHostedService는 등록 순서로 순차 기동되므로, 이 relay를 SorterRegistryFactory 등록(위)
+// **이후**에 등록해 relay.StartAsync가 나중에 돌게 한다 → 구독 시점에 AllBundles 유효.
+builder.Services.AddSingleton<MonitorRelayService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MonitorRelayService>());
+
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -211,6 +234,14 @@ app.UseStaticFiles();
 // IF-08 투입 가부 폴링(deposit-permission)은 폐지 — Phase 2 WCS→RCS 푸시로 대체.
 // ════════════════════════════════════════════════════════════════════════════
 app.MapControllers();
+
+// ════════════════════════════════════════════════════════════════════════════
+// (F2) SignalR 허브 매핑 — MapControllers 뒤·catch-all/fallback 앞.
+// /api/{**rest} catch-all은 /api/**만 매치하므로 /hubs/monitor를 삼키지 않고,
+// MapFallbackToFile(index.html)보다 앞서 매핑돼 fallback이 허브 negotiate를 가로채지 않는다
+// (함정 #1·#2 — 검증 결선: negotiate가 404 아님을 통합 테스트로 입증).
+// ════════════════════════════════════════════════════════════════════════════
+app.MapHub<Wcs.Api.Hubs.WcsMonitorHub>("/hubs/monitor");
 
 // ════════════════════════════════════════════════════════════════════════════
 // (F1) SPA fallback — API 우선·fallback이 /api/**를 삼키지 않게(함정 #1·음성 대조 C2).

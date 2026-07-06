@@ -41,6 +41,13 @@ public sealed class OperationLogService : IOperationLogger, IHostedService, IAsy
     private Task?                    _consumeTask;
     private int                      _stopped;   // 멱등 StopAsync(Interlocked)
 
+    // ── F2 실시간 테일 스트림 훅 (S-FRONTEND-F2) ─────────────────────────────────
+    // 단일 컨슈머가 각 엔트리를 발화 → MonitorRelayService가 SignalR로 브로드캐스트.
+    // DB 영속화와 별개 경로: 발화는 SaveChanges 이전에 하므로 "기록 실패가 스트림을 막지 않고",
+    // 핸들러는 relay가 fire-and-forget·예외 격리하므로 "스트림 실패가 기록을 막지 않는다".
+    // 이 이벤트는 배치·teardown·fail-safe 동작을 바꾸지 않는다(브로드캐스트 얹기 전용).
+    public event Action<OperationLog>? OnEntry;
+
     public OperationLogService(
         IServiceScopeFactory         scopeFactory,
         ILogger<OperationLogService> log)
@@ -143,7 +150,10 @@ public sealed class OperationLogService : IOperationLogger, IHostedService, IAsy
                     buffer.Add(item);
 
                 if (buffer.Count > 0)
+                {
+                    EmitToObservers(buffer);  // SaveChanges 이전 발화(기록 실패와 독립).
                     await FlushBatchAsync(buffer, ct).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException) { /* 종료 — 정상 */ }
@@ -161,9 +171,24 @@ public sealed class OperationLogService : IOperationLogger, IHostedService, IAsy
             while (buffer.Count < MaxBatch && reader.TryRead(out var item))
                 buffer.Add(item);
             if (buffer.Count > 0)
+            {
+                EmitToObservers(buffer);
                 await FlushBatchAsync(buffer, CancellationToken.None).ConfigureAwait(false);
+            }
         }
         catch { /* 종료 경쟁 — 무시(fail-safe) */ }
+    }
+
+    // 실시간 테일 옵저버 발화 — 핸들러 예외를 삼켜(fail-safe) 컨슈머 루프·영속화를 막지 않는다.
+    private void EmitToObservers(List<OperationLog> batch)
+    {
+        var h = OnEntry;
+        if (h is null) return;
+        foreach (var e in batch)
+        {
+            try { h(e); }
+            catch { /* relay 핸들러 예외 격리 — 스트림 실패가 기록/컨슈머를 막지 않음 */ }
+        }
     }
 
     private async Task FlushBatchAsync(List<OperationLog> batch, CancellationToken ct)

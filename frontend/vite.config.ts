@@ -26,6 +26,13 @@ export default defineConfig({
         target: 'http://localhost:5080',
         changeOrigin: true,
       },
+      // SignalR 허브(/hubs/monitor) — ws:true 없으면 dev에서 WebSocket 업그레이드(101) 실패(함정 #3).
+      // /api proxy와 별도 항목. 운영은 동일 출처라 proxy 불요(상대 경로 /hubs).
+      '/hubs': {
+        target: 'http://localhost:5080',
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
   build: {
