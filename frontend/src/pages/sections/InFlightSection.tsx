@@ -25,7 +25,7 @@ export function InFlightSection() {
     { header: 'AGV', accessorKey: 'agvNo', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{dash(getValue<number | null>())}</span> },
     { header: '인덕션', accessorKey: 'inductionNo', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{dash(getValue<number | null>())}</span> },
     { header: '상태', accessorKey: 'status', cell: ({ getValue }) => { const s = getValue<string>(); return <Badge tone={statusTone(s)}>{s}</Badge> } },
-    { header: '등록', accessorKey: 'createdAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-faint">{fmtTime(getValue<string>())}</span> },
+    { header: '등록', accessorKey: 'createdAt', cell: ({ getValue }) => <span className="font-mono tabular-nums text-muted">{fmtTime(getValue<string>())}</span> },
   ]
 
   const items = data?.items ?? []

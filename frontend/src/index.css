@@ -74,6 +74,13 @@
   }
 }
 
+/* 워드 값 변경 하이라이트 — 델타 수신 시 accent(정보색) 배경 플래시 후 페이드(F2). */
+@keyframes value-flash {
+  0%   { background-color: rgba(37, 99, 235, 0.22); } /* --color-accent 22% */
+  100% { background-color: transparent; }
+}
+.value-flash { animation: value-flash 0.9s ease-out; }
+
 /* 온라인 램프 펄스 — 신호 대기 애니메이션 (reduced-motion 존중). currentColor 기반. */
 @keyframes lamp-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }

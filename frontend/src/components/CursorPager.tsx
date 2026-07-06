@@ -21,7 +21,7 @@ export function CursorPager({
 }) {
   return (
     <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-2.5">
-      <span className="font-mono text-[11px] tabular-nums text-faint">
+      <span className="font-mono text-[11px] tabular-nums text-muted">
         페이지 {page} · {count}건{fetching ? ' · 갱신 중…' : ''}
       </span>
       <div className="flex items-center gap-1.5">
