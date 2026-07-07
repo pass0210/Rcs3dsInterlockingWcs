@@ -2241,3 +2241,20 @@ piece=2 · sorter_command=2 · piece_event=2               (적용 전과 동일
 - 포트 1502/5080 free · orphan Sim3ds/Api/testhost 0.
 
 ### 커밋/push 없음 — Evaluator 검증 대기 (feat/sim3ds-rtu).
+
+---
+
+# S-CLEANUP-FIELD — fan-out 3모듈 + fan-in 통합
+
+## IMPLEMENTATION COMPLETE (Orchestrator fan-in, 2026-07-07)
+
+3모듈 병렬(워크트리 격리) 구현 — 상세는 tasks/sprint-log/m1.md·m2.md·m3.md:
+- **M1 백엔드 관측성**: D-1 OFFLINE 로그 억제(전이 1회+N폴 요약, appsettings) · D-2 rollOnFileSizeLimit(100MB) · D-3 GET /health(항상 200 liveness+DB·소터 JSON) · D-4 입력 상한 400(barcode≤200·timeStamp≤30·qty 설정 상한·음수 거부) · A-1 HS_R_RESIDUE WARN 승격(분류기 OperationLogClassifier 추출) · A-2 spurious 에지 억제
+- **M2 Sim·테스트·시드**: C-2 ParsedUnitId 1~247 fail-loud · C-3 RequireTransport 명시 예외 · A-3 volatile 정렬(RSeqOverride는 2필드 분해) · B-1 매핑확장 주석 정정(기존 안내가 재실행 시 MERGE에 클로버되는 오류였음 — 정확 절차로) · B-2/B-4 테스트 주석 · B-6 진단 술어 분리
+- **M3 문서**: A-5 master_spec §05 FULL/PAUSED 타입별 분기 정정 · A-20 README 전면 재작성 · E-SPEC SPEC IF-08 폐지 마킹(판정표 보존)
+
+**fan-in**: 3패치 무충돌 적용 + README /health 라인 통합(M3 인계). 최초 워크트리 프로비저닝 사고(스테일 베이스 79cb6b1) → 수동 재생성으로 복구(lessons 참조).
+
+**통합 결함 1건(iteration 2)**: 신규 CleanupFieldM1_HttpTests가 FakeModbusWebApplicationFactory의 static DB명 공유로 병렬 이중시드 충돌(5 FAIL) → 전용 인스턴스-고유 팩토리(HubWebApplicationFactory 동형)로 격리.
+
+**최종**: dotnet test backend/Wcs.sln = **210/210 GREEN ×3연속**(189 기존 + M1 19 + M2 2), 빌드 오류 0(경고 10 = 선재 NU1903), F1b flake 미발현, 고아 프로세스 0.

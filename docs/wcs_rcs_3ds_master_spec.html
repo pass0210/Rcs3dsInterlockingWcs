@@ -167,16 +167,16 @@
 
   <section id="s5">
     <h2><span class="n">05</span> 목적지 조회 (IF-05) 사유</h2>
-    <p>WCS가 목적지(chuteNo)와 수량을 판정한다. <b>BUSY(분류 중·이동 중)는 일시적이라 그 목적지로 그대로 배정</b>(도착 후 IF-08 상태에서 ready가 되면 투입). <b>FULL·PAUSED는 NG</b> — 가부 조회(IF-08)가 없어졌으므로 받을 수 없는 목적지는 배정하지 않는다.</p>
+    <p>WCS가 목적지(chuteNo)와 수량을 판정한다. <b>BUSY(분류 중·이동 중)는 일시적이라 그 목적지로 그대로 배정</b>(도착 후 IF-08 상태에서 ready가 되면 투입). <b>FULL·PAUSED는 목적지 타입별로 갈린다</b> — <b>슈트</b>는 곧 비워지니 IF-05는 OK(보내고 대기, readiness는 IF-08 푸시로 별도 전달), <b>3D 소터</b>는 PAUSED·셀 만재면 NG(가부 조회 IF-08 폐지로 도착 후 거를 수 없어 IF-05에서 막는다).</p>
     <table>
       <tr><th style="width:190px">WCS 사유(내부)</th><th style="width:130px">RCS 수신</th><th>동작</th></tr>
       <tr><td><code>NORMAL</code></td><td><span class="pill go">OK · chuteNo</span></td><td>전량이 한 곳에 들어감 → 그 목적지로 진행</td></tr>
       <tr><td><code>BUSY</code> (분류 중·이동 중)</td><td><span class="pill go">OK · chuteNo</span></td><td>일시적 → <b>그 목적지로 보냄</b>. 도착(IF-09) 후 소터가 IF-08 상태에서 ready가 되면 투입</td></tr>
-      <tr><td><code>FULL / PAUSED</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>받을 수 없음(장기 차단) → 배정 안 함. IF-08 가부 조회가 없어 도착 후 거를 수 없으므로 IF-05에서 막는다</td></tr>
+      <tr><td><code>FULL / PAUSED</code> (목적지 타입별)</td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span> / <span class="pill go">OK</span></td><td><b>슈트</b>: full/paused여도 <b>IF-05는 OK</b>(보내고 대기 — readiness는 IF-08 푸시로 별도 전달). <b>3D 소터</b>: <code>PAUSED</code>면 NG(예외 없이 차단), 셀 기준(<code>SorterCanAcceptBarcode</code>)으로 못 받으면 NG(FULL); OFFLINE은 IF-05에서 보지 않는다(셀이 있으면 도착 후 푸시 <code>ready</code> 대기)</td></tr>
       <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>전량이 한 곳(슈트/3D 한 셀)에 안 들어감 → 전량 가능할 때까지 AGV 대기</td></tr>
       <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>보낼 곳 없음 → AGV 대기(이동 안 함). OFFLINE은 대체 3D/보류</td></tr>
     </table>
-    <div class="note">NG·대기 그룹: <b>FULL/PAUSED</b>(받을 수 없음) · <b>OVER</b>(전량 안 들어감) · <b>COMPLETED/NO_DEST/OFFLINE</b>(보낼 곳 없음). OK·진행은 <b>NORMAL·BUSY</b>뿐 — BUSY만 일시적이라 그 목적지로 보낸다. (예전엔 FULL/PAUSED도 OK였으나 IF-08 가부 조회 폐지로 NG 전환.)</div>
+    <div class="note">NG·대기 그룹: <b>소터 FULL/PAUSED</b>(소터만 — 받을 수 없음) · <b>OVER</b>(전량 안 들어감) · <b>COMPLETED/NO_DEST/OFFLINE</b>(보낼 곳 없음). OK·진행은 <b>NORMAL·BUSY + 슈트 FULL/PAUSED</b> — BUSY와 슈트 FULL/PAUSED는 그 목적지로 보낸다(슈트는 곧 비워지고 readiness는 IF-08 푸시로 전달). <b>소터만</b> FULL/PAUSED에서 NG(IF-08 가부 조회 폐지로 도착 후 거를 수 없어 IF-05에서 차단). ※ 목적지 타입 분기는 <code>wcs_rcs_interface_kr.html</code> §6·실코드(<code>RcsController.QueryDestination</code>)와 정합.</div>
   </section>
 
   <section id="s6">
