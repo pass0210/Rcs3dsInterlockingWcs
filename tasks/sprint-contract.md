@@ -1,237 +1,209 @@
-[Sprint Contract] — S-SIM3DS-RTU
+[Sprint Contract] — S-CLEANUP-FIELD
 
-Branch: feat/sim3ds-rtu (PR #33 위 스택 — 병합은 사용자가). 이전 계약(S-FIELD-20CELLS)은 커밋 완료됨, 본 파일 overwrite.
-작성: Planner Subagent · 2026-07-07 · 사용자 요청(2026-07-07)
-
-────────────────────────────────────────────────────────────────────────
-## Goal (WHAT — 무엇을 만들 것인가)
-
-목요일(7/9) 현장 방문 **전에** WCS의 RTU 전송 계층(`ModbusRtuMaster` — 지금까지 실 PLC로만
-검증됨)을 실 PLC 없이 사전 리허설할 수 있게 한다. 이를 위해 3DS PLC 시뮬레이터(Sim3ds)가
-현행 TCP뿐 아니라 **Modbus RTU 슬레이브**로도 동작하게 만든다.
-
-리허설 구성:
-```
-WCS(Transport=Rtu, COM-A) ──[가상/실 시리얼 페어]── Sim3ds(Transport=Rtu, COM-B)
-     Modbus 마스터                                        Modbus 슬레이브
-```
-이로써 프레이밍·UnitId·타임아웃·폴링 스냅샷·C/R 핸드셰이크 전 구간을 실 PLC 없이 왕복 검증한다.
-
-**핵심 불변식**: 전송 계층만 교체한다. 시뮬레이터의 의미(레지스터 맵 D0~D6, C_Flag 자체 클리어,
-SortDuration 후 R 에코, ClearR까지 R 유지, 잔류 프리셋, 고장 주입)는 RTU에서 **완전 동일**해야 하며,
-기존 TCP 경로와 그 위의 모든 테스트는 **0 회귀**여야 한다.
-
-이 스프린트의 변경 표면은 **Sim3ds + 테스트 + 문서**뿐이다. WCS 프로덕션 코드(Wcs.Api /
-Wcs.PlcGateway / Wcs.Core / frontend)와 appsettings.json은 **0 변경**(WCS 측 Transport=Tcp|Rtu
-선택은 S-RTU에서 이미 구현 완료 — 무변경 가드).
+Branch: fix/cleanup-field (base: develop @ PR #34 병합 완료)
+작성자: Planner Subagent · 2026-07-07
+성격: 수정 스프린트(누적 코드리뷰 Minor + 2026-07-01 감사 잔여 정리). 신규 기능 0.
+우선순위 원칙: **목요일(7/9) 현장 테스트 전 — 현장 관측성·운영 가치 항목이 최우선.**
+후속 맥락: 이 스프린트 직후 B2B 이식 3단계가 이어짐 → **과확장 금지**(최소 침습, 재사용 가능한 최소 형태).
 
 ────────────────────────────────────────────────────────────────────────
-## Implementation Scope (Generator가 해야 할 것)
+## Goal
 
-1. **Sim3ds 전송 선택**: 설정으로 `Transport = Tcp(기본, 현행 보존) | Rtu` 선택.
-   - 미지정/기본 = **Tcp** → `dotnet run --project backend/src/Wcs.Sim3ds`가 지금과 **바이트 동일**하게
-     `127.0.0.1:1502` TCP로 기동(현행 보존 — 회귀 방지). (참고: WCS 측 기본은 Rtu이나, Sim3ds의
-     기존 관측 동작은 TCP였으므로 Sim3ds 기본은 Tcp로 두어 현행 보존을 우선한다.)
-   - 알 수 없는 Transport 값 → fail-loud(명확한 예외, 절대규칙 #8·Core 원칙 "Fail Loud").
-
-2. **RTU 옵션(전부 설정값 — 절대규칙 #7, 하드코딩 금지)**: PortName·BaudRate·Parity·StopBits·UnitId
-   (+ Read/WriteTimeoutMs). 기본값은 WCS appsettings `Sorters[0]` placeholder와 **정합**
-   (BaudRate=9600·Parity=Even·StopBits=One·UnitId=1·Timeout=1000). 단 **PortName은 안전한 기본값
-   없음** — RTU 모드에서 명시 지정을 요구한다(우발적 COM1 점유 방지. WCS와 Sim은 시리얼 페어의
-   반대쪽 포트를 쓰므로 같은 포트를 공유할 수 없다).
-
-3. **SimServer 내부 전송 추상화**: 현재 `SimServer._server`는 `ModbusTcpServer`로 하드코딩되어 있고
-   `FlushToServerLocked`/`PullFromServerLocked`가 `_server.GetHoldingRegisters(UnitId)`에 결합돼 있다.
-   전송을 TCP/RTU 중 선택 가능하게 추상화하되, 시뮬레이션 루프·프리셋·고장주입·테스트 훅이 깨지지
-   않게 한다. **무변경 가드(공개 표면 시그니처 유지)**: `Options` record 필드, `StartAsync`/`StopAsync`/
-   `DisposeAsync`, `ReadSnapshot`, `SetRResidue`, `InjectRSeqOverride`/`InjectRFlagDelayMs`/
-   `InjectNoResponse`/`InjectStickyRResidue`. 엔디안 처리(현 `BinaryPrimitives.ReverseEndianness`
-   가정)는 RTU 서버 버퍼에서도 동일 의미가 되도록 확인·보존한다(RtuTransportTests의
-   `InitServerRegisters`가 동일 ReverseEndianness 패턴을 쓰므로 정합).
-
-4. **RTU 모드 의미 동일성**: 위 3의 추상화 후 RTU에서 C_Flag 감지→즉시 C·C_Flag 클리어 → TiltDelay →
-   분류 시작(Ready=0 + TgtFloor=0 클리어, Ready 블립 금지) → SortDuration 후 R 세팅(R_Seq==C_Seq) →
-   ClearR까지 R 유지 → 복귀 이동 규칙까지 SPEC §6과 **동일**. 잔류 프리셋·4종 고장 주입도 RTU에서 동작.
-
-5. **관측성**: 콘솔/로그에 어느 전송·어느 엔드포인트로 리스닝 중인지 명시
-   (예: `Sim3ds 서버 기동 TCP 127.0.0.1:1502` / `Sim3ds 서버 기동 RTU COM6 9600/Even/One unit=1`).
-   기존 타임라인 로그 형식 보존.
-
-6. **문서**: 시리얼 페어 준비법 + WCS↔Sim RTU 리허설 절차(설정 예시 포함) — docs/ 아래.
-   - 가상 페어: com0com 설치법(관리자 드라이버 설치 — 사용자 작업, scope 밖임을 명시) **또는**
-     USB-시리얼 어댑터 2개 크로스 결선(TX↔RX, RX↔TX, GND↔GND) 대안.
-   - 리허설 절차: Sim3ds를 COM-B RTU로 기동 → WCS appsettings `Sorters[0]`를 Transport=Rtu·COM-A로
-     설정 → 폴 Online·핸드셰이크 1건 왕복 확인. Sim3ds RTU 설정 예시 + WCS 설정 예시 양쪽 수록.
-   - **주의**: appsettings.json은 이 스프린트에서 변경 대상 아님. 문서에는 "현장 리허설 시 이렇게
-     설정" 예시(diff/스니펫)만 싣고 실제 파일은 건드리지 않는다.
-
-7. **테스트** (아래 Completion Conditions·Verification Scenarios와 정합):
-   - (a) **단위**: Sim3ds 전송 선택 + RTU 옵션 파싱 + 잘못된 Transport fail-loud.
-   - (b) **CI 통합(권장·환경 무관, 결정적)**: `FakeSerialPort`가 `IModbusRtuSerialPort`를 구현하므로,
-     **실 `SimServer`(RTU 모드)**를 fake-serial 페어에 결선해 WCS `ModbusRtuMaster`와 in-process
-     왕복(폴 Online 스냅샷 + C/R 핸드셰이크 1건 + ClearR + 의미 검증 1개 이상: R_Seq==C_Seq / Ready
-     블립 없음 / 잔류 프리셋 중 택). 물리 COM 불요 → CI에서 항상 실행. (기존 VT-2는 hand-rolled
-     `ModbusRtuServer`를 썼을 뿐 실 SimServer 상태기계를 안 태웠음 — 본 (b)가 진짜 신규 가치.)
-     이를 위해 SimServer RTU 모드가 **테스트용 주입 `IModbusRtuSerialPort` seam**을 받도록 설계할 것을
-     권장(ModbusRtuMaster의 fake-port 생성자 패턴과 동형 — Consistency Over Preference).
-   - (c) **실선 통합(환경 게이트, 필수)**: 환경변수 `WCS_RTU_TEST_PORTS=COMx,COMy`(client,server) 지정
-     시에만 실 OS 시리얼 스택으로 (b)와 동일 시나리오 스모크. **미지정 시 스킵이 GREEN**
-     — 반드시 **기존 프로젝트 스킵 패턴(`LiveMultiAgvRunner`)을 따른다**: `Environment.
-     GetEnvironmentVariable` + early-return(+스킵 사유 콘솔/출력). ⚠️ 새 `SkippableFact` 의존성 도입 금지
-     (xUnit 2.9.3 동적 Skip 미지원 — 프로젝트는 이미 early-return 방식으로 결정함. 새 패턴 도입 전 확인 원칙).
-   - (d) **회귀 0**: 기존 전체 스위트(특히 TCP 경로: PlcGatewayIntegrationTests·HandshakeResidueTests·
-     ScenarioTests·E2E) 무변경 GREEN.
-
-────────────────────────────────────────────────────────────────────────
-## Non-change Guards (변경 금지 — git diff 0 라인)
-
-- **Wcs.Api / Wcs.PlcGateway / Wcs.Core / frontend**: 프로덕션 코드 0 변경. (WCS Transport 선택은 이미 구현됨.)
-- **appsettings.json**: 0 변경. Sim3ds 자체 설정만 신설/사용.
-- **FluentModbus 5.3.2 고정**: 버전 변경 금지.
-- **SimServer 공개 표면**: Scope 3에 열거한 시그니처 유지(테스트·프리셋·고장주입 호환).
-- 허용 변경: `backend/src/Wcs.Sim3ds/**`, `backend/tests/Wcs.Tests/**`(신규 테스트 + 필요한 테스트
-  인프라), `docs/**`(리허설 문서), 그리고 Sim3ds 프로젝트 **자체** 설정 파일(신설 시).
-
-────────────────────────────────────────────────────────────────────────
-## Cautions (계약 명기 — Generator 필독)
-
-- **ModbusRtuServer 실 API를 코딩 전 확인**(추측 금지, 5.3.2 고정). 테스트에서 확인된 실서명:
-  `new ModbusRtuServer(unitId, isAsynchronous: true)`, `GetHoldingRegisters(unitId)`,
-  `Start(IModbusRtuSerialPort)`. **물리 COM 기동은 `Start(string portName)` 오버로드**로 추정되나
-  5.3.2에서 실제 시그니처(및 SerialPort 파라미터 지정 방식 — BaudRate/Parity/StopBits를 서버가
-  어떻게 받는지)를 반드시 확인 후 구현. TCP 서버는 `AddUnit(id)`+`Start(IPEndPoint)`인데 RTU 서버는
-  ctor에서 단일 unitId를 받는 등 **API가 발산**하므로 추상화 시 이 차이를 흡수해야 한다.
-- **SimServer 레지스터 버퍼 결합**: `GetHoldingRegisters(UnitId)` 접근이 TCP 인스턴스에 묶여 있으니
-  추상화 후에도 Flush/Pull·프리셋·`SetRResidue`·`ReadSnapshot`이 그대로 동작하는지 검증.
-- **COM 포트 부재 환경**: 이 머신 현재 COM 포트 0개·com0com 미설치 → (c) 실선 테스트는 CI/일반 러너에서
-  항상 실행 불가. **전체 스위트가 스킵 포함 GREEN**이어야 하고, **스킵 사유가 출력**돼야 한다. Evaluator는
-  포트 페어가 없으면 (c)를 "환경 부재로 Skip됨이 정상 동작"으로 검증한다(스킵 로직 자체가 검증 대상).
-  단 (b) fake-serial 통합은 환경 무관 실행되므로 RTU 의미 검증의 실질 게이트다.
-- **com0com 설치는 scope 밖**(관리자 권한 드라이버 설치 = 사용자 결정/작업). 문서로만 안내.
-- **기준 테스트 카운트 = 178**(PR #31+#32 병합 반영) — 기동 시 `dotnet test`로 실제 재확인. 완료 후 =
-  178 + 신규 단위/CI 통합 테스트, (c) 실선 테스트는 환경 부재 시 스킵으로 보고.
-
-────────────────────────────────────────────────────────────────────────
-## Evaluation Criteria (Evaluator 판정 기준 — Library/CLI 4기준, ★★★ 최우선)
-
-1. **API Ergonomics / 전송 선택 명료성** (★★★): Transport 선택·RTU 옵션이 직관적이고 하드코딩 0.
-   콘솔이 "지금 어느 전송·포트로 리스닝 중"인지 즉시 알려주는가. 잘못된 값은 명확한 예외인가.
-2. **Architecture Originality / 추상화 품질** (★★★): 전송 교체가 SimServer 상태기계·프리셋·고장주입·
-   테스트 훅을 오염시키지 않는 깔끔한 seam인가(AI slop·과설계 아님). TCP/RTU 분기가 응집적인가.
-3. **Craft** (★★): 엔디안·타임아웃·UnitId 경계, 예외 삼킴 없음(RTU 예외 = 명시 처리), 리소스 정리
-   (포트/서버 dispose), 스킵 사유 로깅. 문서의 정확성(설정 예시가 실제로 동작).
-4. **Reliability** (★★): 회귀 0(기존 178 GREEN), RTU 의미가 TCP와 동일함을 (b)로 실증,
-   COM 부재 환경에서 스위트 안정 GREEN(스킵 포함).
-
-가중: 회귀 0과 "전송만 교체·의미 동일"이 통과의 하드 게이트. 문서 없이 코드만 = 미완.
-
-────────────────────────────────────────────────────────────────────────
-## Completion Conditions (Evaluator 통과 최소 조건 — 전부 AND)
-
-- [ ] Sim3ds가 설정으로 Transport=Tcp(기본)|Rtu 선택 가능. 기본 실행이 현행 TCP :1502와 동일.
-- [ ] RTU 옵션 전부 설정값(하드코딩 0). 잘못된 Transport = fail-loud.
-- [ ] (a) 전송 선택/옵션 파싱 단위 테스트 GREEN.
-- [ ] (b) 실 SimServer(RTU) ↔ WCS ModbusRtuMaster fake-serial 왕복 통합 테스트 GREEN(환경 무관):
-      폴 Online + C/R 핸드셰이크 1건 + ClearR + 의미 검증(R_Seq==C_Seq 등) 1개 이상.
-- [ ] (c) 실선(WCS_RTU_TEST_PORTS) 테스트: 환경 부재 시 스킵 사유 출력 + 스위트 GREEN. (환경 있으면 왕복 GREEN.)
-- [ ] (d) 기존 전체 스위트(178 기준) 회귀 0 — TCP 경로·E2E 포함 독립 재실행으로 확인.
-- [ ] 콘솔/로그가 전송·엔드포인트를 명시.
-- [ ] 문서: 시리얼 페어 준비법(com0com/어댑터 직결) + WCS↔Sim RTU 리허설 절차 + 설정 예시(양쪽).
-- [ ] Non-change Guards 준수: git diff가 Wcs.Api/PlcGateway/Core/frontend/appsettings.json 0 라인.
-- [ ] dotnet build 경고 0(신규분), 예외 삼킴 0.
-
-────────────────────────────────────────────────────────────────────────
-## Parallel Modules
-N/A (단일 모듈 — Wcs.Sim3ds + 그 테스트/문서. 경계 깨끗한 병렬 분할 없음). → Generator 1인.
-
-## Evaluation Dimensions
-functional only (표면이 시뮬레이터/CLI·프론트/보안/성능 민감 표면 없음). → Evaluator 1인, 1/1/1 기본 유지.
+직전 3개 스프린트(S-HANDSHAKE-RESIDUE / S-FIELD-20CELLS / S-SIM3DS-RTU)의 코드리뷰 Minor와
+2026-07-01 전체 감사의 잔여 quick-fix(묶음 A)·문서 표류(묶음 E)를 한 번에 정리한다.
+행동 의미 변경은 최소화하고(핸드셰이크·판정 의미 변경 0), **관측성·입력 위생·문서 현행화**에 집중해
+현장 테스트 중 진단·운영이 실제로 가능한 상태로 만든다.
 
 ────────────────────────────────────────────────────────────────────────
 ## Detected Project Type: Full-stack
 
-(레포 신호에 근거 — frontend/ 브라우저 진입점 + Wcs.Api 서버 라우트가 같은 레포에 공존.
-사용자 표현이 아니라 구조로 판별.)
+근거(레포 신호 — 사용자 표현·기억 아님):
+- 브라우저 진입 트리 존재: `frontend/src/pages/sections/*.tsx`(클라이언트 렌더 컴포넌트).
+- 서버 라우트/컨트롤러 존재: `backend/src/Wcs.Api/Controllers/RcsController.cs` + 서버 진입점 `Program.cs`.
+- 둘이 같은 레포에 공존 → Full-stack.
 
-> **투명성 노트(S-HANDSHAKE-RESIDUE 계약 선례 준용)**: 레포 전체는 Full-stack이나, **이 스프린트가
-> 변경하는 표면은 백엔드/시뮬레이터 단독**이다 — 독립 콘솔 실행체(`Wcs.Sim3ds`, OutputType=Exe) +
-> 그것의 타입 공개 API(`SimServer`/`Options`, xUnit이 소비) + docs. **프론트엔드 0·HTTP 엔드포인트 0·
-> DB 0·appsettings.json 0 변경.** 따라서 아래 Full-stack 슬롯 중 순수 프론트 Web/UI 슬롯은
-> 근거를 달아 N/A로 두고, 시뮬레이터/백엔드 표면의 시나리오와 전송 경계를 넘는 데이터 플로우
-> 시나리오를 실효 검증으로 채운다.
-
-## Verification Scenarios (Full-stack 슬롯 — 필수)
-
-### Applicable Web/UI scenarios (프론트 표면)
-- **N/A** — 이 스프린트는 프론트엔드 파일을 전혀 건드리지 않는다. Sim3ds는 헤드리스 콘솔 시뮬레이터로
-  브라우저 표면이 없다. (프론트 회귀는 Non-change Guard의 git diff 0로 보장.)
-
-### Applicable Backend/API scenarios (시뮬레이터/백엔드 표면 — 이 스프린트가 건드리는 "서버측" 표면)
-"엔드포인트" 대신 **콘솔/설정 진입점 + Sim3ds 타입 공개 표면 + WCS↔Sim Modbus 왕복**을 시나리오로 열거:
-- **S1 — TCP 회귀(기본 경로 불변)**: Transport 미지정/Tcp → Sim3ds가 여전히 TCP :1502 바인딩,
-  현행과 동일 동작. 증거: PlcGatewayIntegrationTests·HandshakeResidueTests·ScenarioTests·E2E
-  독립 재실행 GREEN + 콘솔 "…기동 TCP 127.0.0.1:1502".
-- **S2 — RTU 선택 + 옵션 파싱(해피)**: Transport=Rtu + RTU 옵션(PortName/BaudRate/Parity/StopBits/
-  UnitId) 설정/CLI 파싱, 하드코딩 0. 증거: 단위 테스트가 파싱 결과 단언 + 콘솔
-  "…기동 RTU COMx 9600/Even/One unit=1".
-- **S3 — RTU 의미 동일성(해피, 핵심)**: 실 SimServer(RTU) ↔ WCS ModbusRtuMaster fake-serial 왕복 —
-  폴 Online 스냅샷 → CellAssign → C_Flag=1 → Sim R 에코(R_Seq==C_Seq, Ready 블립 없음) →
-  ClearR → R_Flag=0. 증거: (b) 통합 테스트 GREEN(환경 무관) + 타임라인 로그.
-- **S4 — 에러/스킵 경계**: 잘못된 Transport 값 → fail-loud 예외(단위 테스트). 그리고 COM 페어
-  부재(WCS_RTU_TEST_PORTS 미설정) → (c) 실선 테스트가 **스킵(사유 출력)**, 전체 스위트 GREEN 유지.
-  이 스킵 동작 자체가 검증 대상.
-
-### End-to-end 데이터 플로우(2+ 계층/프로세스 교차)
-- WCS 마스터 프로세스(`ModbusRtuMaster` → `PlcPollingService` + `HandshakeOrchestrator`) ↔
-  **시리얼 경계** ↔ Sim3ds 슬레이브(`ModbusRtuServer` + SimServer 상태기계)의 전 구간 C/R 핸드셰이크
-  왕복. **CI(환경 무관)**: fake-serial 페어로 실 SimServer를 태워 결정적 검증(S3). **실선(환경 게이트)**:
-  WCS_RTU_TEST_PORTS 지정 시 실 OS 시리얼 스택으로 동일 왕복(프레이밍·타임아웃 실측 커버리지 추가);
-  미지정 시 스킵. — "레지스터가 시리얼을 건너 WCS↔Sim을 왕복한다"는 흐름을 기술(도구가 아니라 흐름).
-
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios [N/A+사유], Applicable Backend/API scenarios [S1~S4], End-to-end 데이터 플로우 [WCS↔serial↔Sim]). All slots filled: yes.
+**단, 이번 스프린트의 변경 표면은 전부 서버측(backend/Wcs.Api·PlcGateway·Sim3ds)·문서·테스트다.
+프론트엔드는 0 변경(B-5 OUT).** 따라서 Full-stack 슬롯 중 Web/UI(브라우저 E2E) 파트는 N/A로 두되,
+Evaluator는 브라우저 E2E 대신 **`git diff`로 `frontend/`가 전혀 수정되지 않았음을 증거로 확인**한다(대체 검증).
 
 ────────────────────────────────────────────────────────────────────────
-## Questions (사용자 확인 필요 — novel 결정, 선택지+권장안)
+## IN / OUT 선별 (Planner 판단 — 현장가치·리스크 근거)
 
-**Q1. Sim3ds 설정 제공 방식** *(진짜 결정 — 현재 `Program.cs`가 Options를 하드코딩. "appsettings/환경변수
-Sim3ds:*로 제공"이라는 주석은 stale이고 Sim3ds는 자체 config 파일·바인딩이 없다. RTU 도입은 이 갭을
-닫는 일이기도 함.)*
-- (A) **CLI 인자만** — 예: `dotnet run --project ...Wcs.Sim3ds -- --transport rtu --port COM6 --baud 9600`.
-  가장 가볍고 리허설에 빠름. 새 파일 없음. 단 절대규칙 #7("전부 설정값") 철학과 약함.
-- (B) **appsettings.Sim3ds.json(자체 파일) + 환경변수** — 절대규칙 #7·기존 API의 Sim3ds 블록 형태와 정합.
-  약간 무겁고 리허설 때 파일 편집 필요.
-- (C) **둘 다** — appsettings(기본값, Transport=Tcp로 현행 보존) + CLI/환경변수 오버라이드로 리허설
-  시 `--transport rtu --port COMx` 한 줄 전환. ← **권장**. 근거: (i) 절대규칙 #7을 지키면서 stale
-  주석의 약속을 실제로 구현, (ii) 기본 Transport=Tcp라 현행 `dotnet run` 동작 바이트 동일 보존,
-  (iii) 목요일 리허설에서 파일 편집 없이 CLI로 즉시 RTU 전환.
+각 후보의 실제 코드 위치를 열어 현 유효성을 확인함. **이미 해소된 항목은 OUT(사유 명기).**
 
-**Q2. 리허설 문서 위치**
-- (A) `docs/SPEC.md` §6/§7-A에 추가 — 스펙과 한 곳.
-- (B) **`docs/RTU-REHEARSAL.md` 신규(SPEC §6/§7-A에서 링크)** ← **권장**. 근거: SPEC.md는 "응축 스펙"
-  성격이고, 단계별 운영자 리허설 절차(com0com 설치·결선·기동·확인)는 절차 문서라 별도 파일이 스펙
-  가독성을 해치지 않는다. SPEC에는 1줄 포인터만 추가.
+### IN — 백엔드 관측성 (Module 1)  ※ 현장가치 최상위 군
+| ID | 항목 | 위치(확인) | 근거 |
+|----|------|-----------|------|
+| D-1 | **OFFLINE 지속 중 로그 스팸 억제** [현장↑] | PlcGateway.cs:319·330-333 | 폴 실패 시 `LogWarning(ex,…)`가 매 폴 스택 전문 + `isHardEx` 매회 true라 "OFFLINE 전이" `LogError`가 매 폴 반복(거짓 전이 라벨). 진단 로그 매몰 → 관측성 훼손. 전이 1회만 상세, 지속은 강등/주기요약, ONLINE 복구 1줄. |
+| D-2 | **Serilog rollOnFileSizeLimit** [현장] | backend/src/Wcs.Api/appsettings.json Serilog File Args | 현재 미설정 → 기본 1GB 도달 시 그날 잔여 로그 침묵 유실. `rollOnFileSizeLimit=true`(+`fileSizeLimitBytes`·`retainedFileCountLimit`) 추가. |
+| D-3 | **/health 엔드포인트** [현장] | Program.cs:204(MapControllers 유일) | 프로세스 생존/소터 Online/DB 연결을 외부에서 확인할 HTTP 표면 0. 최소 liveness 신설(과설계 금지 — B2B-1 재사용 예정). |
+| D-4 | **입력 상한(input caps)** [현장] | RcsController.cs:49·51-52 / DbRepositories.cs:82 | barcode 길이 무검증(스키마 nvarchar(200))·timeStamp 무검증(ClientTs 30)·IF-05 qty 상한 부재(int 오버플로로 OVER 우회·ReservedQty 오염)·IF-10 음수 qty 무검증. Postman·스캐너·RCS 버그 1건으로 500 또는 조용한 데이터 오염. |
+| A-1 | **HS_R_RESIDUE 로그레벨 승격** [현장↑] | Program.cs:410-411 (레벨 분류기) | 분류기가 `MISMATCH/TIMEOUT/OFFLINE` 키워드만 ERROR, 나머지 INFO. "HS_R_RESIDUE"(잔류 감지 — 현장 추적 핵심)가 INFO로 묻힘. `OperationLogLevel.WARN` 존재 확인(Entities.cs:89) → RESIDUE 키워드 WARN 승격. |
+| A-2 | 기동 reconcile spurious RFlagRaised 에지 억제 + 주석 | PlcGateway.cs:286-310 | 기동 첫 폴 잔류 처리(ClearR 큐 투입) 직후 `if(!prevRFlag && snap.RFlag)`가 RFlagRaised 에지도 발화. 소비자 부재라 무해하나, reconcile가 지울 값을 에지로도 흘림. reconcile 발동 시 에지 억제 + RFlagRaised 채널의 소비자 부재 상태를 주석 명시(F-3 흡수). 저비용·방어. |
 
-**Q3(확인만 — 권장 채택 예정)**: 실선 테스트 환경 게이트 변수명 = `WCS_RTU_TEST_PORTS=COMx,COMy`
-(client,server 순), 스킵은 기존 `LiveMultiAgvRunner` early-return 패턴 준수(새 의존성 없음). RTU
-기본 파라미터는 WCS `Sorters[0]` placeholder와 정합(9600/Even/One/UnitId=1), PortName은 기본값 없이
-명시 요구. 이견 없으면 이대로 진행.
+### IN — Sim/RTU + 테스트·시드 위생 (Module 2)
+| ID | 항목 | 위치(확인) | 근거 |
+|----|------|-----------|------|
+| C-2 | SimServer UnitId 무음 절단 fail-loud | SimServer.cs:40·118·134 | `int UnitId` → `(byte)opt.UnitId` 무음 절단(300→44). RTU 유효 1~247 범위 검증 fail-loud(형제 ParsedParity/ParsedStopBits와 동형 — Consistency). |
+| C-3 | SetRResidue/Flush/Pull StartAsync 이전 호출 NRE | SimServer.cs (`_transport` nullable, StartAsync:143 세팅) | 기동 전 호출 시 `_transport` null → NRE. 명확한 InvalidOperationException("StartAsync 먼저 호출") 가드. |
+| A-3 | InjectStickyRResidue 등 volatile 일관성 | SimServer.cs:86(및 :65·:68) vs :108 `volatile _noResponse` | 형제 `_noResponse`는 volatile인데 InjectStickyRResidue/InjectRSeqOverride/InjectRFlagDelayMs는 plain auto-property. 크로스 스레드 읽힘 → volatile 정렬(테스트 결정성). |
+| B-1 | **seed-field-20cells.sql 매핑확장 주석 정정** [현장↑] | scripts/seed-field-20cells.sql:22-28 | 주석이 확장을 "수동 UPDATE cell SET Enabled=1"로 안내하나, 스크립트는 `@availMax` 리팩터됨 — 실제 정확한 확장 = **`@availMax=15→20`(§2 cells·§5 order_item·§6 배정 자동 연동) + §4 오더 VALUES 리스트 1~15→1~20 수동 확장 + §7 셀16 CANCELLED 블록 제거.** 현장 매핑 확장 시 오독 방지(1순위). 주석만 정정. |
+| B-2 | Field20CellsGateTests PlannedQty=100 주석 | Field20CellsGateTests.cs:87·124 | 시드는 PlannedQty=3인데 테스트 픽스처는 100. "OVER 격리용 상향(게이트 검증 시 OVER 간섭 배제)" 1줄 주석. |
+| B-4 | LoadCellQty pId 41000대 주석 | Field20CellsGateTests.cs:286 | SPEC pId 1~30000인데 41000대 사용. "실 IF-05 pId 아님 — LOADED 직적재 합성 pId(20000대 IF-05 pId와 비충돌)" 우회 명시 주석. |
+| B-6 | (선택) cells_enabled 검증 컬럼 술어 분리 | seed sql:224-225 | `Enabled=1 AND Capacity=@cellCap` 혼입 → enabled/capacity 진단 conflate. B-1과 같은 파일이라 저비용 — 술어 분리(진단 명료). |
+
+### IN — 문서 현행화 (Module 3)
+| ID | 항목 | 위치(확인·현 stale) | 근거 |
+|----|------|-----------|------|
+| A-5 | **master_spec §05 FULL/PAUSED 타입별 분기** [현장] | wcs_rcs_3ds_master_spec.html:170·175·179 | "FULL·PAUSED는 NG"(타입 구분 없음)이 확정4(슈트=OK·소터만 NG)·실코드(DbRepositories.cs:68-70)·interface_kr과 충돌. canonical HTML 2종이 정반대 → 목요일 문서 사용 전 정정. 표 FULL/PAUSED 행에 "슈트=OK(보내고 대기)/소터=NG" 분기 반영. |
+| A-20 | **README.md 전면 현행화** [현장 — RCS 오도 방지] | README.md:8·16·18·35·43·45·64·66·70 (전부 stale 확인) | 폐지된 IF-08 폴링('allowed=true까지 폴링')·Minimal API·"Modbus TCP"만·"개발은 SQLite 분기"·16테이블·IF-09 부재·HTML 4종·로드맵 미래형. RCS 개발사에 공유되면 폐지 API 구현 유도. 현행 재작성. |
+| E-SPEC | SPEC.md §2/§3 IF-08 푸시모델 명료화(최소) | SPEC.md §2·§3 deposit-permission | IF-08 엔드포인트가 폴링→푸시로 대체됐으나 §2/§3은 구 폴링 서술. **판정표(§2-A/2-B DepositDecider)는 내부 판정 스펙으로 유효 — 삭제 금지.** "IF-08 deposit-permission 엔드포인트 폐지·WCS→RCS 푸시로 대체(interface_kr 참조), 아래 판정표는 내부 DepositDecider 스펙" 최소 주석. |
+| A-6 | **CLAUDE.md drift** ※ ORCHESTRATOR-APPLIED | CLAUDE.md:29·37·60 등 (still stale 확인) | "Minimal API: IF-05/08/10"(실제 MVC·IF-05/09/10+IF-08 푸시)·"M5에서 Serilog 도입"(완료)·"§6 투입 가부 표"(§06=푸시)·"16테이블"(17)·Migrations 2종 누락. **CLAUDE.md는 Team 보호파일(workflow-agents.md — Generator/Evaluator 수정 금지). 오케스트레이터/사용자가 적용**(Q1 참조). |
+
+### OUT — 사유 명기
+| ID | 항목 | OUT 사유 | 처리 |
+|----|------|----------|------|
+| A-4 | TimingOptions 레코드 중복 필드 통합 | dual-record(공통 TimingOptions + 소터별 nullable SorterTimingOverride)는 **의도된 정상 패턴**(ToXxx 병합 로직 보유). 통합은 병합 경로를 건드리는 횡단 리팩터 — 리스크>가치, 과확장 금지. | todo 등재 |
+| B-3 | Field20CellsGateTests:196-200 데드 브랜치 | 5회 반복 루프의 `p.Value <= AvailMax` 가드는 "16~20 미반환" 불변식을 문서화하는 무해한 방어 단언. 제거는 회귀 의도 약화 리스크. | 유지(무변경) |
+| B-5 | grid-cols-5 전역 고정(SortingSection.tsx:76) | 요건 부합·수용됨(물리 4×5 미러링). frontend 0 변경 원칙. | todo(다중소터 셀수기반 열도출=미래) |
+| C-1 | RTU-REHEARSAL.md:8 SPEC 참조 라벨 | **이미 정확** — 현재 "[§6 Sim3ds 동작]·[§7-A 전송 방식 확정]" 두 참조 모두 SPEC 구조와 일치. 해소됨. | OUT(해소) |
+| C-4 | ISimTransport.Server 노출 폭 | 수용·리뷰 종결(internal 봉인, 실용적 선택). | OUT |
+| C-5 | fire-and-forget 시퀀스 vs Dispose 경합 | 선재·방어 처리 확인됨. | OUT |
+| C+ | 물리 RTU 실선 미검증 | 코드 결함 아님 — 목요일 리허설 몫(RTU-REHEARSAL 체크리스트 커버). | OUT |
+| A-19 | appsettings.Development.json 주석 | **이미 수정됨** — 현재 주석이 "launchSettings 부재로 dotnet run 기본=Production"·필드안전 경고(현장 DB 오염 방지)·SeedOnStartup=false 전부 반영. 해소됨. | OUT(해소) |
+| A-12/A-13 | Serilog 상대경로·install-service.ps1 | 감사 **묶음 B(운영 배포 전)** — 본 스프린트(묶음 A·E) 범위 밖. | todo(기추적) |
+| E-⑤code | DbSeeder chuteNo=30↔Sorters=1 정렬 + Development.json Provider 오버라이드 | **config/code 변경**(현장 DB 오염 회귀) — E는 "문서만" 범위. 잠정 완화(Development.json 필드안전 경고)는 **이미 존재**, 필드 기본=Production. 신중한 전용 처리 필요. | todo(기추적 :8·:16) · Q3 |
+| F-1 | DbSeeder First() 하드닝 | 명시 dev 플래그일 때만 시드 도달·현장=Production. 저현장가치. | todo |
+| F-2 | DateTimeOffset→Stopwatch monotonic | 큰 횡단 변경 — 본 스프린트 OUT. | todo |
 
 ────────────────────────────────────────────────────────────────────────
-## 참고 — 이 스프린트에서 활용/보존할 기존 자산
-- `backend/tests/Wcs.Tests/FakeSerialPort.cs` — `IModbusRtuSerialPort` in-memory 페어(이미 존재).
-  (b) 통합 테스트가 실 SimServer(RTU)를 여기에 결선. `FakeSerialPortPair.Create()` 재사용.
-- `backend/tests/Wcs.Tests/RtuTransportTests.cs` VT-2 — WCS 마스터↔hand-rolled RtuServer 왕복 선례
-  (본 스프린트 (b)는 실 SimServer 상태기계로 격상).
-- `backend/tests/Wcs.Tests/PlcGatewayIntegrationTests.cs` — SimServer(TCP)↔GW 통합 패턴·teardown
-  (Writer.TryComplete → StopAsync → DisposeAsync) 준용.
-- `backend/tests/Wcs.Tests/E2E/LiveMultiAgvRunner.cs` — 환경변수 게이트 + early-return 스킵 선례(준수).
-- `backend/src/Wcs.PlcGateway/Modbus/ModbusRtuMaster.cs` — fake-port 주입 생성자 패턴(SimServer RTU
-  seam 설계의 동형 참조).
+## Implementation Scope (Generator)
 
-── ★ 사용자 확정 (2026-07-07, Phase 1→2 게이트 통과) ─────────────────────────
-Q1 설정 방식: **C안 — appsettings.Sim3ds.json 기본값(Transport=Tcp 현행 보존) + CLI/환경변수 오버라이드**
-   (목요일 현장: `dotnet run -- --transport rtu --port COMx` 한 줄 전환)
-Q2 문서: **B안 — docs/RTU-REHEARSAL.md 신설**, SPEC §6에서 링크
-Q3 확인: 환경 게이트 변수 WCS_RTU_TEST_PORTS=COMx,COMy / RTU 기본값은 WCS Sorters[0]
-   placeholder 정합(9600/Even/One/UnitId=1), 기본 PortName 없음(미지정 시 fail-loud)
-브랜치: feat/sim3ds-rtu — PR #33 위 스택. ⚠ 병합 순서 #33→본 PR (본 PR은 draft로 생성 예정)
+기술 세부(정확한 메서드·시그니처·테스트 배치)는 Generator 재량. 아래는 **무엇을** 만들지의 계약.
+
+### Module 1 — 백엔드 관측성 (파일: PlcGateway.cs · Program.cs · RcsController.cs · appsettings.json + 신규 백엔드 테스트)
+1. **D-1**: 폴 실패 로깅을 전이/지속 분리 — (a) OFFLINE **전이 시 1회만** 상세(스택 포함), (b) 지속 실패는 스택 없는 강등(Debug) 또는 N폴/주기마다 1줄 요약, (c) ONLINE 복구 1회 로그. **요약 주기·백오프 등 신규 타이밍은 appsettings**(절대규칙 #7 — 하드코딩 금지). alarm/operation_log 전이당 1회 가드는 현 동작 보존.
+2. **D-2**: appsettings.json Serilog File Args에 `rollOnFileSizeLimit=true`(+`fileSizeLimitBytes`·`retainedFileCountLimit`) 추가. Development.json도 정합 검토.
+3. **D-3**: `/health` GET 1개 — 부수효과 0(ISorterGatewayRegistry.AllBundles의 Latest.Online/At + DB 연결여부 스냅샷 읽기만). 응답 예: `{status, db:bool, sorters:[{chuteNo, online, lastPollAt}]}`. **liveness 최소**(전용 HealthChecks 프레임워크 도입 금지 — 단일 엔드포인트). 상태코드 정책은 Q2.
+4. **D-4**: RcsController 입력 검증 추가(DB 도달 전) — barcode 길이 ≤ 스키마 상수(200, 단일 진실 공유)·timeStamp(ClientTs) ≤30·IF-05 qty 상한(설정값·appsettings, OVER 검사는 long 산술로 오버플로 방어)·IF-10 qty 음수 거부. 응답 의미(400 vs NG)는 Q2. **정상 입력 경로 동작 불변**(무변경 가드).
+5. **A-1**: Program.cs:410 레벨 분류기에 RESIDUE 키워드 → `OperationLogLevel.WARN` 승격(MISMATCH/TIMEOUT/OFFLINE은 ERROR 유지).
+6. **A-2**: reconcile 발동 폴에서 spurious RFlagRaised 에지 억제(또는 억제 불가 시 주석으로 무해성 명시) + RFlagRaised 채널 소비자 부재 상태 주석(F-3).
+
+### Module 2 — Sim/RTU + 테스트·시드 위생 (파일: SimServer.cs · Field20CellsGateTests.cs · scripts/seed-field-20cells.sql)
+7. **C-2**: SimServer UnitId 1~247 범위 검증 fail-loud(범위 밖 명확한 예외).
+8. **C-3**: SetRResidue/Flush/Pull(StartAsync 前) 명확한 InvalidOperationException 가드.
+9. **A-3**: InjectStickyRResidue·InjectRSeqOverride·InjectRFlagDelayMs volatile 정렬.
+10. **B-1**: seed sql:22-28 매핑확장 주석 정정(위 근거대로 @availMax·§4·§7 경로 정확화).
+11. **B-2/B-4**: 테스트 주석 1줄씩.
+12. **B-6(선택)**: cells_enabled 검증 술어 분리.
+
+### Module 3 — 문서 (파일: README.md · wcs_rcs_3ds_master_spec.html · SPEC.md ; CLAUDE.md = 오케스트레이터 적용)
+13. **A-5**: master_spec §05 FULL/PAUSED 표 행 목적지 타입별 분기.
+14. **A-20**: README 현행 재작성.
+15. **E-SPEC**: SPEC.md §2/§3 IF-08 푸시 명료화 최소 주석(판정표 보존).
+16. **A-6**: CLAUDE.md 정정안을 계약에 명시하되 **적용은 오케스트레이터**(Team 보호파일).
+
+────────────────────────────────────────────────────────────────────────
+## Parallel Modules (Generator fan-out 가능 — 경계 확인 완료)
+
+세 모듈은 **쓰기 파일이 겹치지 않음**(확인함):
+- **Module 1**(백엔드 관측성): `PlcGateway.cs`, `Program.cs`, `RcsController.cs`, `appsettings.json`(+`appsettings.Development.json` Serilog), 신규 백엔드 테스트 파일.
+- **Module 2**(Sim·테스트·시드): `SimServer.cs`, `Field20CellsGateTests.cs`, `scripts/seed-field-20cells.sql`.
+- **Module 3**(문서): `README.md`, `wcs_rcs_3ds_master_spec.html`, `SPEC.md`.
+
+Fan-out 규칙(택하면):
+- Module 1·2 모두 `Wcs.Tests` 프로젝트에 쓰지만 **서로 다른 파일**(Module 1=신규 테스트 파일, Module 2=Field20CellsGateTests.cs) → 파일 충돌 0. 신규 테스트는 기존 파일에 추가하지 말고 별도 파일로.
+- **CLAUDE.md는 어느 모듈에도 속하지 않음** — 오케스트레이터 적용(Q1).
+- Fan-in: 병합 후 **전체 스위트 1회 통합 실행**(189 + 신규). worktree 격리 권장(파일 경계는 깨끗하나 csproj 동시성 안전).
+- 단일 Generator가 순차 처리해도 무방(모듈은 순서 독립). 규모가 작아 fan-out은 선택.
+
+## Evaluation Dimensions: functional only
+(관측성·입력위생·문서 — 단일 기능 차원. 보안/성능 전용 병렬 검증 불요. 입력 캡의 오버플로/음수는 functional 케이스로 커버.)
+
+────────────────────────────────────────────────────────────────────────
+## Evaluation Criteria (Backend/API 4기준 — Evaluator)
+1. **API Design Quality (★★★)**: /health 응답 형태 일관·부수효과 0; 입력 검증 응답(에러 구조)이 기존 IF-05/10 규약과 정합; 로그 레벨 분류 의미 정확(RESIDUE=WARN).
+2. **Architecture Originality (★★★)**: 최소 침습·재사용 가능한 최소 형태(B2B 대비 과설계 0); dual-record 등 기존 패턴 존중; 신규 타이밍 전부 appsettings.
+3. **Craft (★★)**: 오버플로/음수/과길이 엣지 처리; fail-loud(UnitId·pre-StartAsync); volatile 정렬; 예외 삼킴 0; 로그 스팸 실제 억제 확인.
+4. **Functionality (★★)**: **무변경 가드** — 핸드셰이크·판정(Decide)·기존 GREEN 189 전부 보존; 문서가 실코드와 일치.
+
+────────────────────────────────────────────────────────────────────────
+## Completion Conditions (Evaluator PASS 최소 조건)
+- [ ] 기존 전체 스위트 GREEN + **카운트 189 재확인**(기동 시 `dotnet test backend/Wcs.sln`로 baseline 재측정) + IN 항목별 신규 테스트 GREEN.
+- [ ] **D-1 실효 검증**: Sim으로 OFFLINE 유도(StopAsync 등) → 지속 OFFLINE 동안 **로그 라인 수가 폴 주기마다 스택 반복이 아님**을 단정(전이 1회 상세 + 지속 억제). 라인 수/레벨을 fresh 로그 캡처로 인용.
+- [ ] **D-2**: File 싱크에 rollOnFileSizeLimit 반영 확인(설정 파싱·기동 로그 or 단위 확인).
+- [ ] **D-3**: 실제 `GET /health` 왕복(HTTP 응답 본문) — status·db·sorters 필드 존재·부수효과 0.
+- [ ] **D-4**: 실HTTP로 (a) 과길이 barcode(>200)·(b) IF-05 qty=int.MaxValue·(c) IF-10 음수 qty → **500 아님·데이터 오염 0**(정상 입력은 불변) 단정. SQLite 테스트 더블의 provider-gap 유의(길이 미강제 → 컨트롤러 검증으로 잡아야 함).
+- [ ] **A-1**: operation_log에 HS_R_RESIDUE가 WARN으로 기록됨을 단정.
+- [ ] **C-2/C-3**: UnitId 범위밖·pre-StartAsync 호출 → 명확한 예외(fail-loud) 단정.
+- [ ] **문서(A-5/A-20/E-SPEC)**: 정정 내용이 실코드·interface_kr과 일치(리뷰). **frontend/ 무변경**을 `git diff`로 확인(Web/UI 브라우저 E2E 대체).
+- [ ] 정적검사(빌드 경고 회귀 0 — 단, 선재 NU1903 SQLitePCLRaw advisory는 기존 부채로 별건 todo:4, 본 스프린트 신규 경고 0).
+- [ ] A-6 CLAUDE.md 정정은 오케스트레이터 적용 확인(Team 미수정).
+
+────────────────────────────────────────────────────────────────────────
+## Verification Scenarios (Full-stack — 슬롯 채움)
+
+### Web/UI 슬롯 — 전부 N/A (사유: 이번 스프린트 frontend 표면 0 변경)
+- 각 surface 기본상태 / 대체상태 / 빈·에러 상태 / 다크모드 / 핵심 상호작용:
+  **N/A** — 프론트엔드 파일 무수정. Evaluator는 브라우저 E2E 대신 `git diff --stat`로 `frontend/`에 변경이 없음을 증거로 확인(대체 검증). B-5는 OUT.
+
+### Backend/API 슬롯 — 채움
+- **이번 스프린트가 건드리는 엔드포인트(method + path)**:
+  1. `GET /health` (신규 — D-3)
+  2. `POST /api/v1/destination-query` (IF-05 — D-4 입력검증 추가; 판정 의미 불변)
+  3. `POST /api/v1/deposit-report` (IF-10 — D-4 음수 qty 거부; 멱등 의미 불변)
+- **엔드포인트별 happy path(입력→출력 형태)**:
+  1. `/health` → 200, `{status, db:true, sorters:[{chuteNo,online,lastPollAt}]}`(현장 소터 chuteNo=1 반영).
+  2. IF-05 정상 barcode·qty → 기존과 동일 OK·chuteNo·reason(NORMAL/BUSY/…) — **회귀 없음**.
+  3. IF-10 정상 → `{result:"OK"}` 멱등 — **회귀 없음**.
+- **엔드포인트별 관련 에러 케이스(Planner 선별 — 패딩 없음)**:
+  1. IF-05 barcode 길이 >200 → 검증 거부(500 아님; Q2 결정에 따라 400 또는 NG), DENIED 감사행/operation_log 배치 유실 없음.
+  2. IF-05 qty ≤0(기존) 및 qty=2147483647(오버플로) → 거부, ReservedQty 오염 0.
+  3. IF-10 qty 음수 → 거부, ChuteCapacity DepositedQty 왜곡 0.
+  4. timeStamp 원문 >30자 → 거부/절단(ClientTs truncation 500 방지).
+  5. `/health` DB 다운/소터 OFFLINE 시 응답(Q2 상태코드 정책대로) — 부수효과 0 유지.
+
+### 계층 교차(E2E) 슬롯 — 프론트↔백엔드 흐름은 N/A(이번 변경 없음)
+대신 **백엔드↔Sim3ds 통합**(이 스프린트의 실제 통합면)을 실 Sim으로 검증:
+- Sim OFFLINE 유도 → (a) 폴 루프 로그 스팸 억제 실측(D-1) + (b) 그 상태에서 `/health`가 sorter online=false·lastPollAt 반영(D-3)을 한 시나리오로 관측.
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 6 (Web/UI=N/A(git-diff 대체), Backend/API endpoints, happy path, error cases, cross-layer=N/A(backend↔Sim 대체), integration-observed). All slots filled: yes.
+
+────────────────────────────────────────────────────────────────────────
+## 제약 재확인 (절대규칙 — 위반 금지)
+- **#7 하드코딩 금지**: OFFLINE 요약 주기·백오프·qty 상한 등 신규 임계값은 전부 appsettings.
+- **#1 PLC 쓰기 단일 큐**: A-2 reconcile·ClearR은 큐 경유 유지(직접 Modbus 호출 금지).
+- **무변경 가드**: 핸드셰이크(HandshakeOrchestrator)·판정(DepositDecider)·TgtFloor 규칙 의미 변경 0.
+- **예외 삼킴 금지**: 입력검증·fail-loud는 명시 예외/응답으로.
+- **frontend 0 변경**(B-5 OUT).
+- **CLAUDE.md·workflow-*.md·.git/hooks/는 Team 미수정**(오케스트레이터/사용자 전담).
+
+────────────────────────────────────────────────────────────────────────
+## Questions (novel 결정 — 선택지 + 권장안)
+
+**Q1. CLAUDE.md drift(A-6) 적용 주체.**
+CLAUDE.md는 Team(Generator/Evaluator) 보호파일이라 팀이 수정 불가.
+- (a) **[권장]** 오케스트레이터가 Team 완료 후 docs-only 정정을 직접 적용(코드 리스크 0·순수 문서). 계약에 정정안 명시됨.
+- (b) 사용자가 직접 정정.
+- (c) 본 스프린트에서 제외하고 별도 처리.
+→ 권장 (a).
+
+**Q2. 입력 상한(D-4) 거부 의미 + /health 상태코드.**
+- 입력 캡: (a) **[권장]** 구조적 위반(과길이 barcode/timeStamp·비양수/오버플로 qty)은 **400 Bad Request**로 DB 도달 전 거부(입력 검증 ≠ 업무 NG) / (b) 기존 NG 규약에 흡수(reason 추가). RCS 계약 영향 있어 확인 필요.
+- /health: (a) **[권장]** liveness=프로세스 생존이면 **항상 200**+본문에 db/sorter 저하 플래그(단순·프로브 친화, readiness 503은 B2B-1 이연) / (b) 저하 시 503.
+→ 권장 (a)/(a). RCS가 400을 어떻게 처리할지 미확정(SPEC §7 Q1~Q7 대기)이면, 현장 Postman 단계에선 400+명확 메시지가 안전.
+
+**Q3. 현장 DB 오염 회귀(E-⑤ code) 이연 확인 — FYI.**
+DbSeeder 소터 chuteNo=30 ↔ base Sorters ChuteNo=1 미스매치는 명시 `SeedOnStartup=true`를 dev Provider 오버라이드 없이 켜면 현장 SqlServer DB 오염 경로. **잠정 완화(Development.json 필드안전 경고)는 이미 존재**하고 필드 기본 환경=Production이라 즉시 위험은 낮음. 본 스프린트(docs+관측성)에서는 코드 정렬 OUT·todo 유지.
+→ 권장: **이연 확인**. 목요일 전 현장 머신에서 ASPNETCORE_ENVIRONMENT=Development 기동만 하지 않으면 안전. 정렬이 필요하면 별도 소규모 스프린트.
+
+────────────────────────────────────────────────────────────────────────
+## 참고 — 이번 스프린트로 신규 todo 등재 예정(OUT 항목)
+A-4(TimingOptions 통합) · B-5(다중소터 열도출) · F-1(DbSeeder First 하드닝) · F-2(Stopwatch monotonic).
+기추적 유지: 묶음 B(A-12/A-13) · E-⑤ code(todo:8·16) · NU1903(todo:4).
+
+── ★ 오케스트레이터 확정 (2026-07-07, Questions 처리 — 기존 관례 준수 권장안 채택) ──
+Q1: CLAUDE.md(A-6) 정정은 **오케스트레이터가 커밋 단계에서 직접 적용** (Team 보호파일)
+Q2: 입력 상한 위반 = **400**(기존 IF-05 검증 관행 동형) / /health = **항상 200 liveness**(상태 상세는 본문 JSON)
+Q3: 현장 DB 오염 회귀 이연 확인 — 잠정 완화 존재(Production 기본) 전제 수용
+실행 방식: Parallel Modules 3기 fan-out(워크트리 격리) → 오케스트레이터 fan-in(패치 수확→통합 빌드·전체 테스트) → 단일 Evaluator
