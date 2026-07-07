@@ -366,7 +366,7 @@
 
     <h3><span style="font-family:var(--mono);font-weight:700">①</span> 미작업 차수 조회 — <code>GET /api/v1/works/unprocessed?bizDay=</code></h3>
     <p>미작업 상태인 데이터 목록을 조회한다. <b>응답은 <code>ApiResponse</code>가 아니라 원시 배열</b>이며, 데이터가 없으면 빈 배열 <code>[]</code> + <code>200</code>을 반환한다(실패가 아님).</p>
-    <div class="note"><b>부수효과.</b> 조회된 행의 <code>ReceiveTime</code>을 서버시각으로 갱신("가져갔다" 마킹)한다. <b>⚠ GET이지만 멱등이 아니다</b> — 응답 수신에 실패해도 <b>단순 재시도 금지</b>. 각 호출이 조회한 행을 소비(ReceiveTime 마킹)하므로, 재호출하면 이전 행이 아니라 <b>다음 행 집합</b>을 가져가 데이터가 유실될 수 있다.<br>※ 미처리가 0건일 때 서버에 자동생성 설정이 있으면 그 자리에서 자동 생성이 트리거될 수 있으나(트랜잭션 원자 처리) 이는 서버 내부 동작이다 — <b>RCS 관점에서는 "빈 배열을 받을 수도, 새로 생성된 데이터를 받을 수도 있다"만 관측</b>된다.</div>
+    <div class="note"><b>부수효과.</b> 조회된 행의 <code>ReceiveTime</code>을 서버시각으로 갱신("가져갔다" 마킹)한다. <b>⚠ GET이지만 멱등이 아니다</b> — 응답 수신에 실패해도 <b>단순 재시도 금지</b>. 각 호출이 조회한 행을 소비(ReceiveTime 마킹)하므로, 재호출하면 이전 행이 아니라 <b>다음 행 집합</b>을 가져가 데이터가 유실될 수 있다.<br>※ 미처리가 0건이면 <b>빈 배열 <code>[]</code></b>을 반환한다(실패 아님).</div>
     <p><b>요청</b> — <code>bizDay</code>(쿼리 파라미터, 공통 B3) 단독. 고유 필드 없음.</p>
     <p><b>응답</b> (원시 배열) — 그룹별 <code>bizDay</code>·<code>batch</code>(공통) + <code>items[]</code> 배열:</p>
     <table>
