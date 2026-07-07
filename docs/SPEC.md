@@ -71,6 +71,15 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
             → WCS가 R_Flag 폴링(100ms, 타임아웃=분류 최대 소요+여유) → R 읽기 → R_Seq==C_Seq 대사(유실·중복 검출, 불일치=알람)
             → R_CellNo·R_Seq·R_Flag=0 클리어
 
+### 4-A. R단계 잔류 대사 (arming) — S-HANDSHAKE-RESIDUE (감사 A-1 해소)
+R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 관찰 보장) 기반**이다. 0을 관찰한 이후의 R_Flag==1 상승만 자기 응답으로 수용 → 에지 감지와 등가.
+- **핸드셰이크 시작 시**: C(CellAssign)를 큐에 투입하기 **전** 스냅샷 R_Flag를 확인한다.
+  - R_Flag==0 → 그대로 진행(깨끗한 경로는 추가 지연 0).
+  - R_Flag==1 → 직전 건·PLC 기동 잔류로 **대사**: WARN 로그 + operation_log(HANDSHAKE, 잔류값 `rCellNo`/`rSeq` 포함) + **ClearR 선행 큐 투입**(단일 큐 경유) + 폴링 스냅샷에서 **R_Flag==0 확인** 후에만 C 기입.
+  - R_Flag==0 확인 대기 상한 = `Timing:RFlagClearConfirmTimeoutMs`(appsettings — 고정 금지). 초과 시(ClearR 미반영 — PLC 무ack 등) **C를 기입하지 않고** `RFlagResidueTimeout`으로 종결(더티 진행 금지). 대기 중 OFFLINE 감지도 명확 종결.
+- **기동 시(첫 유효 폴)**: 게이트웨이가 첫 Online 폴에서 R_Flag==1이면 PLC 기동 잔류로 간주 → **ClearR 큐 투입**(단일 큐) + WARN 로그 + operation_log 기록. 기동 잔류는 그 응답의 대기자가 없고 C_Seq도 리셋 상태이므로, 유지하면 후속 전 건이 "직전 응답"을 오소비하는 off-by-one 연쇄를 낳는다 → 클리어가 정당한 복구.
+- 배경: 레벨 읽기는 직전 건/PLC 기동 잔류 R_Flag=1을 새 건의 응답으로 오소비 → 허위 RSEQ_MISMATCH가 매 건 한 칸씩 밀리며 자가지속(현장 2026-07-06 5연쇄 실측). arming + 기동 reconcile로 근본 차단.
+
 ## 5. 타이밍 기본값 (전부 appsettings — 현장 조정)
 폴 주기 100~200ms · IF-08 재호출 500ms(RCS측) · R_Flag 폴 100ms · R_Flag 타임아웃 = 분류최대+여유(고정 5s 금지)
 · WCS API 3s · OFFLINE = 연속 폴 실패 N회 또는 소켓 끊김
@@ -106,7 +115,7 @@ R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=
 - **API 필드 정렬(HTML 우선 적용함)**: IF-08은 timeStamp 없음 / IF-10은 qty·timeStamp 없음(qty=IF-05 등록값). WCS 감사용 timeStamp가 필요하면 DTO에 **nullable 선택필드**로 두고 RCS 미전송 허용 — RCS 확정.
 - **IF-08 allowed=true reason="READY"**: 원본 §6 사유코드는 READY 명시. API 계층에서 주입(Core ToWire(None)=null 유지). RCS가 reason 파싱 여부 확인.
 - **IF-05 NG 시 chuteNo**: null 포함 vs 키 생략 직렬화 정책(원본이 혼용). 권장=null 포함(STJ 기본). RCS 파서 전제 확인.
-- **R_Flag 타임아웃 초과 시 동작**: RFLAG_TIMEOUT 알람 + PLC 상태 재확인(Ready·Online) + sorter_command.status=TIMEOUT. **재시도 vs 포기** 정책 미정(재시도=새 행, ERD).
+- **R_Flag 타임아웃 초과 시 동작**: RFLAG_TIMEOUT 알람 + PLC 상태 재확인(Ready·Online) + sorter_command.status=TIMEOUT. **재시도 vs 포기** 정책 미정(재시도=새 행, ERD). (※ 별개 결함이던 감사 A-1 "R_Flag 레벨 읽기 → off-by-one 연쇄"는 §4-A arming + 기동 reconcile로 해소됨. 본 타임아웃은 진짜 무응답 경로로 회귀 보존.)
 - **C_Flag=1 대기 타임아웃**: R쪽과 달리 상한·알람 미정의(무한 대기 위험). appsettings 설정값 + 초과 시 알람/상태 재확인 — 3DS 협의.
 - **TgtFloor 잔류 해소**: 이동만 완료·투입 없이 AGV 이탈 시 TgtFloor≠0 영구 잔류 → 타 층 영구 WRONG_FLOOR. 해소책(PLC 무투입 N분 자체 클리어 / WCS 운영자 수동 리셋=절대규칙 3 예외 명문화) — 3DS 협의. S4 시나리오에 기대동작 정의.
 - **레지스터 시작 주소**: D0~D4는 3DS 제공 맵 기반, D5·D6은 본 협의 신설. D영역↔Modbus 주소 오프셋 포함 현장 확정 — 변경 시 RegisterMap 상수만 수정.
