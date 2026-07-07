@@ -25,6 +25,13 @@ public enum HandshakeOutcome
 
     /// <summary>P2 — C_Flag 대기 타임아웃 (CFlagTimeoutMs 초과).</summary>
     CFlagTimeout,
+
+    /// <summary>
+    /// S-HANDSHAKE-RESIDUE — 시작 시 R_Flag=1 잔류를 감지해 ClearR 선행 투입했으나
+    /// RFlagClearConfirmTimeoutMs 내 R_Flag==0 확인 실패(ClearR 미반영 — PLC 무ack 등).
+    /// C를 기입하지 않고 종결한 terminal outcome(더티 상태 진행 금지·§2C).
+    /// </summary>
+    RFlagResidueTimeout,
 }
 
 /// <summary>C/R 핸드셰이크 1건 결과. 성공/실패·사유·대사 정보 포함.</summary>
@@ -100,6 +107,14 @@ public sealed class HandshakeOrchestrator
             return new(HandshakeOutcome.Offline, 0, 0, 0, "OFFLINE at handshake start");
         }
 
+        // ── arming: C 기입 전 R_Flag==0 관찰 보장 (잔류 대사 — S-HANDSHAKE-RESIDUE §2A) ──
+        // 핵심 불변식: 핸드셰이크 1건은 R_Flag==0을 1회 관찰한 뒤에만 이후 R_Flag==1 상승을
+        // 자기 응답으로 수용한다(0 확인 이후의 레벨 읽기 = 에지 감지 등가).
+        // 시작 시 R_Flag==1이면 직전 건·PLC 기동 잔류이므로 ClearR 선행 후 R_Flag==0 확인.
+        // C를 아직 기입하지 않았으므로(cSeq 미증가) 잔류 대사 실패 시 종결이 곧 "C 미기입".
+        var armResult = await ArmRFlagZeroAsync(ct).ConfigureAwait(false);
+        if (armResult is not null) return armResult; // 잔류 대사 실패(타임아웃/OFFLINE) → 종결(C 미기입)
+
         // C_Seq 증가
         int cSeq = Interlocked.Increment(ref _cSeq);
 
@@ -118,6 +133,83 @@ public sealed class HandshakeOrchestrator
         // ── R단계: R_Flag 폴링 → 타임아웃 → 대사 → 클리어 ──────────────────
 
         return await WaitRFlagAndProcessAsync(cellNo, cSeq, ct).ConfigureAwait(false);
+    }
+
+    // ── arming: 시작 시 R_Flag==0 관찰 보장 (잔류 대사 — S-HANDSHAKE-RESIDUE §2A/§2C) ──
+
+    /// <summary>
+    /// C 기입 전 R_Flag==0을 보장한다(arming). 반환값:
+    ///   - null: R_Flag==0 관찰 완료 → C 기입 진행 가능(깨끗한 경로는 추가 지연 0).
+    ///   - non-null: 잔류 대사 실패(R_Flag==0 확인 타임아웃 / 대기 중 OFFLINE) → C 미기입 종결.
+    ///
+    /// 시작 시 R_Flag==1이면 직전 건·PLC 기동 잔류로 간주:
+    ///   (1) WARN 로그 + (2) operation_log(HANDSHAKE) 잔류값 기록(OnStage HS_R_RESIDUE)
+    ///   + (3) ClearR 선행 큐 투입(절대규칙 #1 — 큐 경유, 직접 Modbus 호출 금지)
+    ///   + (4) 폴링 스냅샷에서 R_Flag==0 확인 대기(RFlagClearConfirmTimeoutMs — appsettings, 절대규칙 #7).
+    /// 확인 타임아웃 시 C를 기입하지 않고 RFlagResidueTimeout으로 종결(더티 진행 금지).
+    /// </summary>
+    private async Task<HandshakeResult?> ArmRFlagZeroAsync(CancellationToken ct)
+    {
+        var snap = _gw.Latest;
+
+        // 깨끗한 경로 — R_Flag가 이미 0이면 즉시 진행(추가 지연 0). 대기는 잔류 케이스에만(함정 1).
+        if (!snap.RFlag)
+            return null;
+
+        // ── R_Flag==1 잔류 감지 → 대사 ────────────────────────────────────────
+        int rCellNo = snap.RCellNo;
+        int rSeq    = snap.RSeq;
+
+        _log.LogWarning(
+            "[핸드셰이크] 시작 시 R_Flag=1 잔류 감지 — 대사(ClearR 선행 후 R_Flag==0 확인): R_CellNo={RCellNo} R_Seq={RSeq}",
+            rCellNo, rSeq);
+        EmitStage("HS_R_RESIDUE",
+            $"{{\"rCellNo\":{rCellNo},\"rSeq\":{rSeq},\"phase\":\"arming\"}}");
+
+        // ClearR 선행 큐 투입 — 절대규칙 #1(쓰기=단일 큐 경유).
+        await _gw.EnqueueAsync(new PlcWrite.ClearR(), ct).ConfigureAwait(false);
+        EmitStage("HS_CLEAR_R",
+            $"{{\"rCellNo\":{rCellNo},\"rSeq\":{rSeq},\"outcome\":\"Residue\",\"phase\":\"arming\"}}");
+
+        // R_Flag==0 확인 대기 — 상한은 appsettings(절대규칙 #7). PollIntervalMs>RFlagPollMs 창(함정 2)을
+        // 닫기 위해 확인 기준을 폴링 스냅샷 갱신으로 한다.
+        var deadline = DateTimeOffset.Now.AddMilliseconds(_opt.RFlagClearConfirmTimeoutMs);
+        while (true)
+        {
+            await Task.Delay(_opt.RFlagPollMs, ct).ConfigureAwait(false);
+
+            var s = _gw.Latest;
+
+            // 대기 중 OFFLINE 감지 → 명확 종결(더티 진행 금지·함정 3).
+            if (!s.Online)
+            {
+                _log.LogError("[핸드셰이크] 잔류 대사 R_Flag==0 확인 대기 중 OFFLINE");
+                EmitStage("HS_OFFLINE", $"{{\"phase\":\"armingClearWait\",\"rSeq\":{rSeq}}}");
+                return new(HandshakeOutcome.Offline, 0, rSeq, rCellNo,
+                    "OFFLINE during R_Flag residue clear confirm wait");
+            }
+
+            if (!s.RFlag)
+            {
+                // 잔류 클리어 확인 — arming 완료(이후 R_Flag==1 상승만 자기 응답으로 수용).
+                _log.LogInformation("[핸드셰이크] 잔류 R_Flag==0 확인 — arming 완료, C 기입 진행");
+                EmitStage("HS_R_ARMED", $"{{\"phase\":\"arming\",\"clearedRSeq\":{rSeq}}}");
+                return null;
+            }
+
+            if (DateTimeOffset.Now >= deadline)
+            {
+                // ClearR 미반영(PLC 무ack 등) — C를 기입하지 않고 terminal outcome 종결(§2C·S5).
+                _log.LogError(
+                    "[핸드셰이크] 잔류 R_Flag==0 확인 타임아웃 — {Ms}ms 내 ClearR 미반영. C 미기입 종결.",
+                    _opt.RFlagClearConfirmTimeoutMs);
+                EmitStage("HS_R_RESIDUE_TIMEOUT",
+                    $"{{\"rCellNo\":{rCellNo},\"rSeq\":{rSeq},\"timeoutMs\":{_opt.RFlagClearConfirmTimeoutMs}}}");
+                return new(HandshakeOutcome.RFlagResidueTimeout, 0, rSeq, rCellNo,
+                    $"R_Flag residue not cleared within {_opt.RFlagClearConfirmTimeoutMs}ms " +
+                    $"(rCellNo={rCellNo}, rSeq={rSeq}) — C not written");
+            }
+        }
     }
 
     // ── C_Flag==0 대기 (P2 CFlagTimeoutMs) ──────────────────────────────────
