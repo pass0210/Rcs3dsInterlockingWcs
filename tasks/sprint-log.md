@@ -2258,3 +2258,137 @@ piece=2 · sorter_command=2 · piece_event=2               (적용 전과 동일
 **통합 결함 1건(iteration 2)**: 신규 CleanupFieldM1_HttpTests가 FakeModbusWebApplicationFactory의 static DB명 공유로 병렬 이중시드 충돌(5 FAIL) → 전용 인스턴스-고유 팩토리(HubWebApplicationFactory 동형)로 격리.
 
 **최종**: dotnet test backend/Wcs.sln = **210/210 GREEN ×3연속**(189 기존 + M1 19 + M2 2), 빌드 오류 0(경고 10 = 선재 NU1903), F1b flake 미발현, 고아 프로세스 0.
+
+---
+
+# S-RCS-DOCS-B2B — WCS↔RCS 인터페이스 3문서 B2C/B2B 이분 기술
+
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-07)
+
+문서 전용 스프린트. 산출물 = `docs/*.html` 3개(+ 본 로그). 코드/스키마/스크립트 0 변경.
+
+### 문서별 추가/변경 (Q1 확정 = 대섹션 이분)
+공통 구조(3문서 동일): 상단 **◎ 2모드 개요** 섹션(B2C vs B2B 7행 비교표) + **Part I · B2C** 배너(기존 본문 그대로 감쌈) + **Part II · B2B** 배너 + B2B 3섹션(B1 개요·통신 / B2 인터페이스 5종 / B3 실패 응답). 신규 CSS(.part/.modechip/.note.b2b)는 additive. TOC·헤더 소개문·푸터를 2모드 표기로 재배치(B2C 본문 §무훼손).
+
+- **wcs_rcs_interface_kr.html (한)**: 정본. 헤더/TOC/푸터 재배치 + B2B 3섹션 추가. §1~§8(B2C) 본문 무변경.
+- **wcs_rcs_interface.html (영)**: KR 구조의 영문 번역 B2B 3섹션 추가. **+ Q4 B2C 동기화** — 낡은 EN B2C 4개소를 최신 KR과 일치: ①§3 `ready` 필드(소터 셀 만재/정지는 push ready 미포함·IF-05 dispatch 차단) ②§5 IF-08 문단(소터 ready=false는 운영상태 사유만) ③§6 IF-05 `FULL/PAUSED` 행(슈트 OK / 소터 PAUSED·셀 NG·OFFLINE 미고려) ④§6 IF-08 표(운영상태 BUSY/OFFLINE 3번째 행 추가).
+- **wcs_rcs_3ds_master_spec.html (통합)**: 2모드 개요 + Part I/II. **B2B의 3DS 무관성 명시**(D5) — 개요 note + B1 선두 note가 "B2B는 §07 PLC 레지스터·§08 핸드셰이크·IF-06/11/12·층 정렬·IF-08 푸시·목적지 판정의 대상이 전혀 아님"을 구조로 드러냄. §00~§10(B2C·3DS)은 라벨링만. **부수 정정 1건**: §06 note의 **미완 `</div>`(HEAD 선재 결함, git show로 확인)**를 닫음 — 내부 B2C 서술 텍스트 100% 동일, "HTML 유효성 유지" 제약 준수 목적의 well-formedness 수정(의미변경·삭제 0).
+
+### B2B 인터페이스 5종 (api-spec-ko.html §1~6 원천 미러링)
+① `GET /api/v1/works/unprocessed?bizDay=` (원시 배열 응답 + 부수효과: ReceiveTime 마킹·미처리0건 자동생성 트리거·[]+200은 실패 아님) · ② `POST /input`(qty 묶음·부족 시 전체거부 F) · ③ `POST /classification` · ④ `POST /results`(요청 최상위 JSON 배열·미등록 barcode 하나라도 전체거부) · ⑤ `POST /box`(선택·바코드 미검증). 응답 래퍼 `{status:"S"|"F", message}`. "HTTP 코드 아닌 status 필드로 분기" 명시. 요청 status OK/NG(양·불) vs 응답 status S/F(성부) 두 축 구분 명시. §6 실패 message 전 카탈로그(공통400 7종·unprocessed 1·input 2·classification 4·results 3·box 4·시스템 429/400/500) 포함.
+
+### Q3/Q2 확정 반영
+- Q3: Base URL = `http://<WCS_HOST>:5080`(배포 환경별 플레이스홀더) + 레거시 `192.168.0.150:5205` 각주(3문서 각 1). 구체 IP 하드코딩 안 함.
+- Q2: 필드 길이는 api-spec 표기값 채택(barcode 20·reason 255·inTime/sortTime 20 — PROGRAM_STRUCTURE의 느슨한 ≤100/≤500/≤30 아님). **batch만 1~10으로 통일**(api-spec 내부 3 vs 1~10 모순 해소). §6 message는 verbatim.
+
+### api-spec 대조 결과 (Generator 자체 검증, 실증)
+- **필드 튜플 대조**: 3문서 B2B 인터페이스 섹션에서 (필드,타입,길이,필수) 40행 추출 → **KR=EN=MS 완전 동일**(EN↔KR B2B 정합 D4 충족). 40행 전부 api-spec-ko.html §1~5 값과 일치(batch=1~10 통일 5행 확인).
+- **§6 verbatim 대조**: 19개 실패 message 문자열이 **3문서 각각에 그대로 존재**(grep 매칭 [Y Y Y] × 19). `{Field}/{N}/{M}/{barcode}/{list}/{chuteNo}/{value}/{id}` 치환 자리 원문 보존.
+- **HTML 유효성**: html.parser 태그 밸런스 3문서 전부 OK(errors=0, leftover=0). master_spec 선재 미완 `</div>` 수정 후 clean. section/table/pre open==close.
+- **B2C 무훼손**: 제거 라인 대조 — KR=헤더/TOC/푸터 3줄(재배치), EN=헤더/TOC/푸터+Q4 4개소, MS=헤더/TOC/푸터+§06 div-fix. B2C 사유코드(NORMAL·BUSY·FULL/PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE) 3문서 전부 보존.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력. 변경 = `docs/*.html` 3개뿐(846 삽입 / 14 삭제).
+
+### 회귀
+dotnet build/test는 코드 무변경이라 210 GREEN 불변 예상 — 실행은 Evaluator D6에 위임(계약 명시).
+
+### 커밋/push 없음 — Evaluator 검증 대기 (docs/rcs-interface-b2b-b2c).
+
+---
+
+## FIX ITERATION 2 (리뷰 C1·I1~I7 보완)
+
+문서 리뷰(RCS 수신자 관점)가 발견한 실질 결함을 사용자 확정("전부 보완")대로 3문서
+(wcs_rcs_interface_kr.html 정본 · wcs_rcs_interface.html 영문 · wcs_rcs_3ds_master_spec.html)에
+반영. 기존 통과분(B2B 필드 api-spec 일치·실패 message verbatim 19개·EN=KR·B2C 무훼손·HTML 유효)
+불변 유지. 코드/스크립트/테스트 0 변경.
+
+### 사용자 확정 반영
+- pId·inductionNo = **RCS 자체 생성 정수 식별자**, 서버는 검증 없이 저장(PROGRAM_STRUCTURE §2.2.1/§2.2.2
+  "검증 없음", `Pid=PId.ToString()` 확인). unprocessed 응답에 없으므로 RCS가 채워 보냄을 명시. 유일성 등
+  원천에 없는 규칙은 창작하지 않음.
+- B2C/B2B 라벨 유지 + 2모드 개요에 (1) "연동 방식 라벨" 정의, (2) 선택 기준(라이브 3D 소터 실시간 틸트=B2C /
+  사전 등록 배치 데이터 소비=B2B), (3) **B2B도 정식 운영 경로**(테스트 전용 아님) 명시.
+
+### 항목별
+- **C1**: input(inductionNo·pId)·classification(pId) 필드표 비고에 출처(RCS 부여·검증 없이 저장·
+  unprocessed 미포함) 명시. 2모드 축 note에도 "RCS가 부여하는 Integer 식별자" 브리지 문장 추가.
+- **I1**: 2모드 개요 상단에 라벨 정의 + 선택기준 + 운영경로 note(3문서). KR/MS 국문·EN 영문.
+- **I2**: B1 개요에 **B2B 골든 패스**(unprocessed→input→classification→results→box) flow + 단계별
+  목적·실패 시 RCS 행동(재시도 가부) 표 추가(3문서).
+- **I3**: bizDay 길이 8→**8~10** 통일(①~④ 필드표, box는 기존 8~10). 검증: b2b-if 내 bizDay 6행 전부 8~10.
+- **I4**: "상충 시 본 문서 우선" note — batch 1~10·bizDay 8~10은 원천 대비 의도적 확장, api-spec-ko.html은
+  역사적 참조로 격하(3문서).
+- **I5**: chuteNo **3자리 zero-pad** 전 엔드포인트 통일 note + classification "Chute mismatch"는 패딩 후
+  값 비교 명확화(코드 §2.2.2/§2.2.3 "3자리 정규화" 근거).
+- **I6**: unprocessed GET **비멱등 경고**(굵게) — 응답 유실 시 단순 재시도 금지(각 호출이 행 소비).
+- **I7**: B3에 **타임아웃·재시도 지침** 문단(unprocessed 재시도 금지 / POST별 안전 재시도 조건·이중소비 주의 /
+  429 지수 백오프 / 500 불확실)(3문서).
+- **Minor**: M1 TOC를 PART I·B2C / PART II·B2B 구분자 span으로 시각 분리 · M2 results 배열 다중
+  (bizDay,batch) 그룹 허용 1줄 · M3 box 송신 주체(박스 분류 설비, RCS 선택 구현) 정리 · M4 자동생성을
+  RCS 관측("빈 배열/생성 데이터 수신 가능")으로 재기술 · M5 순수 interface 문서(KR/EN)의 3DS note 톤
+  완화(PLC 상세는 범위 밖·마스터 소관으로 지시), master_spec은 강한 3DS 무관 note 유지(D5) · M6 TOC
+  개요 앵커 #b2b→**#b2b-ovw** 교정.
+
+### 자기 검증(파서·대조)
+- html.parser 태그 밸런스: 3문서 errors=0, leftover open(html/body 제외)=[].
+- 실패 message 19개 verbatim: 3문서 각 19/19 존재(불변).
+- B2B 계약 튜플(field·type·length·req) 40행: KR==EN==MS True(파서 대조). bizDay 8~10×6·batch 1~10×5(문서별).
+- TOC: 3문서 #b2b-ovw 존재, 구(舊) 배너 앵커 `href="#b2b"` 제거 확인.
+- 무변경 가드: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력. 변경 파일 = docs 3개(+tasks 산출물).
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
+
+## FIX ITER 3 (OFFLINE 각주)
+IF-05 사유표 두 OFFLINE 표면 상충 해소 — interface_kr·interface.html 각각 표 아래 `.note` 각주 1줄 추가(EN=KR): FULL/PAUSED 행 OFFLINE=소터 운영상태(IF-05 미참조·셀 있으면 OK) vs COMPLETED/NO_DEST/OFFLINE 행 OFFLINE=목적지 확정불가(NG). 코드 정합: RcsController IF-05 게이트가 r.Online 미참조(Paused+SorterCanAcceptBarcode만), QueryDestination NO_DEST/COMPLETED가 목적지 미확정 NG. 무변경 가드 `git diff --stat -- backend/ frontend/ scripts/` 빈 출력.
+
+## IMPLEMENTATION COMPLETE (B2B-POLISH)
+
+스프린트 S-RCS-DOCS-B2B-POLISH — 3문서(KR 정본·EN·master) Part II(B2B)를 B2C 문법으로 재구성. 산출물 = `docs/*.html` 3개뿐. 브랜치 docs/rcs-interface-b2b-b2c(미커밋).
+
+### B1~B8 매핑 (B2C §1~§8 미러 · F1 해소)
+기존 3섹션(B1 개요&통신 / B2 인터페이스5종 / B3 실패응답)을 8섹션으로 확장, B 접두사 유지:
+- **B1 개요 & 역할** ← B2C §1. 산문 + 본질 bullet 4개(배치기반/목적지판정없음/단방향/status분기) + `3DS 연동 없음` note.b2b (master는 §07/§08/IF-06·11·12/층정렬 3DS-무관 문구 원문 보존).
+- **B2 통신** ← §2. 통신표(프로토콜/BaseURL/인코딩/레이트리밋/인증/응답래퍼/실패판정) + 레거시 주소 문단.
+- **B3 데이터 모델/필드** ← §3. **공통 필드표 신설(F3 해소)**: bizDay·batch·chuteNo·barcode·qty·status·reason·pId·inductionNo 1회 정의(타입/길이/필수/설명). 변형은 각주5개로 무손실 보존 — ①box chuteNo 1~10·barcode 1~100 ②input barcode=N ③unprocessed qty=Y"1이상" ④status/reason/pId=input·classification 한정 ⑤inductionNo=input 한정. chuteNo정규화·상태2축·batch override note 3개를 여기로 이동(F6 정돈). `§B2 필드표` 상호참조 → `위 공통 필드표`로 갱신.
+- **B4 인터페이스 목록** ← §4. 엔드포인트 5종 표(골든패스 순서).
+- **B5 API 정의** ← §5. 5종 균질 틀(F4 해소): 공통필드 참조줄 + 고유·변형 필드표 + 예시 JSON + 응답스펙. 산문 "응답:"줄 유지(균질). **각 표는 고유필드만**(Q3): input=inTime, classification=sortTime, box=boxNo·chuteNo1~10·barcode1~100·endTime, unprocessed/results=items[] 구조.
+- **B6 실패 응답 & 사유** ← §6. 실패 message 표 전량 + F vs NG note + 예시 JSON.
+- **B7 전체 플로우(골든패스)** ← §7. B1에서 분리 이동(F5): flow + 단계/목적/실패시행동 표.
+- **B8 타이밍 & 재시도** ← §8. B3 말미 재시도 ul 이동(F5) + 레이트리밋 타이밍 표.
+TOC의 B2B 링크 3개 → B1~B8 8개로 갱신(3문서). B2C 링크(#s1~#s8/#s0~#s10) 불변.
+
+### F1~F6 해소
+F1 넘버링(B1~B8) · F2 순서모순(정의·실패부를 골든패스 box④/results⑤로 재배치, 배지숫자만) · F3 공통필드표 신설 · F4 5종 균질틀 · F5 B1분해+독립섹션(B4/B7/B8) · F6 note 정돈.
+
+### 검증 결과
+- **HTML 태그밸런스**: 3문서 leftover=[] errors=[] (html.parser).
+- **골든패스 순서**: B5정의·B6실패·B7플로우 모두 unprocessed→input→classification→**box→results** 일치(3문서, F2 해소 확인).
+- **실패 message verbatim**: 19종 distinct를 fixed-string으로 3문서 + api-spec-ko.html 대조 → ALL PRESENT(0 missing).
+- **필드 무손실**: 고유필드(inTime/sortTime/boxNo/endTime)·box변형(chuteNo1~10·barcode1~100)·공통필드(bizDay8~10/batch1~10/chuteNo3/barcode20/qty1~9999/status2/reason255/pId·inductionNo Integer)·input barcode=N 전부 3문서 present.
+- **B2C 무접촉**: Part II 배너 앞 영역 diff = TOC B2B 링크(1→3줄)뿐. §1~§8/§00~§10/IF-05·08·09·10/Part I 배너/#modes 변경 0.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/ docs/api-spec-ko.html` 빈 출력. 변경 파일 = docs/*.html 3개.
+- **EN=KR=master 정합**: 동일 B1~B8 구성·표틀·공통필드·순서. 언어차 + master 고유(3DS무관 note·§07/§08 참조·inline 배지 style) 보존.
+- dotnet test(210)는 문서전용 변경으로 불변 예상 — Evaluator 몫.
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
+
+## FIX ITER 2 (B3 필수열·chuteNo 중복)
+
+작업: Generator(standalone) fix-only · 브랜치 docs/rcs-interface-b2b-b2c · 커밋 0. 이전 iter가 노트북 절전으로 중단돼 3문서에 불균등 적용 → re-run으로 EN=KR=master 정합 회복. 실제 편집은 master 1개만(KR 정본·EN은 이전 iter에서 이미 #1·#2 완결 상태였음 — 재적용/중복 방지 위해 착수 시 3문서 Read로 확인). 코드 0.
+
+### 착수 시 실측 (부분 적용 상태)
+- KR(정본)·EN: #1·#2 **이미 완결** — 헤더 `필수 <sup>※</sup>` / `Req. <sup>※</sup>` · barcode·qty 셀 `△` · `<sup>※</sup>` 각주 · chuteNo 행 간결화(note 참조) · chuteNo 정규화 note 상세.
+- master: **미완결 4점** — 헤더 `필수`에 `<sup>※</sup>` 부재 · chuteNo 행 여전히 상세(하단 note와 중복) · barcode 셀 `Y`·qty 셀 `N`(△ 미전환) · `<sup>※</sup>` 각주 라인 부재.
+
+### 수정 (master만 — KR와 동일해지도록 4곳)
+- **#1 필수열 오해 제거**: 헤더 `필수`→`필수 <sup>※</sup>` · barcode `Y <sup>2</sup>`→`△ <sup>2</sup>` · qty `N <sup>3</sup>`→`△ <sup>3</sup>` · 각주 최상단에 `<sup>※</sup> 필수 여부는 엔드포인트별로 다를 수 있다 — △로 표기한 필드(barcode·qty)…` 1줄 추가. 각주 ①~⑤ 내용 불변(정보 손실 0).
+- **#2 chuteNo 중복 제거**: B3 공통표 chuteNo 행을 상세("서버가 3자리 zero-pad로 정규화("3"→"003"). classification의 슈트 일치 판정은 패딩 후 값으로 비교.")→간결("3자리 zero-pad로 정규화(상세는 아래 chuteNo 정규화 note 참조).")로 축약. 상세는 하단 `chuteNo 정규화` note 한 곳에만 유지(정보 손실 0). KR·EN은 이미 이 형태.
+
+### 검증 (fresh)
+- **정합 마커 3문서 동일**: `<sup>※</sup>`=2 · `△`=3 · chuteNo정규화 참조/note=2 (각 문서 grep -o 카운트 일치).
+- **실패 message**: 다중어절 `<code>` 추출 → 3문서 전부 동일 20개(실패 19종 + 응답 envelope `{ "status":"S"|"F", "message":"..." }` 1). 19/19 verbatim 불변.
+- **HTML 태그밸런스**: 3문서 section/table/tr/td/th/div/sup/p/ul/li/pre 개폐 mismatch 0.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력.
+- **B2C 파트·골든패스 순서**(unprocessed→input→classification→box→results) 불변 — B3 공통표 외 미접촉.
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).

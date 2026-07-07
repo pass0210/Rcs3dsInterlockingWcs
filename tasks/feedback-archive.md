@@ -2,6 +2,20 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-RCS-DOCS-B2B-POLISH (B2B Part II를 B2C 문법으로 재구성 — B1~B8·공통필드표·균질틀·순서 일원화, 계약 무손실) — APPROVED (2026-07-07, 1 iteration)
+
+- **재구성(정보 재배치) 스프린트의 무손실 게이트 = 공통표+고유표+각주를 "합산"해 엔드포인트별로 원천 대조 + 제거(-)라인 전수 회계**: F3(공통 필드표 신설)로 필드가 per-endpoint 표에서 공통표(B3)로 이동했으므로, 개별 표만 보면 필드가 "사라진" 것처럼 보인다. 무손실은 (공통 9필드 + 각주 5개 변형 + B5 고유필드)를 합쳐 원천 §1~5의 각 엔드포인트 필드셋을 재구성해 대조할 때만 닫힌다. box `chuteNo 1~10`·`barcode 1~100`, input `barcode=N`, unprocessed `qty=Y "1이상"` 같은 **각주로 밀려난 변형이 누락 1순위 후보**. 병행으로 `git diff HEAD` 제거(-)라인 전수 = 구 표 값이 전부 신 위치에 재출현하는지 회계.
+- **"값 개변 vs 이동" 판정 = `git show HEAD:` 선재성 대조가 판정자**: `bizDay 8~10`/`batch 1~10`이 api-spec §1~4(8·3)와 달라 "이번에 개변?" 의심되나, HEAD 스냅샷이 PR #36 B2B에 이미 per-endpoint로 반복 존재함을 보이면 "이동(통합)이지 개변 아님"으로 닫힌다. 확장 자체는 계약 Impl-Scope가 명시한 공통값 + `.note.b2b "상충 시 본 문서 우선"`이 문서화한 의도(선재). 재구성 스프린트에서 원천과의 차이는 "이번 변경분"이 아니라 HEAD 대조로 귀속.
+- **문서 내부 순서 모순(F2) 해소 검증 = 넘버링이 나오는 모든 지점(목록/정의/실패/플로우)을 교차 대조**: 골든패스만 보면 `box④ results⑤`인데 정의부·실패부가 `results④ box⑤`인 문서-내 모순은, B4·B5·B6·B7 4개 지점의 배지숫자·표시순을 한꺼번에 훑어야 "무모순"이 확정된다. api-spec 물리 섹션순(results→box)은 "참조 원천 순서일 뿐 계약값 아님"(계약 명시)이므로 골든패스 순서를 진실로 삼는 재배치는 계약 무변경. 한 곳만 확인하면 잔여 모순을 놓친다.
+- **다문서 재구성 EN=KR=master 정합 = diff numstat 대칭 + 3문서 공통 grep(19 message)·구성 대조**: 3문서 `+214` 동일 라인 수는 "동일 재구성 적용"의 1차 신호. master 고유(3DS 무관 note·§07/§08 B2C 귀속·inline 배지 style)는 보존 대상으로 분리 확인. docs-only Full-stack이라 런타임 E2E N/A + `html.parser` 밸런스·무변경가드·`dotnet test` 210 GREEN로 코드 무영향 실증(S-RCS-DOCS-B2B 선례 준용).
+
+## S-RCS-DOCS-B2B (WCS↔RCS 3문서 B2C/B2B 대섹션 이분 + B2B 계약 원천 미러링) — APPROVED (2026-07-07, 1 iteration)
+
+- **다문서 계약 미러링 검증 = "문서 프로그램 추출 → 튜플 집합 대조"가 육안 대조보다 결정적**: 3문서(KR/EN/MS)×40 필드 튜플을 `id="b2b-if"` 세그먼트에서 정규식 추출해 `KR==EN==MS` set 동치 + 원천(api-spec-ko.html §1~5) 값 대조로 닫았다. 육안으론 batch 1개 누락·EN 드리프트 1행을 놓치기 쉽다. 실패 message 19종은 `grep -F`(fixed-string, 정규식 아님 — `{}()[]'.`이 메타문자라 필수)로 3문서 각각 "ALL PRESENT" 단정. **계약 verbatim은 regex Grep이 아니라 fixed-string 매칭이 정답**.
+- **"B2C 훼손 0" 무훼손 판정 = git diff의 제거(-) 라인 전수 = 수정 전량 회계**: 추가 라인은 신규(B2B/배너/개요)라 무한정이지만 **제거+변경 라인은 유한**하고 그것이 기존 콘텐츠 수정의 완전한 목록이다. 제거 라인이 전부 "헤더/TOC/푸터(라벨) + 승인된 Q4 동기화 + 텍스트-동일 div-fix"임을 보이면 무훼손이 닫힌다. 사유코드 8종 존재 grep은 보조. **무훼손 스프린트에서 추가 라인 리뷰보다 제거 라인 회계가 핵심 게이트**.
+- **"선재 결함 수정" 주장은 HEAD 대조로 검증 — `git show HEAD:file`이 판정자**: Generator가 master_spec §06 미완 `</div>`를 "HEAD 선재"라 주장 → `git show HEAD:…`로 L191-192에서 `</section>` 앞 note 미닫힘 실재 확인 + 추가 라인이 텍스트-동일+`</div>`뿐임을 대조해 "well-formedness만 개선, 의미 0변경"으로 닫음. 선재성 주장은 신뢰 말고 HEAD 스냅샷으로 역증.
+- **docs-only Full-stack 스프린트 = 브라우저 E2E 대신 파서 단정(계약이 sanction)**: 레포는 Full-stack이나 변경 표면이 정적 `docs/*.html`뿐이면 런타임 E2E 3슬롯 N/A + `html.parser` 태그밸런스(errors=0·leftover=[])·테이블 셀밸런스로 렌더 유효성 단정. `<script>` 0 → JS 콘솔 에러 발생 불가, 외부 CDN 폰트는 시스템 폰트 폴백으로 graceful. 무변경 가드(`git diff --stat -- backend/ frontend/ scripts/` 빈 출력) + 회귀(`dotnet test` 210 GREEN 1회)로 "코드 계층 무영향" 실증. Playwright 미설치가 스킵 사유가 아니라 계약이 파서 경로를 명시 허용.
+
 ## S-SIM3DS-RTU (Sim3ds TCP→RTU 전송 계층 추가 · 실 PLC 없이 RTU 리허설 · 전송만 교체·의미 동일) — APPROVED (2026-07-07, 1 iteration)
 
 - **"전송만 교체·의미 동일"의 진짜 게이트 = 실 SUT 상태기계를 fake-transport에 태운 왕복(hand-rolled mock ≠ 실증)**: 기존 VT-2는 hand-rolled `ModbusRtuServer`를 썼을 뿐 실 SimServer 상태기계를 안 태웠음 → 이번 B1/B2는 프로덕션 `new SimServer(opt, fakePort:...)`를 in-memory FakeSerialPort에 결선해 **실 RunSimLoopAsync/RunSortSequenceAsync + 실 FluentModbus ModbusRtuServer**가 D0~D6를 구동, WCS ModbusRtuMaster가 폴 Online→C/R 핸드셰이크 Success(R_Seq==C_Seq)→ClearR→R_Flag=0을 왕복. seam이 상태기계를 오염 안 함의 실증은 "GREEN"이 아니라 "실 SUT가 fake 위에서 도는가"의 코드 판독(생성자·팩토리 라우팅)으로 닫힘. 물리 COM 불요 → 환경 무관 CI 게이트.
@@ -401,3 +415,5 @@
 - **[EVALUATOR 자기-사고] test 실행 중 별도 `dotnet build --no-incremental` 동시 실행 → CS0006 metadata 파일 없음(obj/ref 경합)**: 백그라운드 test-run과 병렬 클린빌드가 같은 출력 디렉터리를 놓고 경합해 거짓 빌드 실패(EXIT=1). e2e-parallel-load-surfaces 교훈의 동시 빌드 파일락과 동류. **빌드/테스트는 직렬로** — 검증자도 동시 빌드 금지. 직렬 재실행 시 210/210 GREEN 확정.
 - [CODE-REVIEW] sprint=S-CLEANUP-FIELD pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-CLEANUP-FIELD critical=0 major=0 minor=3 iter=2
+- [CODE-REVIEW] sprint=S-RCS-DOCS-B2B critical=1 major=7 minor=6 iter=3 (문서리뷰: C1 pId출처·I1~I7·Minor 전부 RESOLVED, OFFLINE 각주 fix iter3, 커밋 전 해소)
+- [CODE-REVIEW] sprint=S-RCS-DOCS-B2B-POLISH critical=0 major=0 minor=4 iter=2 (문서리뷰: 사용자 불만 해소 확인, 공통표 필수열·chuteNo 중복 fix, 잔여 3건 todo)

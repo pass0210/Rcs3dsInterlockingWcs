@@ -1,209 +1,220 @@
-[Sprint Contract] — S-CLEANUP-FIELD
+# Sprint Contract — S-RCS-DOCS-B2B-POLISH
 
-Branch: fix/cleanup-field (base: develop @ PR #34 병합 완료)
-작성자: Planner Subagent · 2026-07-07
-성격: 수정 스프린트(누적 코드리뷰 Minor + 2026-07-01 감사 잔여 정리). 신규 기능 0.
-우선순위 원칙: **목요일(7/9) 현장 테스트 전 — 현장 관측성·운영 가치 항목이 최우선.**
-후속 맥락: 이 스프린트 직후 B2B 이식 3단계가 이어짐 → **과확장 금지**(최소 침습, 재사용 가능한 최소 형태).
+> Branch: `docs/rcs-interface-b2b-b2c` · Base: `develop` · PR #36 미병합 — **같은 브랜치에 이어 작업**
+> 작성: Planner Subagent · 2026-07-07 · (이전 계약 S-RCS-DOCS-B2B는 커밋 완료되어 본 계약이 덮어씀)
 
-────────────────────────────────────────────────────────────────────────
 ## Goal
 
-직전 3개 스프린트(S-HANDSHAKE-RESIDUE / S-FIELD-20CELLS / S-SIM3DS-RTU)의 코드리뷰 Minor와
-2026-07-01 전체 감사의 잔여 quick-fix(묶음 A)·문서 표류(묶음 E)를 한 번에 정리한다.
-행동 의미 변경은 최소화하고(핸드셰이크·판정 의미 변경 0), **관측성·입력 위생·문서 현행화**에 집중해
-현장 테스트 중 진단·운영이 실제로 가능한 상태로 만든다.
+RCS 담당자에게 제공하는 **WCS↔RCS 인터페이스 정의 문서 3종**에서, 앞선 스프린트(PR #36)로
+추가된 **B2B 파트(Part II)를 B2C 파트(Part I)와 같은 "정리 문법"으로 재구성**해 한 문서로서
+일관되게 읽히게 한다. 사용자 요청(2026-07-07): *"기존 B2C 인터페이스 문서는 정리가 잘 되어
+있는데 추가된 B2B는 뭔가 통일도 안 되고 잘 안 읽힌다. B2C랑 비슷하게 정리해줘."*
 
-────────────────────────────────────────────────────────────────────────
+- **표현·구조·레이아웃·넘버링만 개선하는 스프린트다.** B2B **와이어 계약(엔드포인트·필드명·타입·
+  길이·검증규칙·실패 message·골든패스 순서 등) 정보 손실 0**. B2C 파트(Part I)는 **무접촉**.
+  코드/스키마/테스트/설정은 0 변경. 산출물은 `docs/*.html` 3개 파일뿐이다.
+
+## 배경 — 현재 B2B가 "정리가 안 된" 지점 (실제 문서 정독으로 식별)
+
+세 문서(`wcs_rcs_interface_kr.html` 정본 · `wcs_rcs_interface.html` 영문 · `wcs_rcs_3ds_master_spec.html`
+통합)는 **모두 동일한 B2B 구조**를 공유하며, 아래 6개 결함도 **세 문서에 공통**으로 존재한다.
+
+**B2C 파트(Part I)의 "정리가 잘 된" 문법 = 재구성의 기준틀:**
+
+| B2C 섹션 | 역할 | 특징 |
+|---|---|---|
+| `§1 개요 & 역할` | 산문 + 원칙 bullet | 방식의 본질을 먼저 서술 |
+| `§2 통신` | 2열 표(항목/내용) | 프로토콜·방향·메서드·인코딩·타임아웃·인증·Base URL |
+| `§3 데이터 모델/필드` | **공통 필드 표**(필드/타입/설명) | 모든 IF가 공유하는 필드를 **한 번만** 정의 |
+| `§4 인터페이스 목록` | 표(IF/이름/방향/요약) | 전체 조망을 **독립 섹션**으로 |
+| `§5 API 정의` | IF별 h3(.ifid) + **일관된 틀** | 제안 엔드포인트 → 요청/응답 표 → 예시 JSON → note |
+| `§6 사유 코드` | IF별 사유 표 + note | |
+| `§7 전체 플로우` | .flow 다이어그램 + ol 단계 | 운영 순서를 **독립 섹션**으로 |
+| `§8 타이밍 & 재시도` | 표 | 타이밍/재시도를 **한 곳에 모음** |
+
+> master_spec의 B2C는 `§00~§10`(두 자리 chip)로 넘버링되며 3DS 섹션(§07 레지스터·§08 핸드셰이크)을
+> 포함한다. 즉 "B2C 문법"의 **넘버링 형식이 문서마다 다르다**(interface=§1~§8, master=§00~§10).
+> B2B 재구성은 **각 문서 자신의 B2C 형식**에 맞춰야 한다.
+
+**B2B 파트(Part II) 현재 구조와 6개 정리 결함:**
+
+| # | 결함 | 현재 상태 | B2C 대비 |
+|---|---|---|---|
+| **F1** | **넘버링 이질감** | B2B = `B1/B2/B3` 3개뿐 | B2C의 연속 §1~§8과 이질적 (Q1 게이트) |
+| **F2** | **①~⑤ 내부 모순** | B1 개요표·골든패스는 `unprocessed①→input②→classification③→box④→results⑤`, 그러나 **B2 정의부·B3 실패부는 `…→results④→box⑤`** (물리 순서·배지 숫자 상충) | 골든패스 순서는 **불변(locked)**인데 정의부가 어긋남 (Q2 게이트) |
+| **F3** | **공통 필드 표 부재** | `bizDay/batch/chuteNo/status/reason/qty` 정의가 **엔드포인트마다 반복**(5개 표에 산재) | B2C §3처럼 **한 번만** 정의하는 공통 표가 없음 |
+| **F4** | **엔드포인트별 틀 불일치** | `unprocessed`는 요청/응답 2표, 나머지 4개 POST는 요청 표 + 산문 "응답:" 줄 | B2C §5는 IF마다 **동일한 요청/응답 틀** |
+| **F5** | **B1 과적재** | B1이 개요+통신+데이터모델note+인터페이스목록표+골든패스를 **한 섹션에** 담음. 타이밍/재시도는 B1 통신표·골든패스표·B3 말미 3곳에 흩어짐 | B2C는 이를 §2·§3·§4·§7·§8로 **분리** |
+| **F6** | **note 스타일 난립** | B1에 `.note`/`.note.b2b` 박스 4개(3DS없음·상태2축·batch override·chuteNo정규화)가 연속 적재 + 회색 레거시주소 문단 | B2C는 note를 절제해 배치 |
+
+목표: 위 6개를 B2C 문법으로 정돈해 **B2B Part II가 B2C Part I과 같은 리듬으로 읽히게** 한다.
+
+## Implementation Scope (Generator가 할 일)
+
+> **원칙**: 아래는 전부 **재배치·재라벨·넘버링·표틀 통일**이다. 필드·타입·길이·검증규칙·실패 message·
+> 골든패스 순서 등 **계약 내용은 한 글자도 바꾸지 않는다**. 이동만 하고, 삭제·의미변경·신규 계약 0.
+
+1. **[F1 · Q1] B2B 넘버링을 B2C 섹션 문법에 1:1 대응** — Q1 사용자 확정 결과를 따른다.
+   권장안(=Q1 Option A): **B-prefix 유지하되 B2C §1~§8을 그대로 반영하는 `B1~B8` 연속 서브넘버링**으로 확장.
+   (Part I/Part II 경계 보존 + B2C 무접촉 + master_spec까지 세 문서 통일 — 근거는 Q1 참조.)
+
+2. **[F3] 공통 데이터 모델/필드 섹션 신설**(B2C §3 대응, Q3 확정 시) — 반복되는 공통 필드
+   (`bizDay` 8~10 · `batch` 1~10 · `chuteNo` String·zero-pad · `status`/`reason` · `qty` 1~9999 ·
+   `pId`/`inductionNo`=RCS 부여 Integer)를 **공통 표로 1회 정의**. 엔드포인트별 변형(예: `box`의
+   `chuteNo` 1~10 · `barcode` 1~100, unprocessed/input/classification/results의 `barcode` 20)은
+   공통 표 아래 각주 또는 해당 엔드포인트 표에 **명시적으로 보존**(정보 손실 0). B2C §5처럼, 개별
+   엔드포인트 표는 공통 필드를 참조하고 **엔드포인트 고유·변형 필드만** 강조하는 방향.
+
+3. **[F5] B1 분해 + 인터페이스 목록·골든패스 독립 섹션화** — 현재 B1에 뭉쳐 있는 것을 B2C 대응
+   위치로 분리: 통신 표(→ §2 대응), 데이터모델 note(→ 신설 데이터모델 섹션), 엔드포인트 목록 표
+   (→ §4 대응 독립 섹션), 골든 패스 flow+표(→ §7 대응 독립 섹션). B1은 B2C §1처럼 **개요/본질 차이**에 집중.
+
+4. **[F4] 엔드포인트별 요청/응답 틀 통일**(B2C §5 대응) — 5개 엔드포인트 모두 **동일한 시각 틀**:
+   제안 엔드포인트 → 요청 표 → 응답 표(또는 일관된 응답 스펙) → 예시 JSON → note. 특히 POST 4종의
+   산문 "응답:" 줄을 `unprocessed`와 균질한 형태로 정리(응답 `{status:"S"|"F", message}` 스펙을
+   표/일관 블록으로). 예시 JSON·필드 값은 api-spec-ko.html과 동일하게 유지.
+
+5. **[F2 · Q2] ①~⑤ 넘버링 일원화** — 골든패스 순서가 **불변**이고 "results는 항상 마지막"이 최근
+   정정된 운영 진실이므로, **B2 정의부·B3 실패부의 물리 순서와 배지 숫자를 골든패스와 일치**시킨다:
+   `①unprocessed ②input ③classification ④box ⑤results`. (개요표·골든패스·정의부·실패부가 **한 넘버링**으로 정합.)
+   ⚠️ **표시 순서·배지 숫자만 변경**이며 각 엔드포인트의 필드·message 내용은 불변. api-spec-ko.html은
+   `results(4)→box(5)` 순이나 이는 참조 원천의 섹션 순서일 뿐 계약값이 아니다(Q2 참조).
+
+6. **[F5] 타이밍·재시도 통합 섹션**(B2C §8 대응) — 레이트리밋(429)·POST 재시도 규칙·`unprocessed`
+   비멱등 경고·골든패스 실패시행동을 **한 섹션으로 통합**. 흩어진 3곳의 중복을 정리하되 각 지침 내용 보존.
+
+7. **[F6] note 스타일 통일** — `.note.b2b`(teal)는 Part II 시각 정체성으로 **유지**하되, B1 연속 적재를
+   해소(데이터모델 note는 데이터모델 섹션으로, 상태 2축·chuteNo 정규화·batch override note도 해당
+   섹션으로 이동). B2C의 절제된 note 배치 리듬에 맞춘다.
+
+8. **세 문서 동시 적용 + EN=KR=master 정합** — B2B 재구성은 **한 번 설계해 세 문서에 동일 적용**.
+   정본=`wcs_rcs_interface_kr.html`(한글) → `wcs_rcs_interface.html`(동일 내용 영문 번역) →
+   `wcs_rcs_3ds_master_spec.html`(각 문서 B2C 넘버링 형식에 맞춰 반영, B2B의 **3DS 무관성** 문구 유지)
+   순으로 전파. B2B 파트 내용은 세 문서에서 (언어·문서별 상호참조 문구 제외) **동일**해야 한다.
+
+## Questions — 사용자 확정 필요 (Phase 1 gate)
+
+> Q1·Q2는 **문서 정체성에 영향을 주는 novel 결정**으로 사용자 확정을 받는다. Q3는 재량 확인.
+
+**Q1. B2B 섹션 넘버링 체계 (핵심 gate)**
+- **Option A — B-prefix 유지 + B2C 문법으로 확장 (★ 권장)**: `B1/B2/B3`를 B2C §1~§8과 1:1
+  대응하는 `B1~B8`(개요 / 통신 / 데이터모델 / 인터페이스목록 / API정의 / 실패응답·사유 / 골든패스 /
+  타이밍·재시도)로 확장. **Part I/Part II 경계 보존**, **B2C 완전 무접촉**(§1~§8·§00~§10 그대로),
+  세 문서(interface §1~§8 · master §00~§10)에서 **B-prefix가 유일하게 형식 통일을 이룸**.
+- Option B — B2C와 연속 번호(interface `§9~`, master `§11~`): Part 경계가 흐려지고, **문서마다 시작
+  번호가 달라져** 오히려 통일성이 낮아진다.
+- Option C — Part별 독립 번호이되 동일 서식(예: `II-1`~`II-8`): A와 유사하나 B-prefix가 더 짧고 기존
+  앵커(`#b2b-*`)와 자연스럽다.
+- **권장 = A.** 근거: B2B 엔드포인트는 B2C의 `IF-05` 같은 고정 ID가 없어 연속 §번호(B)가 Part 경계를
+  지운다. B-prefix는 (1) B2C를 한 글자도 안 건드리고 (2) 세 문서의 서로 다른 B2C 넘버링 위에서도
+  일관되며 (3) "Part II 전용 번호대"임을 시각적으로 즉시 전달한다.
+
+**Q2. ①~⑤ 엔드포인트 순서/배지 일원화**
+현재 **문서 내부 모순**: 개요표·골든패스는 `box④→results⑤`, 정의부(B2)·실패부(B3)는 `results④→box⑤`.
+- **권장 = 골든패스 기준으로 통일** — 정의부·실패부를 `①unprocessed ②input ③classification ④box ⑤results`로
+  재배치(배지 숫자 포함). 근거: (1) 골든패스 순서는 **불변 가드**, (2) "results 항상 마지막"은 최근
+  정정된 운영 진실(커밋 48884c4), (3) 현 모순 제거. **표시 순서·숫자만 바뀌며 필드·message 내용 불변.**
+- 대안 = 배지 숫자를 떼고 엔드포인트명만 사용(B2C의 고정 IF-ID 방식과 유사). 순서 모순은 남으므로 비권장.
+- ⚠️ api-spec-ko.html은 `results(§4)→box(§5)` 순이나 **참조 원천의 섹션 순서일 뿐 계약값이 아님** —
+  필드·타입·length·message는 그대로 보존되므로 이 재배치는 계약 무변경이다.
+
+**Q3. 공통 데이터 모델/필드 표 신설 (재량)**
+- **권장 = 신설**(Implementation Scope 2). B2C §3와 대칭을 이뤄 "산재"(F3) 결함을 가장 크게 해소.
+- 단, `box`의 `chuteNo`(1~10)·`barcode`(1~100)와 다른 엔드포인트(`chuteNo` 3 · `barcode` 20)의 **길이
+  차이**, `status`/`reason`이 input/classification에만 존재하는 점 때문에 공통 표는 "진짜 공통 필드"만
+  담고 **변형은 각 엔드포인트 표/각주로 명시**해야 한다(무손실 조건). 이 세분화 정도는 Generator 재량.
+
+## Evaluation Criteria (Evaluator 판정 기준 · 구조 일관성 + 무손실이 최우선)
+
+1. **(★★★) 구조 일관성** — B2B Part II가 B2C Part I과 **같은 정리 문법**으로 재구성됨: Q1 넘버링 체계
+   준수, 엔드포인트별 요청/응답 틀 균질(F4), 공통 필드 표 존재(F3), 인터페이스 목록·골든패스·타이밍이
+   독립 섹션(F5), ①~⑤ 넘버링 무모순(F2), note 스타일 정돈(F6). **정성 체크리스트(D1)로 판정**.
+2. **(★★★) 계약 정보 보존(무손실)** — 재구성 후에도 B2B 5개 엔드포인트의 필드명·타입·길이·필수여부·
+   검증규칙·**실패 message 전량(약 19종)**·골든패스 순서·`pId`/`inductionNo` 출처·`chuteNo` zero-pad·
+   `bizDay` 8~10·`batch` 1~10이 `docs/api-spec-ko.html` §1~6과 **일치**(이동은 됐어도 손실·개변 0).
+3. **(★★) B2C 무접촉** — Part I(§1~§8 / §00~§10) 관련 `git diff` = **0**(단 Q1이 B2C 넘버링에 영향을
+   준다면 그 최소 범위는 계약 명시대로). IF-05/08/09/10 서술 훼손 0.
+4. **(★★) EN=KR=master 정합 + 유효 렌더** — 세 문서의 B2B 파트가 **동일 재구성**을 반영(언어/상호참조
+   문구 제외 내용 일치). 세 HTML이 브라우저에서 유효 렌더(구조 깨짐·미완 태그·깨진 표 0). 210 테스트 GREEN 불변.
+
+## Completion Conditions (PASS 최소 조건)
+
+- [ ] 세 문서의 B2B Part II가 Q1 확정 넘버링 체계로 B2C 섹션 문법에 대응(개요/통신/데이터모델/인터페이스목록/API정의/실패응답/골든패스/타이밍).
+- [ ] 공통 필드 표 존재(Q3 확정 시) — 반복 필드가 1회 정의로 통합되고 엔드포인트별 변형은 무손실 보존.
+- [ ] 5개 엔드포인트가 동일한 요청/응답 표 틀로 기술(F4 해소).
+- [ ] ①~⑤ 넘버링이 개요표·골든패스·정의부·실패부에서 **무모순**(F2 해소), 골든패스 순서 불변.
+- [ ] B2B 필드·타입·길이·검증규칙·실패 message 전량이 `api-spec-ko.html`과 정확히 일치(Evaluator 대조).
+- [ ] B2C Part I diff = 0(또는 Q1 확정 최소 범위). master_spec의 "B2B는 3DS 무관" 명시 유지.
+- [ ] 영문·한글·master B2B 파트 재구성 내용 일치.
+- [ ] 세 `.html`이 유효하게 렌더(브라우저 스크린샷 또는 구조 파싱 확인).
+- [ ] **무변경 가드**: `git diff --stat`에서 `backend/`·`frontend/`·`scripts/` 변경 라인 = 0. 변경 파일은 `docs/*.html` 3개(+ `tasks/` 산출물)로 한정. `api-spec-ko.html` 변경 0.
+- [ ] **회귀 확인**: `dotnet build backend/Wcs.sln` 성공 + `dotnet test backend/Wcs.sln` 기존 210 테스트 GREEN 유지(문서 변경이 코드에 영향 없음).
+
+## 제약 (CLAUDE.md 절대규칙 정합)
+
+- **api-spec-ko.html 변경 금지** — B2B 계약 원천. 참조만. 필드명 `pId·agvNo·barcode·inductionNo·chuteNo·qty·timeStamp`는 개명 완료값(규칙 #6, `loadQty` 아님). `pId`·`inductionNo`=RCS 부여 Integer 고정(lessons E-4 회귀 교훈).
+- **계약 내용 0 변경** — 재구성은 표현·구조·레이아웃·넘버링 개선에 국한. 필드·타입·길이·검증규칙·실패 message·골든패스 순서 손실/개변 0.
+- **B2C 파트 무접촉** — 이미 정리된 Part I은 구조 참조만, 변경 0(Q1 확정 최소 범위 예외).
+- 코드·스키마·테스트·appsettings 0 변경. Modbus 레지스터 맵 서술 불변. 3DS 무관성(master) 유지.
+- 스펙 모호 시 추측 금지 — `docs/SPEC.md` "미확정 사항" 기록 + 사용자 질문(위 Questions).
+
+## Parallel Modules
+
+N/A (single module — B2B 재구성은 **한 번 설계해 세 문서에 동일 적용**해야 하며(EN=KR=master 정합),
+정본 KR → EN → master 순차 전파가 정합성 유지에 유리. 병렬 분할 시 세 문서 구조 편차·EN/KR 불일치 위험).
+
+## Evaluation Dimensions
+
+functional only (문서 구조 일관성·계약 무손실 단일 차원. 보안/성능 표면 없음).
+
 ## Detected Project Type: Full-stack
 
-근거(레포 신호 — 사용자 표현·기억 아님):
-- 브라우저 진입 트리 존재: `frontend/src/pages/sections/*.tsx`(클라이언트 렌더 컴포넌트).
-- 서버 라우트/컨트롤러 존재: `backend/src/Wcs.Api/Controllers/RcsController.cs` + 서버 진입점 `Program.cs`.
-- 둘이 같은 레포에 공존 → Full-stack.
+레포 신호로 판별: `backend/src/Wcs.Api`(서버측 route/controller — `RcsController.cs`) + `frontend/`
+(브라우저 진입점, 무변경 가드가 참조)가 한 레포에 공존 → Full-stack. (사용자 요청 어법이 아닌 레포 구조 기준.)
 
-**단, 이번 스프린트의 변경 표면은 전부 서버측(backend/Wcs.Api·PlcGateway·Sim3ds)·문서·테스트다.
-프론트엔드는 0 변경(B-5 OUT).** 따라서 Full-stack 슬롯 중 Web/UI(브라우저 E2E) 파트는 N/A로 두되,
-Evaluator는 브라우저 E2E 대신 **`git diff`로 `frontend/`가 전혀 수정되지 않았음을 증거로 확인**한다(대체 검증).
+> **표면 투명성 노트 (S-RCS-DOCS-B2B / S-SIM3DS-RTU 선례 준용):** 레포 타입은 Full-stack이나,
+> **이번 스프린트의 실제 변경 표면은 `docs/*.html` 정적 참조 문서 3개뿐**이며 그마저도 **B2B 파트의
+> 재배치·재라벨(계약 무변경)**이다. 실행되는 프론트/백엔드 런타임 표면을 건드리지 않으므로 Full-stack의
+> **런타임 E2E 슬롯 3종은 N/A(사유 명시)**로 두고, 이 docs 표면에 맞는 **문서 검증 시나리오(D1~D6)**로
+> 대체·구체화한다. 문서 전용 변경이므로 pre-commit 훅의 docs-only 경로가 코드 검증 없이 통과함이 정상.
 
-────────────────────────────────────────────────────────────────────────
-## IN / OUT 선별 (Planner 판단 — 현장가치·리스크 근거)
+## Verification Scenarios (per-type — Full-stack)
 
-각 후보의 실제 코드 위치를 열어 현 유효성을 확인함. **이미 해소된 항목은 OUT(사유 명기).**
+- **Applicable Web/UI scenarios (frontend surface this sprint touches):**
+    N/A — 이번 스프린트는 어떤 프론트엔드 런타임/컴포넌트 표면도 건드리지 않는다(변경은 `docs/*.html` 정적 문서). 프론트 UI 검증 대상 없음.
+- **Applicable Backend/API scenarios (backend surface this sprint touches):**
+    N/A — 어떤 백엔드 엔드포인트/컨트롤러도 변경하지 않는다. `RcsController.cs` 등 코드는 계약 무손실 대조의 **참조 대상**일 뿐 수정 대상 아님.
+- **At least one end-to-end data-flow scenario crossing two or more layers:**
+    N/A — 런타임 계층 간 데이터 흐름 변경 없음(문서 전용). 대신 D6(무변경 가드 + 회귀)가 "코드 계층이 문서 변경에 영향받지 않음"을 실증한다.
 
-### IN — 백엔드 관측성 (Module 1)  ※ 현장가치 최상위 군
-| ID | 항목 | 위치(확인) | 근거 |
-|----|------|-----------|------|
-| D-1 | **OFFLINE 지속 중 로그 스팸 억제** [현장↑] | PlcGateway.cs:319·330-333 | 폴 실패 시 `LogWarning(ex,…)`가 매 폴 스택 전문 + `isHardEx` 매회 true라 "OFFLINE 전이" `LogError`가 매 폴 반복(거짓 전이 라벨). 진단 로그 매몰 → 관측성 훼손. 전이 1회만 상세, 지속은 강등/주기요약, ONLINE 복구 1줄. |
-| D-2 | **Serilog rollOnFileSizeLimit** [현장] | backend/src/Wcs.Api/appsettings.json Serilog File Args | 현재 미설정 → 기본 1GB 도달 시 그날 잔여 로그 침묵 유실. `rollOnFileSizeLimit=true`(+`fileSizeLimitBytes`·`retainedFileCountLimit`) 추가. |
-| D-3 | **/health 엔드포인트** [현장] | Program.cs:204(MapControllers 유일) | 프로세스 생존/소터 Online/DB 연결을 외부에서 확인할 HTTP 표면 0. 최소 liveness 신설(과설계 금지 — B2B-1 재사용 예정). |
-| D-4 | **입력 상한(input caps)** [현장] | RcsController.cs:49·51-52 / DbRepositories.cs:82 | barcode 길이 무검증(스키마 nvarchar(200))·timeStamp 무검증(ClientTs 30)·IF-05 qty 상한 부재(int 오버플로로 OVER 우회·ReservedQty 오염)·IF-10 음수 qty 무검증. Postman·스캐너·RCS 버그 1건으로 500 또는 조용한 데이터 오염. |
-| A-1 | **HS_R_RESIDUE 로그레벨 승격** [현장↑] | Program.cs:410-411 (레벨 분류기) | 분류기가 `MISMATCH/TIMEOUT/OFFLINE` 키워드만 ERROR, 나머지 INFO. "HS_R_RESIDUE"(잔류 감지 — 현장 추적 핵심)가 INFO로 묻힘. `OperationLogLevel.WARN` 존재 확인(Entities.cs:89) → RESIDUE 키워드 WARN 승격. |
-| A-2 | 기동 reconcile spurious RFlagRaised 에지 억제 + 주석 | PlcGateway.cs:286-310 | 기동 첫 폴 잔류 처리(ClearR 큐 투입) 직후 `if(!prevRFlag && snap.RFlag)`가 RFlagRaised 에지도 발화. 소비자 부재라 무해하나, reconcile가 지울 값을 에지로도 흘림. reconcile 발동 시 에지 억제 + RFlagRaised 채널의 소비자 부재 상태를 주석 명시(F-3 흡수). 저비용·방어. |
+### Document Verification Scenarios (이 표면의 필수 검증 — Evaluator 수행, N=6)
 
-### IN — Sim/RTU + 테스트·시드 위생 (Module 2)
-| ID | 항목 | 위치(확인) | 근거 |
-|----|------|-----------|------|
-| C-2 | SimServer UnitId 무음 절단 fail-loud | SimServer.cs:40·118·134 | `int UnitId` → `(byte)opt.UnitId` 무음 절단(300→44). RTU 유효 1~247 범위 검증 fail-loud(형제 ParsedParity/ParsedStopBits와 동형 — Consistency). |
-| C-3 | SetRResidue/Flush/Pull StartAsync 이전 호출 NRE | SimServer.cs (`_transport` nullable, StartAsync:143 세팅) | 기동 전 호출 시 `_transport` null → NRE. 명확한 InvalidOperationException("StartAsync 먼저 호출") 가드. |
-| A-3 | InjectStickyRResidue 등 volatile 일관성 | SimServer.cs:86(및 :65·:68) vs :108 `volatile _noResponse` | 형제 `_noResponse`는 volatile인데 InjectStickyRResidue/InjectRSeqOverride/InjectRFlagDelayMs는 plain auto-property. 크로스 스레드 읽힘 → volatile 정렬(테스트 결정성). |
-| B-1 | **seed-field-20cells.sql 매핑확장 주석 정정** [현장↑] | scripts/seed-field-20cells.sql:22-28 | 주석이 확장을 "수동 UPDATE cell SET Enabled=1"로 안내하나, 스크립트는 `@availMax` 리팩터됨 — 실제 정확한 확장 = **`@availMax=15→20`(§2 cells·§5 order_item·§6 배정 자동 연동) + §4 오더 VALUES 리스트 1~15→1~20 수동 확장 + §7 셀16 CANCELLED 블록 제거.** 현장 매핑 확장 시 오독 방지(1순위). 주석만 정정. |
-| B-2 | Field20CellsGateTests PlannedQty=100 주석 | Field20CellsGateTests.cs:87·124 | 시드는 PlannedQty=3인데 테스트 픽스처는 100. "OVER 격리용 상향(게이트 검증 시 OVER 간섭 배제)" 1줄 주석. |
-| B-4 | LoadCellQty pId 41000대 주석 | Field20CellsGateTests.cs:286 | SPEC pId 1~30000인데 41000대 사용. "실 IF-05 pId 아님 — LOADED 직적재 합성 pId(20000대 IF-05 pId와 비충돌)" 우회 명시 주석. |
-| B-6 | (선택) cells_enabled 검증 컬럼 술어 분리 | seed sql:224-225 | `Enabled=1 AND Capacity=@cellCap` 혼입 → enabled/capacity 진단 conflate. B-1과 같은 파일이라 저비용 — 술어 분리(진단 명료). |
+- **D1. 구조 일관성 체크리스트 (B2B Part II ↔ B2C Part I)**: 세 문서 각각에 대해 아래를 **B2C 대비**로
+  판정하고 결과를 `sprint-feedback.md`에 기록. 항목: ①Q1 넘버링 체계 준수 ②공통 필드 표 존재(F3)
+  ③5개 엔드포인트의 요청/응답 표 틀 균질(F4) ④인터페이스 목록·골든패스·타이밍이 독립 섹션(F5)
+  ⑤①~⑤ 넘버링 무모순(F2) ⑥note 스타일 정돈(F6). 한 항목이라도 미충족 = FAIL.
+- **D2. 계약 무손실 대조 (문서 → 원천 api-spec-ko.html §1~6)**: 재구성 후 세 문서의 B2B 5개
+  엔드포인트 필드명·타입·길이·필수여부·검증규칙을 원천과 **나란히 대조**. 공통 표로 이동한 필드가
+  값 손실·개변 없이 보존됐는지, 엔드포인트별 변형(box chuteNo 1~10 등)이 유지됐는지 확인. 불일치 1건 = FAIL.
+  증거: 문서별·엔드포인트별 대조 결과(값 인용) 기록.
+- **D3. 실패 message verbatim (약 19종) grep 대조**: `api-spec-ko.html` §6의 모든 실패 message
+  (공통 검증 7 · unprocessed 1 · input 2 · classification 4 · results 3 · box 4 · 시스템 429/400/500)가
+  재구성 후에도 세 문서에 **문자열 그대로** 존재하는지 grep. `status:"F"` vs 요청 `status:"NG"` 구분 설명 유지 확인.
+- **D4. ①~⑤ 넘버링·골든패스 정합 (문서 내부)**: 각 문서에서 개요 엔드포인트 표·골든패스 flow·B2
+  정의부 배지·B3 실패부 배지의 순서/숫자가 **모두 일치**함을 확인(F2 해소). 골든패스 순서
+  `unprocessed→input→classification→box→results` 및 "box 선택 · results 항상 마지막" 보존.
+- **D5. EN=KR=master 정합**: 세 문서의 B2B 파트가 **동일 재구성**(섹션 구성·표 틀·공통필드·넘버링)을
+  반영하는지 대조(언어·상호참조 문구 차이 제외). master_spec에 B2B가 §07 PLC 레지스터·§08 핸드셰이크·
+  IF-06/11/12·층 정렬의 대상이 아님을 명시하는 구조/문구 **유지** 확인.
+- **D6. B2C 무접촉 + 유효 렌더 + 무변경 가드 + 회귀**: `git diff`로 B2C(Part I §1~§8 / §00~§10 및
+  IF-05/08/09/10) 변경 = 0 확인(Q1 확정 최소 범위 예외 시 그 범위 명시). 세 HTML을 브라우저(Playwright)로
+  열어 스크린샷 — 구조 깨짐/미완 태그/깨진 표 없음(스크린샷 판독 증거). `git diff --stat`으로
+  `backend/`·`frontend/`·`scripts/`·`api-spec-ko.html` 변경 0 확인. `dotnet build` + `dotnet test`(210 GREEN) 무영향 확인.
 
-### IN — 문서 현행화 (Module 3)
-| ID | 항목 | 위치(확인·현 stale) | 근거 |
-|----|------|-----------|------|
-| A-5 | **master_spec §05 FULL/PAUSED 타입별 분기** [현장] | wcs_rcs_3ds_master_spec.html:170·175·179 | "FULL·PAUSED는 NG"(타입 구분 없음)이 확정4(슈트=OK·소터만 NG)·실코드(DbRepositories.cs:68-70)·interface_kr과 충돌. canonical HTML 2종이 정반대 → 목요일 문서 사용 전 정정. 표 FULL/PAUSED 행에 "슈트=OK(보내고 대기)/소터=NG" 분기 반영. |
-| A-20 | **README.md 전면 현행화** [현장 — RCS 오도 방지] | README.md:8·16·18·35·43·45·64·66·70 (전부 stale 확인) | 폐지된 IF-08 폴링('allowed=true까지 폴링')·Minimal API·"Modbus TCP"만·"개발은 SQLite 분기"·16테이블·IF-09 부재·HTML 4종·로드맵 미래형. RCS 개발사에 공유되면 폐지 API 구현 유도. 현행 재작성. |
-| E-SPEC | SPEC.md §2/§3 IF-08 푸시모델 명료화(최소) | SPEC.md §2·§3 deposit-permission | IF-08 엔드포인트가 폴링→푸시로 대체됐으나 §2/§3은 구 폴링 서술. **판정표(§2-A/2-B DepositDecider)는 내부 판정 스펙으로 유효 — 삭제 금지.** "IF-08 deposit-permission 엔드포인트 폐지·WCS→RCS 푸시로 대체(interface_kr 참조), 아래 판정표는 내부 DepositDecider 스펙" 최소 주석. |
-| A-6 | **CLAUDE.md drift** ※ ORCHESTRATOR-APPLIED | CLAUDE.md:29·37·60 등 (still stale 확인) | "Minimal API: IF-05/08/10"(실제 MVC·IF-05/09/10+IF-08 푸시)·"M5에서 Serilog 도입"(완료)·"§6 투입 가부 표"(§06=푸시)·"16테이블"(17)·Migrations 2종 누락. **CLAUDE.md는 Team 보호파일(workflow-agents.md — Generator/Evaluator 수정 금지). 오케스트레이터/사용자가 적용**(Q1 참조). |
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 6 (D1 구조일관성체크리스트, D2 계약무손실대조, D3 실패message verbatim, D4 ①~⑤넘버링·골든패스정합, D5 EN=KR=master정합, D6 B2C무접촉+렌더+무변경가드+회귀). Full-stack 런타임 E2E 3슬롯은 docs-only(재배치·무계약변경) 표면 사유로 N/A 처리(투명성 노트 명시). All slots filled: yes.
 
-### OUT — 사유 명기
-| ID | 항목 | OUT 사유 | 처리 |
-|----|------|----------|------|
-| A-4 | TimingOptions 레코드 중복 필드 통합 | dual-record(공통 TimingOptions + 소터별 nullable SorterTimingOverride)는 **의도된 정상 패턴**(ToXxx 병합 로직 보유). 통합은 병합 경로를 건드리는 횡단 리팩터 — 리스크>가치, 과확장 금지. | todo 등재 |
-| B-3 | Field20CellsGateTests:196-200 데드 브랜치 | 5회 반복 루프의 `p.Value <= AvailMax` 가드는 "16~20 미반환" 불변식을 문서화하는 무해한 방어 단언. 제거는 회귀 의도 약화 리스크. | 유지(무변경) |
-| B-5 | grid-cols-5 전역 고정(SortingSection.tsx:76) | 요건 부합·수용됨(물리 4×5 미러링). frontend 0 변경 원칙. | todo(다중소터 셀수기반 열도출=미래) |
-| C-1 | RTU-REHEARSAL.md:8 SPEC 참조 라벨 | **이미 정확** — 현재 "[§6 Sim3ds 동작]·[§7-A 전송 방식 확정]" 두 참조 모두 SPEC 구조와 일치. 해소됨. | OUT(해소) |
-| C-4 | ISimTransport.Server 노출 폭 | 수용·리뷰 종결(internal 봉인, 실용적 선택). | OUT |
-| C-5 | fire-and-forget 시퀀스 vs Dispose 경합 | 선재·방어 처리 확인됨. | OUT |
-| C+ | 물리 RTU 실선 미검증 | 코드 결함 아님 — 목요일 리허설 몫(RTU-REHEARSAL 체크리스트 커버). | OUT |
-| A-19 | appsettings.Development.json 주석 | **이미 수정됨** — 현재 주석이 "launchSettings 부재로 dotnet run 기본=Production"·필드안전 경고(현장 DB 오염 방지)·SeedOnStartup=false 전부 반영. 해소됨. | OUT(해소) |
-| A-12/A-13 | Serilog 상대경로·install-service.ps1 | 감사 **묶음 B(운영 배포 전)** — 본 스프린트(묶음 A·E) 범위 밖. | todo(기추적) |
-| E-⑤code | DbSeeder chuteNo=30↔Sorters=1 정렬 + Development.json Provider 오버라이드 | **config/code 변경**(현장 DB 오염 회귀) — E는 "문서만" 범위. 잠정 완화(Development.json 필드안전 경고)는 **이미 존재**, 필드 기본=Production. 신중한 전용 처리 필요. | todo(기추적 :8·:16) · Q3 |
-| F-1 | DbSeeder First() 하드닝 | 명시 dev 플래그일 때만 시드 도달·현장=Production. 저현장가치. | todo |
-| F-2 | DateTimeOffset→Stopwatch monotonic | 큰 횡단 변경 — 본 스프린트 OUT. | todo |
-
-────────────────────────────────────────────────────────────────────────
-## Implementation Scope (Generator)
-
-기술 세부(정확한 메서드·시그니처·테스트 배치)는 Generator 재량. 아래는 **무엇을** 만들지의 계약.
-
-### Module 1 — 백엔드 관측성 (파일: PlcGateway.cs · Program.cs · RcsController.cs · appsettings.json + 신규 백엔드 테스트)
-1. **D-1**: 폴 실패 로깅을 전이/지속 분리 — (a) OFFLINE **전이 시 1회만** 상세(스택 포함), (b) 지속 실패는 스택 없는 강등(Debug) 또는 N폴/주기마다 1줄 요약, (c) ONLINE 복구 1회 로그. **요약 주기·백오프 등 신규 타이밍은 appsettings**(절대규칙 #7 — 하드코딩 금지). alarm/operation_log 전이당 1회 가드는 현 동작 보존.
-2. **D-2**: appsettings.json Serilog File Args에 `rollOnFileSizeLimit=true`(+`fileSizeLimitBytes`·`retainedFileCountLimit`) 추가. Development.json도 정합 검토.
-3. **D-3**: `/health` GET 1개 — 부수효과 0(ISorterGatewayRegistry.AllBundles의 Latest.Online/At + DB 연결여부 스냅샷 읽기만). 응답 예: `{status, db:bool, sorters:[{chuteNo, online, lastPollAt}]}`. **liveness 최소**(전용 HealthChecks 프레임워크 도입 금지 — 단일 엔드포인트). 상태코드 정책은 Q2.
-4. **D-4**: RcsController 입력 검증 추가(DB 도달 전) — barcode 길이 ≤ 스키마 상수(200, 단일 진실 공유)·timeStamp(ClientTs) ≤30·IF-05 qty 상한(설정값·appsettings, OVER 검사는 long 산술로 오버플로 방어)·IF-10 qty 음수 거부. 응답 의미(400 vs NG)는 Q2. **정상 입력 경로 동작 불변**(무변경 가드).
-5. **A-1**: Program.cs:410 레벨 분류기에 RESIDUE 키워드 → `OperationLogLevel.WARN` 승격(MISMATCH/TIMEOUT/OFFLINE은 ERROR 유지).
-6. **A-2**: reconcile 발동 폴에서 spurious RFlagRaised 에지 억제(또는 억제 불가 시 주석으로 무해성 명시) + RFlagRaised 채널 소비자 부재 상태 주석(F-3).
-
-### Module 2 — Sim/RTU + 테스트·시드 위생 (파일: SimServer.cs · Field20CellsGateTests.cs · scripts/seed-field-20cells.sql)
-7. **C-2**: SimServer UnitId 1~247 범위 검증 fail-loud(범위 밖 명확한 예외).
-8. **C-3**: SetRResidue/Flush/Pull(StartAsync 前) 명확한 InvalidOperationException 가드.
-9. **A-3**: InjectStickyRResidue·InjectRSeqOverride·InjectRFlagDelayMs volatile 정렬.
-10. **B-1**: seed sql:22-28 매핑확장 주석 정정(위 근거대로 @availMax·§4·§7 경로 정확화).
-11. **B-2/B-4**: 테스트 주석 1줄씩.
-12. **B-6(선택)**: cells_enabled 검증 술어 분리.
-
-### Module 3 — 문서 (파일: README.md · wcs_rcs_3ds_master_spec.html · SPEC.md ; CLAUDE.md = 오케스트레이터 적용)
-13. **A-5**: master_spec §05 FULL/PAUSED 표 행 목적지 타입별 분기.
-14. **A-20**: README 현행 재작성.
-15. **E-SPEC**: SPEC.md §2/§3 IF-08 푸시 명료화 최소 주석(판정표 보존).
-16. **A-6**: CLAUDE.md 정정안을 계약에 명시하되 **적용은 오케스트레이터**(Team 보호파일).
-
-────────────────────────────────────────────────────────────────────────
-## Parallel Modules (Generator fan-out 가능 — 경계 확인 완료)
-
-세 모듈은 **쓰기 파일이 겹치지 않음**(확인함):
-- **Module 1**(백엔드 관측성): `PlcGateway.cs`, `Program.cs`, `RcsController.cs`, `appsettings.json`(+`appsettings.Development.json` Serilog), 신규 백엔드 테스트 파일.
-- **Module 2**(Sim·테스트·시드): `SimServer.cs`, `Field20CellsGateTests.cs`, `scripts/seed-field-20cells.sql`.
-- **Module 3**(문서): `README.md`, `wcs_rcs_3ds_master_spec.html`, `SPEC.md`.
-
-Fan-out 규칙(택하면):
-- Module 1·2 모두 `Wcs.Tests` 프로젝트에 쓰지만 **서로 다른 파일**(Module 1=신규 테스트 파일, Module 2=Field20CellsGateTests.cs) → 파일 충돌 0. 신규 테스트는 기존 파일에 추가하지 말고 별도 파일로.
-- **CLAUDE.md는 어느 모듈에도 속하지 않음** — 오케스트레이터 적용(Q1).
-- Fan-in: 병합 후 **전체 스위트 1회 통합 실행**(189 + 신규). worktree 격리 권장(파일 경계는 깨끗하나 csproj 동시성 안전).
-- 단일 Generator가 순차 처리해도 무방(모듈은 순서 독립). 규모가 작아 fan-out은 선택.
-
-## Evaluation Dimensions: functional only
-(관측성·입력위생·문서 — 단일 기능 차원. 보안/성능 전용 병렬 검증 불요. 입력 캡의 오버플로/음수는 functional 케이스로 커버.)
-
-────────────────────────────────────────────────────────────────────────
-## Evaluation Criteria (Backend/API 4기준 — Evaluator)
-1. **API Design Quality (★★★)**: /health 응답 형태 일관·부수효과 0; 입력 검증 응답(에러 구조)이 기존 IF-05/10 규약과 정합; 로그 레벨 분류 의미 정확(RESIDUE=WARN).
-2. **Architecture Originality (★★★)**: 최소 침습·재사용 가능한 최소 형태(B2B 대비 과설계 0); dual-record 등 기존 패턴 존중; 신규 타이밍 전부 appsettings.
-3. **Craft (★★)**: 오버플로/음수/과길이 엣지 처리; fail-loud(UnitId·pre-StartAsync); volatile 정렬; 예외 삼킴 0; 로그 스팸 실제 억제 확인.
-4. **Functionality (★★)**: **무변경 가드** — 핸드셰이크·판정(Decide)·기존 GREEN 189 전부 보존; 문서가 실코드와 일치.
-
-────────────────────────────────────────────────────────────────────────
-## Completion Conditions (Evaluator PASS 최소 조건)
-- [ ] 기존 전체 스위트 GREEN + **카운트 189 재확인**(기동 시 `dotnet test backend/Wcs.sln`로 baseline 재측정) + IN 항목별 신규 테스트 GREEN.
-- [ ] **D-1 실효 검증**: Sim으로 OFFLINE 유도(StopAsync 등) → 지속 OFFLINE 동안 **로그 라인 수가 폴 주기마다 스택 반복이 아님**을 단정(전이 1회 상세 + 지속 억제). 라인 수/레벨을 fresh 로그 캡처로 인용.
-- [ ] **D-2**: File 싱크에 rollOnFileSizeLimit 반영 확인(설정 파싱·기동 로그 or 단위 확인).
-- [ ] **D-3**: 실제 `GET /health` 왕복(HTTP 응답 본문) — status·db·sorters 필드 존재·부수효과 0.
-- [ ] **D-4**: 실HTTP로 (a) 과길이 barcode(>200)·(b) IF-05 qty=int.MaxValue·(c) IF-10 음수 qty → **500 아님·데이터 오염 0**(정상 입력은 불변) 단정. SQLite 테스트 더블의 provider-gap 유의(길이 미강제 → 컨트롤러 검증으로 잡아야 함).
-- [ ] **A-1**: operation_log에 HS_R_RESIDUE가 WARN으로 기록됨을 단정.
-- [ ] **C-2/C-3**: UnitId 범위밖·pre-StartAsync 호출 → 명확한 예외(fail-loud) 단정.
-- [ ] **문서(A-5/A-20/E-SPEC)**: 정정 내용이 실코드·interface_kr과 일치(리뷰). **frontend/ 무변경**을 `git diff`로 확인(Web/UI 브라우저 E2E 대체).
-- [ ] 정적검사(빌드 경고 회귀 0 — 단, 선재 NU1903 SQLitePCLRaw advisory는 기존 부채로 별건 todo:4, 본 스프린트 신규 경고 0).
-- [ ] A-6 CLAUDE.md 정정은 오케스트레이터 적용 확인(Team 미수정).
-
-────────────────────────────────────────────────────────────────────────
-## Verification Scenarios (Full-stack — 슬롯 채움)
-
-### Web/UI 슬롯 — 전부 N/A (사유: 이번 스프린트 frontend 표면 0 변경)
-- 각 surface 기본상태 / 대체상태 / 빈·에러 상태 / 다크모드 / 핵심 상호작용:
-  **N/A** — 프론트엔드 파일 무수정. Evaluator는 브라우저 E2E 대신 `git diff --stat`로 `frontend/`에 변경이 없음을 증거로 확인(대체 검증). B-5는 OUT.
-
-### Backend/API 슬롯 — 채움
-- **이번 스프린트가 건드리는 엔드포인트(method + path)**:
-  1. `GET /health` (신규 — D-3)
-  2. `POST /api/v1/destination-query` (IF-05 — D-4 입력검증 추가; 판정 의미 불변)
-  3. `POST /api/v1/deposit-report` (IF-10 — D-4 음수 qty 거부; 멱등 의미 불변)
-- **엔드포인트별 happy path(입력→출력 형태)**:
-  1. `/health` → 200, `{status, db:true, sorters:[{chuteNo,online,lastPollAt}]}`(현장 소터 chuteNo=1 반영).
-  2. IF-05 정상 barcode·qty → 기존과 동일 OK·chuteNo·reason(NORMAL/BUSY/…) — **회귀 없음**.
-  3. IF-10 정상 → `{result:"OK"}` 멱등 — **회귀 없음**.
-- **엔드포인트별 관련 에러 케이스(Planner 선별 — 패딩 없음)**:
-  1. IF-05 barcode 길이 >200 → 검증 거부(500 아님; Q2 결정에 따라 400 또는 NG), DENIED 감사행/operation_log 배치 유실 없음.
-  2. IF-05 qty ≤0(기존) 및 qty=2147483647(오버플로) → 거부, ReservedQty 오염 0.
-  3. IF-10 qty 음수 → 거부, ChuteCapacity DepositedQty 왜곡 0.
-  4. timeStamp 원문 >30자 → 거부/절단(ClientTs truncation 500 방지).
-  5. `/health` DB 다운/소터 OFFLINE 시 응답(Q2 상태코드 정책대로) — 부수효과 0 유지.
-
-### 계층 교차(E2E) 슬롯 — 프론트↔백엔드 흐름은 N/A(이번 변경 없음)
-대신 **백엔드↔Sim3ds 통합**(이 스프린트의 실제 통합면)을 실 Sim으로 검증:
-- Sim OFFLINE 유도 → (a) 폴 루프 로그 스팸 억제 실측(D-1) + (b) 그 상태에서 `/health`가 sorter online=false·lastPollAt 반영(D-3)을 한 시나리오로 관측.
-
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 6 (Web/UI=N/A(git-diff 대체), Backend/API endpoints, happy path, error cases, cross-layer=N/A(backend↔Sim 대체), integration-observed). All slots filled: yes.
-
-────────────────────────────────────────────────────────────────────────
-## 제약 재확인 (절대규칙 — 위반 금지)
-- **#7 하드코딩 금지**: OFFLINE 요약 주기·백오프·qty 상한 등 신규 임계값은 전부 appsettings.
-- **#1 PLC 쓰기 단일 큐**: A-2 reconcile·ClearR은 큐 경유 유지(직접 Modbus 호출 금지).
-- **무변경 가드**: 핸드셰이크(HandshakeOrchestrator)·판정(DepositDecider)·TgtFloor 규칙 의미 변경 0.
-- **예외 삼킴 금지**: 입력검증·fail-loud는 명시 예외/응답으로.
-- **frontend 0 변경**(B-5 OUT).
-- **CLAUDE.md·workflow-*.md·.git/hooks/는 Team 미수정**(오케스트레이터/사용자 전담).
-
-────────────────────────────────────────────────────────────────────────
-## Questions (novel 결정 — 선택지 + 권장안)
-
-**Q1. CLAUDE.md drift(A-6) 적용 주체.**
-CLAUDE.md는 Team(Generator/Evaluator) 보호파일이라 팀이 수정 불가.
-- (a) **[권장]** 오케스트레이터가 Team 완료 후 docs-only 정정을 직접 적용(코드 리스크 0·순수 문서). 계약에 정정안 명시됨.
-- (b) 사용자가 직접 정정.
-- (c) 본 스프린트에서 제외하고 별도 처리.
-→ 권장 (a).
-
-**Q2. 입력 상한(D-4) 거부 의미 + /health 상태코드.**
-- 입력 캡: (a) **[권장]** 구조적 위반(과길이 barcode/timeStamp·비양수/오버플로 qty)은 **400 Bad Request**로 DB 도달 전 거부(입력 검증 ≠ 업무 NG) / (b) 기존 NG 규약에 흡수(reason 추가). RCS 계약 영향 있어 확인 필요.
-- /health: (a) **[권장]** liveness=프로세스 생존이면 **항상 200**+본문에 db/sorter 저하 플래그(단순·프로브 친화, readiness 503은 B2B-1 이연) / (b) 저하 시 503.
-→ 권장 (a)/(a). RCS가 400을 어떻게 처리할지 미확정(SPEC §7 Q1~Q7 대기)이면, 현장 Postman 단계에선 400+명확 메시지가 안전.
-
-**Q3. 현장 DB 오염 회귀(E-⑤ code) 이연 확인 — FYI.**
-DbSeeder 소터 chuteNo=30 ↔ base Sorters ChuteNo=1 미스매치는 명시 `SeedOnStartup=true`를 dev Provider 오버라이드 없이 켜면 현장 SqlServer DB 오염 경로. **잠정 완화(Development.json 필드안전 경고)는 이미 존재**하고 필드 기본 환경=Production이라 즉시 위험은 낮음. 본 스프린트(docs+관측성)에서는 코드 정렬 OUT·todo 유지.
-→ 권장: **이연 확인**. 목요일 전 현장 머신에서 ASPNETCORE_ENVIRONMENT=Development 기동만 하지 않으면 안전. 정렬이 필요하면 별도 소규모 스프린트.
-
-────────────────────────────────────────────────────────────────────────
-## 참고 — 이번 스프린트로 신규 todo 등재 예정(OUT 항목)
-A-4(TimingOptions 통합) · B-5(다중소터 열도출) · F-1(DbSeeder First 하드닝) · F-2(Stopwatch monotonic).
-기추적 유지: 묶음 B(A-12/A-13) · E-⑤ code(todo:8·16) · NU1903(todo:4).
-
-── ★ 오케스트레이터 확정 (2026-07-07, Questions 처리 — 기존 관례 준수 권장안 채택) ──
-Q1: CLAUDE.md(A-6) 정정은 **오케스트레이터가 커밋 단계에서 직접 적용** (Team 보호파일)
-Q2: 입력 상한 위반 = **400**(기존 IF-05 검증 관행 동형) / /health = **항상 200 liveness**(상태 상세는 본문 JSON)
-Q3: 현장 DB 오염 회귀 이연 확인 — 잠정 완화 존재(Production 기본) 전제 수용
-실행 방식: Parallel Modules 3기 fan-out(워크트리 격리) → 오케스트레이터 fan-in(패치 수확→통합 빌드·전체 테스트) → 단일 Evaluator
+── ★ 사용자 확정 (2026-07-07, Phase 1→2 게이트 — 3문항 전부 권장안) ─────────
+Q1 넘버링: **B1~B8로 확장** — B 접두사 유지, B2C §1~§8 구조 미러(개요/통신/공통필드/인터페이스목록/API정의/사유·실패/플로우/타이밍 — B2C 항목에 맞춰 매핑). 3문서 각각 자기 B2C 서식 따름(master는 §00~10 계열이나 B2B는 B체계로 일관).
+Q2 ①~⑤ 정합: **골든패스 순서(unprocessed→input→classification→box→results)로 B2 정의·B3 실패 섹션 재배치**. 배치 순서·뱃지 숫자만, 필드·message 내용 불변. 문서 내 순서 모순(F2) 완전 해소.
+Q3 공통 필드표: **신설** — B2C §3 대응 공통 필드표(bizDay/batch/chuteNo/status/reason/qty). box 길이 변형(chuteNo 1~10·barcode 1~100)은 각주 보존(정보 손실 0).
+실행: 단일 Generator(KR 정본→EN→master 순차·상호 정합). Evaluator functional + 문서리뷰(수신자 관점) 재활용 가능.
