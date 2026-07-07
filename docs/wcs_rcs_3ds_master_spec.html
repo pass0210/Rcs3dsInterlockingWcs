@@ -125,7 +125,7 @@
     <p>WCS는 두 가지 운영 방식으로 RCS와 연동한다. <b>엔드포인트 집합이 완전히 분리</b>되어 있으므로 담당하는 방식의 파트만 읽으면 된다. 본 통합 정의서의 <b>§00~§10(3DS 포함)은 전부 B2C</b>이며, B2B는 문서 끝의 Part II에서 별도로 다룬다.</p>
     <div class="note"><b>B2C / B2B는 이 문서에서 연동 <em>방식</em>(통신 계약)을 가리키는 라벨</b>이다. <b>어느 쪽을 읽을지</b> — 라이브 3D 소터에 <b>실시간으로 틸트</b>하면 <b>B2C</b>(Part I · §00~§10), <b>사전 등록된 배치 데이터를 소비</b>하면 <b>B2B</b>(Part II)를 읽는다. <b>B2B도 정식 운영 경로</b>다 — "배치 테스트데이터 방식"이라는 이름이지만 테스트 전용이 아니라 실제 운영에 사용된다.</div>
     <table>
-      <tr><th style="width:110px">구분</th><th><span class="modechip b2c">B2C · 실시간</span> 3D 소터 연동 (현행 · §00~§10)</th><th><span class="modechip b2b">B2B · 배치</span> 테스트데이터 방식 (신규 · Part II)</th></tr>
+      <tr><th style="width:110px">구분</th><th><span class="modechip b2c">B2C · 실시간</span> 3D 소터 연동 (§00~§10)</th><th><span class="modechip b2b">B2B · 배치</span> 테스트데이터 방식 (Part II)</th></tr>
       <tr><td>트리거</td><td>인덕션 스캔 즉시 — 피스(상품) 단위 실시간</td><td><code>bizDay</code>/<code>batch</code> 단위 배치 등록 데이터</td></tr>
       <tr><td>인터페이스</td><td>IF-05 / IF-08 / IF-09 / IF-10 (+ 3DS IF-06/11/12)</td><td><code>unprocessed</code> · <code>input</code> · <code>classification</code> · <code>results</code> · <code>box</code> (<code>/api/v1/works/*</code>)</td></tr>
       <tr><td>목적지 판정</td><td><b>WCS가 판정</b> (오더 매칭·예약 차감·소터 셀)</td><td><b>없음</b> — 배치에 등록된 <code>chuteNo</code>를 그대로 사용</td></tr>
@@ -139,7 +139,7 @@
 
   <div class="part b2c" id="b2c">
     <div class="lbl">Part I · B2C</div>
-    <div class="ttl">실시간 3D 소터 연동 (현행)</div>
+    <div class="ttl">실시간 3D 소터 연동</div>
     <div class="sub">인덕션 스캔 즉시 피스 단위로 처리. RCS↔WCS REST(IF-05/08/09/10)와 WCS↔3DS Modbus 핸드셰이크(IF-06/11/12·층 정렬)를 모두 포함한다. 아래 §00~§10 전체가 B2C에 해당한다.</div>
   </div>
 
@@ -287,7 +287,7 @@
 
   <div class="part b2b" id="b2b">
     <div class="lbl">Part II · B2B</div>
-    <div class="ttl">배치 테스트데이터 방식 (신규)</div>
+    <div class="ttl">배치 테스트데이터 방식</div>
     <div class="sub">사전 등록된 테스트데이터(bizDay + batch + barcode) 기반의 배치 투입/분류/결과 전송. 5개 REST 엔드포인트로만 구성되며, 위 §07 레지스터·§08 핸드셰이크·IF-06/11/12·층 정렬과 전혀 무관하다.</div>
   </div>
 

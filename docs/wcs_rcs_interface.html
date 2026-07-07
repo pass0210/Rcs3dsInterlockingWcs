@@ -124,7 +124,7 @@
     <p>WCS integrates with RCS in two operating modes. Because the <b>endpoint sets are entirely separate</b>, you only need to read the part for your mode.</p>
     <div class="note"><b>In this document, B2C / B2B are labels for the integration <em>method</em> (wire contract).</b> <b>Which one to read</b> — if you tilt to a <b>live 3D sorter in real time</b>, read <b>B2C</b> (Part I · §1–§8); if you <b>consume pre-registered batch data</b>, read <b>B2B</b> (Part II). <b>B2B is also a production path</b> — despite the name "batch test-data method," it is not test-only and is used in real operation.</div>
     <table>
-      <tr><th style="width:110px">Aspect</th><th><span class="modechip b2c">B2C · real-time</span> 3D-sorter integration (current)</th><th><span class="modechip b2b">B2B · batch</span> test-data method (new)</th></tr>
+      <tr><th style="width:110px">Aspect</th><th><span class="modechip b2c">B2C · real-time</span> 3D-sorter integration</th><th><span class="modechip b2b">B2B · batch</span> test-data method</th></tr>
       <tr><td>Trigger</td><td>Immediately on induction scan — per piece (item), real-time</td><td>Batch-registered data by <code>bizDay</code>/<code>batch</code></td></tr>
       <tr><td>Interfaces</td><td>IF-05 / IF-08 / IF-09 / IF-10</td><td><code>unprocessed</code> · <code>input</code> · <code>classification</code> · <code>results</code> · <code>box</code> (<code>/api/v1/works/*</code>)</td></tr>
       <tr><td>Destination decision</td><td><b>WCS decides</b> (order match · reservation · sorter cell)</td><td><b>None</b> — uses the <code>chuteNo</code> already registered in the batch</td></tr>
@@ -138,7 +138,7 @@
 
   <div class="part b2c" id="b2c">
     <div class="lbl">Part I · B2C</div>
-    <div class="ttl">Real-time 3D-sorter integration (current)</div>
+    <div class="ttl">Real-time 3D-sorter integration</div>
     <div class="sub">Per-piece processing immediately on the induction scan. RCS calls destination query, arrival report and deposit report (IF-05/09/10); WCS pushes destination status (IF-08) on every change. WCS performs the destination decision and the 3DS Modbus handshake internally. (§1–§8 below)</div>
   </div>
 
@@ -302,7 +302,7 @@
 
   <div class="part b2b" id="b2b">
     <div class="lbl">Part II · B2B</div>
-    <div class="ttl">Batch test-data method (new)</div>
+    <div class="ttl">Batch test-data method</div>
     <div class="sub">Batch-level input / classification / results built on pre-registered test data (bizDay + batch + barcode). It consists of five REST endpoints only; there is no 3DS Modbus handshake, no destination decision, no IF-08 status push, and no floor concept.</div>
   </div>
 
