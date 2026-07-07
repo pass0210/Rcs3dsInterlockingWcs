@@ -82,6 +82,12 @@ public sealed record PlcGatewayOptions
     // 하드코딩 금지(절대규칙 #7). 분류 최대 소요와 무관한 "클리어 반영" 대기이므로
     // RFlagTimeoutMs보다 짧게(현장 폴 주기 몇 배) 잡는다. 초과 시 C 미기입 종결(§2C).
     public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
+
+    // S-CLEANUP-FIELD D-1 — OFFLINE 지속 중 로그 스팸 억제용 요약 주기.
+    // OFFLINE '전이'는 1회만 상세(스택 포함) 로깅하고, 이후 '지속' 폴 실패는 스택 없이 Debug로
+    // 강등하되 이 주기(연속 실패 N회)마다 WARN 요약 1줄만 남긴다(진단 로그 매몰 방지).
+    // 하드코딩 금지(절대규칙 #7) — appsettings Timing 섹션에서 읽는다. ≤0이면 요약 비활성(Debug만).
+    public int OfflineLogSummaryEveryPolls { get; init; } = 20;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -123,6 +129,10 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     // OFFLINE 전이 원자 플래그 — 1=ONLINE(초기), 0=OFFLINE.
     // Interlocked.Exchange로 동시 호출(폴 루프 + 쓰기 컨슈머)에서 정확히 1회 발화 보장.
     private int _online = 1;
+
+    // D-1: OFFLINE '지속' 동안 전이 이후의 연속 폴 실패 수(폴 루프 단일 스레드 전용).
+    // 요약 주기(OfflineLogSummaryEveryPolls) 판단용. 전이 시 0으로 리셋, 정상 폴 성공 시 0으로 리셋.
+    private int _offlineFailureCount;
 
     private readonly PlcGatewayOptions _opt;
     private readonly ILogger<PlcPollingService> _log;
@@ -261,12 +271,14 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 var prevOnline = _latest.Online;
                 _latest  = snap;
                 failures = 0;
+                _offlineFailureCount = 0;   // D-1: 지속 실패 카운트 리셋(정상 폴 성공 — 다음 OFFLINE 요약 새로 시작)
                 // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
                 Interlocked.Exchange(ref _online, 1);
 
-                // ONLINE 복구 전이(false→true) — 부수 기록(STATE/ONLINE). 핸들러 예외 격리.
+                // ONLINE 복구 전이(false→true) — 로그 1회(D-1 (c)) + 부수 기록(STATE/ONLINE). 핸들러 예외 격리.
                 if (!prevOnline)
                 {
+                    try { _log.LogInformation("[폴링] ONLINE — 폴 성공(기동/복구)"); } catch { /* 로거 disposed — 무시 */ }
                     try { OnOnlineTransition?.Invoke(snap); } catch { }
                 }
 
@@ -283,6 +295,11 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 // 쓰기는 반드시 단일 큐 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지.
                 // 관측: WARN 로그(잔류값 포함) + ClearR의 OnWrite(PLC_WRITE) + 이후 폴의
                 //       OnRegisterChange(R_CellNo 20→0·R_Seq 123→0·R_Flag 1→0)로 잔류값이 기록됨.
+                // A-2: 기동 reconcile 폴에서 잔류 R_Flag=1을 ClearR로 지울 때, 같은 폴의
+                // RFlagRaised 상승 에지(아래)도 함께 발화하면 "지금 지우는 잔류값"을 상승 에지로도
+                // 흘리게 된다(spurious edge). 이 폴에 한해 에지 발화를 억제한다.
+                bool suppressRFlagEdge = false;
+
                 if (!startupReconciled)
                 {
                     startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
@@ -298,13 +315,20 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
 
                         // 큐 경유 ClearR(컨슈머가 RMW로 R_Flag clear + R 영역 0). TryWrite = 논블로킹.
                         _writeQueue.Writer.TryWrite(new PlcWrite.ClearR());
+
+                        // A-2: 이 잔류를 RFlagRaised 상승 에지로도 흘리지 않는다(reconcile가 지울 값이므로).
+                        suppressRFlagEdge = true;
                     }
                 }
 
-                // R_Flag 상승 (0→1) 감지
-                if (!prevRFlag && snap.RFlag)
+                // R_Flag 상승 (0→1) 감지 — RFlagRaised 채널에 게시.
+                // F-3: 이 채널(RFlagRaised)은 현재 소비자가 없다. HandshakeOrchestrator는 자체 arming
+                //   (ArmRFlagZeroAsync)에서 _gw.Latest를 직접 폴링해 R_Flag 상승을 감지하며, RFlagRaised
+                //   reader를 구독하지 않는다. 게시는 향후 이벤트 구동 소비자를 위한 후크로 남겨둔다(무해).
+                //   reconcile 폴에서는 spurious 게시를 억제한다(A-2).
+                if (!prevRFlag && snap.RFlag && !suppressRFlagEdge)
                 {
-                    _log.LogInformation("[폴링] R_Flag 상승 감지 — 핸드셰이크 오케스트레이터에 알림");
+                    _log.LogInformation("[폴링] R_Flag 상승 감지 — RFlagRaised 채널 게시(현재 소비자 없음)");
                     _rFlagChannel.Writer.TryWrite(snap);
                 }
                 prevRFlag = snap.RFlag;
@@ -316,8 +340,6 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 // 이 시점에서 _log(EventLogInternal 등)가 이미 disposed일 수 있으므로
                 // 모든 로깅 호출을 try로 보호해 폴 루프 예외 전파 방지.
                 failures++;
-                try { _log.LogWarning(ex, "[폴링] 실패 {Cnt}/{Max}", failures, _opt.OfflineAfterFailures); }
-                catch { /* 로거 disposed — 무시 */ }
 
                 // 예외 종류 불문(SocketException·IOException·시리얼 타임아웃 모두) OFFLINE 판단.
                 // TCP: SocketException·IOException / RTU: IOException·TimeoutException
@@ -327,11 +349,39 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                              || ex.InnerException is System.Net.Sockets.SocketException
                              || ex.InnerException is System.IO.IOException;
 
-                if (failures >= _opt.OfflineAfterFailures || isHardEx)
+                bool shouldGoOffline = failures >= _opt.OfflineAfterFailures || isHardEx;
+
+                if (!shouldGoOffline)
                 {
-                    try { _log.LogError("[폴링] OFFLINE 전이 (연속 실패 {Cnt}회, HardEx={HardEx})", failures, isHardEx); }
+                    // 아직 OFFLINE 전이 임계 미달(soft 실패 누적 중) — 전이 진단을 위해 스택 포함 경고 유지.
+                    // (임계에 도달하지 않은 간헐 실패는 저빈도라 스팸이 아니다.)
+                    try { _log.LogWarning(ex, "[폴링] 폴 실패 {Cnt}/{Max} (OFFLINE 전이 임계 접근)", failures, _opt.OfflineAfterFailures); }
                     catch { /* 로거 disposed — 무시 */ }
-                    PublishOffline();
+                }
+                else
+                {
+                    // D-1: OFFLINE '전이'는 1회만 상세(스택 포함), 이후 '지속' 실패는 스택 없이 강등/요약(로그 스팸 억제).
+                    // isHardEx가 매 폴 true여도 전이 라벨(LogError)이 매 폴 반복되지 않는다(거짓 전이 라벨 제거).
+                    bool transitioned = PublishOffline();  // Online 1→0에 성공한 폴만 true(전이당 1회).
+                    if (transitioned)
+                    {
+                        _offlineFailureCount = 0;
+                        try { _log.LogError(ex, "[폴링] OFFLINE 전이 — 연속 실패 {Cnt}회(HardEx={HardEx}). 지속 실패는 억제(요약 {Every}폴마다).",
+                            failures, isHardEx, _opt.OfflineLogSummaryEveryPolls); }
+                        catch { /* 로거 disposed — 무시 */ }
+                    }
+                    else
+                    {
+                        // 지속 OFFLINE — 스택 없는 강등(Debug) + 요약 주기마다 WARN 1줄(스택 없음).
+                        _offlineFailureCount++;
+                        int every = _opt.OfflineLogSummaryEveryPolls;
+                        if (every > 0 && _offlineFailureCount % every == 0)
+                            try { _log.LogWarning("[폴링] OFFLINE 지속 — 누적 폴 실패 {Cnt}회(요약, 스택 생략).", failures); }
+                            catch { /* 로거 disposed — 무시 */ }
+                        else
+                            try { _log.LogDebug("[폴링] OFFLINE 지속 폴 실패 {Cnt}회(스택 생략).", failures); }
+                            catch { /* 로거 disposed — 무시 */ }
+                    }
 
                     // Disconnect는 _clientLock 임계구역 안에서 실행 — 쓰기 컨슈머가 진행 중인
                     // 트랜잭션이 완료된 뒤에 소켓/포트를 끊어 프레임/버퍼 손상 방지.
@@ -354,7 +404,12 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         try { _master.Disconnect(); } catch { }
     }
 
-    private void PublishOffline()
+    /// <summary>
+    /// OFFLINE 스냅샷 게시 + 전이당 1회 이벤트 발화.
+    /// 반환: Online 1→0 교환에 성공(=이번 호출이 실제 전이)했으면 true, 이미 OFFLINE이면 false.
+    /// D-1: 호출자가 반환값으로 "전이 1회 상세 로그 vs 지속 억제 로그"를 분기한다.
+    /// </summary>
+    private bool PublishOffline()
     {
         var prev = _latest;
         var offlineSnap = new PlcSnapshot(
@@ -367,7 +422,11 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         // 전이당 1회만 이벤트 발화 — Interlocked CAS로 동시 호출(폴 루프 + 쓰기 컨슈머) 경쟁 원자화.
         // _online 1→0 교환에 성공한 호출자만 이벤트를 발화해 alarm 중복 방지.
         if (Interlocked.Exchange(ref _online, 0) == 1)
+        {
             OnOfflineTransition?.Invoke(offlineSnap);
+            return true;
+        }
+        return false;
     }
 
     // ── S-OBSERVABILITY: 레지스터 전이(변화분) 발화 ─────────────────────────────

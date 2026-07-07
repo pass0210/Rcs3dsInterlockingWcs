@@ -16,6 +16,14 @@ public sealed record WcsOptions
     public int OperationalFloor { get; init; } = 2;
 
     /// <summary>
+    /// IF-05/IF-10 요청 qty 상한(입력 위생 — S-CLEANUP-FIELD D-4).
+    /// RCS·스캐너·Postman 버그로 비정상 대량 qty(예: int.MaxValue)가 들어오면 DB 도달 전에 400으로 거부해
+    /// OVER 우회(int 오버플로)·ReservedQty/DepositedQty 오염을 막는다. 하드코딩 금지(절대규칙 #7) — 설정값.
+    /// 기본 100000(현장 단일 투입 수량을 크게 상회 — 정상 입력 경로 불변).
+    /// </summary>
+    public int MaxQtyPerRequest { get; init; } = 100000;
+
+    /// <summary>
     /// IF-08 아웃바운드 푸시(WCS→RCS destination-status) 설정.
     /// Phase 2 — RCS base URL·재시도·타이밍 전부 설정화(하드코딩 금지, 절대규칙 #7).
     /// </summary>
