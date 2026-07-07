@@ -157,6 +157,43 @@ public class Sim3dsRtuTests
         _out.WriteLine($"[A8] {ex.Message}");
     }
 
+    /// <summary>
+    /// C-2: UnitId 범위 밖(0=브로드캐스트·248 이상·byte 초과 300) → 무음 절단((byte)300=44) 대신
+    /// 생성 시점 fail-loud. 형제 ParsedParity/ParsedStopBits와 동형(잘못된 값 → 명확한 예외).
+    /// </summary>
+    [Fact]
+    public void A9_UnitId_OutOfRange_FailLoud()
+    {
+        // 300 → (byte) 무음 절단(44)이 아니라 명확한 예외.
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => new SimServer(new SimServer.Options { UnitId = 300 }));
+        Assert.Contains("UnitId", ex.Message);
+
+        // 0(브로드캐스트)·248(예약 시작)도 슬레이브 식별자로 무효 → 거부.
+        Assert.Throws<InvalidOperationException>(
+            () => new SimServer(new SimServer.Options { UnitId = 0 }));
+        Assert.Throws<InvalidOperationException>(
+            () => new SimServer(new SimServer.Options { UnitId = 248 }));
+
+        // 경계값 1·247 은 유효(예외 없음).
+        _ = new SimServer(new SimServer.Options { UnitId = 1 });
+        _ = new SimServer(new SimServer.Options { UnitId = 247 });
+        _out.WriteLine($"[A9] {ex.Message}");
+    }
+
+    /// <summary>
+    /// C-3: StartAsync 이전에 SetRResidue 호출 → 전송 계층 미생성(_transport null)이라
+    /// NRE가 나던 것을 명확한 InvalidOperationException("StartAsync 먼저 호출")으로 대체.
+    /// </summary>
+    [Fact]
+    public void A10_SetRResidue_BeforeStart_FailLoud()
+    {
+        var sim = new SimServer(new SimServer.Options());   // StartAsync 미호출 → _transport null
+        var ex = Assert.Throws<InvalidOperationException>(() => sim.SetRResidue(rCellNo: 20, rSeq: 123));
+        Assert.Contains("StartAsync", ex.Message);
+        _out.WriteLine($"[A10] {ex.Message}");
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // (b) CI 통합 — 실 SimServer(RTU, fake-serial) ↔ WCS ModbusRtuMaster
     // ════════════════════════════════════════════════════════════════════════

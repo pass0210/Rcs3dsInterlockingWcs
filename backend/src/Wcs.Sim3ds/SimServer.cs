@@ -58,14 +58,41 @@ public sealed class SimServer : IAsyncDisposable
         // 잘못된 값은 Enum.Parse가 fail-loud(예: Parity="Weird" → 명확한 예외).
         public Parity   ParsedParity   => Enum.Parse<Parity>(Parity, ignoreCase: true);
         public StopBits ParsedStopBits => Enum.Parse<StopBits>(StopBits, ignoreCase: true);
+
+        // Modbus 유닛 식별자를 byte로 검증 변환한다. RTU 슬레이브 유효 범위 1~247
+        // (0=브로드캐스트·248~255=예약). 범위 밖(예: 300)은 (byte) 무음 절단(300→44) 대신
+        // fail-loud — 형제 ParsedParity/ParsedStopBits와 동형(Consistency Over Preference).
+        public byte ParsedUnitId => UnitId is >= 1 and <= 247
+            ? (byte)UnitId
+            : throw new InvalidOperationException(
+                $"Sim3ds UnitId 범위 오류: {UnitId}. Modbus 유닛 식별자는 1~247 이어야 합니다 " +
+                "(0=브로드캐스트·248~255=예약 — byte 무음 절단 방지).");
     }
 
     // ─── 고장 주입 ───────────────────────────────────────────────────────────
-    /// <summary>R_Seq를 보낸 C_Seq 대신 이 값으로 교체 (불일치 유발).</summary>
-    public int? InjectRSeqOverride { get; set; }
+    // 주입 필드는 테스트 스레드가 쓰고 Sim 루프·시퀀스(Task.Run) 스레드가 읽는다 →
+    // 크로스 스레드 가시성을 위해 형제 _noResponse(volatile)와 동형으로 volatile 백킹 필드에 담는다
+    // (A-3, 테스트 결정성 — lock 우연 배리어에 의존하지 않음). 의미·기본값은 불변.
 
+    // R_Seq 교체값은 int?(Nullable<int>) — volatile 대상 타입이 아니라 직접 volatile 불가.
+    // '유무 플래그 + 값' 두 volatile 필드로 분해해 가시성을 확보(setter: 값→플래그 순, getter: 플래그→값 순).
+    private volatile bool _hasRSeqOverride;
+    private volatile int  _rSeqOverride;
+
+    /// <summary>R_Seq를 보낸 C_Seq 대신 이 값으로 교체 (불일치 유발).</summary>
+    public int? InjectRSeqOverride
+    {
+        get => _hasRSeqOverride ? _rSeqOverride : null;
+        set { _rSeqOverride = value ?? 0; _hasRSeqOverride = value.HasValue; }
+    }
+
+    private volatile int _rFlagDelayMs;
     /// <summary>R_Flag 세팅 전 추가 지연 ms (타임아웃 유발).</summary>
-    public int InjectRFlagDelayMs { get; set; }
+    public int InjectRFlagDelayMs
+    {
+        get => _rFlagDelayMs;
+        set => _rFlagDelayMs = value;
+    }
 
     /// <summary>
     /// true = 시뮬레이터 상태기계가 C_Flag 감지·R_Flag 세팅 등 일체 처리를 중단.
@@ -78,12 +105,17 @@ public sealed class SimServer : IAsyncDisposable
         set => _noResponse = value;
     }
 
+    private volatile bool _stickyRResidue;
     /// <summary>
     /// true = WCS가 R를 클리어(ClearR)해도 시뮬레이터가 R_Flag=1을 즉시 재천명(PLC 무ack·ClearR 미반영 모사).
     /// 잔류 대사 R_Flag==0 확인 타임아웃 경로(§2C·S5) 유발용 — 실측 PLC의 R 자체 유지 동작을 깨지 않고
     /// "클리어가 반영되지 않는 고장"만 재현한다. 기본 false(기존 동작 보존).
     /// </summary>
-    public bool InjectStickyRResidue { get; set; }
+    public bool InjectStickyRResidue
+    {
+        get => _stickyRResidue;
+        set => _stickyRResidue = value;
+    }
 
     // ─── 내부 ────────────────────────────────────────────────────────────────
     private readonly byte                  _unitId;   // Modbus 유닛 식별자(설정값·기본 1)
@@ -115,7 +147,7 @@ public sealed class SimServer : IAsyncDisposable
         _opt             = opt;
         _log             = log ?? NullLogger<SimServer>.Instance;
         _timelineLog     = timelineLog;
-        _unitId          = (byte)opt.UnitId;
+        _unitId          = opt.ParsedUnitId;   // 1~247 범위 검증 fail-loud(무음 절단 방지 — C-2)
         _injectedRtuPort = null; // 전송은 opt.Transport에 따라 StartAsync에서 선택
     }
 
@@ -131,7 +163,7 @@ public sealed class SimServer : IAsyncDisposable
         _opt             = opt;
         _log             = log ?? NullLogger<SimServer>.Instance;
         _timelineLog     = timelineLog;
-        _unitId          = (byte)opt.UnitId;
+        _unitId          = opt.ParsedUnitId;   // 1~247 범위 검증 fail-loud(무음 절단 방지 — C-2)
         _injectedRtuPort = fakePort;
     }
 
@@ -422,13 +454,23 @@ public sealed class SimServer : IAsyncDisposable
     // ─── HR ↔ FluentModbus 서버 버퍼 동기화 (호출자는 _hrLock 보유) ─────────
 
     /// <summary>
+    /// 전송 계층(StartAsync에서 생성)을 반환하거나, 기동 전이면 fail-loud한다.
+    /// SetRResidue/Flush/Pull 등을 StartAsync 이전에 호출하면 <c>_transport</c>가 null이라
+    /// NRE가 나던 것을 명확한 예외로 대체(C-3). CallerMemberName으로 어느 동작이 기동 전이었는지 표기.
+    /// </summary>
+    private ISimTransport RequireTransport([CallerMemberName] string? caller = null) =>
+        _transport ?? throw new InvalidOperationException(
+            $"SimServer가 아직 기동되지 않았습니다({caller}). StartAsync()를 먼저 호출하세요 " +
+            "— 전송 계층은 StartAsync에서 생성됩니다.");
+
+    /// <summary>
     /// 내부 _hr 배열 → FluentModbus 서버 버퍼에 기록. _hrLock 보유 상태에서 호출.
     /// FluentModbus 서버는 raw bytes로 저장, Modbus 클라이언트는 빅엔디언으로 전송.
     /// 호스트가 x86(리틀엔디언)이면 서버 버퍼에서 바이트 순서를 뒤집어야 일치함.
     /// </summary>
     private void FlushToServerLocked()
     {
-        var span = _transport!.Server.GetHoldingRegisters(_unitId);
+        var span = RequireTransport().Server.GetHoldingRegisters(_unitId);
         for (int i = 0; i < RegisterMap.BlockLength; i++)
             // ushort를 빅엔디언 short로 변환하여 서버 버퍼에 기록
             span[i] = (short)BinaryPrimitives.ReverseEndianness(_hr[i]);
@@ -440,7 +482,7 @@ public sealed class SimServer : IAsyncDisposable
     /// </summary>
     private void PullFromServerLocked()
     {
-        var span = _transport!.Server.GetHoldingRegisters(_unitId);
+        var span = RequireTransport().Server.GetHoldingRegisters(_unitId);
         for (int i = 0; i < RegisterMap.BlockLength; i++)
         {
             ushort prev = _hr[i];
