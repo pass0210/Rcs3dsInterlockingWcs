@@ -314,8 +314,8 @@
       <tr><td>①</td><td>GET</td><td><code>/api/v1/works/unprocessed?bizDay=</code></td><td>미작업 차수 조회 (부수효과 있음)</td></tr>
       <tr><td>②</td><td>POST</td><td><code>/api/v1/works/input</code></td><td>투입 데이터 송신</td></tr>
       <tr><td>③</td><td>POST</td><td><code>/api/v1/works/classification</code></td><td>분류 데이터 송신</td></tr>
-      <tr><td>④</td><td>POST</td><td><code>/api/v1/works/results</code></td><td>전체 작업 결과 전송 (최상위 배열)</td></tr>
-      <tr><td>⑤</td><td>POST</td><td><code>/api/v1/works/box</code></td><td>박스 마감 데이터 (선택 — RCS 구현 시)</td></tr>
+      <tr><td>④</td><td>POST</td><td><code>/api/v1/works/box</code></td><td>박스 마감 데이터 (선택 — RCS 구현 시)</td></tr>
+      <tr><td>⑤</td><td>POST</td><td><code>/api/v1/works/results</code></td><td>전체 작업 결과 전송 (최상위 배열)</td></tr>
     </table>
 
     <h3>B2B 골든 패스 (표준 시퀀스)</h3>
@@ -324,16 +324,16 @@
       <span class="st">① unprocessed 조회</span><span class="ar">→</span>
       <span class="st">② input 투입</span><span class="ar">→</span>
       <span class="st">③ classification 분류</span><span class="ar">→</span>
-      <span class="st">④ results 결과</span><span class="ar">→</span>
-      <span class="st">⑤ box 마감 (선택)</span>
+      <span class="st">④ box 마감 (선택)</span><span class="ar">→</span>
+      <span class="st">⑤ results 결과</span>
     </div>
     <table>
       <tr><th style="width:110px">단계</th><th>목적</th><th>실패 시 RCS 행동</th></tr>
       <tr><td>① <code>unprocessed</code></td><td>처리할 배치 데이터 확보 + 조회 행 "가져감" 마킹</td><td><b>재시도하지 않는다</b>(비멱등 — 각 호출이 행을 소비). 응답 유실 시 재조회하면 다른 행을 가져가므로 운영자 확인/재동기화. 빈 배열은 실패가 아니다.</td></tr>
       <tr><td>② <code>input</code></td><td>투입 기록(<code>qty</code> 묶음)</td><td><code>status:"F"</code>면 전량 거부(부분 없음) — <code>message</code>로 원인 확인. "Not enough unprocessed rows"면 ①을 재조회해 가용량 재확인 후 재전송. 응답을 못 받은(타임아웃) 경우 이중 소비 위험이 있어 반영 여부 확인 후에만 재전송.</td></tr>
       <tr><td>③ <code>classification</code></td><td>분류 결과 기록(<code>qty</code> 묶음)</td><td>Chute mismatch·이미 분류됨·부족은 데이터 교정 없이는 재시도해도 동일 실패. 원인 교정 후 재전송. 타임아웃 재전송 주의는 ②와 동일.</td></tr>
-      <tr><td>④ <code>results</code></td><td>전체 결과 일괄 전송(최상위 배열)</td><td>미등록 <code>barcode</code>가 하나라도 있으면 전량 거부(부분 INSERT 없음). barcode 교정 후 <b>전체 재전송이 안전</b>하다.</td></tr>
-      <tr><td>⑤ <code>box</code> (선택)</td><td>박스 단위 마감 기록</td><td>동일 <code>(bizDay,batch,boxNo)</code> 재전송은 중복 키로 거부 — 이미 저장된 것이므로 재시도 불필요.</td></tr>
+      <tr><td>④ <code>box</code> (선택)</td><td>박스 단위 마감 기록</td><td>동일 <code>(bizDay,batch,boxNo)</code> 재전송은 중복 키로 거부 — 이미 저장된 것이므로 재시도 불필요.</td></tr>
+      <tr><td>⑤ <code>results</code></td><td>전체 결과 일괄 전송(최상위 배열)</td><td>미등록 <code>barcode</code>가 하나라도 있으면 전량 거부(부분 INSERT 없음). barcode 교정 후 <b>전체 재전송이 안전</b>하다.</td></tr>
     </table>
   </section>
 

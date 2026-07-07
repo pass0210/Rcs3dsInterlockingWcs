@@ -329,8 +329,8 @@
       <tr><td>①</td><td>GET</td><td><code>/api/v1/works/unprocessed?bizDay=</code></td><td>Query unprocessed batch (has side effects)</td></tr>
       <tr><td>②</td><td>POST</td><td><code>/api/v1/works/input</code></td><td>Send input data</td></tr>
       <tr><td>③</td><td>POST</td><td><code>/api/v1/works/classification</code></td><td>Send classification data</td></tr>
-      <tr><td>④</td><td>POST</td><td><code>/api/v1/works/results</code></td><td>Send all work results (top-level array)</td></tr>
-      <tr><td>⑤</td><td>POST</td><td><code>/api/v1/works/box</code></td><td>Box closing data (optional — if RCS implements it)</td></tr>
+      <tr><td>④</td><td>POST</td><td><code>/api/v1/works/box</code></td><td>Box closing data (optional — if RCS implements it)</td></tr>
+      <tr><td>⑤</td><td>POST</td><td><code>/api/v1/works/results</code></td><td>Send all work results (top-level array)</td></tr>
     </table>
 
     <h3>B2B Golden Path (standard sequence)</h3>
@@ -339,16 +339,16 @@
       <span class="st">① unprocessed query</span><span class="ar">→</span>
       <span class="st">② input</span><span class="ar">→</span>
       <span class="st">③ classification</span><span class="ar">→</span>
-      <span class="st">④ results</span><span class="ar">→</span>
-      <span class="st">⑤ box close (optional)</span>
+      <span class="st">④ box close (optional)</span><span class="ar">→</span>
+      <span class="st">⑤ results</span>
     </div>
     <table>
       <tr><th style="width:110px">Step</th><th>Purpose</th><th>Action on failure</th></tr>
       <tr><td>① <code>unprocessed</code></td><td>Obtain batch data to process + mark queried rows as "taken"</td><td><b>Do not retry</b> (non-idempotent — each call consumes rows). If the response is lost, re-querying fetches different rows, so use operator confirmation / re-sync. An empty array is not a failure.</td></tr>
       <tr><td>② <code>input</code></td><td>Record input (grouped by <code>qty</code>)</td><td>On <code>status:"F"</code> the whole call is rejected (no partial) — check the cause via <code>message</code>. On "Not enough unprocessed rows," re-query ① to re-check availability, then resend. If no response arrived (timeout), there is a double-consume risk, so resend only after verifying whether it was applied.</td></tr>
       <tr><td>③ <code>classification</code></td><td>Record classification result (grouped by <code>qty</code>)</td><td>Chute mismatch / already classified / insufficient rows will fail identically on retry unless the data is corrected. Fix the cause, then resend. The timeout-resend caution is the same as ②.</td></tr>
-      <tr><td>④ <code>results</code></td><td>Send all results in bulk (top-level array)</td><td>If even one <code>barcode</code> is unregistered, the whole request is rejected (no partial INSERT). After fixing the barcode, <b>resending the whole request is safe</b>.</td></tr>
-      <tr><td>⑤ <code>box</code> (optional)</td><td>Record a box-level closing</td><td>Resending the same <code>(bizDay,batch,boxNo)</code> is rejected by the duplicate key — it is already stored, so no retry is needed.</td></tr>
+      <tr><td>④ <code>box</code> (optional)</td><td>Record a box-level closing</td><td>Resending the same <code>(bizDay,batch,boxNo)</code> is rejected by the duplicate key — it is already stored, so no retry is needed.</td></tr>
+      <tr><td>⑤ <code>results</code></td><td>Send all results in bulk (top-level array)</td><td>If even one <code>barcode</code> is unregistered, the whole request is rejected (no partial INSERT). After fixing the barcode, <b>resending the whole request is safe</b>.</td></tr>
     </table>
   </section>
 
