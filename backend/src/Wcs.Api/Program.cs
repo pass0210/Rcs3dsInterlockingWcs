@@ -236,6 +236,41 @@ app.UseStaticFiles();
 app.MapControllers();
 
 // ════════════════════════════════════════════════════════════════════════════
+// (D-3) /health — liveness 프로브 (S-CLEANUP-FIELD, 현장 관측성)
+// 프로세스 생존을 외부(감시/로드밸런서/현장 점검)에서 확인할 최소 HTTP 표면.
+// 정책(Q2 확정): liveness=프로세스가 응답하면 **항상 200**. 소터 OFFLINE·DB 저하는 본문 플래그로만
+//   노출한다(readiness 503은 B2B-1로 이연 — 과설계 금지). 전용 HealthChecks 프레임워크 미도입(단일 엔드포인트).
+// 부수효과 0: 소터 스냅샷(Latest.Online/At)·DB CanConnect(읽기 전용) 스냅샷만 조회. 쓰기·상태전이 없음.
+// /api catch-all 밖 경로라 아래 Map("/api/{**rest}")가 삼키지 않고, MapGet이 fallback보다 우선.
+// ════════════════════════════════════════════════════════════════════════════
+app.MapGet("/health", (ISorterGatewayRegistry sorters, WcsDbContext db) =>
+{
+    bool dbOk;
+    try { dbOk = db.Database.CanConnect(); }
+    catch { dbOk = false; }  // 연결 실패도 liveness는 200 — 본문 db=false로만 저하 표시(예외 삼킴 아님).
+
+    var sorterStates = sorters.AllBundles
+        .Select(b =>
+        {
+            var snap = b.Latest;   // 폴링 스냅샷(논블로킹) — 부수효과 0.
+            return new
+            {
+                chuteNo    = b.ChuteNo,
+                online     = snap.Online,
+                lastPollAt = snap.At,
+            };
+        })
+        .ToArray();
+
+    return Results.Json(new
+    {
+        status  = "ok",   // liveness — 프로세스 생존(항상 200). 저하는 db·sorters 필드로 판단.
+        db      = dbOk,
+        sorters = sorterStates,
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // (F2) SignalR 허브 매핑 — MapControllers 뒤·catch-all/fallback 앞.
 // /api/{**rest} catch-all은 /api/**만 매치하므로 /hubs/monitor를 삼키지 않고,
 // MapFallbackToFile(index.html)보다 앞서 매핑돼 fallback이 허브 negotiate를 가로채지 않는다
@@ -254,6 +289,31 @@ app.Map("/api/{**rest}", () => Results.NotFound());
 app.MapFallbackToFile("index.html");
 
 app.Run();
+
+// ════════════════════════════════════════════════════════════════════════════
+// OperationLogClassifier — 핸드셰이크 단계 action → operation_log 레벨 분류 (A-1)
+// 단일 진실: 위 SubscribeHandshakeStage 구독부와 테스트(CleanupFieldM1Tests)가 이 함수를 공유해
+// 분류 로직 중복·표류를 막는다.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>핸드셰이크 단계 로그 레벨 분류기 — operation_log HANDSHAKE 레벨 산출(A-1).</summary>
+public static class OperationLogClassifier
+{
+    /// <summary>
+    /// 핸드셰이크 단계 action 문자열 → operation_log 레벨.
+    ///   · MISMATCH/TIMEOUT/OFFLINE 포함 → ERROR (실패·이상. HS_R_RESIDUE_TIMEOUT은 TIMEOUT 포함 → ERROR).
+    ///   · RESIDUE 포함(그 외)          → WARN  (A-1: 잔류 감지 HS_R_RESIDUE — 현장 추적 핵심. INFO 매몰 방지).
+    ///   · 그 외                        → INFO  (정상 진행 단계 HS_C_SENT/HS_R_RECV/HS_RSEQ_MATCH 등).
+    /// </summary>
+    public static Wcs.Data.OperationLogLevel ForHandshakeStage(string action)
+    {
+        if (action.Contains("MISMATCH") || action.Contains("TIMEOUT") || action.Contains("OFFLINE"))
+            return Wcs.Data.OperationLogLevel.ERROR;
+        if (action.Contains("RESIDUE"))
+            return Wcs.Data.OperationLogLevel.WARN;
+        return Wcs.Data.OperationLogLevel.INFO;
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // SorterRegistryFactory — IHostedService
@@ -407,8 +467,8 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                         detail: $"{{\"reg\":\"{reg}\",\"old\":{oldV},\"new\":{newV}}}"));
                 bundle.SubscribeHandshakeStage((action, detail) =>
                     opLog.Log(Wcs.Data.OperationLogCategory.HANDSHAKE, action,
-                        level: action.Contains("MISMATCH") || action.Contains("TIMEOUT") || action.Contains("OFFLINE")
-                            ? Wcs.Data.OperationLogLevel.ERROR : Wcs.Data.OperationLogLevel.INFO,
+                        // A-1: 레벨 분류를 단일 진실(OperationLogClassifier)로 위임 — RESIDUE는 WARN 승격.
+                        level: OperationLogClassifier.ForHandshakeStage(action),
                         sorterChuteNo: capturedChuteNo, destinationId: capturedDestId, detail: detail));
                 bundle.SubscribeOnline(_ =>
                     opLog.Log(Wcs.Data.OperationLogCategory.STATE, "ONLINE",
@@ -500,6 +560,9 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             CFlagTimeoutMs = t?.CFlagTimeoutMs ?? commonTiming.CFlagTimeoutMs,
             RFlagClearConfirmTimeoutMs =
                 t?.RFlagClearConfirmTimeoutMs ?? commonTiming.RFlagClearConfirmTimeoutMs,
+            // D-1: OFFLINE 지속 로그 요약 주기(소터별 오버라이드 or 공통).
+            OfflineLogSummaryEveryPolls =
+                t?.OfflineLogSummaryEveryPolls ?? commonTiming.OfflineLogSummaryEveryPolls,
         };
     }
 }
@@ -570,6 +633,9 @@ public sealed record SorterTimingOverride
 
     // S-HANDSHAKE-RESIDUE — 소터별 잔류 대사 확인 타임아웃 오버라이드(null=공통 상속).
     public int? RFlagClearConfirmTimeoutMs { get; init; }
+
+    // S-CLEANUP-FIELD D-1 — 소터별 OFFLINE 지속 로그 요약 주기 오버라이드(null=공통 상속).
+    public int? OfflineLogSummaryEveryPolls { get; init; }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

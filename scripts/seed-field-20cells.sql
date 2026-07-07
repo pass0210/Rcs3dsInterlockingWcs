@@ -20,12 +20,16 @@
 --     따라서 셀 16이 **활성 cell_assignment 를 갖지 않도록** 배정 해제 + 오더 CANCELLED 로 완결 차단한다.
 --
 -- ── ★ 매핑 확장 경로(코드/스키마 변경 불요 — 데이터-온리) ───────────────────────
---   현장 PLC 매핑이 16~20까지 완료되면 아래 한 줄만으로 가용 상한을 15→20 으로 확장한다:
---       UPDATE cell SET Enabled = 1
---        WHERE DestinationId = (SELECT Id FROM destination WHERE ChuteNo = 1 AND DestType = 'SORTER_3D')
---          AND CellNo BETWEEN 16 AND 20;
---   (필요 시 오더/아이템/배정 16~20 추가는 아래 §4~6 의 nums 범위를 1~20 으로 넓히고,
---    §7 셀16 CANCELLED 블록을 제거하면 된다. 애플리케이션 코드·마이그레이션 변경은 없다.)
+--   현장 PLC 매핑이 16~20까지 완료되면, 이 스크립트의 **가용 상한 파라미터 @availMax 를 15→20 으로**
+--   바꾸고 아래 두 곳을 함께 넓힌 뒤 재실행하면 가용 20셀로 전이한다(멱등):
+--     (1) @availMax = 20        … §2 셀 MERGE(Enab=CASE n<=@availMax)·§5 order_item·§6 cell_assignment 가
+--                                  전부 @availMax 를 참조하므로 셀 16~20 Enabled=1·아이템·배정이 자동 연동된다.
+--     (2) §4 오더 VALUES 리스트   … §4 는 @availMax 가 아니라 하드코딩 VALUES (1)..(15) 를 쓰므로
+--                                  (1)..(20) 으로 **수동 확장**해야 오더 0701-CELL-16~20 이 생성된다.
+--     (3) §7 셀16 CANCELLED 블록  … 셀 16 을 가용화하려면 이 블록(배정 해제 + 오더 CANCELLED)을 **제거**한다.
+--   ⚠ 과거 안내였던 "UPDATE cell SET Enabled=1 한 줄"은 이제 부정확하다 — §2 MERGE 가 재실행 시
+--     @availMax(=15) 기준으로 Enabled 를 되돌리므로(WHEN MATCHED → Enabled=src.Enab) 수동 UPDATE 는 클로버된다.
+--     반드시 @availMax 자체를 올려야 확장이 멱등하게 유지된다. 애플리케이션 코드·마이그레이션 변경은 없다.
 --
 -- 설계 결정(계약 §0 결정적 사실 준수):
 --   · 테이블명 = snake_case(destination, cell, cell_assignment, work_batch, wcs_order, order_item)
@@ -218,11 +222,16 @@ COMMIT TRANSACTION;
 -- ────────────────────────────────────────────────────────────────────────────
 -- 적재 요약 출력(검증 편의) — 20셀·가용15·활성배정15·오더16 CANCELLED 단정용
 -- ────────────────────────────────────────────────────────────────────────────
+-- (B-6) enabled/capacity 술어를 분리해 진단을 명료화: cells_enabled_15 는 가용(Enabled=1) 차원만,
+--       cells_cap3_20 은 용량(Capacity=@cellCap) 차원만 센다. 혼입(Enabled=1 AND Capacity=3)이면
+--       기대치(15)에서 어긋날 때 원인이 Enabled 인지 Capacity 인지 구분되지 않는다.
 SELECT
     (SELECT COUNT(*) FROM cell WHERE DestinationId = @sorterId
         AND CellNo BETWEEN 1 AND @physMax)                                       AS cells_total_20,
     (SELECT COUNT(*) FROM cell WHERE DestinationId = @sorterId
-        AND Enabled = 1 AND Capacity = @cellCap)                                 AS cells_enabled_15,
+        AND Enabled = 1)                                                         AS cells_enabled_15,
+    (SELECT COUNT(*) FROM cell WHERE DestinationId = @sorterId
+        AND CellNo BETWEEN 1 AND @physMax AND Capacity = @cellCap)               AS cells_cap3_20,
     (SELECT COUNT(*) FROM cell WHERE DestinationId = @sorterId
         AND Enabled = 0)                                                         AS cells_disabled_5,
     (SELECT COUNT(*) FROM cell_assignment ca

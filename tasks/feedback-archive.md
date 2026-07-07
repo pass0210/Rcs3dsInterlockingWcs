@@ -391,3 +391,13 @@
 - [CODE-REVIEW] sprint=S-HANDSHAKE-RESIDUE critical=0 major=0 minor=4 iter=1
 - [CODE-REVIEW] sprint=S-FIELD-20CELLS critical=0 major=0 minor=5 iter=1
 - [CODE-REVIEW] sprint=S-SIM3DS-RTU critical=0 major=0 minor=6 iter=1
+
+## S-CLEANUP-FIELD (누적 코드리뷰 Minor + 7/01 감사 잔여 정리 · fan-out 3모듈) — APPROVED (2026-07-07, 1 iteration to pass)
+
+- **fan-out fan-in의 유일한 통합 결함은 테스트 인프라 공유상태(static DB명)였고, 신규 파일 격리로만 닫혔다**: 3모듈 병렬(관측성/Sim·시드/문서)은 쓰기 파일 경계가 깨끗해 무충돌이었으나, 신규 `CleanupFieldM1_HttpTests`가 두 번째 `IClassFixture<FakeModbusWebApplicationFactory>`가 되며 그 팩토리의 `static readonly _dbName` 공유 → xUnit 클래스 병렬에서 같은 in-memory SQLite에 EnsureCreated+Seed 이중 → 'table agv already exists'/UNIQUE 5 FAIL. 기존 관행(Hub/Monitoring/RcsPush 팩토리는 전부 인스턴스-고유 Guid _dbName)과 어긋난 Fake 단독 static이 원인. **해법=신규 전용 팩토리(인스턴스 Guid _dbName)**, 기존 파일·프로덕션 무수정. 표적 GREEN이 fan-in 후에도 GREEN을 보장하지 않는다 — 병합 후 전체 스위트 필수(210/210 ×3).
+- **B-1류 "문서 안내 정정"은 SQL 로직 전문 재판독으로만 검증된다(이전 안내가 틀렸던 항목)**: 시드 매핑확장 주석의 정정된 3단계(`@availMax 15→20` 자동연동 + §4 하드코딩 VALUES 수동확장 + §7 CANCELLED 블록 제거)를 각 SQL 절이 실제로 @availMax를 참조하는지/하드코딩인지 절별 대조로 확인. 옛 안내("UPDATE Enabled=1 한 줄")가 틀린 근거도 재현: §2 MERGE `WHEN MATCHED→Enabled=src.Enab`가 재실행 시 수동 UPDATE를 클로버. 주석-only 정정도 로직 대조 없이 PASS 금지.
+- **D-1 로그 스팸 억제 검증은 "전이 1 / 지속 N" 로그 카운트 단정이 권위**: `PublishOffline()`를 bool(Online 1→0 CAS 성공=전이) 반환으로 바꿔 전이 상세 1회 vs 지속 강등을 분기. 표적 테스트가 지속 라인≥12에서 전이 ERROR==1·예외첨부==1·요약WARN≥1·복구 INFO 1회를 단정 → 육안 로그가 아닌 카운트로 스팸 억제 입증. 전이 카운터(`_offlineFailureCount`)는 폴 루프 단일 스레드 전용·`_online`은 Interlocked로 원자화(동시성 사각 통과). 쓰기 컨슈머 전이 선점 극단 케이스는 더 조용한 방향이라 결함 아님(비차단 minor 등재).
+- **분류기 추출(A-1)의 ERROR 승격 회귀는 집합 대조로 닫는다**: 인라인 삼항→`OperationLogClassifier.ForHandshakeStage` 추출 시 기존 ERROR 집합(MISMATCH/TIMEOUT/OFFLINE) 불변·RESIDUE만 INFO→WARN(ERROR 아님)·RESIDUE_TIMEOUT은 TIMEOUT 우선매칭 ERROR 유지를 12케이스 theory로 고정. Nop 팩토리로 HANDSHAKE→opLog 미배선인 테스트 호스트에선 "레벨 결정 함수" 단위 테스트 + 운영 배선 1줄 위임(Program.cs:469) 코드 판독이 정당한 검증.
+- **[EVALUATOR 자기-사고] test 실행 중 별도 `dotnet build --no-incremental` 동시 실행 → CS0006 metadata 파일 없음(obj/ref 경합)**: 백그라운드 test-run과 병렬 클린빌드가 같은 출력 디렉터리를 놓고 경합해 거짓 빌드 실패(EXIT=1). e2e-parallel-load-surfaces 교훈의 동시 빌드 파일락과 동류. **빌드/테스트는 직렬로** — 검증자도 동시 빌드 금지. 직렬 재실행 시 210/210 GREEN 확정.
+- [CODE-REVIEW] sprint=S-CLEANUP-FIELD pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
+- [CODE-REVIEW] sprint=S-CLEANUP-FIELD critical=0 major=0 minor=3 iter=2

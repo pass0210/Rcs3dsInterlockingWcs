@@ -24,7 +24,7 @@
 
 ## 스펙 소스 (docs/ — 항상 이것이 정답)
 - `docs/SPEC.md` — 응축 스펙(레지스터 맵, 판정 표, 핸드셰이크, 시뮬레이터 동작). **먼저 읽을 것.**
-- `docs/ERD.md` — DB 스키마 16테이블(M4 구현 기준). 대리키·p_id 순환·이력 분리 원칙 포함.
+- `docs/ERD.md` — DB 스키마 17테이블. 대리키·p_id 순환·이력 분리 원칙 포함.
 - `docs/wcs_3ds_interface.html` — WCS↔3DS Modbus 정의 + 타이밍 차트 ①②③
 - `docs/wcs_rcs_3ds_master_spec.html` — 마스터 정의서(§6 투입 가부 표 = 판정 스펙)
 - `docs/wcs_3ds_unified_sequence.html` — 통합 시퀀스(IF-05→08→10→11→12)
@@ -34,9 +34,9 @@
 ```
 backend/src/Wcs.Core        판정 엔진(순수 C#): RegisterMap, 모델, DepositDecider  ← 의존성 0
 backend/src/Wcs.PlcGateway  FluentModbus 마스터: 폴링 스냅샷 캐시 + 쓰기 큐
-backend/src/Wcs.Api         ASP.NET Core Minimal API: IF-05/08/10 + Windows Service 호스트
-backend/src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그
-backend/src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus TcpServer) — 통합 테스트 상대역
+backend/src/Wcs.Api         ASP.NET Core MVC Controllers: IF-05/09/10 + IF-08 상태 푸시 + 모니터링 API/SignalR + Windows Service 호스트
+backend/src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그(SqlServer 운영 / SQLite 테스트 — provider별 마이그레이션 분리)
+backend/src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus, TCP 기본·RTU 옵션 --transport rtu) — 통합 테스트 상대역
 backend/tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정 케이스는 처음엔 RED가 정상, ToWire 검증은 GREEN)
 ```
 
@@ -57,5 +57,5 @@ TargetFramework을 설치 버전(LTS 권장)으로 일괄 변경하라.
 
 ## 코딩 컨벤션
 - C# 12+, nullable enable, file-scoped namespace, record 적극 사용
-- 로그: 처음엔 ILogger, M5에서 Serilog 도입(레지스터 변화 + API 원문 구조화 기록)
+- 로그: Serilog 도입 완료(콘솔+파일, 레지스터 변화 + API 원문 + 핸드셰이크 단계를 operation_log 테이블 및 파일에 구조화 기록)
 - 예외를 삼키지 말 것 — PLC 통신 실패는 OFFLINE 상태 전이로 명시 처리

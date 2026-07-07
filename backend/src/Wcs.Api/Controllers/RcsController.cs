@@ -26,6 +26,12 @@ public sealed class RcsController : ControllerBase
     private readonly ILogger<RcsController> _log;
     private readonly IOperationLogger       _opLog;
 
+    // ── D-4 입력 상한 상수 (S-CLEANUP-FIELD) ──────────────────────────────────
+    // WcsDbContext 스키마와 정합(단일 진실). 이 값 변경 시 반드시 WcsDbContext.HasMaxLength(...)도 함께
+    // 변경한다(초과 입력이 DB 컬럼 길이를 넘으면 SaveChanges에서 500 유발 — 그 전에 400으로 거부).
+    private const int BarcodeMaxLength   = 200;  // piece.Barcode / order_item.Barcode = nvarchar(200)
+    private const int TimeStampMaxLength = 30;   // piece.ClientTs / piece_event.ClientTs = nvarchar(30)
+
     public RcsController(ILogger<RcsController> log, IOperationLogger opLog)
     {
         _log   = log;
@@ -41,15 +47,23 @@ public sealed class RcsController : ControllerBase
         [FromBody] DestinationQueryRequest    req,
         [FromServices] IOrderRepository       orders,
         [FromServices] IChuteCapacityService  capacity,
-        [FromServices] IDestinationStatusService status)
+        [FromServices] IDestinationStatusService status,
+        [FromServices] IOptions<WcsOptions>   wcsOptions)
     {
-        // ── 검증 ────────────────────────────────────────────────────────────────
+        // ── 검증 (D-4: 입력 상한 — DB 도달 전 거부, 위반 시 400. 정상 입력 경로 불변) ─────
         if (req.PId is < 1 or > 30000)
             return BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
         if (string.IsNullOrWhiteSpace(req.Barcode))
             return BadRequest(new { error = "barcode는 필수입니다." });
+        if (req.Barcode.Length > BarcodeMaxLength)
+            return BadRequest(new { error = $"barcode 길이는 {BarcodeMaxLength}자 이하여야 합니다." });
         if (req.Qty <= 0)
             return BadRequest(new { error = "qty는 1 이상이어야 합니다." });
+        // qty 상한(설정값) — int.MaxValue 등 비정상 대량 qty를 DB 도달 전 거부(OVER int 오버플로 우회 차단).
+        if (req.Qty > wcsOptions.Value.MaxQtyPerRequest)
+            return BadRequest(new { error = $"qty는 {wcsOptions.Value.MaxQtyPerRequest} 이하여야 합니다." });
+        if (!string.IsNullOrEmpty(req.TimeStamp) && req.TimeStamp.Length > TimeStampMaxLength)
+            return BadRequest(new { error = $"timeStamp 길이는 {TimeStampMaxLength}자 이하여야 합니다." });
 
         // ── operation_log: IF-05 요청 원문 전수 기록(부수 — 응답 형상 0 변경) ───────
         _opLog.Log(OperationLogCategory.API, "IF05_REQ", barcode: req.Barcode, pId: req.PId,
@@ -117,11 +131,13 @@ public sealed class RcsController : ControllerBase
         [FromServices] IOptions<WcsOptions>      wcsOptions,
         [FromServices] IHostApplicationLifetime  lifetime)
     {
-        // ── 검증 ────────────────────────────────────────────────────────────────
+        // ── 검증 (D-4: timeStamp 상한 포함 — ClientTs 절단 500 방지) ─────────────────
         if (req.PId is < 1 or > 30000)
             return BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
         if (req.ChuteNo <= 0)
             return BadRequest(new { error = "chuteNo는 양수여야 합니다." });
+        if (!string.IsNullOrEmpty(req.TimeStamp) && req.TimeStamp.Length > TimeStampMaxLength)
+            return BadRequest(new { error = $"timeStamp 길이는 {TimeStampMaxLength}자 이하여야 합니다." });
 
         // ── operation_log: IF-09 요청 원문 전수 기록 ──────────────────────────────
         _opLog.Log(OperationLogCategory.API, "IF09", sorterChuteNo: req.ChuteNo, pId: req.PId,
@@ -215,15 +231,23 @@ public sealed class RcsController : ControllerBase
         [FromServices] WcsDbContext               db,
         [FromServices] ISorterGatewayRegistry     sorterRegistry,
         [FromServices] IHostApplicationLifetime   lifetime,
-        [FromServices] IServiceScopeFactory       scopeFactory)
+        [FromServices] IServiceScopeFactory       scopeFactory,
+        [FromServices] IOptions<WcsOptions>       wcsOptions)
     {
-        // ── 검증 ────────────────────────────────────────────────────────────────
+        // ── 검증 (D-4: 입력 상한 — 음수/과대 qty·과길이 barcode/timeStamp를 DB 도달 전 거부) ─────
         if (req.PId is < 1 or > 30000)
             return BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
         if (string.IsNullOrWhiteSpace(req.Barcode))
             return BadRequest(new { error = "barcode는 필수입니다." });
+        if (req.Barcode.Length > BarcodeMaxLength)
+            return BadRequest(new { error = $"barcode 길이는 {BarcodeMaxLength}자 이하여야 합니다." });
         if (req.ChuteNo <= 0)
             return BadRequest(new { error = "chuteNo는 양수여야 합니다." });
+        // qty는 선택필드(nullable) — 제공 시 음수 거부(DepositedQty 왜곡 방지) + 상한(설정값) 초과 거부.
+        if (req.Qty is int q && (q < 0 || q > wcsOptions.Value.MaxQtyPerRequest))
+            return BadRequest(new { error = $"qty는 0 이상 {wcsOptions.Value.MaxQtyPerRequest} 이하여야 합니다." });
+        if (!string.IsNullOrEmpty(req.TimeStamp) && req.TimeStamp.Length > TimeStampMaxLength)
+            return BadRequest(new { error = $"timeStamp 길이는 {TimeStampMaxLength}자 이하여야 합니다." });
 
         // ── operation_log: IF-10 요청 원문 전수 기록 ──────────────────────────────
         _opLog.Log(OperationLogCategory.API, "IF10", sorterChuteNo: req.ChuteNo,

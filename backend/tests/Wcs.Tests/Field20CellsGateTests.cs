@@ -82,6 +82,8 @@ public class Field20CellsGateTests
 
             if (!db.OrderItems.Any(i => i.OrderId == order.Id && i.Barcode == orderNo))
             {
+                // PlannedQty=100: 시드(seed sql @plannedQty=3)보다 상향. 이 스위트는 Enabled 게이트만
+                // 검증하므로 작업수량 도달(OVER) 간섭을 배제하려 높게 둔다(셀 만재는 별도 LoadCellQty 로 유발).
                 db.OrderItems.Add(new OrderItem
                 {
                     OrderId = order.Id, Barcode = orderNo, PlannedQty = 100, ReservedQty = 0, SortedQty = 0,
@@ -119,6 +121,7 @@ public class Field20CellsGateTests
         };
         db.Orders.Add(order);
         db.SaveChanges();
+        // PlannedQty=100: OVER 간섭 배제용 상향(위 SetupField20Cells 와 동일 사유 — 게이트만 검증).
         db.OrderItems.Add(new OrderItem
         {
             OrderId = order.Id, Barcode = barcode, PlannedQty = 100, ReservedQty = 0, SortedQty = 0,
@@ -282,6 +285,9 @@ public class Field20CellsGateTests
             SetupField20Cells(db, sorterId);
 
             // 가용 15셀 전부 작업수량(Cap=3) 도달시킴 — 각 셀에 3개 적재.
+            // pId 41000+cellNo 는 실 IF-05 pId(SPEC 유효 1~30000)가 아니라 LOADED piece 를 DB에
+            // 직접 삽입(IF-05 우회)하는 합성 pId다. 41000대를 쓰는 이유는 이 스위트가 IF-05 로 투입하는
+            // 20000대 pId(20001/20015/20016/20100)와 비충돌이면 되기 때문(범위 자체엔 의미 없음).
             for (int cellNo = 1; cellNo <= AvailMax; cellNo++)
                 LoadCellQty(db, sorterId, cellNo, qty: CellCap, pId: 41000 + cellNo, barcode: $"0701-CELL-{cellNo:D2}");
 

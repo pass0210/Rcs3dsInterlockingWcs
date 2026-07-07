@@ -19,6 +19,8 @@ D4는 한 워드 — 한 비트만 바꿀 땐 D4 읽기→비트 수정→쓰기
 
 ## 2. IF-08 투입 가부 판정
 
+> **IF-08 모델 변경(재설계 Phase 1)**: RCS 폴링 `deposit-permission` 엔드포인트는 **폐지**되고 **WCS→RCS 상태 푸시**(키=chuteNo·단일 `ready`)로 대체됐다 — `docs/wcs_rcs_interface_kr.html` §6·`master_spec §06` 참조. 아래 판정표(2-A/2-B)는 **삭제된 게 아니라 내부 `DepositDecider` 판정 스펙으로 유효**하다: 소터 push `ready` 산출·IF-09 도착 정렬 판정의 근거로 쓰인다(투입 가부의 상류 차단은 IF-05 dispatch로 이동 — §3 IF-05·`RcsController.QueryDestination`).
+
 ### 2-A. SORTER_3D 경로 (Wcs.Core.DepositDecider — 순수 함수)
 입력: PlcSnapshot(레지스터+Online), agvFloor(int), WcsHold(None/Full/Paused)
 우선순위: Offline → Full/Paused → Ready/층 비교
@@ -57,9 +59,8 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
   OK 시 예약 차감(이동 중 물량 반영, 중복 배정 방지)
   · **NG여도 투입 기록은 남긴다**(IF-16 통합) — piece를 status=DENIED로 삽입 + piece_event 기록(ERD §order_item·piece 참조)
   · 오더의 destination이 NULL(송장/매장 단위 상위 등록)이면 **이 시점 WCS가 빈 슈트 자동 할당**(dest_assign_type=AUTO) 후 예약 — 같은 트랜잭션. 빈 슈트 없으면 NG·NO_DEST
-- `POST /api/v1/deposit-permission` (IF-08) req{pId,chuteNo,agvNo}  ← timeStamp 없음(원본 HTML). WCS 감사용 필요시 DTO nullable 선택필드(§7 확정 대기)
-  → {allowed, reason} — 판정 표 그대로. **allowed=true → reason="READY"**(원본 §6 사유코드). RCS는 false면 500ms 후 재호출
-  · agvFloor는 agvNo→층 매핑으로 산출(원본 §4에서 agvFloor 필드 제거 확정). 매핑 테이블 값만 현장 확정 — 설정(M3)→agv.floor(M4)
+- ~~`POST /api/v1/deposit-permission` (IF-08)~~ **[폐지 — RCS 폴링 엔드포인트 제거]** — 현행: WCS→RCS 상태 푸시로 대체(§2 상단 노트·`interface_kr` §6·`master_spec §06`). 옛 응답 형상 `{allowed, reason}`(판정 표 그대로, allowed=true→reason="READY")은 이제 **RCS로 나가지 않고** 내부 `DepositDecider` 판정 결과일 뿐이다 — 소터 push `ready` 산출과 IF-09 도착 정렬의 근거.
+  · agvFloor는 agvNo→층 매핑으로 산출(원본 §4에서 agvFloor 필드 제거 확정). 매핑 테이블 값만 현장 확정 — 설정(M3)→agv.floor(M4). ※ AGV 도착 보고는 IF-09(`POST /api/v1/arrival-report`)로 신설됨(도착 시 WCS가 3DS를 운영층 정렬 — interface_kr 참조).
 - `POST /api/v1/deposit-report` (IF-10) req{pId,barcode,chuteNo,agvNo}  ← qty·timeStamp 없음(원본 HTML — qty는 IF-05 등록값 사용, 전량 틸트)
   → {result:"OK"} — 멱등(pId 중복 보고 무해). 3D 목적지면 이후 IF-11 셀 지정 트리거
 
