@@ -2340,3 +2340,55 @@ dotnet build/test는 코드 무변경이라 210 GREEN 불변 예상 — 실행�
 
 ## FIX ITER 3 (OFFLINE 각주)
 IF-05 사유표 두 OFFLINE 표면 상충 해소 — interface_kr·interface.html 각각 표 아래 `.note` 각주 1줄 추가(EN=KR): FULL/PAUSED 행 OFFLINE=소터 운영상태(IF-05 미참조·셀 있으면 OK) vs COMPLETED/NO_DEST/OFFLINE 행 OFFLINE=목적지 확정불가(NG). 코드 정합: RcsController IF-05 게이트가 r.Online 미참조(Paused+SorterCanAcceptBarcode만), QueryDestination NO_DEST/COMPLETED가 목적지 미확정 NG. 무변경 가드 `git diff --stat -- backend/ frontend/ scripts/` 빈 출력.
+
+## IMPLEMENTATION COMPLETE (B2B-POLISH)
+
+스프린트 S-RCS-DOCS-B2B-POLISH — 3문서(KR 정본·EN·master) Part II(B2B)를 B2C 문법으로 재구성. 산출물 = `docs/*.html` 3개뿐. 브랜치 docs/rcs-interface-b2b-b2c(미커밋).
+
+### B1~B8 매핑 (B2C §1~§8 미러 · F1 해소)
+기존 3섹션(B1 개요&통신 / B2 인터페이스5종 / B3 실패응답)을 8섹션으로 확장, B 접두사 유지:
+- **B1 개요 & 역할** ← B2C §1. 산문 + 본질 bullet 4개(배치기반/목적지판정없음/단방향/status분기) + `3DS 연동 없음` note.b2b (master는 §07/§08/IF-06·11·12/층정렬 3DS-무관 문구 원문 보존).
+- **B2 통신** ← §2. 통신표(프로토콜/BaseURL/인코딩/레이트리밋/인증/응답래퍼/실패판정) + 레거시 주소 문단.
+- **B3 데이터 모델/필드** ← §3. **공통 필드표 신설(F3 해소)**: bizDay·batch·chuteNo·barcode·qty·status·reason·pId·inductionNo 1회 정의(타입/길이/필수/설명). 변형은 각주5개로 무손실 보존 — ①box chuteNo 1~10·barcode 1~100 ②input barcode=N ③unprocessed qty=Y"1이상" ④status/reason/pId=input·classification 한정 ⑤inductionNo=input 한정. chuteNo정규화·상태2축·batch override note 3개를 여기로 이동(F6 정돈). `§B2 필드표` 상호참조 → `위 공통 필드표`로 갱신.
+- **B4 인터페이스 목록** ← §4. 엔드포인트 5종 표(골든패스 순서).
+- **B5 API 정의** ← §5. 5종 균질 틀(F4 해소): 공통필드 참조줄 + 고유·변형 필드표 + 예시 JSON + 응답스펙. 산문 "응답:"줄 유지(균질). **각 표는 고유필드만**(Q3): input=inTime, classification=sortTime, box=boxNo·chuteNo1~10·barcode1~100·endTime, unprocessed/results=items[] 구조.
+- **B6 실패 응답 & 사유** ← §6. 실패 message 표 전량 + F vs NG note + 예시 JSON.
+- **B7 전체 플로우(골든패스)** ← §7. B1에서 분리 이동(F5): flow + 단계/목적/실패시행동 표.
+- **B8 타이밍 & 재시도** ← §8. B3 말미 재시도 ul 이동(F5) + 레이트리밋 타이밍 표.
+TOC의 B2B 링크 3개 → B1~B8 8개로 갱신(3문서). B2C 링크(#s1~#s8/#s0~#s10) 불변.
+
+### F1~F6 해소
+F1 넘버링(B1~B8) · F2 순서모순(정의·실패부를 골든패스 box④/results⑤로 재배치, 배지숫자만) · F3 공통필드표 신설 · F4 5종 균질틀 · F5 B1분해+독립섹션(B4/B7/B8) · F6 note 정돈.
+
+### 검증 결과
+- **HTML 태그밸런스**: 3문서 leftover=[] errors=[] (html.parser).
+- **골든패스 순서**: B5정의·B6실패·B7플로우 모두 unprocessed→input→classification→**box→results** 일치(3문서, F2 해소 확인).
+- **실패 message verbatim**: 19종 distinct를 fixed-string으로 3문서 + api-spec-ko.html 대조 → ALL PRESENT(0 missing).
+- **필드 무손실**: 고유필드(inTime/sortTime/boxNo/endTime)·box변형(chuteNo1~10·barcode1~100)·공통필드(bizDay8~10/batch1~10/chuteNo3/barcode20/qty1~9999/status2/reason255/pId·inductionNo Integer)·input barcode=N 전부 3문서 present.
+- **B2C 무접촉**: Part II 배너 앞 영역 diff = TOC B2B 링크(1→3줄)뿐. §1~§8/§00~§10/IF-05·08·09·10/Part I 배너/#modes 변경 0.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/ docs/api-spec-ko.html` 빈 출력. 변경 파일 = docs/*.html 3개.
+- **EN=KR=master 정합**: 동일 B1~B8 구성·표틀·공통필드·순서. 언어차 + master 고유(3DS무관 note·§07/§08 참조·inline 배지 style) 보존.
+- dotnet test(210)는 문서전용 변경으로 불변 예상 — Evaluator 몫.
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
+
+## FIX ITER 2 (B3 필수열·chuteNo 중복)
+
+작업: Generator(standalone) fix-only · 브랜치 docs/rcs-interface-b2b-b2c · 커밋 0. 이전 iter가 노트북 절전으로 중단돼 3문서에 불균등 적용 → re-run으로 EN=KR=master 정합 회복. 실제 편집은 master 1개만(KR 정본·EN은 이전 iter에서 이미 #1·#2 완결 상태였음 — 재적용/중복 방지 위해 착수 시 3문서 Read로 확인). 코드 0.
+
+### 착수 시 실측 (부분 적용 상태)
+- KR(정본)·EN: #1·#2 **이미 완결** — 헤더 `필수 <sup>※</sup>` / `Req. <sup>※</sup>` · barcode·qty 셀 `△` · `<sup>※</sup>` 각주 · chuteNo 행 간결화(note 참조) · chuteNo 정규화 note 상세.
+- master: **미완결 4점** — 헤더 `필수`에 `<sup>※</sup>` 부재 · chuteNo 행 여전히 상세(하단 note와 중복) · barcode 셀 `Y`·qty 셀 `N`(△ 미전환) · `<sup>※</sup>` 각주 라인 부재.
+
+### 수정 (master만 — KR와 동일해지도록 4곳)
+- **#1 필수열 오해 제거**: 헤더 `필수`→`필수 <sup>※</sup>` · barcode `Y <sup>2</sup>`→`△ <sup>2</sup>` · qty `N <sup>3</sup>`→`△ <sup>3</sup>` · 각주 최상단에 `<sup>※</sup> 필수 여부는 엔드포인트별로 다를 수 있다 — △로 표기한 필드(barcode·qty)…` 1줄 추가. 각주 ①~⑤ 내용 불변(정보 손실 0).
+- **#2 chuteNo 중복 제거**: B3 공통표 chuteNo 행을 상세("서버가 3자리 zero-pad로 정규화("3"→"003"). classification의 슈트 일치 판정은 패딩 후 값으로 비교.")→간결("3자리 zero-pad로 정규화(상세는 아래 chuteNo 정규화 note 참조).")로 축약. 상세는 하단 `chuteNo 정규화` note 한 곳에만 유지(정보 손실 0). KR·EN은 이미 이 형태.
+
+### 검증 (fresh)
+- **정합 마커 3문서 동일**: `<sup>※</sup>`=2 · `△`=3 · chuteNo정규화 참조/note=2 (각 문서 grep -o 카운트 일치).
+- **실패 message**: 다중어절 `<code>` 추출 → 3문서 전부 동일 20개(실패 19종 + 응답 envelope `{ "status":"S"|"F", "message":"..." }` 1). 19/19 verbatim 불변.
+- **HTML 태그밸런스**: 3문서 section/table/tr/td/th/div/sup/p/ul/li/pre 개폐 mismatch 0.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력.
+- **B2C 파트·골든패스 순서**(unprocessed→input→classification→box→results) 불변 — B3 공통표 외 미접촉.
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
