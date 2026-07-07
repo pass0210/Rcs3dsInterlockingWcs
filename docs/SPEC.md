@@ -92,6 +92,7 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
   이때 **복귀 이동이 남았으면(TgtFloor≠0 && TgtFloor≠CurFloor) Ready=0을 유지한 채 곧바로 이동 시작**, 그 외에만 Ready=1.
 - **분류 중이 아닐 때** && TgtFloor≠0 && TgtFloor!=CurFloor → 이동 시작(Ready=0) → MoveDuration 후 CurFloor=TgtFloor 기입(TgtFloor는 유지!) → Ready=1
 - 설정: TiltDelay, SortDuration, MoveDuration, 초기 CurFloor / 고장 주입: R_Seq 불일치, R_Flag 지연, 무응답(OFFLINE 유발)
+- **전송(S-SIM3DS-RTU)**: Sim3ds는 `Transport=Tcp`(기본·현행 :1502 보존) 또는 `Rtu`(현장 리허설·RS-485)로 기동. 레지스터 맵·에코 지연·C_Flag 자체 클리어·ClearR까지 R 유지·잔류 프리셋 의미는 전송 무관 동일. 설정은 `appsettings.Sim3ds.json`(기본값) + 환경변수(`SIM3DS_*`) + CLI(`--transport rtu --port COMx …`). → **실 PLC 없이 WCS↔Sim RTU 리허설 절차·시리얼 페어 준비법: [docs/RTU-REHEARSAL.md](RTU-REHEARSAL.md)**
 
 ## 7. 미확정 사항 (구현 중 추측 금지 — 기록·질문)
 - agvFloor **산출 방법은 확정**(agvNo→층 매핑; 원본 §4 "agvFloor 필드 제거"). **매핑 테이블 값**만 현장 확정 — M3 설정→M4 agv.floor 단일 진실 전환
