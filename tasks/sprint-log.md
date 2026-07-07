@@ -2143,3 +2143,101 @@ Wcs.Sim3ds/Wcs.Api/testhost 오펀 0 · 포트 1502/5080 free 확인.
 
 ### 상태
 계약 §5 ①~⑧ 전부 PASS. 커밋/git 조작 없음. Evaluator 검증 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE — S-FIELD-20CELLS (Generator, 2026-07-07)
+
+브랜치 feat/field-20cells (fix/handshake-rflag-residue/PR #31 위 스택). A안 확정: 기존 cell.Enabled 게이트 재사용 — **백엔드 프로덕션 코드 변경 0**, 회귀 테스트만 추가. 커밋/push 없음.
+
+### Change Summary
+1. **시드 리네임+재작성**: `scripts/seed-field-16cells.sql` → `git mv` → `scripts/seed-field-20cells.sql`.
+   - 셀 1~20 MERGE: 1~15 `Enabled=1·Cap=3`(무손상), 16~20 `Enabled=0·Cap=3`. 셀 16 은 MATCHED UPDATE(Enabled 1→0), 17~20 은 NOT MATCHED INSERT. CellNo 파생 `CASE WHEN n<=@availMax THEN 1 ELSE 0`.
+   - §7 셀 16 전이: (a) 셀 16 활성 cell_assignment `ReleasedAt=now` (b) 오더 `0701-CELL-16` `Status='CANCELLED'`(+ClosedAt/UpdatedAt). order_item 보존·예약/실적 무조작.
+   - 오더/아이템/배정 N↔N 픽스처를 1~15 로 축소(15건 활성). work_batch(FIELD-16·2026-07-01)·소터 chuteNo=1 유지.
+   - 멱등: 전 구간 MERGE/NOT EXISTS/조건부 UPDATE + `BEGIN TRAN`/`COMMIT`/`XACT_ABORT ON`. 매핑 확장 경로(`UPDATE cell SET Enabled=1 WHERE CellNo BETWEEN 16 AND 20`) 헤더 주석에 명기.
+   - 현장 실 데이터 무접촉 원칙: piece/sorter_command/piece_event 무접촉, order_item 은 INSERT(NOT EXISTS)만(실적 무조작).
+2. **백엔드 회귀 테스트**: 신규 `backend/tests/Wcs.Tests/Field20CellsGateTests.cs` 3건(프로그래매틱 SQLite 더블 · RcsPushWebApplicationFactory). 프로덕션 코드 diff 0.
+   - T1 `SelectCell_NeverReturnsDisabledCells_16to20` — 1~15 만재·16~20 Enabled=0 미배정 → SelectCell=null(16~20 미반환). 음성 대조: 셀 16 Enabled=1 승격 시 16 반환(게이트=Enabled 입증·매핑 확장 데이터-온리).
+   - T2 `If05_Cells01And15_Ok_Cell16_Ng` — IF-05 0701-CELL-01/-15 → OK(chuteNo=1) / 0701-CELL-16(CANCELLED) → NG·reason=NO_DEST(결정적).
+   - T3 `All15EnabledCellsFull_SorterFull_And_If05_Ng` — 가용 15셀 전량 작업수량 도달 → SorterFull=true·신규 IF-05 NG·reason=FULL. 비활성 16~20 은 미점유여도 full 산출 제외 단정(UnoccupiedCellCount enabledOnly=true→0 vs false→5).
+3. **프론트**: `SortingSection.tsx` CellsCard 그리드 `grid-cols-2 sm/lg/xl…` → `overflow-x-auto` 컨테이너 안 `grid-cols-5 gap-2 min-w-[600px]`(5열 고정·4×5 물리 미러링·좁은 폭 가로 스크롤+최소폭). 기존 `!cell.enabled` "비활성" 렌더·범례 그대로 활용(신규 UI/DTO/타입 변경 0).
+
+### Raw Test Results
+- 베이스라인(변경 전): `실패: 0, 통과: 175, 전체: 175` (기준 175 재확인).
+- 전체(변경 후): `실패: 0, 통과: 178, 전체: 178` — 3회 연속 GREEN(13s/13s/14s). 신규 3건 = 175+3.
+- 신규 테스트 표적 반복: `Field20CellsGateTests` 5/5 연속 GREEN(각 3s) — flake 0.
+- 프론트: `npm run typecheck`(tsc --noEmit) 0 error · `npm run lint`(eslint .) 0 error.
+- 빌드: `오류 0개` · `경고 10개`(전부 NU1903 SQLitePCLRaw 2.1.10 — base 선재 부채·todo 등재·스코프 밖).
+- 프로세스/포트: 테스트 후 포트 1502/5080 free · Wcs.Sim3ds/Wcs.Api 오펀 0.
+
+### 실 DB 재적용·검증·멱등 증거 (Rcs3dsInterlockingWcs @ localhost, sqlcmd -E, 앱 기동 시드 없음·SeedOnStartup=false 유지)
+**사전 백업(SELECT INTO):** `cell_bak_field20`=16 · `cell_assignment_bak_field20`=16 · `wcs_order_bak_field20`=16 · `order_item_bak_field20`=16 생성 완료. (롤백 안전망으로 DB에 잔존 — 확인 후 DROP 가능.)
+**적용 전 상태:** 셀 16(전부 Enabled=1) · 활성 배정 7건(셀 10~16 N↔N, 셀 1~9 는 어제 현장 분류 후 해제됨) · 오더 0701-CELL-16 RUNNING · piece=2/sorter_command=2/piece_event=2.
+**1회차 적용 후 검증(원문):**
+```
+cellNos_enabled1 = 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15   (Enabled=1 정확히 15)
+cellNos_enabled0 = 16,17,18,19,20                        (Enabled=0 정확히 5)
+cells_1to15_cap3_en1 = 15                                (1~15 Cap=3·Enabled=1 무손상)
+active_assign_cells = 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 (활성 배정 정확히 15·셀16 해제됨)
+order16 = CANCELLED                                       (0701-CELL-16 전이)
+orders_01to15_running = 15                               (01~15 RUNNING 무손상)
+order_item16_preserved = 1                               (order_item 이력 보존)
+piece=2 · sorter_command=2 · piece_event=2               (적용 전과 동일 — 무접촉)
+```
+**멱등(동일 스크립트 2·3회차 재실행):** 요약 출력 매회 `20 15 5 15 1` 불변. cells_total=20·enabled=15·disabled=5·active_assign=15·order16=CANCELLED·wcs_order=16·order_item=16 전부 불변. cell_assignment_total = 16(원본)+9(1회차에서 셀 1~9 활성 재수립)=25 로 1회차 후 정착, 2·3회차 25→25 불변(NOT EXISTS·부분유니크로 중복 삽입 0). piece/sorter_command/piece_event = 2/2/2 불변.
+
+### 절대규칙/스코프 준수
+- 백엔드 프로덕션 코드 diff 0(A안). Wcs.Core·PlcGateway 무변경. IF-09/IF-10 핸드셰이크·워드쓰기 트리거 없음(폴링조차 미기동 — sqlcmd 직접 적용). appsettings Transport/COM/Provider/ConnStr/SeedOnStartup 무변경.
+- S-HANDSHAKE-RESIDUE 코드리뷰 Minor 4건 무접촉(스코프 밖).
+- 변경 파일: `scripts/seed-field-20cells.sql`(rename+rewrite) · `backend/tests/Wcs.Tests/Field20CellsGateTests.cs`(신규) · `frontend/src/pages/sections/SortingSection.tsx`(그리드 1블록). 커밋/push 없음 — Evaluator 검증 대기.
+
+---
+
+# S-SIM3DS-RTU — Sim3ds RTU 슬레이브 전송 추가 (실 PLC 없이 RTU 리허설)
+
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-07)
+
+### 요약
+3DS PLC 시뮬레이터(`Wcs.Sim3ds`)가 기존 TCP뿐 아니라 **Modbus RTU 슬레이브**로도 기동하도록 전송 계층만
+추상화. 목요일(7/9) 현장 방문 전 실 PLC 없이 WCS `ModbusRtuMaster` 왕복 리허설 가능. 레지스터 맵·에코
+지연·C_Flag 자체 클리어·ClearR까지 R 유지·잔류 프리셋·고장 주입 의미는 RTU에서 **완전 동일**(전송만 교체).
+기본 Transport=Tcp라 기존 `dotnet run` 동작 바이트 동일(콘솔은 `Sim3ds 서버 기동 TCP 127.0.0.1:1502`로 전송 명시).
+
+### 변경/신규 파일 (전부 계약 허용 스코프)
+- **신규** `backend/src/Wcs.Sim3ds/SimTransport.cs` — `ISimTransport` seam(레지스터 버퍼=`ModbusServer`만 노출) +
+  `TcpSimTransport`(현행 보존: ctor+AddUnit+Start(IPEndPoint)) + `RtuSimTransport`(물리 COM ctor + fake-serial seam ctor) +
+  `SimTransportFactory`(전송 선택·검증·fail-loud). FluentModbus 5.3.2 실 API를 라이브러리 리플렉션으로 확인 후 구현
+  (`ModbusRtuServer(unitId,isAsynchronous:true)` + BaudRate/Parity/StopBits/ReadTimeout/WriteTimeout 프로퍼티 + `Start(string)`|`Start(IModbusRtuSerialPort)`).
+- **수정** `backend/src/Wcs.Sim3ds/SimServer.cs` — `_server`(ModbusTcpServer 하드코딩) → `_transport`(ISimTransport, StartAsync에서 생성).
+  `const UnitId=1` → 설정값 `_unitId`. Options에 Transport/PortName/BaudRate/Parity/StopBits/ReadTimeoutMs/WriteTimeoutMs/UnitId +
+  `ParsedParity`/`ParsedStopBits` 헬퍼 추가(전부 additive — 기존 필드/시그니처 무변경). fake-serial 주입 생성자 신설
+  (ModbusRtuMaster fake-port 패턴과 동형). Flush/Pull은 `_transport.Server.GetHoldingRegisters(_unitId)`로 라우팅(엔디안 `ReverseEndianness` 보존).
+- **신규** `backend/src/Wcs.Sim3ds/Sim3dsConfig.cs` — 설정 해석(순수 정적·테스트 가능). 우선순위 CLI(`--*`) > env(`SIM3DS_*`) > `appsettings.Sim3ds.json` > 코드 기본값.
+  `--port`는 유효 Transport에 따라 라우팅(RTU→PortName / TCP→Port). 알 수 없는 스위치·값 누락 fail-loud(오타 방지).
+- **신규** `backend/src/Wcs.Sim3ds/appsettings.Sim3ds.json` — 기본값(Transport=Tcp·현행 보존). PortName 기본값 없음(RTU 미지정 시 fail-loud). CopyToOutputDirectory.
+- **수정** `backend/src/Wcs.Sim3ds/Program.cs` — 하드코딩 Options → `Sim3dsConfig.Resolve(args)`. 설정/기동 오류 fail-loud(stderr + exit 1).
+- **수정** `backend/src/Wcs.Sim3ds/Wcs.Sim3ds.csproj` — Microsoft.Extensions.Configuration(.Json/.EnvironmentVariables/.Binder) 10.0.0 + json Content 복사. FluentModbus 5.3.2 고정 유지.
+- **신규** `backend/tests/Wcs.Tests/Sim3dsRtuTests.cs` — 11개 테스트(아래).
+- **신규** `docs/RTU-REHEARSAL.md` + **수정** `docs/SPEC.md §6`(링크 1줄).
+
+### 무변경 가드 (git diff HEAD 확인)
+- `backend/src/Wcs.Api` 0 · `backend/src/Wcs.PlcGateway` 0 · `backend/src/Wcs.Core` 0 · `frontend` 0 · `appsettings.json`/`appsettings.Development.json` 0 diff 라인.
+- FluentModbus 5.3.2 고정. SimServer 공개 표면(Options 기존 필드·StartAsync/StopAsync/DisposeAsync·ReadSnapshot·SetRResidue·Inject* 4종) 시그니처 유지(전부 additive).
+- 신규 컴파일 경고 0(NU1903 SQLitePCLRaw 10건은 선재 부채·스코프 밖·todo 등재됨).
+
+### 테스트 (신규 11건 — 178 → 189)
+- (a) 단위 8건: `A1` 기본=Tcp 현행 보존 · `A2` RTU CLI 파싱+`--port` COM 라우팅+ParsedParity/StopBits · `A3` TCP `--port`→포트번호 라우팅 ·
+  `A4` json 기본값<CLI 우선 · `A5` env(SIM3DS_*) 오버라이드 · `A6` 알 수 없는 스위치 fail-loud · `A7` 잘못된 Transport StartAsync fail-loud · `A8` RTU PortName 미지정 fail-loud.
+- (b) CI 통합 2건(환경 무관·결정적): `B1` 실 SimServer(RTU, fake-serial) ↔ WCS ModbusRtuMaster 왕복 — 폴 Online + C/R 핸드셰이크 Success(R_Seq==C_Seq)+ClearR 후 R_Flag=0+Ready 복귀 ·
+  `B2` 잔류 프리셋(R_CellNo=20/R_Seq=123)이 RTU에서 동일 관측. (기존 VT-2는 hand-rolled 서버였음 — B1이 실 SimServer 상태기계로 격상.)
+- (c) 실선 게이트 1건: `C1` WCS_RTU_TEST_PORTS=COMx,COMy 지정 시 실 OS 시리얼 스모크. 미지정 시 early-return 스킵(사유 출력) — LiveMultiAgvRunner 패턴 준수(새 의존성 0). 이 머신 COM 0개 → 스킵 경로 정상.
+
+### RAW 테스트 결과
+- 기준 재확인(변경 전): `통과! - 실패: 0, 통과: 178, 건너뜀: 0, 전체: 178`.
+- 전체(변경 후, 빌드 포함): `통과! - 실패: 0, 통과: 189, 건너뜀: 0, 전체: 189, 기간: 14 s`.
+- 타이밍 취약 신규(Sim3dsRtuTests 전체 11건) 6회 반복: RUN1~6 전부 `실패: 0, 통과: 11` — flake 0.
+- 스모크: `dotnet run --project ...Wcs.Sim3ds`(기본) → `Sim3ds 서버 기동 TCP 127.0.0.1:1502` / `--transport rtu`(PortName 없음) → fail-loud / `--tranport`(오타) → fail-loud(지원 스위치 목록 출력).
+- 포트 1502/5080 free · orphan Sim3ds/Api/testhost 0.
+
+### 커밋/push 없음 — Evaluator 검증 대기 (feat/sim3ds-rtu).

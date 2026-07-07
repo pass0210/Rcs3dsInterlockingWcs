@@ -1,129 +1,237 @@
-# Sprint Contract — S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 잔류 대사 — off-by-one 연쇄 차단)
+[Sprint Contract] — S-SIM3DS-RTU
 
-> **감사 A-1 현장 발현 수정 스프린트** — 2026-07-06 현장 라이브 진단으로 확정된 결함.
-> `HandshakeOrchestrator`가 R_Flag를 **레벨**로 읽어 직전 건(또는 PLC 기동)의 잔류 R_Flag=1을
-> 새 건의 응답으로 오인 → 허위 RSEQ_MISMATCH → off-by-one 연쇄 자가지속.
-> WHAT/WHERE/검증만 규정. **정확한 메서드·시그니처·appsettings 키명·값·구현 배치는 Generator 재량(제약 내). 코드 구현 0.**
+Branch: feat/sim3ds-rtu (PR #33 위 스택 — 병합은 사용자가). 이전 계약(S-FIELD-20CELLS)은 커밋 완료됨, 본 파일 overwrite.
+작성: Planner Subagent · 2026-07-07 · 사용자 요청(2026-07-07)
 
-## 0. 메타
+────────────────────────────────────────────────────────────────────────
+## Goal (WHAT — 무엇을 만들 것인가)
 
-| 항목 | 값 |
-|------|-----|
-| Sprint ID | S-HANDSHAKE-RESIDUE |
-| Branch | `fix/handshake-rflag-residue` (생성 완료 — 현재 체크아웃) |
-| Base | `develop` (PR #30까지 병합) |
-| Detected Project Type | **Backend/API** (아래 투명성 노트 참조) |
-| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 컴포넌트·팬아웃 없음) |
-| Test baseline | **169 GREEN** (기동 시 `dotnet test`로 실제 카운트 재확인 — 완료 시 기존 전원 GREEN 유지 + 신규 시나리오 = 169+N) |
-| 스펙 소스 | `docs/SPEC.md` §4(C/R 핸드셰이크)·§6(Sim3ds 동작) / `tasks/audit-20260701-full.md` A-1 / 현장 실측(2026-07-06) |
-| 배경 상태 | 감사 A-1 CONFIRMED. 현장 로그로 5연쇄 재현 확인, 잔류 없는 깨끗한 상태에선 연속 2사이클 성공 확인. 수정 방향은 사용자 보고·확정 완료 — 본 계약은 이를 WHAT으로 구체화. |
+목요일(7/9) 현장 방문 **전에** WCS의 RTU 전송 계층(`ModbusRtuMaster` — 지금까지 실 PLC로만
+검증됨)을 실 PLC 없이 사전 리허설할 수 있게 한다. 이를 위해 3DS PLC 시뮬레이터(Sim3ds)가
+현행 TCP뿐 아니라 **Modbus RTU 슬레이브**로도 동작하게 만든다.
 
-> **투명성 노트(프로젝트 타입)**: 레포는 구조상 Full-stack(`frontend/` + `backend/`)이다. 그러나 **이 스프린트의 변경 표면은 100% 백엔드 Modbus 핸드셰이크 계층**(`Wcs.PlcGateway` + `Wcs.Sim3ds` 테스트 더블 + `Wcs.Tests` + `docs/SPEC.md`)이며 **frontend·브라우저 표면 접촉 0**이다. 교차되는 "레이어"는 오케스트레이터 ↔ 단일 쓰기 큐 ↔ Modbus ↔ Sim-PLC로, frontend↔backend 데이터 흐름이 아니다. 따라서 Full-stack의 브라우저 E2E 슬롯은 **적용 불가(false gate)**이고, 정답 검증은 **Backend/API 필수 검증 = 자동 테스트 코드 실행**(Sim3ds Modbus 더블 기반 xUnit 통합 테스트)이다. Playwright/브라우저 검증은 이 스프린트에 해당 없음.
+리허설 구성:
+```
+WCS(Transport=Rtu, COM-A) ──[가상/실 시리얼 페어]── Sim3ds(Transport=Rtu, COM-B)
+     Modbus 마스터                                        Modbus 슬레이브
+```
+이로써 프레이밍·UnitId·타임아웃·폴링 스냅샷·C/R 핸드셰이크 전 구간을 실 PLC 없이 왕복 검증한다.
 
-## 1. 목표 (WHAT · 한 줄)
+**핵심 불변식**: 전송 계층만 교체한다. 시뮬레이터의 의미(레지스터 맵 D0~D6, C_Flag 자체 클리어,
+SortDuration 후 R 에코, ClearR까지 R 유지, 잔류 프리셋, 고장 주입)는 RTU에서 **완전 동일**해야 하며,
+기존 TCP 경로와 그 위의 모든 테스트는 **0 회귀**여야 한다.
 
-`HandshakeOrchestrator`의 R단계 레벨-읽기 결함을 **"C 기입 전 R_Flag==0 관찰 보장(arming)"** 으로 무장하고, **기동 시 잔류 R_Flag 대사(reconciliation)** 를 추가해, 직전 건·PLC 기동 잔류가 새 건의 응답으로 오소비되어 발생하는 **허위 RSEQ_MISMATCH off-by-one 연쇄를 근본 차단**한다. 모든 PLC 쓰기는 단일 큐 경유(절대규칙 #1), 대기 상한은 전부 appsettings(절대규칙 #7), 잔류 대사 발생은 operation_log(HANDSHAKE)에 잔류값 포함 기록(관측성).
+이 스프린트의 변경 표면은 **Sim3ds + 테스트 + 문서**뿐이다. WCS 프로덕션 코드(Wcs.Api /
+Wcs.PlcGateway / Wcs.Core / frontend)와 appsettings.json은 **0 변경**(WCS 측 Transport=Tcp|Rtu
+선택은 S-RTU에서 이미 구현 완료 — 무변경 가드).
 
-## 2. Scope IN
+────────────────────────────────────────────────────────────────────────
+## Implementation Scope (Generator가 해야 할 것)
 
-### 2A. 핸드셰이크 시작 시 잔류 대사 (arming) — `HandshakeOrchestrator`
-- **핵심 불변식**: 핸드셰이크 1건은 **R_Flag==0을 1회 관찰한 뒤에만** 이후 R_Flag==1 상승을 자기 응답으로 수용한다. 0 확인 이후의 레벨 읽기는 에지 감지와 등가.
-- **동작(WHAT)**: C(CellAssign) 큐 투입 **이전**에 스냅샷 R_Flag를 확인 →
-  - R_Flag==0 이면 → 그대로 진행(추가 지연 0 — 깨끗한 경로는 기존 타이밍 보존).
-  - R_Flag==1 이면 → **잔류로 간주**: (1) WARN 로그 + (2) operation_log(HANDSHAKE) 기록 — 잔류값 `rCellNo`/`rSeq` 포함(§2D 관측성) + (3) **ClearR 선행 큐 투입**(절대규칙 #1 — 큐 경유) + (4) 폴링 스냅샷에서 **R_Flag==0 확인 대기** → 확인 후에만 C 기입 진행.
-- **R_Flag==0 확인 대기 타임아웃**: 하드코딩 금지(절대규칙 #7) — 신규 appsettings 타이밍값(예: `Timing:RFlagClearConfirmTimeoutMs`, 키명·값 Generator 재량)에서 읽는다. 초과 시 **C를 기입하지 않고** 명확한 terminal Outcome으로 종결(§2C·시나리오 5). 대기 중 OFFLINE 감지도 기존 대기 루프들과 동형으로 명확 종결.
-- 배치(대사 로직을 `ExecuteAsync` 내 C 투입 직전 별도 단계로 둘지, `WaitCFlagZeroAsync`류와 나란히 둘지 등)와 폴링·에지 채널(`RFlagRaised`) 소비 여부는 **Generator 재량**. 절대규칙 #1(쓰기=큐)·#7(타이밍=설정)만 불가침.
+1. **Sim3ds 전송 선택**: 설정으로 `Transport = Tcp(기본, 현행 보존) | Rtu` 선택.
+   - 미지정/기본 = **Tcp** → `dotnet run --project backend/src/Wcs.Sim3ds`가 지금과 **바이트 동일**하게
+     `127.0.0.1:1502` TCP로 기동(현행 보존 — 회귀 방지). (참고: WCS 측 기본은 Rtu이나, Sim3ds의
+     기존 관측 동작은 TCP였으므로 Sim3ds 기본은 Tcp로 두어 현행 보존을 우선한다.)
+   - 알 수 없는 Transport 값 → fail-loud(명확한 예외, 절대규칙 #8·Core 원칙 "Fail Loud").
 
-### 2B. 기동 시 잔류 R_Flag reconciliation — `Wcs.PlcGateway`
-- **동작(WHAT)**: 소터 게이트웨이 기동 후 **첫 유효 폴에서 R_Flag==1**이면 PLC 기동 잔류로 간주 → **ClearR 큐 투입**(절대규칙 #1) + **WARN 로그 + operation_log 기록**(§2D — 잔류값 포함). PLC 기동 직후 R 영역 테스트 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가 소비하기 전에 차단.
-- **위치·방식은 Generator 재량**(폴 루프 내 1회 게이트 / 레지스트리 StartAsync 완료 후 훅 등) — 단 **쓰기는 반드시 단일 큐 경유**(절대규칙 #1, API/오케스트레이터 직접 Modbus 호출 금지).
-- **근거 명기(주석)**: 기동 잔류를 지우면 그 응답의 대기자는 없고 C_Seq 카운터도 리셋되므로 잔류 유지는 후속 전 건 오소비를 낳는다 — 클리어가 정당한 복구. (계약 문서화 요구, 코드 주석에도.)
+2. **RTU 옵션(전부 설정값 — 절대규칙 #7, 하드코딩 금지)**: PortName·BaudRate·Parity·StopBits·UnitId
+   (+ Read/WriteTimeoutMs). 기본값은 WCS appsettings `Sorters[0]` placeholder와 **정합**
+   (BaudRate=9600·Parity=Even·StopBits=One·UnitId=1·Timeout=1000). 단 **PortName은 안전한 기본값
+   없음** — RTU 모드에서 명시 지정을 요구한다(우발적 COM1 점유 방지. WCS와 Sim은 시리얼 페어의
+   반대쪽 포트를 쓰므로 같은 포트를 공유할 수 없다).
 
-### 2C. 잔류 대사 실패 경로 terminal Outcome — `HandshakeOrchestrator`
-- R_Flag==0 확인 대기가 타임아웃(ClearR 미반영 — 소터 오프라인·PLC 무ack 등)하면 **C를 기입하지 않고** 명확·테스트 가능한 terminal Outcome으로 종결(무한 대기·더티 상태 진행 금지).
-- 신규 `HandshakeOutcome` 값 추가 vs 기존값(예: OFFLINE 감지 시 `Offline`) 재사용은 **Generator 재량** — 단 (a) 조용히 성공/진행하지 않고, (b) 결과에 사유가 드러나며, (c) 테스트로 단정 가능해야 한다. `HandshakeResult` record 형상 확장이 필요하면 기존 소비처(관측 싱크·테스트) 회귀 0을 지킬 것.
+3. **SimServer 내부 전송 추상화**: 현재 `SimServer._server`는 `ModbusTcpServer`로 하드코딩되어 있고
+   `FlushToServerLocked`/`PullFromServerLocked`가 `_server.GetHoldingRegisters(UnitId)`에 결합돼 있다.
+   전송을 TCP/RTU 중 선택 가능하게 추상화하되, 시뮬레이션 루프·프리셋·고장주입·테스트 훅이 깨지지
+   않게 한다. **무변경 가드(공개 표면 시그니처 유지)**: `Options` record 필드, `StartAsync`/`StopAsync`/
+   `DisposeAsync`, `ReadSnapshot`, `SetRResidue`, `InjectRSeqOverride`/`InjectRFlagDelayMs`/
+   `InjectNoResponse`/`InjectStickyRResidue`. 엔디안 처리(현 `BinaryPrimitives.ReverseEndianness`
+   가정)는 RTU 서버 버퍼에서도 동일 의미가 되도록 확인·보존한다(RtuTransportTests의
+   `InitServerRegisters`가 동일 ReverseEndianness 패턴을 쓰므로 정합).
 
-### 2D. 관측성 — operation_log(HANDSHAKE) 잔류 기록
-- 잔류 대사(2A)·기동 reconcile(2B) 발생 시 **operation_log의 HANDSHAKE 카테고리**에 잔류값(`rCellNo`/`rSeq`)을 포함해 기록 — 현장 원인 추적용.
-- 기록 경로는 **기존 관측 훅 재사용**: `HandshakeOrchestrator.OnStage(action, detailJson)`(잔류 대사용 신규 action 예: `HS_R_RESIDUE`) / PlcGateway 측은 기존 `OnWrite`/전이 훅 및 로깅. **훅은 부수 기록 전용 — 핸드셰이크·폴 본동작 의미·타이밍 0 변경, 핸들러 예외 격리(fail-safe)**(기존 S-OBSERVABILITY 계약 동형). 신규 폴 루프·신규 DB 초크포인트 도입 0.
+4. **RTU 모드 의미 동일성**: 위 3의 추상화 후 RTU에서 C_Flag 감지→즉시 C·C_Flag 클리어 → TiltDelay →
+   분류 시작(Ready=0 + TgtFloor=0 클리어, Ready 블립 금지) → SortDuration 후 R 세팅(R_Seq==C_Seq) →
+   ClearR까지 R 유지 → 복귀 이동 규칙까지 SPEC §6과 **동일**. 잔류 프리셋·4종 고장 주입도 RTU에서 동작.
 
-### 2E. Sim3ds — R 잔류 프리셋 수단 확인/추가 (테스트 더블)
-- **먼저 확인**: `SimServer`가 실측 PLC 동작을 이미 모사하는가 — (i) C 지령 수락 시 C_Flag 자체 클리어(현재 `RunSimLoopAsync` L169-175 = 예), (ii) SortDuration 후 R 에코+R_Flag=1(L232-240 = 예), (iii) ClearR까지 R 영역 유지·자체 클리어 안 함(현재 Sim은 R 자체 클리어 없음 — WCS ClearR로만 R 비움 = 예). **에코 지연은 SortDurationMs로 모사됨.**
-- **부재 확인분만 추가**: 테스트가 "핸드셰이크 시작 시점에 R_Flag=1(+R_CellNo/R_Seq 지정값) 잔류"를 결정적으로 세팅할 **프리셋 수단이 없으면** 추가(예: `Options`에 초기 R 잔류 필드, 또는 기동 후 R 영역 직접 세팅 API — HOW는 Generator). 실측 잔류값 (R_CellNo=20, R_Seq=123) 재현 가능해야 함.
-- Sim의 **기존 동작·기본 무잔류 초기화(현재 `StartAsync`가 `Array.Clear` 후 Ready=1만 세팅)는 보존** — 프리셋은 명시 opt-in.
+5. **관측성**: 콘솔/로그에 어느 전송·어느 엔드포인트로 리스닝 중인지 명시
+   (예: `Sim3ds 서버 기동 TCP 127.0.0.1:1502` / `Sim3ds 서버 기동 RTU COM6 9600/Even/One unit=1`).
+   기존 타임라인 로그 형식 보존.
 
-### 2F. 문서 동기화 — `docs/SPEC.md` §4
-- §4 C/R 핸드셰이크에 **잔류 대사 규칙** 추가: "R단계는 레벨이 아니라 arming(C 기입 전 R_Flag==0 관찰 보장) 기반 — 시작 시 R_Flag==1이면 잔류로 대사(WARN+operation_log+ClearR 선행) 후 R_Flag==0 확인하고 C 기입" + "기동 첫 폴 R_Flag==1은 잔류로 클리어". 필요 시 §7-B의 관련 미확정 항목에 A-1 해소 1줄 교차 표기(선택).
+6. **문서**: 시리얼 페어 준비법 + WCS↔Sim RTU 리허설 절차(설정 예시 포함) — docs/ 아래.
+   - 가상 페어: com0com 설치법(관리자 드라이버 설치 — 사용자 작업, scope 밖임을 명시) **또는**
+     USB-시리얼 어댑터 2개 크로스 결선(TX↔RX, RX↔TX, GND↔GND) 대안.
+   - 리허설 절차: Sim3ds를 COM-B RTU로 기동 → WCS appsettings `Sorters[0]`를 Transport=Rtu·COM-A로
+     설정 → 폴 Online·핸드셰이크 1건 왕복 확인. Sim3ds RTU 설정 예시 + WCS 설정 예시 양쪽 수록.
+   - **주의**: appsettings.json은 이 스프린트에서 변경 대상 아님. 문서에는 "현장 리허설 시 이렇게
+     설정" 예시(diff/스니펫)만 싣고 실제 파일은 건드리지 않는다.
 
-### 2G. 신규 테스트 (`backend/tests/Wcs.Tests/`)
-- §4 검증 시나리오 1~6을 자동 테스트로 결선(SQLite in-memory 더블 + Sim3ds Modbus 더블 — 기존 통합 테스트 패턴 재사용). 잔류 프리셋(2E)으로 결정적 재현.
+7. **테스트** (아래 Completion Conditions·Verification Scenarios와 정합):
+   - (a) **단위**: Sim3ds 전송 선택 + RTU 옵션 파싱 + 잘못된 Transport fail-loud.
+   - (b) **CI 통합(권장·환경 무관, 결정적)**: `FakeSerialPort`가 `IModbusRtuSerialPort`를 구현하므로,
+     **실 `SimServer`(RTU 모드)**를 fake-serial 페어에 결선해 WCS `ModbusRtuMaster`와 in-process
+     왕복(폴 Online 스냅샷 + C/R 핸드셰이크 1건 + ClearR + 의미 검증 1개 이상: R_Seq==C_Seq / Ready
+     블립 없음 / 잔류 프리셋 중 택). 물리 COM 불요 → CI에서 항상 실행. (기존 VT-2는 hand-rolled
+     `ModbusRtuServer`를 썼을 뿐 실 SimServer 상태기계를 안 태웠음 — 본 (b)가 진짜 신규 가치.)
+     이를 위해 SimServer RTU 모드가 **테스트용 주입 `IModbusRtuSerialPort` seam**을 받도록 설계할 것을
+     권장(ModbusRtuMaster의 fake-port 생성자 패턴과 동형 — Consistency Over Preference).
+   - (c) **실선 통합(환경 게이트, 필수)**: 환경변수 `WCS_RTU_TEST_PORTS=COMx,COMy`(client,server) 지정
+     시에만 실 OS 시리얼 스택으로 (b)와 동일 시나리오 스모크. **미지정 시 스킵이 GREEN**
+     — 반드시 **기존 프로젝트 스킵 패턴(`LiveMultiAgvRunner`)을 따른다**: `Environment.
+     GetEnvironmentVariable` + early-return(+스킵 사유 콘솔/출력). ⚠️ 새 `SkippableFact` 의존성 도입 금지
+     (xUnit 2.9.3 동적 Skip 미지원 — 프로젝트는 이미 early-return 방식으로 결정함. 새 패턴 도입 전 확인 원칙).
+   - (d) **회귀 0**: 기존 전체 스위트(특히 TCP 경로: PlcGatewayIntegrationTests·HandshakeResidueTests·
+     ScenarioTests·E2E) 무변경 GREEN.
 
-## 3. Scope OUT (0 변경 — 무변경 가드)
+────────────────────────────────────────────────────────────────────────
+## Non-change Guards (변경 금지 — git diff 0 라인)
 
-- **동시 핸드셰이크 직렬화(F1b, todo.md)** — **OUT**. SPEC는 소터당 물리 직렬 dispatch 전제. 본 스프린트는 이를 **해결하지 않되 악화 금지**. ⚠ **주의(계약 명기)**: 잔류 대사 ClearR이 같은 소터에서 **진행 중인 다른 핸드셰이크의 응답을 지울 수 있다** — 순차 dispatch 전제가 유지되는 한 안전(한 소터엔 동시에 1건뿐). 동시 IF-10 허용은 별도 후속 스프린트.
-- **R_Flag 타임아웃 재시도 vs 포기 정책(SPEC §7-B)** — **OUT**(여전히 미정). 본 스프린트는 진짜 무응답 타임아웃 경로(시나리오 6)를 **회귀 보존**만 한다.
-- **핸드셰이크 정상 경로 의미 불변**: 깨끗한 상태의 성공/불일치/타임아웃 판정·C_Seq 증가·한 건씩 직렬·`OnStage` 기존 action 시그니처는 **불변**(2A 잔류 경로·2C terminal outcome·2D 신규 action 추가만).
-- **frontend 0 변경**: 이 스프린트는 백엔드 전용. `frontend/` 디렉터리 diff 0.
-- **셀 20/15 제약(S-FIELD-20CELLS)** — **OUT**(별도 스프린트, 다루지 않음).
-- **Wcs.Core 판정 엔진 무접촉**: `DepositDecider`·`RegisterMap`·`PlcSnapshot` 의미 불변(순수 함수 — 절대규칙 #8). `RegisterMap` 상수 변경 0.
-- **DB 스키마·마이그레이션 0**: operation_log는 조회/기록만(기존 경로), 스키마 변경 없음.
-- **appsettings 기존 값 불변**: Sorters[]/Provider/ConnectionStrings/기존 Timing 값 0 변경(신규 `RFlagClearConfirm` 류 타이밍 키 **추가만**).
+- **Wcs.Api / Wcs.PlcGateway / Wcs.Core / frontend**: 프로덕션 코드 0 변경. (WCS Transport 선택은 이미 구현됨.)
+- **appsettings.json**: 0 변경. Sim3ds 자체 설정만 신설/사용.
+- **FluentModbus 5.3.2 고정**: 버전 변경 금지.
+- **SimServer 공개 표면**: Scope 3에 열거한 시그니처 유지(테스트·프리셋·고장주입 호환).
+- 허용 변경: `backend/src/Wcs.Sim3ds/**`, `backend/tests/Wcs.Tests/**`(신규 테스트 + 필요한 테스트
+  인프라), `docs/**`(리허설 문서), 그리고 Sim3ds 프로젝트 **자체** 설정 파일(신설 시).
 
-## 4. Verification Scenarios (Backend/API — 필수, per-type 슬롯)
+────────────────────────────────────────────────────────────────────────
+## Cautions (계약 명기 — Generator 필독)
 
-> 서피스 정의: 이 스프린트의 검증 표면은 **HTTP 엔드포인트 형상 변경이 아니라** 내부 핸드셰이크 실행 경로다. 아래 "surface"를 (a) `HandshakeOrchestrator.ExecuteAsync(cellNo, ct)` 소터별 핸드셰이크(운영상 IF-10 `POST /api/v1/deposit-report` → TriggerSorterHandshake로 구동), (b) `PlcPollingService` 기동 폴 reconciliation, (c) 신규 appsettings 타이밍 키, (d) Sim3ds 잔류 프리셋 테스트 더블 표면으로 매핑한다. 모든 시나리오는 **Sim3ds Modbus 더블 기반 자동 xUnit 통합 테스트**로 검증(수동 curl/코드리뷰 대체 금지).
+- **ModbusRtuServer 실 API를 코딩 전 확인**(추측 금지, 5.3.2 고정). 테스트에서 확인된 실서명:
+  `new ModbusRtuServer(unitId, isAsynchronous: true)`, `GetHoldingRegisters(unitId)`,
+  `Start(IModbusRtuSerialPort)`. **물리 COM 기동은 `Start(string portName)` 오버로드**로 추정되나
+  5.3.2에서 실제 시그니처(및 SerialPort 파라미터 지정 방식 — BaudRate/Parity/StopBits를 서버가
+  어떻게 받는지)를 반드시 확인 후 구현. TCP 서버는 `AddUnit(id)`+`Start(IPEndPoint)`인데 RTU 서버는
+  ctor에서 단일 unitId를 받는 등 **API가 발산**하므로 추상화 시 이 차이를 흡수해야 한다.
+- **SimServer 레지스터 버퍼 결합**: `GetHoldingRegisters(UnitId)` 접근이 TCP 인스턴스에 묶여 있으니
+  추상화 후에도 Flush/Pull·프리셋·`SetRResidue`·`ReadSnapshot`이 그대로 동작하는지 검증.
+- **COM 포트 부재 환경**: 이 머신 현재 COM 포트 0개·com0com 미설치 → (c) 실선 테스트는 CI/일반 러너에서
+  항상 실행 불가. **전체 스위트가 스킵 포함 GREEN**이어야 하고, **스킵 사유가 출력**돼야 한다. Evaluator는
+  포트 페어가 없으면 (c)를 "환경 부재로 Skip됨이 정상 동작"으로 검증한다(스킵 로직 자체가 검증 대상).
+  단 (b) fake-serial 통합은 환경 무관 실행되므로 RTU 의미 검증의 실질 게이트다.
+- **com0com 설치는 scope 밖**(관리자 권한 드라이버 설치 = 사용자 결정/작업). 문서로만 안내.
+- **기준 테스트 카운트 = 178**(PR #31+#32 병합 반영) — 기동 시 `dotnet test`로 실제 재확인. 완료 후 =
+  178 + 신규 단위/CI 통합 테스트, (c) 실선 테스트는 환경 부재 시 스킵으로 보고.
 
-**Slot 1 — 이 스프린트가 건드리는 surface(엔드포인트/실행 경로) 목록**:
-- `HandshakeOrchestrator.ExecuteAsync` — R단계 arming(2A) + 잔류 대사 실패 terminal outcome(2C) 추가.
-- `Wcs.PlcGateway`(PlcPollingService 또는 레지스트리 기동 경로) — 기동 첫 폴 잔류 reconciliation(2B). 쓰기는 단일 큐 경유.
-- 신규 appsettings 타이밍 키(예: `Timing:RFlagClearConfirmTimeoutMs`) — R_Flag==0 확인 대기 상한.
-- `SimServer` — R 잔류 프리셋 수단(2E, 부재 시 추가).
-- `docs/SPEC.md` §4 — 잔류 대사 규칙 문서(2F).
+────────────────────────────────────────────────────────────────────────
+## Evaluation Criteria (Evaluator 판정 기준 — Library/CLI 4기준, ★★★ 최우선)
 
-**Slot 2 — Happy path (정상 입력 → 기대 결과 형상)**:
-- **[S1] 잔류→대사→성공**: R 영역에 (R_CellNo=20, R_Seq=123, R_Flag=1) 프리셋 → 핸드셰이크 시작 → **잔류 대사(ClearR 선행) 후 R_Flag==0 확인 → C 기입 → 진짜 응답 대사** → `HandshakeOutcome.Success`. (기존 레벨-읽기 코드였다면 이 케이스는 `RSeqMismatch`였음 — 회귀 대조로 fix 입증.) operation_log에 잔류값(rCellNo=20/rSeq=123) 포함 HANDSHAKE 기록 존재.
-- **[S4] 무잔류 정상 경로 회귀**: 깨끗한 상태(R_Flag=0)에서 연속 2건 핸드셰이크 → 2건 모두 `Success`, **추가 지연·잔류 대사 발화 0**(깨끗한 경로 기존 동작·타이밍 보존).
+1. **API Ergonomics / 전송 선택 명료성** (★★★): Transport 선택·RTU 옵션이 직관적이고 하드코딩 0.
+   콘솔이 "지금 어느 전송·포트로 리스닝 중"인지 즉시 알려주는가. 잘못된 값은 명확한 예외인가.
+2. **Architecture Originality / 추상화 품질** (★★★): 전송 교체가 SimServer 상태기계·프리셋·고장주입·
+   테스트 훅을 오염시키지 않는 깔끔한 seam인가(AI slop·과설계 아님). TCP/RTU 분기가 응집적인가.
+3. **Craft** (★★): 엔디안·타임아웃·UnitId 경계, 예외 삼킴 없음(RTU 예외 = 명시 처리), 리소스 정리
+   (포트/서버 dispose), 스킵 사유 로깅. 문서의 정확성(설정 예시가 실제로 동작).
+4. **Reliability** (★★): 회귀 0(기존 178 GREEN), RTU 의미가 TCP와 동일함을 (b)로 실증,
+   COM 부재 환경에서 스위트 안정 GREEN(스킵 포함).
 
-**Slot 3 — 관련 에러/에지 케이스 (Planner가 해당분만 선정 — 패딩 금지)**:
-- **[S2] off-by-one 연쇄 재현→전건 성공**: 잔류 존재 상태에서 같은 소터 **연속 3건**(현장 back-to-back 재현) → **3건 모두 `Success`**. (기존 코드: 3건 모두 `RSeqMismatch` 연쇄 — 자가지속 연쇄가 차단됨을 단정.)
-- **[S3] 기동 reconcile**: 게이트웨이가 R_Flag=1(+R_CellNo/R_Seq 잔류) 상태에서 폴링 시작 → 잔류가 **ClearR로 클리어됨**(스냅샷 R_Flag==0 도달) + **WARN 로그** + operation_log HANDSHAKE 잔류 기록. 이후 첫 핸드셰이크가 잔류를 오소비하지 않음.
-- **[S5] R_Flag==0 확인 타임아웃**: 잔류 대사 ClearR이 반영되지 않는 상황(소터 오프라인/PLC 무ack 모사) → 신규 확인-대기 타임아웃 경로가 **C를 기입하지 않고** 명확한 terminal Outcome(2C)으로 종결(무한 대기·더티 진행 없음). 테스트로 outcome 단정.
-- **[S6] 진짜 R_Flag 무응답 타임아웃 회귀**: 응답 자체가 없는 경우(Sim `InjectNoResponse` 등) → 기존 `RFlagTimeout` 경로가 그대로 동작(회귀 보존). arming 도입이 이 경로를 훼손하지 않음.
-- **[S7] 전체 스위트 GREEN + 빌드 경고 0**: `dotnet test backend/Wcs.sln` → 기존 169 전원 GREEN + 신규 S1~S6 GREEN(합계 169+N), 실패 0. `dotnet build` 경고 0(기존 관행). 동시성/타이밍 취약분은 기존 flake 교훈대로 **≥5회 반복 + stash 대조**로 회귀 귀속(1회 GREEN 신뢰 금지 — S9/E2E flake 교훈).
+가중: 회귀 0과 "전송만 교체·의미 동일"이 통과의 하드 게이트. 문서 없이 코드만 = 미완.
 
-## 5. Deliverables & 완료 조건 (Completion Gate)
+────────────────────────────────────────────────────────────────────────
+## Completion Conditions (Evaluator 통과 최소 조건 — 전부 AND)
 
-> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 증거(테스트 러너 요약 raw line·`git diff --stat`·operation_log/로그 발췌·`dotnet run`+Sim3ds 콘솔이 필요하면 그 출력)를 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정·이전 결과만으론 PASS 금지.
+- [ ] Sim3ds가 설정으로 Transport=Tcp(기본)|Rtu 선택 가능. 기본 실행이 현행 TCP :1502와 동일.
+- [ ] RTU 옵션 전부 설정값(하드코딩 0). 잘못된 Transport = fail-loud.
+- [ ] (a) 전송 선택/옵션 파싱 단위 테스트 GREEN.
+- [ ] (b) 실 SimServer(RTU) ↔ WCS ModbusRtuMaster fake-serial 왕복 통합 테스트 GREEN(환경 무관):
+      폴 Online + C/R 핸드셰이크 1건 + ClearR + 의미 검증(R_Seq==C_Seq 등) 1개 이상.
+- [ ] (c) 실선(WCS_RTU_TEST_PORTS) 테스트: 환경 부재 시 스킵 사유 출력 + 스위트 GREEN. (환경 있으면 왕복 GREEN.)
+- [ ] (d) 기존 전체 스위트(178 기준) 회귀 0 — TCP 경로·E2E 포함 독립 재실행으로 확인.
+- [ ] 콘솔/로그가 전송·엔드포인트를 명시.
+- [ ] 문서: 시리얼 페어 준비법(com0com/어댑터 직결) + WCS↔Sim RTU 리허설 절차 + 설정 예시(양쪽).
+- [ ] Non-change Guards 준수: git diff가 Wcs.Api/PlcGateway/Core/frontend/appsettings.json 0 라인.
+- [ ] dotnet build 경고 0(신규분), 예외 삼킴 0.
 
-- **① fix 입증(핵심)**: S1·S2가 GREEN이고, **동일 시나리오가 수정 전 코드에선 `RSeqMismatch`였음**을 대조 증거(stash/이전 커밋 대비 또는 arming 제거 시 RED)로 제시 — "레벨→arming" 전환이 실제로 연쇄를 끊었음을 입증.
-- **② 기동 reconcile(S3)·확인 타임아웃(S5)·무응답 회귀(S6)** 각각 자동 테스트 GREEN + 명확 outcome 단정.
-- **③ 무잔류 회귀(S4)**: 깨끗한 경로 성공 + 잔류 대사 미발화(추가 지연 0) 확인.
-- **④ 전체 169+N GREEN**(S7): raw 요약 인용. 타이밍 취약분 ≥5회 반복 + stash 대조.
-- **⑤ 절대규칙 준수 입증**: #1 — 모든 쓰기(잔류 ClearR·기동 reconcile ClearR)가 **단일 큐 경유**임을 소스/`OnWrite` 발화로 확인(오케스트레이터·API 직접 Modbus 호출 0). #7 — R_Flag==0 확인 타임아웃이 **appsettings에서 바인딩**(하드코딩 grep 0). #8 — `Wcs.Core` 판정 무접촉. #3 — TgtFloor 클리어 0(R 클리어만, 본 스프린트 대상·정당).
-- **⑥ 관측성**: 잔류 대사·기동 reconcile 발생 시 operation_log(HANDSHAKE)에 잔류값 포함 기록됨을 실증(테스트 또는 라이브 로그 발췌).
-- **⑦ 무변경 가드**: `git diff --stat` 판독 → 변경이 §2 IN 표면(`Wcs.PlcGateway`·`Wcs.Sim3ds`·`Wcs.Tests`·`docs/SPEC.md`·`appsettings*.json` 신규 타이밍 키)에만 국한. `git diff -- frontend` 빈 출력. `git diff -- backend/src/Wcs.Core` 판정 의미 불변. DbSeeder·마이그레이션·Sorters/Provider/ConnectionStrings 값 diff 0.
-- **⑧ 관측 무영향(fail-safe)**: 신규 `OnStage` action·기록 콜백이 논블로킹·예외 격리(핸드셰이크·폴 본동작 지연/중단 0) — 소스 확인 + ④ 타이밍 회귀로 실증.
+────────────────────────────────────────────────────────────────────────
+## Parallel Modules
+N/A (단일 모듈 — Wcs.Sim3ds + 그 테스트/문서. 경계 깨끗한 병렬 분할 없음). → Generator 1인.
 
-**Completion**: ①~⑧ 전부 PASS + `tasks/lessons.md`에 A-1 교훈(레벨 vs 에지/arming·잔류 대사·기동 reconcile·off-by-one 연쇄 기전) 1행 + `docs/SPEC.md` §4 동기화 완료 + 프로세스/포트 정리(:1502·:5080 free) + git status 핸드오프 동일.
+## Evaluation Dimensions
+functional only (표면이 시뮬레이터/CLI·프론트/보안/성능 민감 표면 없음). → Evaluator 1인, 1/1/1 기본 유지.
 
-## 6. 함정 (Traps)
+────────────────────────────────────────────────────────────────────────
+## Detected Project Type: Full-stack
 
-1. **깨끗한 경로 타이밍 회귀**: arming을 "항상 R_Flag==0 대기"로 구현하면 정상 건마다 지연 추가 위험. **R_Flag가 이미 0이면 지연 0으로 즉시 진행**(대기는 잔류 케이스에만). ③으로 실증.
-2. **PollIntervalMs(150) > RFlagPollMs(100) 창**: A-1의 실창. 잔류 대사는 이 창을 닫는 것이 목적 — R_Flag==0 확인을 **폴링 스냅샷 갱신 기준**으로 하되, 확인 대기 폴 간격과 타임아웃을 appsettings로.
-3. **ClearR 미반영 시 무한 대기**: R_Flag==0 확인 루프에 반드시 타임아웃(2C·S5) + OFFLINE 감지 종결. 더티 상태로 C 기입 진행 금지.
-4. **동시 핸드셰이크(F1b)와 혼동 금지**: 본 건은 '동시'가 아니라 '순차 연속'에서도 발생하는 별개 근본원인. per-소터 락으로 해소되지 않음. 잔류 ClearR이 동시 진행 건 응답을 지울 수 있다는 주의(순차 dispatch 전제) — Scope OUT에 명기, 악화 금지.
-5. **Sim R 자체 클리어 금지 보존**: 실측 PLC는 ClearR을 ack으로 R 유지(자체 클리어 안 함). Sim이 이 동작을 바꾸면 잔류 재현·회귀가 오염됨 — Sim 기존 R 유지 동작 보존, 프리셋만 opt-in 추가.
-6. **테스트 flake 귀속**: 핸드셰이크 통합 테스트는 타이밍 취약. 1회 GREEN 신뢰 금지 — ≥5회 반복 + stash 대조로 회귀 귀속(S9/IT4b/E2E 부하 flake 교훈). 고아 `Wcs.Sim3ds.exe`가 포트 점유·빌드 파일잠금 유발 가능 — 실패 시 kill 후 재시도.
-7. **관측 훅 fail-safe**: 신규 잔류 기록 콜백에서 동기 I/O·블로킹·예외 누수 금지(EmitStage try/catch 동형). 폴/핸드셰이크 핫패스 비지연.
-8. **테스트 provider 함정(교훈)**: 통합 테스트는 in-memory SQLite 더블. `Database:Provider` 즉시평가 키 override는 `builder.UseSetting`으로(2026-06-30 교훈) — 단 본 스프린트는 DB 스키마 무변경이라 대개 무관.
+(레포 신호에 근거 — frontend/ 브라우저 진입점 + Wcs.Api 서버 라우트가 같은 레포에 공존.
+사용자 표현이 아니라 구조로 판별.)
 
-## 7. Questions / Assumptions (모호점)
+> **투명성 노트(S-HANDSHAKE-RESIDUE 계약 선례 준용)**: 레포 전체는 Full-stack이나, **이 스프린트가
+> 변경하는 표면은 백엔드/시뮬레이터 단독**이다 — 독립 콘솔 실행체(`Wcs.Sim3ds`, OutputType=Exe) +
+> 그것의 타입 공개 API(`SimServer`/`Options`, xUnit이 소비) + docs. **프론트엔드 0·HTTP 엔드포인트 0·
+> DB 0·appsettings.json 0 변경.** 따라서 아래 Full-stack 슬롯 중 순수 프론트 Web/UI 슬롯은
+> 근거를 달아 N/A로 두고, 시뮬레이터/백엔드 표면의 시나리오와 전송 경계를 넘는 데이터 플로우
+> 시나리오를 실효 검증으로 채운다.
 
-> 수정 방향은 사용자 보고·확정 완료(배경). 아래는 Generator 재량 설계점과 전제 — **블로킹 질문 없음**. 진행 중 스펙 모호가 새로 발견되면 `docs/SPEC.md` "미확정 사항"에 기록.
+## Verification Scenarios (Full-stack 슬롯 — 필수)
 
-- **A1 (전제)**: 소터당 **순차 dispatch** 유지(SPEC 물리 직렬 전제). 동시 IF-10 직렬화(F1b)는 본 스프린트 밖 — 잔류 대사는 이 전제 위에서 안전.
-- **A2 (Generator 재량)**: R_Flag==0 확인 타임아웃 키명·기본값, arming 로직 배치, `RFlagRaised` 에지 채널 소비 여부, 신규 `HandshakeOutcome` 값 추가 vs 기존값 재사용 — 전부 Generator 결정(제약: 절대규칙 #1·#7·#8, terminal outcome은 테스트 가능·비-silent).
-- **A3 (전제)**: 기동 reconcile은 첫 유효(Online) 폴 기준 1회. 클리어된 잔류 응답의 대기자는 없고 C_Seq 리셋 상태이므로 유지가 아니라 클리어가 정당한 복구.
-- **A4 (확인 대상)**: Sim3ds가 실측 PLC 동작(C_Flag 자체 클리어·SortDuration 에코 지연·ClearR까지 R 유지)을 이미 모사함(2E에서 확인). **부재 확인분은 R 잔류 프리셋뿐** — 그것만 추가.
+### Applicable Web/UI scenarios (프론트 표면)
+- **N/A** — 이 스프린트는 프론트엔드 파일을 전혀 건드리지 않는다. Sim3ds는 헤드리스 콘솔 시뮬레이터로
+  브라우저 표면이 없다. (프론트 회귀는 Non-change Guard의 git diff 0로 보장.)
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Slot 1 surface 목록, Slot 2 happy path[S1·S4], Slot 3 error/edge[S2·S3·S5·S6·S7]). All slots filled: yes.
+### Applicable Backend/API scenarios (시뮬레이터/백엔드 표면 — 이 스프린트가 건드리는 "서버측" 표면)
+"엔드포인트" 대신 **콘솔/설정 진입점 + Sim3ds 타입 공개 표면 + WCS↔Sim Modbus 왕복**을 시나리오로 열거:
+- **S1 — TCP 회귀(기본 경로 불변)**: Transport 미지정/Tcp → Sim3ds가 여전히 TCP :1502 바인딩,
+  현행과 동일 동작. 증거: PlcGatewayIntegrationTests·HandshakeResidueTests·ScenarioTests·E2E
+  독립 재실행 GREEN + 콘솔 "…기동 TCP 127.0.0.1:1502".
+- **S2 — RTU 선택 + 옵션 파싱(해피)**: Transport=Rtu + RTU 옵션(PortName/BaudRate/Parity/StopBits/
+  UnitId) 설정/CLI 파싱, 하드코딩 0. 증거: 단위 테스트가 파싱 결과 단언 + 콘솔
+  "…기동 RTU COMx 9600/Even/One unit=1".
+- **S3 — RTU 의미 동일성(해피, 핵심)**: 실 SimServer(RTU) ↔ WCS ModbusRtuMaster fake-serial 왕복 —
+  폴 Online 스냅샷 → CellAssign → C_Flag=1 → Sim R 에코(R_Seq==C_Seq, Ready 블립 없음) →
+  ClearR → R_Flag=0. 증거: (b) 통합 테스트 GREEN(환경 무관) + 타임라인 로그.
+- **S4 — 에러/스킵 경계**: 잘못된 Transport 값 → fail-loud 예외(단위 테스트). 그리고 COM 페어
+  부재(WCS_RTU_TEST_PORTS 미설정) → (c) 실선 테스트가 **스킵(사유 출력)**, 전체 스위트 GREEN 유지.
+  이 스킵 동작 자체가 검증 대상.
+
+### End-to-end 데이터 플로우(2+ 계층/프로세스 교차)
+- WCS 마스터 프로세스(`ModbusRtuMaster` → `PlcPollingService` + `HandshakeOrchestrator`) ↔
+  **시리얼 경계** ↔ Sim3ds 슬레이브(`ModbusRtuServer` + SimServer 상태기계)의 전 구간 C/R 핸드셰이크
+  왕복. **CI(환경 무관)**: fake-serial 페어로 실 SimServer를 태워 결정적 검증(S3). **실선(환경 게이트)**:
+  WCS_RTU_TEST_PORTS 지정 시 실 OS 시리얼 스택으로 동일 왕복(프레이밍·타임아웃 실측 커버리지 추가);
+  미지정 시 스킵. — "레지스터가 시리얼을 건너 WCS↔Sim을 왕복한다"는 흐름을 기술(도구가 아니라 흐름).
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios [N/A+사유], Applicable Backend/API scenarios [S1~S4], End-to-end 데이터 플로우 [WCS↔serial↔Sim]). All slots filled: yes.
+
+────────────────────────────────────────────────────────────────────────
+## Questions (사용자 확인 필요 — novel 결정, 선택지+권장안)
+
+**Q1. Sim3ds 설정 제공 방식** *(진짜 결정 — 현재 `Program.cs`가 Options를 하드코딩. "appsettings/환경변수
+Sim3ds:*로 제공"이라는 주석은 stale이고 Sim3ds는 자체 config 파일·바인딩이 없다. RTU 도입은 이 갭을
+닫는 일이기도 함.)*
+- (A) **CLI 인자만** — 예: `dotnet run --project ...Wcs.Sim3ds -- --transport rtu --port COM6 --baud 9600`.
+  가장 가볍고 리허설에 빠름. 새 파일 없음. 단 절대규칙 #7("전부 설정값") 철학과 약함.
+- (B) **appsettings.Sim3ds.json(자체 파일) + 환경변수** — 절대규칙 #7·기존 API의 Sim3ds 블록 형태와 정합.
+  약간 무겁고 리허설 때 파일 편집 필요.
+- (C) **둘 다** — appsettings(기본값, Transport=Tcp로 현행 보존) + CLI/환경변수 오버라이드로 리허설
+  시 `--transport rtu --port COMx` 한 줄 전환. ← **권장**. 근거: (i) 절대규칙 #7을 지키면서 stale
+  주석의 약속을 실제로 구현, (ii) 기본 Transport=Tcp라 현행 `dotnet run` 동작 바이트 동일 보존,
+  (iii) 목요일 리허설에서 파일 편집 없이 CLI로 즉시 RTU 전환.
+
+**Q2. 리허설 문서 위치**
+- (A) `docs/SPEC.md` §6/§7-A에 추가 — 스펙과 한 곳.
+- (B) **`docs/RTU-REHEARSAL.md` 신규(SPEC §6/§7-A에서 링크)** ← **권장**. 근거: SPEC.md는 "응축 스펙"
+  성격이고, 단계별 운영자 리허설 절차(com0com 설치·결선·기동·확인)는 절차 문서라 별도 파일이 스펙
+  가독성을 해치지 않는다. SPEC에는 1줄 포인터만 추가.
+
+**Q3(확인만 — 권장 채택 예정)**: 실선 테스트 환경 게이트 변수명 = `WCS_RTU_TEST_PORTS=COMx,COMy`
+(client,server 순), 스킵은 기존 `LiveMultiAgvRunner` early-return 패턴 준수(새 의존성 없음). RTU
+기본 파라미터는 WCS `Sorters[0]` placeholder와 정합(9600/Even/One/UnitId=1), PortName은 기본값 없이
+명시 요구. 이견 없으면 이대로 진행.
+
+────────────────────────────────────────────────────────────────────────
+## 참고 — 이 스프린트에서 활용/보존할 기존 자산
+- `backend/tests/Wcs.Tests/FakeSerialPort.cs` — `IModbusRtuSerialPort` in-memory 페어(이미 존재).
+  (b) 통합 테스트가 실 SimServer(RTU)를 여기에 결선. `FakeSerialPortPair.Create()` 재사용.
+- `backend/tests/Wcs.Tests/RtuTransportTests.cs` VT-2 — WCS 마스터↔hand-rolled RtuServer 왕복 선례
+  (본 스프린트 (b)는 실 SimServer 상태기계로 격상).
+- `backend/tests/Wcs.Tests/PlcGatewayIntegrationTests.cs` — SimServer(TCP)↔GW 통합 패턴·teardown
+  (Writer.TryComplete → StopAsync → DisposeAsync) 준용.
+- `backend/tests/Wcs.Tests/E2E/LiveMultiAgvRunner.cs` — 환경변수 게이트 + early-return 스킵 선례(준수).
+- `backend/src/Wcs.PlcGateway/Modbus/ModbusRtuMaster.cs` — fake-port 주입 생성자 패턴(SimServer RTU
+  seam 설계의 동형 참조).
+
+── ★ 사용자 확정 (2026-07-07, Phase 1→2 게이트 통과) ─────────────────────────
+Q1 설정 방식: **C안 — appsettings.Sim3ds.json 기본값(Transport=Tcp 현행 보존) + CLI/환경변수 오버라이드**
+   (목요일 현장: `dotnet run -- --transport rtu --port COMx` 한 줄 전환)
+Q2 문서: **B안 — docs/RTU-REHEARSAL.md 신설**, SPEC §6에서 링크
+Q3 확인: 환경 게이트 변수 WCS_RTU_TEST_PORTS=COMx,COMy / RTU 기본값은 WCS Sorters[0]
+   placeholder 정합(9600/Even/One/UnitId=1), 기본 PortName 없음(미지정 시 fail-loud)
+브랜치: feat/sim3ds-rtu — PR #33 위 스택. ⚠ 병합 순서 #33→본 PR (본 PR은 draft로 생성 예정)

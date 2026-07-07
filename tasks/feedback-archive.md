@@ -2,6 +2,21 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-SIM3DS-RTU (Sim3ds TCP→RTU 전송 계층 추가 · 실 PLC 없이 RTU 리허설 · 전송만 교체·의미 동일) — APPROVED (2026-07-07, 1 iteration)
+
+- **"전송만 교체·의미 동일"의 진짜 게이트 = 실 SUT 상태기계를 fake-transport에 태운 왕복(hand-rolled mock ≠ 실증)**: 기존 VT-2는 hand-rolled `ModbusRtuServer`를 썼을 뿐 실 SimServer 상태기계를 안 태웠음 → 이번 B1/B2는 프로덕션 `new SimServer(opt, fakePort:...)`를 in-memory FakeSerialPort에 결선해 **실 RunSimLoopAsync/RunSortSequenceAsync + 실 FluentModbus ModbusRtuServer**가 D0~D6를 구동, WCS ModbusRtuMaster가 폴 Online→C/R 핸드셰이크 Success(R_Seq==C_Seq)→ClearR→R_Flag=0을 왕복. seam이 상태기계를 오염 안 함의 실증은 "GREEN"이 아니라 "실 SUT가 fake 위에서 도는가"의 코드 판독(생성자·팩토리 라우팅)으로 닫힘. 물리 COM 불요 → 환경 무관 CI 게이트.
+- **전송 추상화 seam 오염 판정 체크리스트(재사용)**: ①레지스터 버퍼 참조가 공통 기반 타입(`ISimTransport.Server`=ModbusServer)으로 라우팅되고 엔디안 패턴 불변인가 ②전송 필드가 워커 루프 생성 **전** 1회 대입(Task.Run 배리어)돼 null-race 불가인가 ③잘못된 값은 팩토리가 필드 대입 **전** throw→상위 fail-loud·정리 경로 `?.` null-safe인가 ④상태기계/프리셋/Inject 훅이 전송 무관 섀도 배열만 조작(diff로 무접촉 확인)인가 ⑤externally-owned 주입 자원은 이중 dispose 안 하는가. GREEN 5회 + 이 5축 코드 판독으로 seam 안전 확정.
+- **환경 게이트 스킵 로직 자체가 검증 대상 — early-return 스킵은 "통과"로 계수(0 skip)이므로 사유 출력을 verbose로 캡처해 확인**: `WCS_RTU_TEST_PORTS` 미설정 시 C1이 early-return(xUnit 2.9.3 동적 Skip 미지원·LiveMultiAgvRunner 패턴) → 스위트 `건너뜀:0`으로 나오나 실제론 스킵됨. `--logger console;verbosity=detailed`로 `[C1] ... 미설정 — 건너뜀 ...` 사유 라인을 캡처해야 "스킵 경로가 실제로 탄다"가 입증됨. 새 SkippableFact 의존성 도입 0(계약 준수·프로젝트 convention 확인 원칙).
+- **CLAUDE.md 물리 제약(COM1 실 PLC)이 검증 표면을 가름 — RTU 실선 미기동, fake-serial(b)로 의미 검증·(c) 실선은 환경 게이트**: Sim은 TCP로만 기동(1502 loopback·안전), RTU 콘솔 엔드포인트 형식은 `RtuSimTransport.Endpoint` 코드 확정 + 문서로 검증. 물리 COM 시리얼 파라미터(baud/parity/stopbits) 적용은 fake-serial이 협상을 안 하므로 (b)에서 안 탐 → 실측은 실선 게이트+현장 리허설의 몫(계약이 의도한 (b)/(c) 분업 경계, 갭 아님). 무변경 가드: Wcs.Api/PlcGateway/Core/Data/frontend/appsettings.json diff 0줄, SimServer 공개 표면 additive-only, FluentModbus 5.3.2 고정. 빌드 경고 0(NU1903 선재 부채는 audit 격리).
+
+## S-FIELD-20CELLS (현장 20셀·15가용 전이 — 기존 Enabled 게이트 재사용[A안]·시드+프론트 5열, 백엔드 코드 0) — APPROVED (2026-07-07, 1 iteration)
+
+- **"신규 게이트 불요"의 입증 = 프로덕션 diff 0 + 음성 대조 테스트**: A안(기존 `cell.Enabled` 재사용)의 핵심 리스크는 "게이트가 실제로 16~20을 막는가"인데, 이는 `git diff HEAD -- backend/src` 빈 출력(코드 무변경)만으론 부족하고 **T1의 음성 대조**(셀16 Enabled=1 승격 시 SelectCell이 16 반환)가 "게이트=Enabled"를 역증명해야 닫힌다. 무변경 주장 + 데이터-온리 확장 경로는 "Enabled를 올리면 즉시 선택됨"을 테스트가 실증할 때만 신뢰. → 무변경 스프린트에서도 게이트 술어의 능동/차단 양방향을 테스트가 구별하는지 확인.
+- **A안 gap(①활성 배정 재사용 경로는 Enabled 무시) 봉합은 배정 해제 + 오더 CANCELLED 이중으로**: `Enabled=0`은 ②빈 셀 폴백만 차단하고 ①`HasAssignedCellWithRoom`/SelectCell①은 Enabled를 안 봄 → 셀16이 활성 cell_assignment를 가지면 재사용돼 뚫린다. 시드가 (a)셀16 활성 배정 `ReleasedAt=now` 해제 + (b)오더 `0701-CELL-16` CANCELLED(QueryDestination이 COMPLETED/CANCELLED 제외 → NO_DEST)로 봉합. IF-05 CELL-16 NG가 "1~15 점유 여부와 무관하게 결정적"(T2 piece_event Reason=NO_DEST)임이 gap 봉합의 증거. order_item은 이력 보존(INSERT NOT EXISTS만·실적 무조작).
+- **실 DB 전이 시드 검증 = released 이력 보존 + 멱등 재실행 카운트 불변**: 적용 전 활성 7건(셀10~16)에서 시드가 셀1~9 활성 재삽입으로 15건 픽스처 재수립 → active 15(1~15)·released 10(1~9 어제 해제분 9 + 셀16 해제 1)·assign_total 25(원본16+9). 결정적 픽스처 15 요구 충족하며 released 소실 0. 멱등은 요약 `20 15 5 15 1` + assign_total 25→25(중복삽입 0)로 재실행 불변 실증. 현장 실 데이터(piece 908/909·piece_event·sorter_command 2/2/2)는 시드 SQL이 참조조차 안 함(전문 판독).
+- **실 DB 자동 시드 벡터 차단 재확인(2026-07-03 사고 교훈 상시 적용)**: 프론트 브라우저 검증 위해 API를 실 SqlServer DB에 붙여 기동해야 하나 — base·appsettings.Development.json 둘 다 `SeedOnStartup=false` + launchSettings 부재로 `dotnet run` 기본 Production이라 자동 시드 0. 방어적으로 `ASPNETCORE_ENVIRONMENT=Production` 명시 기동. 라이브 IF-05는 piece 런타임 산물을 만들어 현장 데이터를 오염시키므로 **미발동**(IF-05 게이트는 T2/T3 자동 테스트로 커버 — 계약 "자동 테스트, 일회성 curl 금지" 정합). 실 DB는 읽기 쿼리 + 멱등 재적용 1회만 손대 클린 유지.
+- **5열 고정 그리드 브라우저 검증 = computed grid-template-columns + row top-offset + narrow scrollWidth**: "20타일 5×4"는 스크린샷 육안만으론 약함 → `getComputedStyle(grid).gridTemplateColumns`가 정확히 5값(190px×5)·distinct row top-offset 4개(249/346/442/539)·비활성 배지 타일 정확히 셀16~20 5개 op0.6로 정량 단정. 좁은 폭(500px)은 `overflow-x-auto` 컨테이너 scrollWidth 552 > clientWidth 234로 "5열 유지·가로 스크롤"(타일 뭉개짐 0) 실증. 콘솔 pageerror/error/React warning 0(무해 vite/devtools 3줄만).
+
 ## S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 레벨-읽기 → arming 전환 + 기동 잔류 reconcile · 감사 A-1) — APPROVED (2026-07-07, 1 iteration)
 
 - **fix 입증은 Evaluator가 직접 arming 비활성/복원 대조로 — GREEN 테스트만으론 "레벨→arming 전환이 연쇄를 끊었다"를 못 보임**: `ArmRFlagZeroAsync` 호출을 임시 주석 처리 후 재빌드 → S1/S2가 `RSeqMismatch`(잔류 R_Seq=123을 새 건 cSeq=1이 오소비) 재현(RED). 복원(SHA256 byte-identical 대조) + `--no-incremental` 재빌드 → S1/S2 `Success`. 이 대조가 "레벨-읽기 결함이 실재했고 arming이 그것을 제거했다"의 유일한 직접 증거(신규 테스트가 GREEN인 것만으로는 회귀 대조가 안 됨).
@@ -374,3 +389,5 @@
 - [CODE-REVIEW] sprint=S-FRONTEND-F2 pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-FRONTEND-F2 critical=0 major=2 minor=5 iter=2 opus=yes (MAJOR 2건을 fix-only iter로 즉시 해소 — M2 영구 재연결 부재는 무인 관제 월보드의 Done 의미 실질 훼손이라 이연 대신 수정(orchestrator 판단·65s+ 다운 자동 복구 입증). M1 relay 주석. MINOR 5 이연. Evaluator 근접실패(git checkout으로 Generator 미커밋 의존 소거→재구성) 교차확인 클린 + 2차엔 npm --no-save로 무접촉 처리 — 교훈 등재.)
 - [CODE-REVIEW] sprint=S-HANDSHAKE-RESIDUE critical=0 major=0 minor=4 iter=1
+- [CODE-REVIEW] sprint=S-FIELD-20CELLS critical=0 major=0 minor=5 iter=1
+- [CODE-REVIEW] sprint=S-SIM3DS-RTU critical=0 major=0 minor=6 iter=1
