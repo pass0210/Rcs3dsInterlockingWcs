@@ -77,6 +77,11 @@ public sealed record PlcGatewayOptions
     public int RFlagPollMs      { get; init; } = 100;
     public int RFlagTimeoutMs   { get; init; } = 30000;
     public int CFlagTimeoutMs   { get; init; } = 5000;
+
+    // S-HANDSHAKE-RESIDUE — 잔류 대사 ClearR 후 R_Flag==0 확인 대기 상한(ms).
+    // 하드코딩 금지(절대규칙 #7). 분류 최대 소요와 무관한 "클리어 반영" 대기이므로
+    // RFlagTimeoutMs보다 짧게(현장 폴 주기 몇 배) 잡는다. 초과 시 C 미기입 종결(§2C).
+    public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -227,6 +232,8 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         // S-OBSERVABILITY: 전체 레지스터 전이 감지용 직전 스냅샷(변화분 정책 — 무변화는 발화 0).
         // null = 첫 폴(직전값 없음 → 전이 기록 안 함, baseline만 설정).
         PlcSnapshot? prevSnap = null;
+        // S-HANDSHAKE-RESIDUE §2B: 기동 잔류 R_Flag reconciliation 1회 게이트(첫 유효 폴 기준).
+        bool startupReconciled = false;
 
         while (!ct.IsCancellationRequested)
         {
@@ -267,6 +274,32 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 if (prevSnap is { } p)
                     EmitRegisterChanges(p, snap);
                 prevSnap = snap;
+
+                // ── S-HANDSHAKE-RESIDUE §2B: 기동 잔류 R_Flag reconciliation (첫 유효 폴 1회) ──
+                // PLC 기동 직후 R 영역 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가
+                // 소비하기 전에 차단한다. 근거: 기동 잔류를 지우면 그 응답을 기다리는 대기자는 없고
+                // C_Seq 카운터도 리셋 상태이므로, 잔류를 유지하면 후속 전(全) 건이 "직전 응답"을
+                // 오소비하는 off-by-one 연쇄를 낳는다 → 클리어가 정당한 복구(§A3).
+                // 쓰기는 반드시 단일 큐 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지.
+                // 관측: WARN 로그(잔류값 포함) + ClearR의 OnWrite(PLC_WRITE) + 이후 폴의
+                //       OnRegisterChange(R_CellNo 20→0·R_Seq 123→0·R_Flag 1→0)로 잔류값이 기록됨.
+                if (!startupReconciled)
+                {
+                    startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
+                    if (snap.RFlag)
+                    {
+                        try
+                        {
+                            _log.LogWarning(
+                                "[폴링] 기동 첫 폴 R_Flag=1 잔류 감지 — ClearR 대사(단일 큐 경유): " +
+                                "R_CellNo={RCellNo} R_Seq={RSeq}", snap.RCellNo, snap.RSeq);
+                        }
+                        catch { /* 로거 disposed — 무시 */ }
+
+                        // 큐 경유 ClearR(컨슈머가 RMW로 R_Flag clear + R 영역 0). TryWrite = 논블로킹.
+                        _writeQueue.Writer.TryWrite(new PlcWrite.ClearR());
+                    }
+                }
 
                 // R_Flag 상승 (0→1) 감지
                 if (!prevRFlag && snap.RFlag)

@@ -498,6 +498,8 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             RFlagPollMs    = t?.RFlagPollMs    ?? commonTiming.RFlagPollMs,
             RFlagTimeoutMs = t?.RFlagTimeoutMs ?? commonTiming.RFlagTimeoutMs,
             CFlagTimeoutMs = t?.CFlagTimeoutMs ?? commonTiming.CFlagTimeoutMs,
+            RFlagClearConfirmTimeoutMs =
+                t?.RFlagClearConfirmTimeoutMs ?? commonTiming.RFlagClearConfirmTimeoutMs,
         };
     }
 }
@@ -565,6 +567,9 @@ public sealed record SorterTimingOverride
     public int? RFlagPollMs    { get; init; }
     public int? RFlagTimeoutMs { get; init; }
     public int? CFlagTimeoutMs { get; init; }
+
+    // S-HANDSHAKE-RESIDUE — 소터별 잔류 대사 확인 타임아웃 오버라이드(null=공통 상속).
+    public int? RFlagClearConfirmTimeoutMs { get; init; }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -616,4 +621,7 @@ public sealed record TimingOptions
     public int RFlagPollMs      { get; init; } = 100;
     public int RFlagTimeoutMs   { get; init; } = 30000;
     public int CFlagTimeoutMs   { get; init; } = 5000;
+
+    // S-HANDSHAKE-RESIDUE — 잔류 대사 ClearR 후 R_Flag==0 확인 대기 상한(ms).
+    public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
 }

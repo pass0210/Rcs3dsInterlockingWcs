@@ -1,126 +1,129 @@
-# Sprint Contract — S-FRONTEND-F2 (SignalR 실시간 + 3DS 워드 뷰(읽기 전용) + oplog 라이브 테일)
+# Sprint Contract — S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 잔류 대사 — off-by-one 연쇄 차단)
 
-> **프론트엔드 F2 스프린트** — `docs/FRONTEND.md` §2(실시간 설계)·§5 페이지 ②·§6 F2가 **범위의 단일 진실. 재설계 금지.**
-> WHAT/WHERE/검증만 규정 — 정확한 시그니처·허브 메서드명·컴포넌트 구조·타이밍 상수 값은 **Generator 재량(제약 내)**. 코드 구현 0.
-> F1(스캐폴드·정적 서빙·모니터링 읽기·Airbnb 라이트 테마) 병합 완료 위에 실시간 계층을 얹는다.
+> **감사 A-1 현장 발현 수정 스프린트** — 2026-07-06 현장 라이브 진단으로 확정된 결함.
+> `HandshakeOrchestrator`가 R_Flag를 **레벨**로 읽어 직전 건(또는 PLC 기동)의 잔류 R_Flag=1을
+> 새 건의 응답으로 오인 → 허위 RSEQ_MISMATCH → off-by-one 연쇄 자가지속.
+> WHAT/WHERE/검증만 규정. **정확한 메서드·시그니처·appsettings 키명·값·구현 배치는 Generator 재량(제약 내). 코드 구현 0.**
 
 ## 0. 메타
 
 | 항목 | 값 |
 |------|-----|
-| Sprint ID | S-FRONTEND-F2 |
-| Branch | `feat/frontend-f2` |
-| Base | `develop` (PR #29까지 병합 — backend/ 구조·F1 모니터링·Airbnb 라이트 테마·시드 가드) |
-| Detected Project Type | **Full-stack (Web/UI)** — `.mcp.json` Playwright 존재(F1 신설). Evaluator 브라우저 검증 슬롯 발동. |
-| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 페이즈·팬아웃 없음) |
-| Test baseline | **164 GREEN** (완료 시 164 전원 GREEN 유지 + 신규 허브 통합 테스트 = 164+N) |
-| 스펙 소스 | `docs/FRONTEND.md` §2·§5 페이지 ②·§6 F2 / `docs/DESIGN-airbnb.md`(토큰) / `docs/SPEC.md`(레지스터 맵 D0~D6) |
-| 이월 처리 | **F1-CR-M1**(IMonitoringQueries DI AddScoped) · **RESTYLE-CR-M1**(Rausch 버튼 AA) · **RESTYLE-CR-M2**(faint 정보성 텍스트 AA) — 3건 전부 이번 스프린트 IN |
+| Sprint ID | S-HANDSHAKE-RESIDUE |
+| Branch | `fix/handshake-rflag-residue` (생성 완료 — 현재 체크아웃) |
+| Base | `develop` (PR #30까지 병합) |
+| Detected Project Type | **Backend/API** (아래 투명성 노트 참조) |
+| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 컴포넌트·팬아웃 없음) |
+| Test baseline | **169 GREEN** (기동 시 `dotnet test`로 실제 카운트 재확인 — 완료 시 기존 전원 GREEN 유지 + 신규 시나리오 = 169+N) |
+| 스펙 소스 | `docs/SPEC.md` §4(C/R 핸드셰이크)·§6(Sim3ds 동작) / `tasks/audit-20260701-full.md` A-1 / 현장 실측(2026-07-06) |
+| 배경 상태 | 감사 A-1 CONFIRMED. 현장 로그로 5연쇄 재현 확인, 잔류 없는 깨끗한 상태에선 연속 2사이클 성공 확인. 수정 방향은 사용자 보고·확정 완료 — 본 계약은 이를 WHAT으로 구체화. |
+
+> **투명성 노트(프로젝트 타입)**: 레포는 구조상 Full-stack(`frontend/` + `backend/`)이다. 그러나 **이 스프린트의 변경 표면은 100% 백엔드 Modbus 핸드셰이크 계층**(`Wcs.PlcGateway` + `Wcs.Sim3ds` 테스트 더블 + `Wcs.Tests` + `docs/SPEC.md`)이며 **frontend·브라우저 표면 접촉 0**이다. 교차되는 "레이어"는 오케스트레이터 ↔ 단일 쓰기 큐 ↔ Modbus ↔ Sim-PLC로, frontend↔backend 데이터 흐름이 아니다. 따라서 Full-stack의 브라우저 E2E 슬롯은 **적용 불가(false gate)**이고, 정답 검증은 **Backend/API 필수 검증 = 자동 테스트 코드 실행**(Sim3ds Modbus 더블 기반 xUnit 통합 테스트)이다. Playwright/브라우저 검증은 이 스프린트에 해당 없음.
 
 ## 1. 목표 (WHAT · 한 줄)
 
-`Wcs.Api`에 SignalR 허브(`/hubs/monitor`)와 relay 서비스를 신설해 **기존 관측 훅을 재사용(신규 폴 루프 0)** 으로 소터 워드(D0~D6+Online) 변화분·operation_log 엔트리를 실시간 push하고, 프론트에 **읽기 전용 3DS 워드 페이지 ②**(변경 하이라이트·재연결 부트스트랩 복구)와 **operation_log 라이브 테일**을 추가하며, TanStack Query를 SignalR 이벤트로 무효화 연동한다. 동시에 이월 3건(DI AddScoped·명암비 2건)을 해소한다. **쓰기·제어·인증은 F3 — 이 스프린트는 관측/뷰 전용.**
-
-**relay 불변식(핵심)**: 훅 콜백은 **논블로킹·예외 격리**, `IHubContext`는 **fire-and-forget**. 관측이 폴(150ms)·핸드셰이크·API 본 동작을 지연시키지 않는다(S-OBSERVABILITY 계약과 동형). **PlcGateway/Wcs.Core 의미·훅 시그니처 0 변경.**
+`HandshakeOrchestrator`의 R단계 레벨-읽기 결함을 **"C 기입 전 R_Flag==0 관찰 보장(arming)"** 으로 무장하고, **기동 시 잔류 R_Flag 대사(reconciliation)** 를 추가해, 직전 건·PLC 기동 잔류가 새 건의 응답으로 오소비되어 발생하는 **허위 RSEQ_MISMATCH off-by-one 연쇄를 근본 차단**한다. 모든 PLC 쓰기는 단일 큐 경유(절대규칙 #1), 대기 상한은 전부 appsettings(절대규칙 #7), 잔류 대사 발생은 operation_log(HANDSHAKE)에 잔류값 포함 기록(관측성).
 
 ## 2. Scope IN
 
-### 2A. `Wcs.Api` — SignalR 허브 `WcsMonitorHub` (`/hubs/monitor`)
-- **신규 파일**(예: `backend/src/Wcs.Api/Hubs/WcsMonitorHub.cs`). `Hub` 파생, 인증 없음(사용자 확정).
-- **부트스트랩(§2.1)**: `OnConnectedAsync`에서 `ISorterGatewayRegistry.AllBundles`의 각 `Latest`(전체 D0~D6 + Online) 스냅샷을 **접속 클라이언트에 1회 전송** → 늦게 접속한 클라이언트도 즉시 완전 상태 확보. 재연결 시에도 동일 경로로 복구.
-- **구독 그룹**: oplog 테일 구독(그룹 `oplog`)과 소터 워드 구독을 클라이언트가 선택 가능(허브 메서드). **고빈도 `POLL_CHANGE`는 oplog 기본 스트림에서 제외 또는 명시 옵트인**(콘솔/테일 폭주 방지 — DB 정책과 동형). 초기엔 소터 워드 델타는 전량 push + 클라이언트 필터로 단순화 가능(§2.1·§2.2).
-- 소터 워드 변화분 델타(reg·old·new·chuteNo)·Online/Offline 전이·하트비트 스냅샷·oplog 엔트리를 클라이언트로 push하는 메시지 계약(메서드명·payload 형상은 Generator 재량, 프론트 타입과 1:1).
+### 2A. 핸드셰이크 시작 시 잔류 대사 (arming) — `HandshakeOrchestrator`
+- **핵심 불변식**: 핸드셰이크 1건은 **R_Flag==0을 1회 관찰한 뒤에만** 이후 R_Flag==1 상승을 자기 응답으로 수용한다. 0 확인 이후의 레벨 읽기는 에지 감지와 등가.
+- **동작(WHAT)**: C(CellAssign) 큐 투입 **이전**에 스냅샷 R_Flag를 확인 →
+  - R_Flag==0 이면 → 그대로 진행(추가 지연 0 — 깨끗한 경로는 기존 타이밍 보존).
+  - R_Flag==1 이면 → **잔류로 간주**: (1) WARN 로그 + (2) operation_log(HANDSHAKE) 기록 — 잔류값 `rCellNo`/`rSeq` 포함(§2D 관측성) + (3) **ClearR 선행 큐 투입**(절대규칙 #1 — 큐 경유) + (4) 폴링 스냅샷에서 **R_Flag==0 확인 대기** → 확인 후에만 C 기입 진행.
+- **R_Flag==0 확인 대기 타임아웃**: 하드코딩 금지(절대규칙 #7) — 신규 appsettings 타이밍값(예: `Timing:RFlagClearConfirmTimeoutMs`, 키명·값 Generator 재량)에서 읽는다. 초과 시 **C를 기입하지 않고** 명확한 terminal Outcome으로 종결(§2C·시나리오 5). 대기 중 OFFLINE 감지도 기존 대기 루프들과 동형으로 명확 종결.
+- 배치(대사 로직을 `ExecuteAsync` 내 C 투입 직전 별도 단계로 둘지, `WaitCFlagZeroAsync`류와 나란히 둘지 등)와 폴링·에지 채널(`RFlagRaised`) 소비 여부는 **Generator 재량**. 절대규칙 #1(쓰기=큐)·#7(타이밍=설정)만 불가침.
 
-### 2B. `Wcs.Api` — relay 서비스 (기존 훅 재사용 · 신규 폴 루프 0)
-- **신규 relay 서비스**(IHostedService 등 — HOW는 Generator). 두 소스를 `IHubContext<WcsMonitorHub>`로 fire-and-forget 브로드캐스트:
-  - **① 소터 워드 스트림**: `SorterBundleHandle`의 `SubscribeRegisterChange`(reg,old,new)·`SubscribeOnline`·`SubscribeOffline`를 relay가 **추가 구독**(기존 operation_log 구독과 나란히 — 훅은 멀티캐스트 이벤트). 변화분만 push(무변화 0). + **저빈도 하트비트**: 주기적으로 `AllBundles`의 `Latest` 전체 스냅샷 1회 push(델타 유실·재연결 갭 보정).
-  - **② operation_log 테일 스트림**: 단일 초크포인트 `OperationLogService`(단일 컨슈머)에서 각 엔트리를 그룹 `oplog`로 브로드캐스트. **DB 영속화와 별개 경로**(기록 실패가 스트림을, 스트림 실패가 기록을 막지 않음). `POLL_CHANGE`는 기본 제외/옵트인(2A).
-- **relay 안전 요건(불변식)**: 모든 콜백/브로드캐스트는 **논블로킹·예외 흡수(fail-safe)**. 폴/쓰기/핸드셰이크 스레드에서 직접 호출되므로 예외가 새어나가 루프를 죽이면 안 됨(기존 훅 계약·Program.cs L365-419·PlcGateway `EmitRegisterChanges` try/catch와 동형).
-- **⚠ 구독 시점 순서**: `AllBundles`는 `SorterRegistryFactory.StartAsync` 완료 후에만 채워진다. relay 구독은 **레지스트리 초기화 이후**에 이뤄져야 한다(IHostedService 등록 순서로 보장하거나 registry StartAsync 내에서 나란히 구독 — Generator 판단, 검증 필수).
+### 2B. 기동 시 잔류 R_Flag reconciliation — `Wcs.PlcGateway`
+- **동작(WHAT)**: 소터 게이트웨이 기동 후 **첫 유효 폴에서 R_Flag==1**이면 PLC 기동 잔류로 간주 → **ClearR 큐 투입**(절대규칙 #1) + **WARN 로그 + operation_log 기록**(§2D — 잔류값 포함). PLC 기동 직후 R 영역 테스트 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가 소비하기 전에 차단.
+- **위치·방식은 Generator 재량**(폴 루프 내 1회 게이트 / 레지스트리 StartAsync 완료 후 훅 등) — 단 **쓰기는 반드시 단일 큐 경유**(절대규칙 #1, API/오케스트레이터 직접 Modbus 호출 금지).
+- **근거 명기(주석)**: 기동 잔류를 지우면 그 응답의 대기자는 없고 C_Seq 카운터도 리셋되므로 잔류 유지는 후속 전 건 오소비를 낳는다 — 클리어가 정당한 복구. (계약 문서화 요구, 코드 주석에도.)
 
-### 2C. `Wcs.Api` — Program.cs 결선 + appsettings 타이밍 외부화
-- `builder.Services.AddSignalR()` 등록. relay 서비스·IHubContext 결선.
-- **`app.MapHub<WcsMonitorHub>("/hubs/monitor")`** 매핑. 미들웨어/엔드포인트 순서: `UseStaticFiles()`(기존 L207) → `MapControllers()`(L213) → **`MapHub`** → `app.Map("/api/{**rest}", …)` catch-all(L222) → `MapFallbackToFile`(L223). catch-all은 `/api/**`만 매치하므로 `/hubs/monitor`를 삼키지 않음(함정 §5-1 — 검증 결선).
-- **신규 타이밍은 전부 appsettings**(절대규칙 #7 — 하드코딩 금지): 하트비트 주기·(있으면)버퍼/스로틀 주기 등을 신규 섹션(예: `Wcs:Monitor:HeartbeatMs`)에 두고 바인딩. 코드 상수 금지.
+### 2C. 잔류 대사 실패 경로 terminal Outcome — `HandshakeOrchestrator`
+- R_Flag==0 확인 대기가 타임아웃(ClearR 미반영 — 소터 오프라인·PLC 무ack 등)하면 **C를 기입하지 않고** 명확·테스트 가능한 terminal Outcome으로 종결(무한 대기·더티 상태 진행 금지).
+- 신규 `HandshakeOutcome` 값 추가 vs 기존값(예: OFFLINE 감지 시 `Offline`) 재사용은 **Generator 재량** — 단 (a) 조용히 성공/진행하지 않고, (b) 결과에 사유가 드러나며, (c) 테스트로 단정 가능해야 한다. `HandshakeResult` record 형상 확장이 필요하면 기존 소비처(관측 싱크·테스트) 회귀 0을 지킬 것.
 
-### 2D. `Wcs.Api` — IMonitoringQueries AddScoped 전환(F1-CR-M1) + operation-log 백로그 엔드포인트
-- **F1-CR-M1 해소**: `MonitoringController`가 생성자에서 `new MonitoringQueries(db, registry, status)`로 **요청당 손조립**하던 것을 제거하고, Program.cs에 **`AddScoped<IMonitoringQueries, MonitoringQueries>()`** 등록 → 컨트롤러는 `IMonitoringQueries`를 **주입**받는다. (deps: WcsDbContext scoped·ISorterGatewayRegistry/IDestinationStatusService 싱글톤 — scoped 수명 해석 정상.)
-- **operation-log REST 백로그(§2.2·§3.1 — 테일 초기 N행 소스)**: `IMonitoringQueries` + `MonitoringController`에 **읽기 전용** `GET /api/monitor/operation-log?category=&level=&sorterChuteNo=&take=&cursor=` 추가. `operation_log` 테이블 조회(선두 인덱스 `at`/`id` 활용·키셋 커서·take clamp — E7 sorter-commands 패턴 재사용). **AsNoTracking·기존 리포지토리 무변경.** operation_log **스키마 0 변경**(조회만).
+### 2D. 관측성 — operation_log(HANDSHAKE) 잔류 기록
+- 잔류 대사(2A)·기동 reconcile(2B) 발생 시 **operation_log의 HANDSHAKE 카테고리**에 잔류값(`rCellNo`/`rSeq`)을 포함해 기록 — 현장 원인 추적용.
+- 기록 경로는 **기존 관측 훅 재사용**: `HandshakeOrchestrator.OnStage(action, detailJson)`(잔류 대사용 신규 action 예: `HS_R_RESIDUE`) / PlcGateway 측은 기존 `OnWrite`/전이 훅 및 로깅. **훅은 부수 기록 전용 — 핸드셰이크·폴 본동작 의미·타이밍 0 변경, 핸들러 예외 격리(fail-safe)**(기존 S-OBSERVABILITY 계약 동형). 신규 폴 루프·신규 DB 초크포인트 도입 0.
 
-### 2E. `frontend` — SignalR 클라이언트 + 페이지 ②(읽기 전용) + oplog 테일 + 무효화
-- **@microsoft/signalr 클라이언트 래퍼**(신규 `frontend/src/lib/signalr.ts` 등): 접속·재연결(withAutomaticReconnect)·부트스트랩 스냅샷 수신·델타/전이/하트비트/oplog 이벤트 수신. `/hubs/monitor` 상대 경로(운영=동일 출처, dev=vite proxy).
-- **페이지 ② 레지스터 패널(§5 페이지 ②·읽기 전용)**: D0 C_CellNo·D1 C_Seq·D2 R_CellNo·D3 R_Seq·D4 비트(C_Flag·R_Flag·Ready)·D5 CurFloor·D6 TgtFloor·Online. SignalR 스트림으로 갱신, **변경값 하이라이트(깜빡임)** + 각 값 **마지막 변경 시각**. 소터 N대 선택(기존 `useSorters`/소터 목록 재사용). **쓰기/편집 컨트롤 없음**(F3). 신규 라우트(`/sorters` 또는 `/sorters/:destId` — App.tsx Route 추가) + `Layout.tsx` NAV의 "3DS 워드"(현재 `enabled:false`·phase F2 배지) **활성화**.
-- **operation_log 라이브 테일(§2.2)**: 하단 패널. category/level 필터, 자동 스크롤 토글, **`POLL_CHANGE` 기본 접힘(옵트인)**. 접속 시 REST 백로그(2D) 로드 후 SignalR로 append(무한 스크롤/테일).
-- **TanStack Query ↔ SignalR 무효화(§2.3)**: 행 단위 push 남발 금지 — SignalR API/HANDSHAKE/STATE 이벤트 수신 시 `invalidateQueries`로 배치/오더/in-flight/셀/sorter_command/소터 readiness를 **근실시간 보정**. 고빈도·저지연(워드·oplog)=push, 집계·목록=폴링+이벤트 무효화 원칙 유지.
+### 2E. Sim3ds — R 잔류 프리셋 수단 확인/추가 (테스트 더블)
+- **먼저 확인**: `SimServer`가 실측 PLC 동작을 이미 모사하는가 — (i) C 지령 수락 시 C_Flag 자체 클리어(현재 `RunSimLoopAsync` L169-175 = 예), (ii) SortDuration 후 R 에코+R_Flag=1(L232-240 = 예), (iii) ClearR까지 R 영역 유지·자체 클리어 안 함(현재 Sim은 R 자체 클리어 없음 — WCS ClearR로만 R 비움 = 예). **에코 지연은 SortDurationMs로 모사됨.**
+- **부재 확인분만 추가**: 테스트가 "핸드셰이크 시작 시점에 R_Flag=1(+R_CellNo/R_Seq 지정값) 잔류"를 결정적으로 세팅할 **프리셋 수단이 없으면** 추가(예: `Options`에 초기 R 잔류 필드, 또는 기동 후 R 영역 직접 세팅 API — HOW는 Generator). 실측 잔류값 (R_CellNo=20, R_Seq=123) 재현 가능해야 함.
+- Sim의 **기존 동작·기본 무잔류 초기화(현재 `StartAsync`가 `Array.Clear` 후 Ready=1만 세팅)는 보존** — 프리셋은 명시 opt-in.
 
-### 2F. `frontend` — 명암비 2건(이월 · 확정)
-- **RESTYLE-CR-M1(버튼)**: `components/ui/button.tsx` `solid` variant의 **안정 상태 fill을 `bg-brand-active`(#e00b41, 4.89:1)로 채택**(현재 `bg-brand` #ff385c=3.52:1). 사용자 확정(스펙 내 토큰·시각 차이 미미). 백색 라벨 AA(≥4.5:1) 충족.
-- **RESTYLE-CR-M2(정보성 텍스트)**: **데이터를 담는 정보성 `text-faint`(#929292, 3.11:1)를 `text-muted`(#6a6a6a, 5.41:1)로 치환** — 타임스탬프·시퀀스 컬럼·배정오더·페이저 카운트 등(예: `SortingSection.tsx` C_Seq/R_Seq/C 기입/R 수신/assignedOrderNo·`InFlightSection.tsx` createdAt·`CursorPager.tsx` 위치). **장식/비활성 용도의 faint(비활성 nav `text-faint/70`·off 램프 라벨·순수 라벨·로고 서브캡션)는 DESIGN 문서 스코프상 유지 가능** — Generator가 "데이터 가독성 필요 여부"로 판단, **데이터 담는 것은 전부 AA**. (DESIGN: faint=disabled 전용·very sparingly.)
+### 2F. 문서 동기화 — `docs/SPEC.md` §4
+- §4 C/R 핸드셰이크에 **잔류 대사 규칙** 추가: "R단계는 레벨이 아니라 arming(C 기입 전 R_Flag==0 관찰 보장) 기반 — 시작 시 R_Flag==1이면 잔류로 대사(WARN+operation_log+ClearR 선행) 후 R_Flag==0 확인하고 C 기입" + "기동 첫 폴 R_Flag==1은 잔류로 클리어". 필요 시 §7-B의 관련 미확정 항목에 A-1 해소 1줄 교차 표기(선택).
 
-### 2G. `frontend` — 빌드/개발 결선
-- `package.json`에 **`@microsoft/signalr`** 추가(F1에서 의도적 미설치). 런타임 의존 셋 최소 유지.
-- `vite.config.ts` dev proxy에 **`/hubs` 추가 + `ws: true`**(websocket proxy) → `http://localhost:5080`. 기존 `/api` proxy 불변.
-
-### 2H. 신규 테스트 (`backend/tests/Wcs.Tests/`)
-- **허브 통합 테스트**(WebApplicationFactory 기반 — `MonitoringApiTests`의 인스턴스-고유 in-memory SQLite 팩토리 패턴 재사용): 최소 고정
-  - **접속 → 부트스트랩 스냅샷 수신**(AllBundles Latest 1회 전송 확인).
-  - **레지스터 변화 → 델타 push 수신**(관측 훅 발화 → 허브 브로드캐스트 → 클라이언트 수신).
-  - (가능하면) **operation_log append → 테일 수신** / **POLL_CHANGE 기본 미포함**.
-- operation-log REST 엔드포인트(2D) 형상·페이징·필터 통합 테스트(E-시리즈 패턴).
-- **⚠ TestServer websocket**: `WebApplicationFactory` TestServer는 SignalR 기본 WebSocket 협상을 그대로 지원하지 않을 수 있음 → HubConnection을 TestServer `HttpMessageHandler`/`WebSocketFactory`로 결선하거나 **LongPolling 트랜스포트 대체** 검토(함정 §5-4).
+### 2G. 신규 테스트 (`backend/tests/Wcs.Tests/`)
+- §4 검증 시나리오 1~6을 자동 테스트로 결선(SQLite in-memory 더블 + Sim3ds Modbus 더블 — 기존 통합 테스트 패턴 재사용). 잔류 프리셋(2E)으로 결정적 재현.
 
 ## 3. Scope OUT (0 변경 — 무변경 가드)
 
-- **PlcGateway/Wcs.Core 의미 0**: `PlcGateway.cs`·`HandshakeOrchestrator.cs`·`Models.cs`(PlcSnapshot·RegisterMap)·관측 훅 시그니처(`OnRegisterChange`/`OnWrite`/`OnStage`/`OnOnline/OfflineTransition`·`SorterBundleHandle.Subscribe*`) **불변**. relay는 **소비만**. `git diff -- backend/src/Wcs.PlcGateway backend/src/Wcs.Core` 빈 출력.
-- **쓰기/제어/인증 = F3**: `OpsController` 신설·워드 쓰기(SetTgtFloor/ClearR/CellAssign enqueue)·clear/pause/resume·`OnCleared` 결선·PAUSED/RESUMED 전이·로그인/바인딩 제한 **전부 OUT**. 페이지 ②는 **읽기 전용**(편집 컨트롤 0).
-- **RcsController(`/api/v1`) 불변**(IF-05/09/10). RcsPush·DestinationStatusPusher·핸드셰이크 로직 무접촉.
-- **operation_log 스키마 0**·**마이그레이션 0**(조회 엔드포인트만 추가). `OperationLogService` 컨슈머 로직은 브로드캐스트 얹기 외 동작(배치·teardown·fail-safe) 불변.
-- **DbSeeder 토폴로지 불변**·**appsettings Sorters[]/Provider/ConnectionStrings 값 불변**(신규 `Wcs:Monitor` 타이밍 섹션 추가만).
-- **F1 모니터링 표면(E1~E7)·라이트 테마 토큰(index.css @theme) 값 불변**(명암비 2건 치환 외). 신규 상태색 토큰 도입 없음.
+- **동시 핸드셰이크 직렬화(F1b, todo.md)** — **OUT**. SPEC는 소터당 물리 직렬 dispatch 전제. 본 스프린트는 이를 **해결하지 않되 악화 금지**. ⚠ **주의(계약 명기)**: 잔류 대사 ClearR이 같은 소터에서 **진행 중인 다른 핸드셰이크의 응답을 지울 수 있다** — 순차 dispatch 전제가 유지되는 한 안전(한 소터엔 동시에 1건뿐). 동시 IF-10 허용은 별도 후속 스프린트.
+- **R_Flag 타임아웃 재시도 vs 포기 정책(SPEC §7-B)** — **OUT**(여전히 미정). 본 스프린트는 진짜 무응답 타임아웃 경로(시나리오 6)를 **회귀 보존**만 한다.
+- **핸드셰이크 정상 경로 의미 불변**: 깨끗한 상태의 성공/불일치/타임아웃 판정·C_Seq 증가·한 건씩 직렬·`OnStage` 기존 action 시그니처는 **불변**(2A 잔류 경로·2C terminal outcome·2D 신규 action 추가만).
+- **frontend 0 변경**: 이 스프린트는 백엔드 전용. `frontend/` 디렉터리 diff 0.
+- **셀 20/15 제약(S-FIELD-20CELLS)** — **OUT**(별도 스프린트, 다루지 않음).
+- **Wcs.Core 판정 엔진 무접촉**: `DepositDecider`·`RegisterMap`·`PlcSnapshot` 의미 불변(순수 함수 — 절대규칙 #8). `RegisterMap` 상수 변경 0.
+- **DB 스키마·마이그레이션 0**: operation_log는 조회/기록만(기존 경로), 스키마 변경 없음.
+- **appsettings 기존 값 불변**: Sorters[]/Provider/ConnectionStrings/기존 Timing 값 0 변경(신규 `RFlagClearConfirm` 류 타이밍 키 **추가만**).
 
-## 4. Deliverables & 검증 (Completion Gate)
+## 4. Verification Scenarios (Backend/API — 필수, per-type 슬롯)
 
-> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 증거(테스트 러너 요약·Playwright 스크린샷/DOM computed 값·`dotnet run`+`Sim3ds` 콘솔·`git diff --stat`)를 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정만으론 PASS 금지. (가중치·Web/UI Full-stack 슬롯.)
+> 서피스 정의: 이 스프린트의 검증 표면은 **HTTP 엔드포인트 형상 변경이 아니라** 내부 핸드셰이크 실행 경로다. 아래 "surface"를 (a) `HandshakeOrchestrator.ExecuteAsync(cellNo, ct)` 소터별 핸드셰이크(운영상 IF-10 `POST /api/v1/deposit-report` → TriggerSorterHandshake로 구동), (b) `PlcPollingService` 기동 폴 reconciliation, (c) 신규 appsettings 타이밍 키, (d) Sim3ds 잔류 프리셋 테스트 더블 표면으로 매핑한다. 모든 시나리오는 **Sim3ds Modbus 더블 기반 자동 xUnit 통합 테스트**로 검증(수동 curl/코드리뷰 대체 금지).
 
-**① 실시간 워드 동작 (Playwright · 핵심)**
-- `dotnet run --project backend/src/Wcs.Sim3ds`(:1502) + `dotnet run --project backend/src/Wcs.Api`(소터 online) 기동 후 페이지 ②에서:
-  - D0~D6 값이 **폴링 없이 SignalR push로 갱신**(핸드셰이크/이동으로 CurFloor·C_Seq·R_Seq·Ready 등 변화)·**변경 하이라이트** 육안 확인.
-  - **재연결 시 부트스트랩 스냅샷 복구**(허브 재접속 후 전체 D0~D6+Online 즉시 표시). raw 증거(스크린샷/네트워크 프레임).
+**Slot 1 — 이 스프린트가 건드리는 surface(엔드포인트/실행 경로) 목록**:
+- `HandshakeOrchestrator.ExecuteAsync` — R단계 arming(2A) + 잔류 대사 실패 terminal outcome(2C) 추가.
+- `Wcs.PlcGateway`(PlcPollingService 또는 레지스트리 기동 경로) — 기동 첫 폴 잔류 reconciliation(2B). 쓰기는 단일 큐 경유.
+- 신규 appsettings 타이밍 키(예: `Timing:RFlagClearConfirmTimeoutMs`) — R_Flag==0 확인 대기 상한.
+- `SimServer` — R 잔류 프리셋 수단(2E, 부재 시 추가).
+- `docs/SPEC.md` §4 — 잔류 대사 규칙 문서(2F).
 
-**② operation_log 테일 스트림**
-- 핸드셰이크/전이 발생 → 하단 테일에 엔트리 append 스트리밍(자동 스크롤). **`POLL_CHANGE` 기본 접힘(옵트인)** 확인(고빈도가 기본 스트림 폭주 안 함).
+**Slot 2 — Happy path (정상 입력 → 기대 결과 형상)**:
+- **[S1] 잔류→대사→성공**: R 영역에 (R_CellNo=20, R_Seq=123, R_Flag=1) 프리셋 → 핸드셰이크 시작 → **잔류 대사(ClearR 선행) 후 R_Flag==0 확인 → C 기입 → 진짜 응답 대사** → `HandshakeOutcome.Success`. (기존 레벨-읽기 코드였다면 이 케이스는 `RSeqMismatch`였음 — 회귀 대조로 fix 입증.) operation_log에 잔류값(rCellNo=20/rSeq=123) 포함 HANDSHAKE 기록 존재.
+- **[S4] 무잔류 정상 경로 회귀**: 깨끗한 상태(R_Flag=0)에서 연속 2건 핸드셰이크 → 2건 모두 `Success`, **추가 지연·잔류 대사 발화 0**(깨끗한 경로 기존 동작·타이밍 보존).
 
-**③ 기존 164 GREEN + 신규 테스트**
-- `dotnet test backend/Wcs.sln` → 기존 164 전원 GREEN + 허브 통합/operation-log 엔드포인트 테스트 GREEN(합계 164+N). 실패 0. raw 요약 인용.
+**Slot 3 — 관련 에러/에지 케이스 (Planner가 해당분만 선정 — 패딩 금지)**:
+- **[S2] off-by-one 연쇄 재현→전건 성공**: 잔류 존재 상태에서 같은 소터 **연속 3건**(현장 back-to-back 재현) → **3건 모두 `Success`**. (기존 코드: 3건 모두 `RSeqMismatch` 연쇄 — 자가지속 연쇄가 차단됨을 단정.)
+- **[S3] 기동 reconcile**: 게이트웨이가 R_Flag=1(+R_CellNo/R_Seq 잔류) 상태에서 폴링 시작 → 잔류가 **ClearR로 클리어됨**(스냅샷 R_Flag==0 도달) + **WARN 로그** + operation_log HANDSHAKE 잔류 기록. 이후 첫 핸드셰이크가 잔류를 오소비하지 않음.
+- **[S5] R_Flag==0 확인 타임아웃**: 잔류 대사 ClearR이 반영되지 않는 상황(소터 오프라인/PLC 무ack 모사) → 신규 확인-대기 타임아웃 경로가 **C를 기입하지 않고** 명확한 terminal Outcome(2C)으로 종결(무한 대기·더티 진행 없음). 테스트로 outcome 단정.
+- **[S6] 진짜 R_Flag 무응답 타임아웃 회귀**: 응답 자체가 없는 경우(Sim `InjectNoResponse` 등) → 기존 `RFlagTimeout` 경로가 그대로 동작(회귀 보존). arming 도입이 이 경로를 훼손하지 않음.
+- **[S7] 전체 스위트 GREEN + 빌드 경고 0**: `dotnet test backend/Wcs.sln` → 기존 169 전원 GREEN + 신규 S1~S6 GREEN(합계 169+N), 실패 0. `dotnet build` 경고 0(기존 관행). 동시성/타이밍 취약분은 기존 flake 교훈대로 **≥5회 반복 + stash 대조**로 회귀 귀속(1회 GREEN 신뢰 금지 — S9/E2E flake 교훈).
 
-**④ relay 무영향 (핸드셰이크 타이밍 회귀 0)**
-- **기존 E2E GREEN이 증거**: E2E 그룹(A~I)·소터 핸드셰이크 통합 테스트가 relay 얹은 뒤에도 GREEN 유지. 동시성/타이밍 취약 스위트는 **≥5회 반복 + stash 대조**로 회귀 귀속(S-E2E-MULTI-AGV·S9 flake 교훈 — 1회 GREEN 신뢰 금지). relay 콜백 논블로킹·예외 격리 소스 확인.
+## 5. Deliverables & 완료 조건 (Completion Gate)
 
-**⑤ 명암비 2건 해소 (computed)**
-- 브라우저 computed 색상으로 RESTYLE-CR-M1(버튼 solid fill=#e00b41 → 백 라벨 ≥4.5:1)·RESTYLE-CR-M2(정보성 데이터 텍스트 muted #6a6a6a=5.41:1) **AA 산술 통과** 확인. 장식/비활성 faint 잔존은 데이터 비담지로 정당함 명시.
+> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 증거(테스트 러너 요약 raw line·`git diff --stat`·operation_log/로그 발췌·`dotnet run`+Sim3ds 콘솔이 필요하면 그 출력)를 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정·이전 결과만으론 PASS 금지.
 
-**⑥ 무변경 가드 (스코프 격리)**
-- `git diff --stat` 판독 → 변경이 **§2 IN 파일에만 국한**. `git diff -- backend/src/Wcs.PlcGateway backend/src/Wcs.Core` = 빈 출력(훅 시그니처·판정 의미 불변). 마이그레이션 디렉터리·DbSeeder·RcsController·appsettings Sorters/Provider/ConnectionStrings diff 0(신규 `Wcs:Monitor` 타이밍 섹션 추가만). `/api/{**rest}` catch-all이 `/hubs/monitor`를 삼키지 않음을 negotiate 응답(200/101, not 404)으로 입증.
+- **① fix 입증(핵심)**: S1·S2가 GREEN이고, **동일 시나리오가 수정 전 코드에선 `RSeqMismatch`였음**을 대조 증거(stash/이전 커밋 대비 또는 arming 제거 시 RED)로 제시 — "레벨→arming" 전환이 실제로 연쇄를 끊었음을 입증.
+- **② 기동 reconcile(S3)·확인 타임아웃(S5)·무응답 회귀(S6)** 각각 자동 테스트 GREEN + 명확 outcome 단정.
+- **③ 무잔류 회귀(S4)**: 깨끗한 경로 성공 + 잔류 대사 미발화(추가 지연 0) 확인.
+- **④ 전체 169+N GREEN**(S7): raw 요약 인용. 타이밍 취약분 ≥5회 반복 + stash 대조.
+- **⑤ 절대규칙 준수 입증**: #1 — 모든 쓰기(잔류 ClearR·기동 reconcile ClearR)가 **단일 큐 경유**임을 소스/`OnWrite` 발화로 확인(오케스트레이터·API 직접 Modbus 호출 0). #7 — R_Flag==0 확인 타임아웃이 **appsettings에서 바인딩**(하드코딩 grep 0). #8 — `Wcs.Core` 판정 무접촉. #3 — TgtFloor 클리어 0(R 클리어만, 본 스프린트 대상·정당).
+- **⑥ 관측성**: 잔류 대사·기동 reconcile 발생 시 operation_log(HANDSHAKE)에 잔류값 포함 기록됨을 실증(테스트 또는 라이브 로그 발췌).
+- **⑦ 무변경 가드**: `git diff --stat` 판독 → 변경이 §2 IN 표면(`Wcs.PlcGateway`·`Wcs.Sim3ds`·`Wcs.Tests`·`docs/SPEC.md`·`appsettings*.json` 신규 타이밍 키)에만 국한. `git diff -- frontend` 빈 출력. `git diff -- backend/src/Wcs.Core` 판정 의미 불변. DbSeeder·마이그레이션·Sorters/Provider/ConnectionStrings 값 diff 0.
+- **⑧ 관측 무영향(fail-safe)**: 신규 `OnStage` action·기록 콜백이 논블로킹·예외 격리(핸드셰이크·폴 본동작 지연/중단 0) — 소스 확인 + ④ 타이밍 회귀로 실증.
 
-**Completion**: ①~⑥ 전부 PASS + `tasks/lessons.md`에 F2 교훈(relay 무영향 입증법·TestServer websocket 처리·POLL_CHANGE 옵트인) 1행 + 프로세스/포트 정리(:5080·:5173·:1502 free) + git status 핸드오프 동일.
+**Completion**: ①~⑧ 전부 PASS + `tasks/lessons.md`에 A-1 교훈(레벨 vs 에지/arming·잔류 대사·기동 reconcile·off-by-one 연쇄 기전) 1행 + `docs/SPEC.md` §4 동기화 완료 + 프로세스/포트 정리(:1502·:5080 free) + git status 핸드오프 동일.
 
-## 5. 함정 (Traps)
+## 6. 함정 (Traps)
 
-1. **`/api/{**rest}` catch-all(L222) vs `/hubs`**: catch-all은 `/api/**`만 매치하므로 `/hubs/monitor`는 안전하나(F1 리뷰 확인 "catch-all vs /hubs 충돌 없음") **MapHub가 실제로 매핑됐고 negotiate가 404 아님**을 검증 결선. fallback(`index.html`)이 `/hubs`를 삼키지 않게 순서 확인.
-2. **UseStaticFiles ↔ SignalR 순서**: `UseStaticFiles`(라우팅 이전 미들웨어) → 엔드포인트(`MapControllers`/`MapHub`). WebApplication 최소 호스팅에서 MapHub가 라우팅 자동 추가 — 순서 역전 주의.
-3. **vite dev proxy `/hubs` websocket**: `ws: true` 없으면 dev에서 SignalR 핸드셰이크(101 Upgrade) 실패. `/api` proxy와 별도 항목.
-4. **TestServer websocket 한계**: `WebApplicationFactory` TestServer는 SignalR 기본 WebSocket 협상을 그대로 못 할 수 있음 → HubConnection을 TestServer 핸들러(`Server.CreateHandler()`/`WebSocketFactory`)로 결선하거나 **LongPolling 대체**. 무거운 실-Sim 허브 테스트는 직렬 컬렉션 고려(E2E 병렬 부하 flake 교훈).
-5. **POLL_CHANGE 폭주**: 150ms 폴에서 레지스터가 자주 변하면 oplog 테일이 폭주 → **기본 스트림에서 제외/옵트인**. 단 소터 워드 스트림(페이지 ②)은 델타가 목적이므로 push 유지하되 **소터별 그룹/구독**으로 관심 없는 클라이언트엔 미전송(선택). fire-and-forget이라도 브로드캐스트 빈도가 relay 스레드/네트워크 부담이 되지 않게.
-6. **relay 구독 시점**: `AllBundles`는 `SorterRegistryFactory.StartAsync` 후에만 채워짐 — relay가 그 전에 구독하면 빈 세트. IHostedService 등록 순서 또는 registry StartAsync 내 나란히 구독으로 보장(§2B ⚠).
-7. **relay가 본 동작 지연 금지(절대규칙·S-OBSERVABILITY)**: 훅 콜백에서 동기 I/O·블로킹 금지. `IHubContext` fire-and-forget + 예외 흡수. 폴/핸드셰이크 핫패스 비지연을 ④로 실증.
-8. **라이브 검증 환경 드리프트(기등재)**: DbSeeder는 소터 `chuteNo=30` 시드 vs `appsettings.Sorters[0].ChuteNo=1` → dev 콜드스타트 시 `SorterRegistryFactory` fail-loud. ①/② 라이브는 F1 Evaluator처럼 `Sorters__0__ChuteNo=30` env override(추적파일 무변경)로 소터 online 확보. frontend 스코프 밖·backend 후속.
+1. **깨끗한 경로 타이밍 회귀**: arming을 "항상 R_Flag==0 대기"로 구현하면 정상 건마다 지연 추가 위험. **R_Flag가 이미 0이면 지연 0으로 즉시 진행**(대기는 잔류 케이스에만). ③으로 실증.
+2. **PollIntervalMs(150) > RFlagPollMs(100) 창**: A-1의 실창. 잔류 대사는 이 창을 닫는 것이 목적 — R_Flag==0 확인을 **폴링 스냅샷 갱신 기준**으로 하되, 확인 대기 폴 간격과 타임아웃을 appsettings로.
+3. **ClearR 미반영 시 무한 대기**: R_Flag==0 확인 루프에 반드시 타임아웃(2C·S5) + OFFLINE 감지 종결. 더티 상태로 C 기입 진행 금지.
+4. **동시 핸드셰이크(F1b)와 혼동 금지**: 본 건은 '동시'가 아니라 '순차 연속'에서도 발생하는 별개 근본원인. per-소터 락으로 해소되지 않음. 잔류 ClearR이 동시 진행 건 응답을 지울 수 있다는 주의(순차 dispatch 전제) — Scope OUT에 명기, 악화 금지.
+5. **Sim R 자체 클리어 금지 보존**: 실측 PLC는 ClearR을 ack으로 R 유지(자체 클리어 안 함). Sim이 이 동작을 바꾸면 잔류 재현·회귀가 오염됨 — Sim 기존 R 유지 동작 보존, 프리셋만 opt-in 추가.
+6. **테스트 flake 귀속**: 핸드셰이크 통합 테스트는 타이밍 취약. 1회 GREEN 신뢰 금지 — ≥5회 반복 + stash 대조로 회귀 귀속(S9/IT4b/E2E 부하 flake 교훈). 고아 `Wcs.Sim3ds.exe`가 포트 점유·빌드 파일잠금 유발 가능 — 실패 시 kill 후 재시도.
+7. **관측 훅 fail-safe**: 신규 잔류 기록 콜백에서 동기 I/O·블로킹·예외 누수 금지(EmitStage try/catch 동형). 폴/핸드셰이크 핫패스 비지연.
+8. **테스트 provider 함정(교훈)**: 통합 테스트는 in-memory SQLite 더블. `Database:Provider` 즉시평가 키 override는 `builder.UseSetting`으로(2026-06-30 교훈) — 단 본 스프린트는 DB 스키마 무변경이라 대개 무관.
 
-## 6. Planner Self-Check
+## 7. Questions / Assumptions (모호점)
 
-- [x] **Scope IN** = 허브(2A)·relay 서비스(2B)·Program 결선+타이밍 외부화(2C)·IMonitoringQueries AddScoped + operation-log 백로그(2D)·프론트 signalr client·페이지 ② 읽기전용·oplog 테일·무효화(2E)·명암비 2건(2F)·vite proxy/의존/nav(2G)·허브 통합 테스트(2H). 실독 근거: FRONTEND.md §2·§5·§6 / Program.cs(DI·훅 구독 블록 L154-198·L357-419·MapControllers L213·catch-all L222) / OperationLogService.cs(단일 컨슈머) / SorterGatewayRegistry.cs(Subscribe*·Latest·AllBundles) / MonitoringController.cs(손조립 현황·E1~E7) / PlcGateway.cs(EmitRegisterChanges reg명·fail-safe try/catch) / Models.cs(PlcSnapshot D0~D6) / frontend(api.ts·queries.ts·App.tsx·Layout.tsx·index.css @theme·button.tsx·meter.tsx·SortingSection/InFlightSection faint 사용처) / MonitoringApiTests 팩토리 패턴 / feedback-archive F1 CR-MAJOR·sprint-feedback RESTYLE-CR-M1/M2.
-- [x] **사용자 확정 반영(재질문 0)**: F2 범위=허브+relay(신규 폴 0)+페이지 ② 읽기전용+oplog 테일+무효화 / 이월 3건 IN(RESTYLE-CR-M1은 **brand-active #e00b41 fill 확정 명기**) / 인증 없음 / @microsoft/signalr 추가.
-- [x] **절대규칙 점검**: #1(PLC 쓰기 무관 — relay는 관측만) · #7(하트비트/버퍼 신규 타이밍 appsettings 외부화·2C) · #8(판정 순수함수 무접촉 — 신규 판정 0). relay 콜백 논블로킹·예외격리·`IHubContext` fire-and-forget = S-OBSERVABILITY 계약 동형(2B·함정7).
-- [x] **Scope OUT** = PlcGateway/Core 의미·훅 시그니처 0 / 쓰기·제어·인증(F3) / RcsController / operation_log 스키마·마이그레이션 0 / DbSeeder·Sorters/Provider/ConnectionStrings 값 0. 무변경 가드 ⑥ git diff로 입증.
-- [x] **검증(가중치·Full-stack 슬롯)**: ①실시간 워드 push+하이라이트+재연결 부트스트랩(Playwright) ②oplog 테일(POLL_CHANGE 접힘) ③164+N GREEN ④relay 무영향(기존 E2E GREEN·≥5회 반복+stash 대조) ⑤명암비 2건 computed AA ⑥무변경 가드. 각 fresh evidence 의무.
-- [x] **함정 8종**: catch-all/hubs·미들웨어 순서·vite ws proxy·TestServer websocket·POLL_CHANGE 폭주·relay 구독 시점·relay 본동작 지연 금지·라이브 드리프트 env override. F1 리뷰 i3·S-OBSERVABILITY·S-E2E flake 교훈 결선.
-- [x] **코드 구현 0** — WHAT/WHERE/VERIFY만. 허브 메서드명·payload 형상·컴포넌트 구조·타이밍 값·라우팅 shape·TestServer 결선 방식은 Generator 재량(제약 내).
+> 수정 방향은 사용자 보고·확정 완료(배경). 아래는 Generator 재량 설계점과 전제 — **블로킹 질문 없음**. 진행 중 스펙 모호가 새로 발견되면 `docs/SPEC.md` "미확정 사항"에 기록.
+
+- **A1 (전제)**: 소터당 **순차 dispatch** 유지(SPEC 물리 직렬 전제). 동시 IF-10 직렬화(F1b)는 본 스프린트 밖 — 잔류 대사는 이 전제 위에서 안전.
+- **A2 (Generator 재량)**: R_Flag==0 확인 타임아웃 키명·기본값, arming 로직 배치, `RFlagRaised` 에지 채널 소비 여부, 신규 `HandshakeOutcome` 값 추가 vs 기존값 재사용 — 전부 Generator 결정(제약: 절대규칙 #1·#7·#8, terminal outcome은 테스트 가능·비-silent).
+- **A3 (전제)**: 기동 reconcile은 첫 유효(Online) 폴 기준 1회. 클리어된 잔류 응답의 대기자는 없고 C_Seq 리셋 상태이므로 유지가 아니라 클리어가 정당한 복구.
+- **A4 (확인 대상)**: Sim3ds가 실측 PLC 동작(C_Flag 자체 클리어·SortDuration 에코 지연·ClearR까지 R 유지)을 이미 모사함(2E에서 확인). **부재 확인분은 R 잔류 프리셋뿐** — 그것만 추가.
+
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Slot 1 surface 목록, Slot 2 happy path[S1·S4], Slot 3 error/edge[S2·S3·S5·S6·S7]). All slots filled: yes.

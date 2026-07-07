@@ -25,6 +25,14 @@ public sealed class SimServer : IAsyncDisposable
         public int    MoveDurationMs  { get; init; } = 300;   // 이동 소요
         public int    InitialCurFloor { get; init; } = 1;
         public int    SimLoopMs       { get; init; } = 20;    // 상태 루프 주기
+
+        // ─── R 잔류 프리셋 (테스트 전용 opt-in — S-HANDSHAKE-RESIDUE §2E) ─────────
+        // 기동 시 R 영역에 잔류를 세팅해 "PLC 기동 잔류"(§2B 기동 reconcile 검증)를 결정적 재현.
+        // 기본 0/false = 무잔류(기존 StartAsync 동작 보존). 실측 잔류값(R_CellNo=20, R_Seq=123) 재현 가능.
+        // (핸드셰이크 시작 시점 잔류(§2A)는 기동 reconcile로 지워지므로 런타임 SetRResidue()로 재현.)
+        public int  InitialRCellNo { get; init; }          // 기본 0
+        public int  InitialRSeq    { get; init; }          // 기본 0
+        public bool InitialRFlag   { get; init; }          // 기본 false
     }
 
     // ─── 고장 주입 ───────────────────────────────────────────────────────────
@@ -44,6 +52,13 @@ public sealed class SimServer : IAsyncDisposable
         get => _noResponse;
         set => _noResponse = value;
     }
+
+    /// <summary>
+    /// true = WCS가 R를 클리어(ClearR)해도 시뮬레이터가 R_Flag=1을 즉시 재천명(PLC 무ack·ClearR 미반영 모사).
+    /// 잔류 대사 R_Flag==0 확인 타임아웃 경로(§2C·S5) 유발용 — 실측 PLC의 R 자체 유지 동작을 깨지 않고
+    /// "클리어가 반영되지 않는 고장"만 재현한다. 기본 false(기존 동작 보존).
+    /// </summary>
+    public bool InjectStickyRResidue { get; set; }
 
     // ─── 내부 ────────────────────────────────────────────────────────────────
     private const byte UnitId = 1; // Modbus 유닛 식별자
@@ -87,8 +102,20 @@ public sealed class SimServer : IAsyncDisposable
             Array.Clear(_hr, 0, _hr.Length);
             _hr[RegisterMap.CurFloor] = (ushort)_opt.InitialCurFloor;
             _hr[RegisterMap.Flags]    = RegisterMap.D4.Ready; // Ready=1(수용 가능)
+
+            // R 잔류 프리셋(opt-in — §2E). 기본 0/false면 무잔류(기존 동작 보존).
+            if (_opt.InitialRFlag || _opt.InitialRCellNo != 0 || _opt.InitialRSeq != 0)
+            {
+                _hr[RegisterMap.R_CellNo] = (ushort)_opt.InitialRCellNo;
+                _hr[RegisterMap.R_Seq]    = (ushort)_opt.InitialRSeq;
+                if (_opt.InitialRFlag)
+                    _hr[RegisterMap.Flags] |= RegisterMap.D4.R_Flag;
+            }
+
             FlushToServerLocked();
         }
+        if (_opt.InitialRFlag || _opt.InitialRCellNo != 0 || _opt.InitialRSeq != 0)
+            LogTimeline($"[프리셋] R 잔류: R_CellNo={_opt.InitialRCellNo} R_Seq={_opt.InitialRSeq} R_Flag={_opt.InitialRFlag}");
 
         var ep = new IPEndPoint(IPAddress.Parse(_opt.Host), _opt.Port);
         _server.Start(ep);
@@ -131,6 +158,23 @@ public sealed class SimServer : IAsyncDisposable
         return PlcSnapshot.FromRegisters(copy, online: true, at: DateTimeOffset.Now);
     }
 
+    /// <summary>
+    /// 테스트 전용(§2E): 기동 후 R 영역에 잔류를 직접 세팅한다 —
+    /// "핸드셰이크 시작 시점에 R_Flag=1(+R_CellNo/R_Seq 지정값) 잔류"를 결정적으로 재현.
+    /// 실측 PLC와 동일하게 R는 WCS ClearR로만 비워진다(Sim 자체 클리어 없음 — 함정 5 보존).
+    /// </summary>
+    public void SetRResidue(int rCellNo, int rSeq)
+    {
+        lock (_hrLock)
+        {
+            _hr[RegisterMap.R_CellNo] = (ushort)rCellNo;
+            _hr[RegisterMap.R_Seq]    = (ushort)rSeq;
+            _hr[RegisterMap.Flags]    = (ushort)(_hr[RegisterMap.Flags] | RegisterMap.D4.R_Flag);
+            FlushToServerLocked();
+        }
+        LogTimeline($"[테스트] R 잔류 세팅: R_CellNo={rCellNo} R_Seq={rSeq} R_Flag=1");
+    }
+
     // ─── 시뮬레이터 메인 루프 ────────────────────────────────────────────────
 
     private async Task RunSimLoopAsync(CancellationToken ct)
@@ -151,6 +195,15 @@ public sealed class SimServer : IAsyncDisposable
                 {
                     // WCS가 FluentModbus를 통해 쓴 값을 섀도에 반영
                     PullFromServerLocked();
+
+                    // 고장주입(§2C/S5): WCS ClearR로 R_Flag가 꺼졌으면 즉시 재천명(PLC 무ack·ClearR 미반영 모사).
+                    // 실측 PLC의 "R 자체 클리어 안 함"은 그대로 두고 "클리어가 반영 안 되는 고장"만 재현.
+                    if (InjectStickyRResidue && (_hr[RegisterMap.Flags] & RegisterMap.D4.R_Flag) == 0)
+                    {
+                        _hr[RegisterMap.Flags] |= RegisterMap.D4.R_Flag;
+                        FlushToServerLocked();
+                    }
+
                     flags    = _hr[RegisterMap.Flags];
                     tgtFloor = _hr[RegisterMap.TgtFloor];
                     curFloor = _hr[RegisterMap.CurFloor];

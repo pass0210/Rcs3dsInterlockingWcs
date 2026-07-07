@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 레벨-읽기 → arming 전환 + 기동 잔류 reconcile · 감사 A-1) — APPROVED (2026-07-07, 1 iteration)
+
+- **fix 입증은 Evaluator가 직접 arming 비활성/복원 대조로 — GREEN 테스트만으론 "레벨→arming 전환이 연쇄를 끊었다"를 못 보임**: `ArmRFlagZeroAsync` 호출을 임시 주석 처리 후 재빌드 → S1/S2가 `RSeqMismatch`(잔류 R_Seq=123을 새 건 cSeq=1이 오소비) 재현(RED). 복원(SHA256 byte-identical 대조) + `--no-incremental` 재빌드 → S1/S2 `Success`. 이 대조가 "레벨-읽기 결함이 실재했고 arming이 그것을 제거했다"의 유일한 직접 증거(신규 테스트가 GREEN인 것만으로는 회귀 대조가 안 됨).
+- **파일 복원 후 검증은 `--no-incremental` 재빌드 필수(incremental build stale 함정·신규 함정)**: 미커밋 파일을 백업에서 복원(Copy-Item)한 직후 일반 `dotnet build`가 재컴파일을 스킵 → stale(arming-비활성) 바이너리로 S1/S2가 여전히 RED. `--no-incremental` 강제 재빌드 후에야 GREEN. 복원-후-검증에서 incremental build를 믿으면 거짓 FAIL. **미커밋 파일 복원은 `git checkout` 금지**(HEAD로 되돌아가 Generator 미커밋분 소실 — 2026-07-06 lessons) → 백업본 Copy-Item + 해시 대조가 정답.
+- **잔류 대사 = C 기입 전 R_Flag==0 관찰 보장(arming), 0 관찰 이후 레벨 읽기가 곧 에지 감지**: 시작 시 R_Flag==1이면 WARN+operation_log(잔류값)+ClearR 선행(단일 큐)+R_Flag==0 확인(타임아웃 appsettings). 깨끗한 경로(R_Flag=0)는 `if(!snap.RFlag) return null`로 즉시 진행(추가 지연 0 — S4가 HS_R_RESIDUE/HS_R_ARMED 미발화로 실증). 확인 타임아웃은 C 미기입 terminal `RFlagResidueTimeout`(SentCSeq=0·사유 노출·HS_C_SENT 부재 — S5). 기동 첫 유효 폴 R_Flag==1은 대기자 없고 C_Seq 리셋 상태이므로 ClearR reconcile이 정당(§A3, poll-loop 지역 `startupReconciled`로 게이트웨이 기동당 1회).
+- **절대규칙 입증법(재적용)**: #1 = 두 ClearR 경로(오케스트레이터 `_gw.EnqueueAsync` / 폴루프 `_writeQueue.Writer.TryWrite`)가 단일 큐→단일 컨슈머(WriteMultipleRegisters+RmwD4)에서만 실 쓰기 + 오케스트레이터 직접 Modbus grep 0. #7 = 신규 타임아웃 appsettings 바인딩 + Wcs.PlcGateway 하드코딩 ms grep 0. #8 = Wcs.Core diff 빈 출력. #3 = TgtFloor 무접촉. 관측성 = 기존 `SubscribeHandshakeStage`→`opLog.Log(HANDSHAKE)`(Program.cs:408)가 신규 action 자동 기록(Wcs.Api 무변경).
+- **동시성 blindspot 소스 점검(GREEN 보완)**: arming 대기 루프 취소는 기존 대기 루프와 동형 OCE 전파 + deadline로 무한대기 불가 / 신규 action 전부 EmitStage(try/catch) 격리 / reconcile 정확히 1회(poll-loop 지역 플래그) / reconcile ClearR ↔ 이른 첫 핸드셰이크는 멱등 ClearR + 단일 큐 직렬화 + arming 재확인으로 안전(per-소터 순차 dispatch 전제, F1b Scope OUT 악화 0). S1(런타임 잔류)·S3(기동 잔류) 두 타이밍 모두 GREEN.
+- **검증은 Sim3ds TCP 더블 전용 — 현장 3DS(COM1/RTU) 미기동**: 현장 소터 이설로 물리 미연결(사용자 확인). appsettings Transport/COM/Sorters/Provider/ConnStr 무변경 유지. 4회 연속 full-suite 175 GREEN + 신규 6건 6회 관측 flake 0 + 포트 1502/5080 free·오펀 0.
+
 ## S-DEV-SEED-GUARD (환경 암묵 자동 시드 제거 — 명시 `SeedOnStartup=true`만 · 실사고 재발 방지) — APPROVED (2026-07-03, 1 iteration)
 
 - **환경만으로 자동 시드 발동 = 실 DB 오염 벡터; 사고의 근본은 S-M5-P1가 심은 `?? IsDevelopment()` fallback**: S-M5-P1 archive(line 39)가 "운영 안전 게이트"로 도입한 `SeedOnStartup ?? IsDevelopment()`가 바로 사고 원인 — 미지정+Development면 자동 on, Development.json이 켠 `SeedOnStartup=true`가 Provider/ConnectionStrings 오버라이드 없이 base(SqlServer·현장 연결문자열)로 직행. 수정 = 환경 fallback 제거·순수 함수 `ShouldSeed(bool?) => seedOnStartup==true`. "운영 안전"으로 도입한 게이트가 다음 사고의 벡터가 될 수 있다 — 암묵 발동은 언제나 위험.
@@ -364,3 +373,4 @@
 - **[EVALUATOR 근접실패] 검증용 dev 의존을 `git checkout`으로 되돌리다 Generator 미커밋 변경을 소거**: `npm i -D playwright` 후 `git checkout -- frontend/package.json frontend/package-lock.json`으로 되돌리자 **같은 파일에 있던 Generator의 `@microsoft/signalr` 추가까지 develop 기준으로 소거**(+prune로 node_modules에서도 제거). `npm install @microsoft/signalr@^8.0.17` 재구성으로 원 diff(package-lock +175줄) 복원. 규칙 lessons.md 등재.
 - [CODE-REVIEW] sprint=S-FRONTEND-F2 pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-FRONTEND-F2 critical=0 major=2 minor=5 iter=2 opus=yes (MAJOR 2건을 fix-only iter로 즉시 해소 — M2 영구 재연결 부재는 무인 관제 월보드의 Done 의미 실질 훼손이라 이연 대신 수정(orchestrator 판단·65s+ 다운 자동 복구 입증). M1 relay 주석. MINOR 5 이연. Evaluator 근접실패(git checkout으로 Generator 미커밋 의존 소거→재구성) 교차확인 클린 + 2차엔 npm --no-save로 무접촉 처리 — 교훈 등재.)
+- [CODE-REVIEW] sprint=S-HANDSHAKE-RESIDUE critical=0 major=0 minor=4 iter=1

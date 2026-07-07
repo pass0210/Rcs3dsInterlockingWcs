@@ -2084,3 +2084,62 @@ FK를 DROP+ADD(NO ACTION)하므로 콜드스타트에 도달하지 못한다.
 
 ### 상태
 ①~④ 전부 PASS. 커밋/git 조작 없음. Evaluator 검증 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE (S-HANDSHAKE-RESIDUE)
+
+**Generator · branch `fix/handshake-rflag-residue` · 커밋/push 없음 (워킹트리 상태로 Evaluator 검증 대기).**
+
+### 목표
+감사 A-1(현장 2026-07-06 실측 5연쇄) 수정: `HandshakeOrchestrator`가 R_Flag를 **레벨**로 읽어 직전 건·PLC 기동 잔류(R_CellNo=20/R_Seq=123)를 새 건 응답으로 오소비 → 허위 RSEQ_MISMATCH off-by-one 연쇄 자가지속. **arming(C 기입 전 R_Flag==0 관찰 보장) + 기동 첫 폴 잔류 reconcile**로 근본 차단.
+
+### 구현 (Scope IN 2A~2G)
+1. **`backend/src/Wcs.PlcGateway/HandshakeOrchestrator.cs`** (2A/2C): `ExecuteAsync`의 OFFLINE 확인 직후·C_Seq 증가 **이전** `ArmRFlagZeroAsync(ct)` 호출. R_Flag==0이면 즉시 진행(추가 지연 0). R_Flag==1이면 잔류 대사 — WARN + `OnStage("HS_R_RESIDUE")`(잔류값 rCellNo/rSeq 포함) + **ClearR 선행 큐 투입**(`_gw.EnqueueAsync` — 절대규칙 #1) + `RFlagClearConfirmTimeoutMs`(appsettings) 내 R_Flag==0 확인. 확인 후 `HS_R_ARMED` → C 진행. 타임아웃 시 **신규 terminal outcome `RFlagResidueTimeout`**(C 미기입·SentCSeq=0·사유 노출·`HS_R_RESIDUE_TIMEOUT`). 대기 중 OFFLINE 감지도 `Offline`로 종결.
+2. **`backend/src/Wcs.PlcGateway/PlcGateway.cs`** (2B): `PlcGatewayOptions.RFlagClearConfirmTimeoutMs`(기본 2000) 추가. `RunPollLoopAsync`에 **첫 유효(Online) 폴 1회 게이트**(`startupReconciled`) — 첫 폴 R_Flag==1이면 기동 잔류로 WARN + **`_writeQueue.Writer.TryWrite(ClearR)`**(단일 큐 경유·논블로킹). 근거 주석(대기자 없음·C_Seq 리셋 → 유지가 후속 오소비, 클리어가 정당한 복구) 포함.
+3. **`backend/src/Wcs.Sim3ds/SimServer.cs`** (2E): `Options`에 R 잔류 프리셋(`InitialRCellNo/InitialRSeq/InitialRFlag`, 기본 0/false=무잔류·기존 동작 보존) + `StartAsync`에서 opt-in 적용. 런타임 `SetRResidue(rCellNo,rSeq)`(핸드셰이크 시작 시점 잔류 재현) + `InjectStickyRResidue`(WCS ClearR를 sim이 재천명 — PLC 무ack 모사, S5용). Sim R 자체 클리어 없음 유지(함정 5).
+4. **`backend/src/Wcs.Api/appsettings.json`** (신규 타이밍 키만): `Timing:RFlagClearConfirmTimeoutMs=2000` + 주석. **Transport=Rtu·COM1·Sorters[]·Provider=SqlServer·ConnectionStrings 전부 불변**(git diff 확인).
+5. **`backend/src/Wcs.Api/Program.cs`** (타이밍 키 배선만): `TimingOptions` + `SorterTimingOverride`에 `RFlagClearConfirmTimeoutMs`(nullable) 필드 + `BuildGatewayOptions`에 소터별 오버라이드/공통 상속 1줄. (slot 1이 "신규 appsettings 타이밍 키"·"레지스트리 기동 경로"를 표면으로 명시 — 운영 바인딩에 필수·최소.)
+6. **`docs/SPEC.md`** (2F): §4에 **§4-A "R단계 잔류 대사(arming)"** 신설(시작 잔류 대사·기동 reconcile·타임아웃 종결). §7-B R_Flag 타임아웃 항목에 A-1 해소 1줄 교차 표기.
+7. **`backend/tests/Wcs.Tests/HandshakeResidueTests.cs`** (2G·신규): 실 SimServer+GW+HS 직접 번들(S234_9 패턴). S1~S6 + 포트 경쟁 강인 하니스(`StartRobustAsync` — GetFreePort TOCTOU 재시도).
+
+### 검증 (fresh evidence — 지금 실제 실행)
+- **베이스라인**: 변경 전 `dotnet test backend/Wcs.sln` → `실패: 0, 통과: 169`.
+- **④ 전체 스위트 175 GREEN ×5 연속**(1회 GREEN 신뢰 금지·flake 교훈):
+  ```
+  RUN 1 통과!  - 실패: 0, 통과: 175, 전체: 175 (15s)
+  RUN 2 통과!  - 실패: 0, 통과: 175, 전체: 175 (15s)
+  RUN 3 통과!  - 실패: 0, 통과: 175, 전체: 175 (14s)
+  RUN 4 통과!  - 실패: 0, 통과: 175, 전체: 175 (13s)
+  RUN 5 통과!  - 실패: 0, 통과: 175, 전체: 175 (15s)
+  ```
+  (169 기존 + 6 신규 = 175. 회귀 0.)
+- **신규 6건 단독 ×6 연속 GREEN**(타이밍 취약분 결정성 확인): NEW RUN 1~6 전부 `실패: 0, 통과: 6`. (전체 5회 부하 하 + 단독 6회 = 신규 테스트 11회 전원 GREEN.)
+- **① fix 입증(핵심)** — arming 호출 임시 비활성화(`ArmRFlagZeroAsync` 주석) 후 S1/S2 실행 → **레벨-읽기 결함 재현(RED)**:
+  ```
+  실패 S1_Residue_Reconciled_ThenSuccess  Actual: RSeqMismatch
+     [S1] Outcome=RSeqMismatch SentCSeq=1 RSeq=123   ← 잔류 R_Seq=123을 새 건(cSeq=1) 응답으로 오소비
+  실패 S2_ResidueChain_ThreeConsecutive   Actual: RSeqMismatch
+     [S2] #1 Outcome=RSeqMismatch CSeq=1 RSeq=123
+  실패! - 실패: 2, 통과: 0
+  ```
+  arming 복원 후 동일 S1/S2 → `Success`(대사 일치 SentCSeq==ReceivedRSeq). ⇒ "레벨→arming" 전환이 연쇄를 끊었음을 직접 입증.
+- **② S3 기동 reconcile**: Sim R 프리셋(20/123/RFlag=1) 기동 → 폴 루프 ClearR → `!RFlag` 도달 + `OnWrite("CLEAR_R")` + `OnRegisterChange(R_CellNo 20→0·R_Seq 123→0·R_Flag 1→0)` 단언 GREEN. 이후 첫 핸드셰이크 Success·잔류 대사 미발화.
+- **② S5 확인 타임아웃**: sticky 잔류 → arming ClearR 미반영 → `RFlagResidueTimeout`(SentCSeq=0·ReceivedRSeq=123·`HS_R_RESIDUE_TIMEOUT`·**HS_C_SENT 없음**=C 미기입) 단언 GREEN.
+- **② S6 무응답 회귀**: `InjectNoResponse` → `RFlagTimeout` 보존(arming이 이 경로 훼손 안 함·HS_R_RESIDUE 미발화·C는 기입).
+- **③ S4 무잔류 회귀**: 깨끗한 상태(건 간 ClearR 정착 대기) 연속 2건 Success + `HS_R_RESIDUE`/`HS_R_ARMED` 미발화(추가 지연 0).
+- **⑤ 절대규칙 준수**: #1 — 모든 ClearR가 큐 경유(`_gw.EnqueueAsync` / `_writeQueue.Writer.TryWrite`, 오케스트레이터·폴루프 직접 Modbus 호출 0). #7 — 확인 타임아웃 전부 `_opt.RFlagClearConfirmTimeoutMs` 바인딩(하드코딩 grep 0). #8 — `Wcs.Core` diff 0. #3 — 오케스트레이터 TgtFloor 접촉 0(R 클리어만).
+- **⑥ 관측성**: 2A 잔류 대사는 기존 `OnStage` 구독(SorterRegistryFactory:408)이 `HS_R_RESIDUE`(잔류값 포함)를 operation_log **HANDSHAKE**로 자동 기록(Wcs.Api 무변경). 2B 기동 reconcile은 계약 2D 명시대로 **기존 OnWrite/전이 훅+로깅** 경유 — WARN(잔류값)+CLEAR_R(PLC_WRITE)+POLL_CHANGE(R_CellNo 20→0·R_Seq 123→0). S1/S3 테스트가 OnStage/OnWrite/OnRegisterChange로 실증.
+- **⑦ 무변경 가드**: `git diff --stat` → Program.cs(+8·타이밍 배선)·appsettings.json(+4/-2·타이밍 키)·HandshakeOrchestrator.cs(+92)·PlcGateway.cs(+33)·SimServer.cs(+53)·docs/SPEC.md(+11) + 신규 HandshakeResidueTests.cs. **frontend diff 빈 출력·Wcs.Core diff 빈 출력**·DbSeeder/마이그레이션/Sorters/Provider/ConnectionStrings diff 0.
+- **⑧ fail-safe**: `EmitStage`/`OnWrite`/`OnRegisterChange` 전부 기존 try/catch 격리 유지(신규 발화도 동일 경로). 타이밍 회귀 0(④ 5회·깨끗한 경로 지연 0=③).
+- **빌드 경고**: `dotnet build` 경고 10건 전부 **NU1903(SQLitePCLRaw 2.1.10 advisory) — base develop 선재 부채**(todo.md S-BACKEND-FOLDER). 본 변경 도입 신규 경고 0·오류 0.
+
+### 무변경 가드/함정 대응
+- **동시 직렬화(F1b)**: 미해결·악화 금지 준수 — arming ClearR은 per-소터 순차 dispatch 전제 위에서 안전(잔류 대사 로직은 orchestrator 인스턴스 내부, per-소터 락 미도입).
+- **S7 flake 귀속**: 변경 후 1차 전체 실행에서 `S7OfflineAlarmTests`가 `SocketException(포트 바인드)` 1회 실패 — 기존 `GetFreePort()` TOCTOU 경쟁(ScenarioTests.cs:959)이 신규 6 테스트 병렬 부하로 발현(핸드셰이크 로직 무관·bind 예외). 신규 하니스에 포트 경쟁 재시도 추가 후 **전체 5회 연속 175 GREEN 재현 0**으로 귀속·해소. 기존 테스트는 미접촉(스코프 보존).
+
+### 프로세스/포트 정리
+Wcs.Sim3ds/Wcs.Api/testhost 오펀 0 · 포트 1502/5080 free 확인.
+
+### 상태
+계약 §5 ①~⑧ 전부 PASS. 커밋/git 조작 없음. Evaluator 검증 대기.
