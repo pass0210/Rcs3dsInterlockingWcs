@@ -2,6 +2,13 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-RCS-DOCS-B2B (WCS↔RCS 3문서 B2C/B2B 대섹션 이분 + B2B 계약 원천 미러링) — APPROVED (2026-07-07, 1 iteration)
+
+- **다문서 계약 미러링 검증 = "문서 프로그램 추출 → 튜플 집합 대조"가 육안 대조보다 결정적**: 3문서(KR/EN/MS)×40 필드 튜플을 `id="b2b-if"` 세그먼트에서 정규식 추출해 `KR==EN==MS` set 동치 + 원천(api-spec-ko.html §1~5) 값 대조로 닫았다. 육안으론 batch 1개 누락·EN 드리프트 1행을 놓치기 쉽다. 실패 message 19종은 `grep -F`(fixed-string, 정규식 아님 — `{}()[]'.`이 메타문자라 필수)로 3문서 각각 "ALL PRESENT" 단정. **계약 verbatim은 regex Grep이 아니라 fixed-string 매칭이 정답**.
+- **"B2C 훼손 0" 무훼손 판정 = git diff의 제거(-) 라인 전수 = 수정 전량 회계**: 추가 라인은 신규(B2B/배너/개요)라 무한정이지만 **제거+변경 라인은 유한**하고 그것이 기존 콘텐츠 수정의 완전한 목록이다. 제거 라인이 전부 "헤더/TOC/푸터(라벨) + 승인된 Q4 동기화 + 텍스트-동일 div-fix"임을 보이면 무훼손이 닫힌다. 사유코드 8종 존재 grep은 보조. **무훼손 스프린트에서 추가 라인 리뷰보다 제거 라인 회계가 핵심 게이트**.
+- **"선재 결함 수정" 주장은 HEAD 대조로 검증 — `git show HEAD:file`이 판정자**: Generator가 master_spec §06 미완 `</div>`를 "HEAD 선재"라 주장 → `git show HEAD:…`로 L191-192에서 `</section>` 앞 note 미닫힘 실재 확인 + 추가 라인이 텍스트-동일+`</div>`뿐임을 대조해 "well-formedness만 개선, 의미 0변경"으로 닫음. 선재성 주장은 신뢰 말고 HEAD 스냅샷으로 역증.
+- **docs-only Full-stack 스프린트 = 브라우저 E2E 대신 파서 단정(계약이 sanction)**: 레포는 Full-stack이나 변경 표면이 정적 `docs/*.html`뿐이면 런타임 E2E 3슬롯 N/A + `html.parser` 태그밸런스(errors=0·leftover=[])·테이블 셀밸런스로 렌더 유효성 단정. `<script>` 0 → JS 콘솔 에러 발생 불가, 외부 CDN 폰트는 시스템 폰트 폴백으로 graceful. 무변경 가드(`git diff --stat -- backend/ frontend/ scripts/` 빈 출력) + 회귀(`dotnet test` 210 GREEN 1회)로 "코드 계층 무영향" 실증. Playwright 미설치가 스킵 사유가 아니라 계약이 파서 경로를 명시 허용.
+
 ## S-SIM3DS-RTU (Sim3ds TCP→RTU 전송 계층 추가 · 실 PLC 없이 RTU 리허설 · 전송만 교체·의미 동일) — APPROVED (2026-07-07, 1 iteration)
 
 - **"전송만 교체·의미 동일"의 진짜 게이트 = 실 SUT 상태기계를 fake-transport에 태운 왕복(hand-rolled mock ≠ 실증)**: 기존 VT-2는 hand-rolled `ModbusRtuServer`를 썼을 뿐 실 SimServer 상태기계를 안 태웠음 → 이번 B1/B2는 프로덕션 `new SimServer(opt, fakePort:...)`를 in-memory FakeSerialPort에 결선해 **실 RunSimLoopAsync/RunSortSequenceAsync + 실 FluentModbus ModbusRtuServer**가 D0~D6를 구동, WCS ModbusRtuMaster가 폴 Online→C/R 핸드셰이크 Success(R_Seq==C_Seq)→ClearR→R_Flag=0을 왕복. seam이 상태기계를 오염 안 함의 실증은 "GREEN"이 아니라 "실 SUT가 fake 위에서 도는가"의 코드 판독(생성자·팩토리 라우팅)으로 닫힘. 물리 COM 불요 → 환경 무관 CI 게이트.
@@ -401,3 +408,4 @@
 - **[EVALUATOR 자기-사고] test 실행 중 별도 `dotnet build --no-incremental` 동시 실행 → CS0006 metadata 파일 없음(obj/ref 경합)**: 백그라운드 test-run과 병렬 클린빌드가 같은 출력 디렉터리를 놓고 경합해 거짓 빌드 실패(EXIT=1). e2e-parallel-load-surfaces 교훈의 동시 빌드 파일락과 동류. **빌드/테스트는 직렬로** — 검증자도 동시 빌드 금지. 직렬 재실행 시 210/210 GREEN 확정.
 - [CODE-REVIEW] sprint=S-CLEANUP-FIELD pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-CLEANUP-FIELD critical=0 major=0 minor=3 iter=2
+- [CODE-REVIEW] sprint=S-RCS-DOCS-B2B critical=1 major=7 minor=6 iter=3 (문서리뷰: C1 pId출처·I1~I7·Minor 전부 RESOLVED, OFFLINE 각주 fix iter3, 커밋 전 해소)

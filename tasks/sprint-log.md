@@ -2258,3 +2258,85 @@ piece=2 · sorter_command=2 · piece_event=2               (적용 전과 동일
 **통합 결함 1건(iteration 2)**: 신규 CleanupFieldM1_HttpTests가 FakeModbusWebApplicationFactory의 static DB명 공유로 병렬 이중시드 충돌(5 FAIL) → 전용 인스턴스-고유 팩토리(HubWebApplicationFactory 동형)로 격리.
 
 **최종**: dotnet test backend/Wcs.sln = **210/210 GREEN ×3연속**(189 기존 + M1 19 + M2 2), 빌드 오류 0(경고 10 = 선재 NU1903), F1b flake 미발현, 고아 프로세스 0.
+
+---
+
+# S-RCS-DOCS-B2B — WCS↔RCS 인터페이스 3문서 B2C/B2B 이분 기술
+
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-07)
+
+문서 전용 스프린트. 산출물 = `docs/*.html` 3개(+ 본 로그). 코드/스키마/스크립트 0 변경.
+
+### 문서별 추가/변경 (Q1 확정 = 대섹션 이분)
+공통 구조(3문서 동일): 상단 **◎ 2모드 개요** 섹션(B2C vs B2B 7행 비교표) + **Part I · B2C** 배너(기존 본문 그대로 감쌈) + **Part II · B2B** 배너 + B2B 3섹션(B1 개요·통신 / B2 인터페이스 5종 / B3 실패 응답). 신규 CSS(.part/.modechip/.note.b2b)는 additive. TOC·헤더 소개문·푸터를 2모드 표기로 재배치(B2C 본문 §무훼손).
+
+- **wcs_rcs_interface_kr.html (한)**: 정본. 헤더/TOC/푸터 재배치 + B2B 3섹션 추가. §1~§8(B2C) 본문 무변경.
+- **wcs_rcs_interface.html (영)**: KR 구조의 영문 번역 B2B 3섹션 추가. **+ Q4 B2C 동기화** — 낡은 EN B2C 4개소를 최신 KR과 일치: ①§3 `ready` 필드(소터 셀 만재/정지는 push ready 미포함·IF-05 dispatch 차단) ②§5 IF-08 문단(소터 ready=false는 운영상태 사유만) ③§6 IF-05 `FULL/PAUSED` 행(슈트 OK / 소터 PAUSED·셀 NG·OFFLINE 미고려) ④§6 IF-08 표(운영상태 BUSY/OFFLINE 3번째 행 추가).
+- **wcs_rcs_3ds_master_spec.html (통합)**: 2모드 개요 + Part I/II. **B2B의 3DS 무관성 명시**(D5) — 개요 note + B1 선두 note가 "B2B는 §07 PLC 레지스터·§08 핸드셰이크·IF-06/11/12·층 정렬·IF-08 푸시·목적지 판정의 대상이 전혀 아님"을 구조로 드러냄. §00~§10(B2C·3DS)은 라벨링만. **부수 정정 1건**: §06 note의 **미완 `</div>`(HEAD 선재 결함, git show로 확인)**를 닫음 — 내부 B2C 서술 텍스트 100% 동일, "HTML 유효성 유지" 제약 준수 목적의 well-formedness 수정(의미변경·삭제 0).
+
+### B2B 인터페이스 5종 (api-spec-ko.html §1~6 원천 미러링)
+① `GET /api/v1/works/unprocessed?bizDay=` (원시 배열 응답 + 부수효과: ReceiveTime 마킹·미처리0건 자동생성 트리거·[]+200은 실패 아님) · ② `POST /input`(qty 묶음·부족 시 전체거부 F) · ③ `POST /classification` · ④ `POST /results`(요청 최상위 JSON 배열·미등록 barcode 하나라도 전체거부) · ⑤ `POST /box`(선택·바코드 미검증). 응답 래퍼 `{status:"S"|"F", message}`. "HTTP 코드 아닌 status 필드로 분기" 명시. 요청 status OK/NG(양·불) vs 응답 status S/F(성부) 두 축 구분 명시. §6 실패 message 전 카탈로그(공통400 7종·unprocessed 1·input 2·classification 4·results 3·box 4·시스템 429/400/500) 포함.
+
+### Q3/Q2 확정 반영
+- Q3: Base URL = `http://<WCS_HOST>:5080`(배포 환경별 플레이스홀더) + 레거시 `192.168.0.150:5205` 각주(3문서 각 1). 구체 IP 하드코딩 안 함.
+- Q2: 필드 길이는 api-spec 표기값 채택(barcode 20·reason 255·inTime/sortTime 20 — PROGRAM_STRUCTURE의 느슨한 ≤100/≤500/≤30 아님). **batch만 1~10으로 통일**(api-spec 내부 3 vs 1~10 모순 해소). §6 message는 verbatim.
+
+### api-spec 대조 결과 (Generator 자체 검증, 실증)
+- **필드 튜플 대조**: 3문서 B2B 인터페이스 섹션에서 (필드,타입,길이,필수) 40행 추출 → **KR=EN=MS 완전 동일**(EN↔KR B2B 정합 D4 충족). 40행 전부 api-spec-ko.html §1~5 값과 일치(batch=1~10 통일 5행 확인).
+- **§6 verbatim 대조**: 19개 실패 message 문자열이 **3문서 각각에 그대로 존재**(grep 매칭 [Y Y Y] × 19). `{Field}/{N}/{M}/{barcode}/{list}/{chuteNo}/{value}/{id}` 치환 자리 원문 보존.
+- **HTML 유효성**: html.parser 태그 밸런스 3문서 전부 OK(errors=0, leftover=0). master_spec 선재 미완 `</div>` 수정 후 clean. section/table/pre open==close.
+- **B2C 무훼손**: 제거 라인 대조 — KR=헤더/TOC/푸터 3줄(재배치), EN=헤더/TOC/푸터+Q4 4개소, MS=헤더/TOC/푸터+§06 div-fix. B2C 사유코드(NORMAL·BUSY·FULL/PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE) 3문서 전부 보존.
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력. 변경 = `docs/*.html` 3개뿐(846 삽입 / 14 삭제).
+
+### 회귀
+dotnet build/test는 코드 무변경이라 210 GREEN 불변 예상 — 실행은 Evaluator D6에 위임(계약 명시).
+
+### 커밋/push 없음 — Evaluator 검증 대기 (docs/rcs-interface-b2b-b2c).
+
+---
+
+## FIX ITERATION 2 (리뷰 C1·I1~I7 보완)
+
+문서 리뷰(RCS 수신자 관점)가 발견한 실질 결함을 사용자 확정("전부 보완")대로 3문서
+(wcs_rcs_interface_kr.html 정본 · wcs_rcs_interface.html 영문 · wcs_rcs_3ds_master_spec.html)에
+반영. 기존 통과분(B2B 필드 api-spec 일치·실패 message verbatim 19개·EN=KR·B2C 무훼손·HTML 유효)
+불변 유지. 코드/스크립트/테스트 0 변경.
+
+### 사용자 확정 반영
+- pId·inductionNo = **RCS 자체 생성 정수 식별자**, 서버는 검증 없이 저장(PROGRAM_STRUCTURE §2.2.1/§2.2.2
+  "검증 없음", `Pid=PId.ToString()` 확인). unprocessed 응답에 없으므로 RCS가 채워 보냄을 명시. 유일성 등
+  원천에 없는 규칙은 창작하지 않음.
+- B2C/B2B 라벨 유지 + 2모드 개요에 (1) "연동 방식 라벨" 정의, (2) 선택 기준(라이브 3D 소터 실시간 틸트=B2C /
+  사전 등록 배치 데이터 소비=B2B), (3) **B2B도 정식 운영 경로**(테스트 전용 아님) 명시.
+
+### 항목별
+- **C1**: input(inductionNo·pId)·classification(pId) 필드표 비고에 출처(RCS 부여·검증 없이 저장·
+  unprocessed 미포함) 명시. 2모드 축 note에도 "RCS가 부여하는 Integer 식별자" 브리지 문장 추가.
+- **I1**: 2모드 개요 상단에 라벨 정의 + 선택기준 + 운영경로 note(3문서). KR/MS 국문·EN 영문.
+- **I2**: B1 개요에 **B2B 골든 패스**(unprocessed→input→classification→results→box) flow + 단계별
+  목적·실패 시 RCS 행동(재시도 가부) 표 추가(3문서).
+- **I3**: bizDay 길이 8→**8~10** 통일(①~④ 필드표, box는 기존 8~10). 검증: b2b-if 내 bizDay 6행 전부 8~10.
+- **I4**: "상충 시 본 문서 우선" note — batch 1~10·bizDay 8~10은 원천 대비 의도적 확장, api-spec-ko.html은
+  역사적 참조로 격하(3문서).
+- **I5**: chuteNo **3자리 zero-pad** 전 엔드포인트 통일 note + classification "Chute mismatch"는 패딩 후
+  값 비교 명확화(코드 §2.2.2/§2.2.3 "3자리 정규화" 근거).
+- **I6**: unprocessed GET **비멱등 경고**(굵게) — 응답 유실 시 단순 재시도 금지(각 호출이 행 소비).
+- **I7**: B3에 **타임아웃·재시도 지침** 문단(unprocessed 재시도 금지 / POST별 안전 재시도 조건·이중소비 주의 /
+  429 지수 백오프 / 500 불확실)(3문서).
+- **Minor**: M1 TOC를 PART I·B2C / PART II·B2B 구분자 span으로 시각 분리 · M2 results 배열 다중
+  (bizDay,batch) 그룹 허용 1줄 · M3 box 송신 주체(박스 분류 설비, RCS 선택 구현) 정리 · M4 자동생성을
+  RCS 관측("빈 배열/생성 데이터 수신 가능")으로 재기술 · M5 순수 interface 문서(KR/EN)의 3DS note 톤
+  완화(PLC 상세는 범위 밖·마스터 소관으로 지시), master_spec은 강한 3DS 무관 note 유지(D5) · M6 TOC
+  개요 앵커 #b2b→**#b2b-ovw** 교정.
+
+### 자기 검증(파서·대조)
+- html.parser 태그 밸런스: 3문서 errors=0, leftover open(html/body 제외)=[].
+- 실패 message 19개 verbatim: 3문서 각 19/19 존재(불변).
+- B2B 계약 튜플(field·type·length·req) 40행: KR==EN==MS True(파서 대조). bizDay 8~10×6·batch 1~10×5(문서별).
+- TOC: 3문서 #b2b-ovw 존재, 구(舊) 배너 앵커 `href="#b2b"` 제거 확인.
+- 무변경 가드: `git diff --stat -- backend/ frontend/ scripts/` 빈 출력. 변경 파일 = docs 3개(+tasks 산출물).
+
+### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
+
+## FIX ITER 3 (OFFLINE 각주)
+IF-05 사유표 두 OFFLINE 표면 상충 해소 — interface_kr·interface.html 각각 표 아래 `.note` 각주 1줄 추가(EN=KR): FULL/PAUSED 행 OFFLINE=소터 운영상태(IF-05 미참조·셀 있으면 OK) vs COMPLETED/NO_DEST/OFFLINE 행 OFFLINE=목적지 확정불가(NG). 코드 정합: RcsController IF-05 게이트가 r.Online 미참조(Paused+SorterCanAcceptBarcode만), QueryDestination NO_DEST/COMPLETED가 목적지 미확정 NG. 무변경 가드 `git diff --stat -- backend/ frontend/ scripts/` 빈 출력.

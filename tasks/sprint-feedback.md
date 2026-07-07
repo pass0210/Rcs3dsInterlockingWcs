@@ -1,124 +1,108 @@
-# Sprint Feedback — S-CLEANUP-FIELD
+# Sprint Feedback — S-RCS-DOCS-B2B
 
 **APPROVED** — Evaluator, 2026-07-07 (1 iteration to pass).
-IN 16항목 전항 + 절대규칙·무변경 가드·동시성 사각 전부 PASS, fresh evidence.
-브랜치 `fix/cleanup-field`. 검증자는 코드 수정/커밋/브랜치 전환 없이 독립 재실행·코드 판독만 수행.
-핸드오프 마커 확인: `tasks/sprint-log.md:2249` `## IMPLEMENTATION COMPLETE (Orchestrator fan-in, 2026-07-07)` (+ m1/m2/m3.md).
-평가 제외(사용자 추가 자료·untracked): `docs/PROGRAM_STRUCTURE.md`·`docs/api-spec-ko.html` — 이 스프린트 산출물 아님(확인).
+WCS↔RCS 인터페이스 3문서 B2C/B2B 이분 기술. 검증 시나리오 D1~D6 전항 + Q1~Q4 확정 준수 전부 PASS, fresh evidence.
+브랜치 `docs/rcs-interface-b2b-b2c`. 검증자는 코드 수정/커밋/브랜치 전환 없이 독립 재실행·문서↔원천 대조·코드 판독만 수행.
+핸드오프 마커 확인: `tasks/sprint-log.md:2266` `## IMPLEMENTATION COMPLETE (Generator, 2026-07-07)`.
+변경 파일: `docs/{wcs_rcs_3ds_master_spec,wcs_rcs_interface,wcs_rcs_interface_kr}.html` (+ tasks/sprint-log.md). 원천 = `docs/api-spec-ko.html` §1~6.
 
-──────────────────────────────────────────────────────────────────────
-## 1. 전체 스위트 (독립 재실행 ×2, fresh)
+---
 
-```
-RUN1: dotnet test backend/Wcs.sln → 통과!  실패: 0, 통과: 210, 건너뜀: 0, 전체: 210 (14s) EXIT=0
-RUN2: dotnet test backend/Wcs.sln → 통과!  실패: 0, 통과: 210, 건너뜀: 0, 전체: 210 (17s) EXIT=0
-```
-- 189 baseline + M1 신규 19 + M2 신규 2 = 210. **F1b 선재 flake 미발현**(격리 재실행 불요).
-- ⚠ 자기-사고 기록(귀속 명확·코드 무관): RUN2 1차 시도가 CS0006(metadata 파일 없음)으로 EXIT=1 →
-  원인은 **검증자가 `dotnet build --no-incremental`를 test-run2와 동시 실행**해 obj/ref DLL을 놓고 경합한 것
-  (e2e-parallel-load-surfaces flake 교훈의 동시 빌드 파일락). 직렬 재실행 시 210/210 GREEN 확정. 산출물 결함 아님.
-- 정적검사: `dotnet build --no-incremental` → **오류 0 / 경고 10**, 10건 전부 선재 NU1903
-  (`SQLitePCLRaw.lib.e_sqlite3 2.1.10` advisory·todo:4). **신규 컴파일 경고 0**(계약 조건 충족).
+## D1. B2B 계약 대조 (문서 → 원천 api-spec-ko.html §1~5) — PASS
 
-## 2. IN 16항목 개별 실증 (targeted 재실행 raw 인용 — `--no-build`)
+프로그램 추출로 3문서 B2B 인터페이스 섹션(`id="b2b-if"`)의 (필드,타입,길이,필수) 튜플 40행 파싱·대조.
+- **KR=EN=MS 완전 동일** (byte-identical 튜플 40행, `KR==EN: True`, `KR==MS: True`).
+- 40행 전부 api-spec-ko.html §1~5 값과 일치. Q2 확정대로 **batch만 1~10 통일**(api-spec 내부 §1~4=3 vs §5=1~10 모순 해소) — 5개 batch 행 전부 `1~10`(KR/EN/MS 각 5). 나머지 api-spec 값 채택 확인:
+  - `barcode` §1~4 = **20**, `reason` = **255**, `inTime`/`sortTime` = **20** (PROGRAM_STRUCTURE의 느슨한 ≤100/≤500/≤30 아님).
+  - `pId`·`inductionNo` = **Integer** (lessons E-4 회귀 교훈 준수).
+  - 필수여부 미세 차이 정확: input `barcode`=N(선택)·results `qty`=N vs classification `barcode`=Y·unprocessed `qty`=Y — api-spec 그대로.
+  - box §5 고유값: `bizDay` 8~10 · `boxNo` 1~50 · `chuteNo` 1~10 · `items[].barcode` 1~100 · `endTime` 1~50 N — api-spec §5 정확 미러링.
+- raw: `KR: 40 field rows / EN: 40 / MS: 40 · KR==EN==MS True · batch len=1~10 ×15(3문서×5)`.
 
-```
-통과 CleanupFieldM1_OfflineLogTests.D1_SustainedOffline_SuppressesLogSpam_OneTransitionAndRecovery [170ms]
-통과 CleanupFieldM1_HttpTests.D3_Health_Returns200_WithStatusDbSorters [24ms]
-통과 CleanupFieldM1_HttpTests.D4_If05_BarcodeTooLong_Returns400 [1s]
-통과 CleanupFieldM1_HttpTests.D4_If05_QtyOverflow_Returns400_NoDataPollution [62ms]
-통과 CleanupFieldM1_HttpTests.D4_If05_TimeStampTooLong_Returns400 [2ms]
-통과 CleanupFieldM1_HttpTests.D4_If10_NegativeQty_Returns400 [13ms]
-통과 CleanupFieldM1_HttpTests.D4_If05_ValidInput_StillOk_NoRegression [186ms]
-통과 CleanupFieldM1_ClassifierTests.A1_Residue_IsWarn_NotInfo + A1_HandshakeStageLevels(×11 theory)
-통과 Sim3dsRtuTests.A9_UnitId_OutOfRange_FailLoud [15ms]
-통과 Sim3dsRtuTests.A10_SetRResidue_BeforeStart_FailLoud [1ms]
-EXIT=0
-```
+## D2. §6 실패 message verbatim 검증 — PASS
 
-- **D-1 (OFFLINE 로그 스팸 억제) — PASS.** 표적 테스트가 단정: SetFailReads(true)로 지속 OFFLINE 유도 →
-  지속 라인 ≥12 관측 시점에 "OFFLINE 전이" ERROR **==1**, 총 ERROR **==1**, 예외(스택) 첨부 **==1**
-  (폴마다 스택 반복 아님=스팸 억제), 주기 WARN 요약("OFFLINE 지속 — 누적") ≥1, 복구 시 "ONLINE" INFO 정확히 1회 증가.
-  코드(`PlcGateway.cs:365-405`): `PublishOffline()`가 `bool` 반환(Online 1→0 성공=전이당 1회) → 전이는 `LogError(ex,…)` 1회,
-  지속은 `LogDebug` 강등 + `OfflineLogSummaryEveryPolls`마다 `LogWarning` 요약. `_offlineFailureCount`는 정상 폴 성공/전이 시 리셋.
-- **D-2 (Serilog rollOnFileSizeLimit) — PASS.** `appsettings.json`(retain 14)·`appsettings.Development.json`(retain 7) 둘 다
-  File Args에 `rollOnFileSizeLimit:true` + `fileSizeLimitBytes:104857600`(100MB) 추가(diff 확인). base/dev 정합.
-- **D-3 (/health) — PASS.** 실 HTTP 왕복: `GET /health` → 200, `{status:"ok", db:true, sorters:[{chuteNo:30,online,lastPollAt}]}`.
-  **부수효과 0**: 두 번째 호출도 200 + `TgtFloor` 불변 단정. 코드(`Program.cs:120-145`)는 `Latest`(논블로킹 스냅샷)·`CanConnect`(읽기 전용)만.
-  CanConnect 예외도 liveness 200 유지(db=false로만 저하 표시 — 예외 삼킴 아님). 항상 200(Q2 확정).
-- **D-4 (입력 상한) — PASS.** 실 HTTP: barcode 201자→400, IF-05 qty=int.MaxValue→400 + **piece 미생성(오염 0 DB 단정)**,
-  timeStamp 31자→400, IF-10 qty=-5→400, 정상 입력→200 OK(회귀 없음). 전부 **500 아님**(SQLite 더블 provider-gap을
-  컨트롤러 검증이 선제 차단). qty 상한은 `WcsOptions.MaxQtyPerRequest`(appsettings 100000·설정값), barcode 200/timeStamp 30은
-  스키마 미러 const(`WcsDbContext.HasMaxLength`와 정합·주석 명시). IF-05/IF-09/IF-10 세 핸들러 전부 배선(코드 확인).
-- **A-1 (HS_R_RESIDUE WARN 승격) — PASS.** 분류기 12케이스: `HS_R_RESIDUE`→WARN, `HS_R_RESIDUE_TIMEOUT`/MISMATCH/OFFLINE/TIMEOUT/CFLAG_TIMEOUT→ERROR,
-  정상 단계(C_SENT/R_RECV/RSEQ_MATCH/R_ARMED/CLEAR_R)→INFO. 배선 경로 판독: `Program.cs:469` `SubscribeHandshakeStage`가
-  `OperationLogClassifier.ForHandshakeStage(action)`로 위임(단일 진실). Nop 팩토리 주의사항 정당: 테스트 호스트는
-  `NopSorterRegistryFactory`라 HANDSHAKE→opLog 미배선 → 레벨 결정 함수를 단위 테스트로 검증(운영 배선이 이 레벨 그대로 opLog.Log 전달).
-  **ERROR 승격 회귀 0**: 기존 ERROR 집합 불변, RESIDUE만 INFO→WARN(ERROR로 승격 아님), RESIDUE_TIMEOUT은 TIMEOUT 우선 매칭→ERROR 유지.
-- **A-2 (spurious RFlagRaised 에지 억제 + F-3 주석) — PASS(코드 판독).** `PlcGateway.cs:315-355`: reconcile 폴에서 ClearR 큐 투입 시
-  `suppressRFlagEdge=true` → `if(!prevRFlag && snap.RFlag && !suppressRFlagEdge)`로 상승 에지 게시 억제. ClearR은 `_writeQueue.Writer.TryWrite`
-  경유(절대규칙 #1 준수·직접 Modbus 호출 아님). F-3 주석: `RFlagRaised` 채널 소비자 부재 명시(HandshakeOrchestrator는 `ArmRFlagZeroAsync`에서
-  `_gw.Latest` 직접 폴링). 소비자 없어 무해·핸드셰이크 의미 영향 0.
-- **C-2 (UnitId 경계) — PASS.** A9 테스트: 0·248·300 거부(InvalidOperationException), 1·247 유효. 코드: `ParsedUnitId`(1~247, 형제
-  ParsedParity/ParsedStopBits 동형) — 생성자에서 `(byte)opt.UnitId` 무음 절단(300→44) 대신 fail-loud.
-- **C-3 (pre-StartAsync 예외) — PASS.** A10 테스트: StartAsync 전 SetRResidue → "StartAsync 먼저 호출" InvalidOperationException.
-  코드: `RequireTransport([CallerMemberName])` 가드가 Flush/Pull의 `_transport!` NRE 대체.
-- **A-3 (volatile 정렬) — PASS(코드 판독).** `InjectRFlagDelayMs`(int)·`InjectStickyRResidue`(bool)는 volatile 백킹 필드.
-  `InjectRSeqOverride`(int?)는 volatile 대상 아니라 `_hasRSeqOverride`(volatile bool)+`_rSeqOverride`(volatile int) 2필드 분해.
-  공개 시그니처(int?/int/bool·이름) 불변 → 기존 사용처 무영향(전체 스위트 GREEN이 방증).
-- **B-1 (seed 매핑확장 주석 정정) — PASS(SQL 전문 판독으로 재검증 — 핵심).** 정정된 3단계 절차가 실 SQL 로직과 정확히 일치:
-  (1) `@availMax 15→20`: §2 셀 MERGE(`Enab=CASE WHEN n<=@availMax`)·§5 order_item(`BETWEEN 1 AND @availMax`)·§6 cell_assignment
-  (`CellNo BETWEEN 1 AND @availMax`) 전부 @availMax 참조 확인 → 자동 연동. (2) §4 오더 VALUES: 하드코딩 `(1)..(15)`로 @availMax 미참조 →
-  16~20 오더 생성 위해 `(1)..(20)` 수동 확장 필요 확인. (3) §7 셀16 CANCELLED 블록: 유지 시 §7a가 셀16 배정 해제·§7b가 오더16 CANCELLED
-  → 셀16 가용화 위해 제거 필요 확인. **옛 안내("UPDATE cell SET Enabled=1 한 줄")가 틀린 이유도 정확**: §2 MERGE `WHEN MATCHED … Enabled=src.Enab`가
-  재실행 시 @availMax(=15) 기준으로 수동 UPDATE를 클로버함(로직 확인). **SQL 로직 무변경**: diff는 주석 블록(L22-32) + B-6 진단 SELECT만.
-- **B-2/B-4 (테스트 주석) — PASS.** PlannedQty=100(OVER 간섭 배제·게이트만 검증)·pId 41000대(LOADED 직삽입 합성 pId·20000대 IF-05와 비충돌)
-  주석 3곳 추가. diff는 주석 라인만(로직 무변경).
-- **B-6 (cells_enabled 술어 분리) — PASS.** 진단 SELECT를 `cells_enabled_15`(Enabled=1만)·`cells_cap3_20`(Capacity만)로 분리.
-  검증 편의 SELECT·출력 전용(트랜잭션 로직 무영향). 전 20셀 Capacity=3이라 cap 열=20, enabled 열=15로 진단 명료.
-- **A-5 (master_spec §05 FULL/PAUSED 타입 분기) — PASS(실코드 대조).** 정정 표가 `RcsController.DestinationQuery` availability 델리게이트와
-  정합: 슈트(dt!=Sorter3D)→`DestinationBlock.None`(OK), 소터 PAUSED→`Block.Paused`(NG), 소터 `SorterCanAcceptBarcode` 실패→`Block.Full`(NG),
-  OFFLINE은 IF-05 미검사. `DbRepositories.cs:68-135`도 소터만 PAUSED 차단(슈트 통과) 확인. interface_kr 정합 참조 추가.
-- **A-20 (README 전면 현행화) — PASS(표본 대조).** 엔드포인트(destination-query/arrival-report/deposit-report) 실 라우트 일치,
-  ASP.NET Core MVC·IF-08 푸시(deposit-permission 폐지)·Migrations 2종·17테이블·.NET10·SQL Server/SQLite·포트(:5080/:1502/:5173)
-  전부 코드/appsettings와 일치. 참조 링크 12개 파일 전수 존재 확인(docs 8·scripts 3·TASKS.md).
-- **E-SPEC (SPEC.md IF-08 푸시 명료화) — PASS.** §2 상단 노트 + §3 `deposit-permission` 폐지 마킹. **판정표 2-A/2-B는 내부
-  DepositDecider 스펙으로 보존**(삭제 안 함) 확인. IF-09 신설 언급.
-- **A-6 (CLAUDE.md drift) — PASS(오케스트레이터 몫·Team 미수정 확인).** `git diff HEAD -- CLAUDE.md` **빈 출력** — Team이 보호파일
-  미접촉(정상). 실제 정정은 오케스트레이터가 커밋 단계에서 적용(계약 Q1 확정).
+`grep -Fq`(fixed-string) 19개 실패 message 문자열을 3문서에 각각 대조:
+- **3문서 각각 "ALL 19 PRESENT (verbatim)"** — 누락 0. 카탈로그: 공통400 7종·unprocessed 1·input 2·classification 4·results 3·box 4 + 시스템 429/400/500(중복 제거 후 고유 19문자열). `{Field}/{N}/{M}/{barcode}/{list}/{chuteNo}/{value}/{id}` 런타임 치환 자리 원문 보존.
+- **`status:"F"`(서버 거부) vs 요청 `status:"NG"`(불량 물품·수락됨) 구분 설명** 3문서 전부 존재(KR:455 · EN:472 · MS:458 note). "HTTP 코드 아닌 status 필드로 분기" 명시도 3문서 존재.
+- raw 출력: 3 docs 각각 `ALL 19 PRESENT (verbatim)`.
 
-## 3. 절대규칙 · 무변경 가드
+## D3. B2C 무훼손 검증 — PASS
 
-- **#7 하드코딩 금지**: 신규 임계값 전부 appsettings 바인딩 — `OfflineLogSummaryEveryPolls`(Timing, 소터별 override 병합)·
-  `MaxQtyPerRequest`(Wcs)·`fileSizeLimitBytes`(Serilog). barcode 200/timeStamp 30은 DB 스키마 미러 const(단일 진실·의도).
-- **#1 PLC 단일 큐**: A-2 ClearR = `_writeQueue.Writer.TryWrite` 경유(직접 Modbus 0).
-- **무변경 가드 diff 0**(git diff HEAD --stat 빈 출력): `HandshakeOrchestrator.cs` · `Wcs.Core/`(DepositDecider·RegisterMap) ·
-  `frontend/` · `CLAUDE.md` · `DbRepositories.cs`. 판정·핸드셰이크·TgtFloor 규칙 의미 변경 0.
-- **예외 삼킴 0**: fail-loud(UnitId·pre-StartAsync 명시 예외)·400 응답. logger try/catch는 disposed 로거 보호(선재 패턴).
+`git diff HEAD`의 **제거(-) 라인 전수**를 문서별로 캡처해 B2C 변경이 라벨/재배치/Q4-동기화/div-fix에만 국한됨을 입증(제거 라인 = B2C 수정 전량 회계):
+- **KR(정본)**: 제거 3줄 = 헤더 소개문 + TOC `#s1` + 푸터. **B2C 본문(§1~§8) 의미변경 0**.
+- **EN**: 제거 7줄 = 헤더/TOC/푸터(3) + **Q4 동기화 4개소**(§3 `ready` 필드 · §5 IF-08 문단 · §6 IF-05 FULL/PAUSED 행 · §6 IF-08 ready=false 행). Q4 확정("의미 보존하며 최신화")이 명시 승인한 변경 — 낡은 EN을 KR 최신 내용에 맞춘 것(삭제·왜곡 아님).
+- **MS**: 제거 4줄 = 헤더/TOC/푸터(3) + **§06 note div-fix 1**(제거=미완 note, 추가=동일 텍스트+`</div>` — 텍스트 100% 동일).
+- **B2C 사유코드 전수 보존** 확인: NORMAL·BUSY·FULL/PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE 3문서 전부 존재. IF-05/08/09/10 플로우 보존.
+- **코드 정합(표본)**: 문서의 IF-05 FULL/PAUSED 슈트/소터 분기·OFFLINE 규칙이 `RcsController.cs`와 일치 — 슈트 full/paused→OK(L77·L88), 소터 `if (r.Paused) return DestinationBlock.Paused`(L93), 셀 못받음→`DestinationBlock.Full`(L96-98), OFFLINE은 IF-05 dispatch 비차단. IF-08 push ready에서 소터 셀 만재·정지 제외 규칙도 문서·코드 정합.
 
-## 4. 동시성 사각 (코드 직접 판독)
+## D4. EN↔KR(및 MS) 정합 — PASS
 
-- **D-1 전이 카운터/상태의 스레드 경계 — 안전.** `_offlineFailureCount`는 폴 루프 catch/success 블록에서만 접근(PublishOffline
-  미접근) → 단일 스레드 전용. `_online`은 `PublishOffline`(폴 루프 :365 + 쓰기 컨슈머 :470) 양쪽에서 `Interlocked.Exchange`로 원자 전환 →
-  전이당 1 이벤트/1 상세로그 보장.
-- **[관찰·비차단] 쓰기 컨슈머 전이 경합 극단 케이스**: 쓰기 컨슈머(:470)가 OFFLINE 전이를 선점하면(CAS 승리) 폴 루프의 다음
-  PublishOffline은 false 반환 → "OFFLINE 전이" ERROR 대신 "지속"(Debug/요약) 경로. 단 쓰기 컨슈머는 그 직전 `LogError(ex,"[쓰기 큐]…")`로
-  자체 상세 로그를 이미 남기고, 결과는 **더 조용한** 방향(스팸 회귀 아님). 선재 dual-call 패턴이며 D-1 목표(스팸 억제) 보존 → 결함 아님.
-- **/health 스냅샷 읽기 경합 — 안전.** `Latest`(불변 record 참조 스왑)·`CanConnect` 읽기 전용, 상태전이/쓰기 0. 테스트가 2회 호출 후 TgtFloor 불변 단정.
-- **A-1 분류기 추출 ERROR 승격 회귀 0**: 기존 인라인 삼항과 ERROR 집합 동일, RESIDUE→WARN(INFO→WARN, ERROR 아님), 실패 계열 de-escalation 없음.
+- **신규 B2B 섹션 완전 일치**: D1의 40행 튜플 `KR==EN==MS True` + D2의 19 message가 3문서 동일. 엔드포인트·응답 래퍼·two-axis 설명 구조 동일.
+- **Q4 B2C 동기화**: EN의 낡은 4개소를 KR 최신과 일치시킴(IF-08 push ready에서 소터 셀 만재·정지 제외 · IF-05 FULL/PAUSED 슈트 OK/소터 NG 분기 · §6 IF-08 표에 소터 운영상태 BUSY/OFFLINE 행 추가). EN §6 IF-08 표 3행 = KR 3행 대응.
 
-## 5. 프로세스 정리
-- 검증 종료 후 포트 :1502·:5080 LISTENING 0, 고아 `Wcs.Sim3ds`/`testhost`/`vstest` 0. 실 PLC/RTU 실선 미기동(Sim TCP·더블만).
+## D5. master_spec B2B 3DS 무관성 명시 — PASS
 
-──────────────────────────────────────────────────────────────────────
-## 최종 판정: **APPROVED**
-IN 16항목 · 절대규칙 · 무변경 가드 · 동시성 · 문서-코드 정합 전부 PASS. FAIL 0. 재작업 지시 없음.
-Minor(비차단) 1건 등재: 쓰기 컨슈머 OFFLINE 전이 선점 시 폴 루프가 전이 ERROR를 남기지 않는 극단 케이스(결함 아님·더 조용한 방향).
+`wcs_rcs_3ds_master_spec.html`에 B2B의 3DS 무관성이 **구조로** 드러남:
+- **2모드 개요 note**(L134, `.note.b2b`): "Part II(B2B)는 §07 PLC 레지스터·§08 핸드셰이크·IF-06/11/12·층 정렬의 대상이 아니다 … Modbus·핸드셰이크·목적지 판정·IF-08 상태 푸시가 없다".
+- **B1 선두 note**(L294): "B2B는 3DS Modbus/핸드셰이크와 무관 — 본 파트는 REST API만 다룬다 … §07 PLC 레지스터(C/R/Ready·D0~D6)·§08 핸드셰이크·IF-06(상태 조회)·IF-11(셀 지정)·IF-12(적재 완료)·층 정렬(2층 고정)·IF-08 상태 푸시·목적지 판정의 대상이 전혀 아니다".
+- §00~§10(B2C·3DS)은 Part I 배너로 감싸 라벨링만, B2B(Part II)와 물리적으로 분리. 개요 표 "3DS 연동" 행이 B2C=있음 / B2B=없음 대조.
 
-## Code Review Minor (4-Tier Step 4.5 — S-CLEANUP-FIELD, 병합 비차단·다음 스프린트/todo 참조)
+## D6. 유효 렌더 + 무변경 가드 + 회귀 — PASS
 
-1. **입력 상한이 공유 단일-진실 아닌 문서화 미러** — RcsController.cs:31-34 const가 WcsDbContext.cs 산재 리터럴(Barcode=200/ClientTs=30)의 복제. 동기화 주석 의존. 기존 스타일과 일관·과확장 금지로 수용 — B2B 이식 전 SchemaLimits 공유 상수 검토(todo).
-2. **/health CanConnect() 동기·타임아웃 부재** — Program.cs:246. DB 무응답 시 기본 15초 점유로 liveness 프로브 역설. DB-down은 빠른 실패라 실위험 낮음. CanConnectAsync+짧은 CT(2초) 검토(readiness 정교화는 B2B-1 이연).
-3. **지속 OFFLINE 로깅이 예외 원인 변화 은폐** — PlcGateway.cs:374-384. 스팸 억제 트레이드오프. 주기 WARN에 ex.GetType().Name 저비용 노출 검토.
+- **HTML 유효성**(브라우저 미가용 → 계약 sanction된 파서 단정, "문서 파일이라 서버 불요"): `html.parser` 태그 밸런스 3문서 전부 **errors=0 · leftover_open=[]**. 테이블 th/td 셀 밸런스 imbalanced=0(KR 26·EN 26·MS 24 테이블). 문서에 `<script>` 0 → JS 콘솔/pageerror 발생 불가. 외부 CDN 폰트(pretendard)는 `--sans` 시스템 폰트 폴백으로 graceful degradation. master_spec §06 선재 미완 `</div>`는 **HEAD에 실재**(`git show HEAD:…` L191-192에서 `</section>` 앞 note 미닫힘 확인) → 텍스트 무변경으로 닫음(well-formedness만 개선).
+- **무변경 가드**: `git diff --stat HEAD -- backend/ frontend/ scripts/` = **빈 출력**. 전체 diff = `docs/*.html` 3개(+tasks/sprint-log.md)뿐. 코드·스키마·스크립트·appsettings 0줄.
+- **회귀**: `dotnet test backend/Wcs.sln` → **통과! 실패:0 통과:210 건너뜀:0 전체:210** (1회 실행, exit 0). 문서 변경이 코드에 무영향 실증. (NU1903 SQLite transitive 경고는 선재 부채·본 스프린트 무관.)
 
-리뷰어 권고(todo): 입력검증 400 거부의 operation_log 미기록(규약 비대칭 방지 위해 별도 스프린트), 쓰기 컨슈머 OFFLINE 전이 선점 시 폴링 ERROR 라인 부재(알람·큐오류로 관측 가능, 주석 명시 권장).
+---
+
+## Q1~Q4 사용자 확정 준수 — PASS
+
+- **Q1 대섹션 이분**: 3문서 전부 상단 `section#modes`(2모드 7행 비교표) + `div.part.b2c`(Part I 배너) + `div.part.b2b`(Part II 배너) + B2B 3섹션(B1 개요·통신 / B2 인터페이스 5종 / B3 실패 응답). B2B 5개 인터페이스(unprocessed GET+부수효과 명시 · input · classification · results 최상위 배열 · box 선택) 존재. 요청 status OK/NG vs 응답 status S/F 두 축 구분 서술 3문서 존재.
+- **Q2 정본**: api-spec-ko.html 값 채택 + batch만 1~10 통일 + §6 verbatim (D1·D2에서 입증).
+- **Q3 서버 주소**: Base URL `http://<WCS_HOST>:5080`(배포 환경별 플레이스홀더) + 레거시 `192.168.0.150:5205` 각주 — 3문서 각 1개소.
+- **Q4 EN B2C 동기화**: D3·D4에서 입증.
+
+## Minor (APPROVED 비차단 — 다음 스프린트 Generator 참고)
+
+- 없음. 계약 IN 전항·확정 4건·무변경 가드·회귀 전부 충족. 문서 정확성 결함 0.
+
+## 검증 방법 메모
+
+- fresh evidence 전량 자체 생성: 필드 튜플 프로그램 추출·대조, `grep -F` verbatim 19종×3문서, `git diff HEAD` 제거라인 전수, `git show HEAD` div-fix 선재성, `html.parser` 밸런스, `dotnet test` 210 GREEN 1회 실행, 컨트롤러 코드 판독.
+- COM1 실 PLC 물리 제약 준수 — API/Sim 미기동(문서 작업). dotnet test는 인메모리 더블. 검증 후 잔류 프로세스 0(Wcs.Api/Sim3ds none).
+
+---
+
+## FIX ITER 2 재검증 (Evaluator, 2026-07-07 — 최상단 APPROVED 유지)
+
+문서 리뷰 C1·I1~I7·Minor 보완(fix iteration 2) 후 delta 재검증. **회귀 0 + fix 항목 사실·계약 정합** 전항 PASS → **위 APPROVED 판정 유지**. 브랜치 `docs/rcs-interface-b2b-b2c` 읽기 전용(커밋/수정 없음). 전량 fresh evidence 자체 생성.
+
+### (A) 회귀 0 — 이전 통과분 유지 (fresh 재확인)
+
+- **실패 message 19종 verbatim**: `grep -Fq` 3문서 각 **19/19 present, MISSING 없음**. 카탈로그 = api-spec-ko.html §6 원천(공통400 7·unprocessed 1·input 2·classification 4·results 3·box 4·시스템 429/400/500, 중복 제거 후 고유 19). 치환 자리 `{Field}/{N}/{M}/{barcode}/{list}/{chuteNo}/{value}/{id}` 원문 보존.
+- **B2B 필드 튜플 3문서 동일 + api-spec 정합**: b2b-if 섹션 (field,type,length,req) **40행 파서 추출 → KR==EN==MS True**. 40행 전부 api-spec-ko.html §1~5 값 일치(chuteNo 3자리·barcode 20·reason 255·inTime/sortTime 20·box boxNo 1~50/chuteNo 1~10/items barcode 1~100). 필수여부 미세차 보존(input barcode=N vs classification barcode=Y, unprocessed items[].qty=Y vs input/classification/results qty=N). bizDay 8~10·batch 1~10은 I3/I4 승인된 의도적 확장(회귀 아님).
+- **B2C 사유코드 8종·플로우 보존**: NORMAL·BUSY·FULL·PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE **3문서 전부 존재**. IF-05/08/09/10 서술 유지.
+- **EN=KR=MS 정합**: 40행 튜플 == True + 19 message 3문서 공통. fix 항목(C1·I1~I7)이 EN(영문)·MS(국문)에서 KR과 동일 내용으로 반영.
+- **HTML 유효**: `html.parser` 태그 밸런스 3문서 전부 **errors=0 · leftover_open=[] · stray=[]**. `<script>` 0(콘솔/pageerror 발생 불가).
+- **무변경 가드**: `git diff --stat -- backend/ frontend/ scripts/` = **빈 출력**. 변경 = `docs/*.html` 3개(+tasks 산출물)뿐. numstat: KR +310/-2 · EN +315/-6 · MS +311/-3.
+- **회귀 테스트**: `dotnet test backend/Wcs.sln` → **통과! 실패:0 통과:210 건너뜀:0 전체:210**(1회, exit 0). 문서 변경 코드 무영향 실증.
+- **B2C 무훼손(제거라인 전수 회계)**: 3문서 총 제거 11줄 = 헤더 소개문 재배치(3) + 푸터 재배치(3) + **EN Q4 동기화 4개소**(§3 ready 필드·§5 IF-08 문단·§6 IF-05 FULL/PAUSED 행·§6 IF-08 ready=false 행 — Q4 승인) + **MS IF-09 도착 note div-close fix 1**(제거=미완 `</div>` note, 추가=**텍스트 byte-identical + `</div>`**만 — 기존 sanction된 well-formedness 수정 클래스, 의미변경·삭제 0). B2C 본문 의미 손실 0.
+
+### (B) fix 항목 사실·계약 정합
+
+- **C1 (PASS·원천 대조)**: 3문서 input(inductionNo·pId)·classification(pId) 필드표 비고에 "**RCS가 부여하는 정수 식별자·unprocessed 응답에 없어 RCS가 채워 보냄·서버는 검증 없이 저장**" 명시(KR 375·377·405 / EN 392·394·422 / MS 378·380·408) + 2모드 축 note 브리지 문장(KR 306/EN 323/MS 309). **원천 대조**: PROGRAM_STRUCTURE.md §2.2.1(`InductionNo` int "검증 없음(암묵 필수, 기본 0)"·`PId` int "검증 없음"·step3 `Pid=PId.ToString()`, `EquipmentNo=InductionNo.ToString()`)·§2.2.2(`PId` int "검증 없음(RCS 계약 유지)"·`Pid=PId.ToString()`) — Generator 주장 정확. unprocessed 응답 §2.2.4 = `[{bizDay,batch,items:[{barcode,chuteNo,qty}]}]`(pId/inductionNo 부재) 확인 → "RCS가 채움" 정합. **원천에 없는 유일성 규칙 창작 0**(B2B pId 비고에 uniqueness 없음). ※ B2C §데이터모델 pId "고유 ID·범위 1-30000·초기화 협의" 라인은 **HEAD 선재 B2C 콘텐츠**(git show HEAD: EN 136·KR 119, EN=KR)로 이번 fix 미접촉 — C1(B2B) 범위 밖·결함 아님.
+- **I1 (PASS)**: 2모드 개요에 (1)라벨 정의("연동 방식(통신 계약) 라벨") (2)선택기준("라이브 3D 소터 실시간 틸트=B2C / 사전 등록 배치 데이터 소비=B2B") (3)운영경로("B2B도 정식 운영 경로 — 테스트 전용 아님") — KR 108/EN 125/MS 126.
+- **I2 (PASS)**: B1에 B2B 골든 패스(unprocessed→input→classification→results→box) flow + 단계별 목적·실패 시 재시도 가부 표 — KR 318~334/EN 335~350/MS 존재.
+- **I3 (PASS)**: bizDay 8→**8~10** 통일 — b2b-if 내 6행 전부 8~10(3문서). 구현 정규식 `^\d{8}$ 또는 ^\d{4}-\d{2}-\d{2}$`와 정합(오히려 원천 §1~4의 단일 8보다 정확).
+- **I4 (PASS)**: "상충 시 본 문서 우선" note — batch 1~10·bizDay 8~10은 의도적 확장, api-spec-ko.html 해당 길이는 역사적 참조로 격하(KR 307/EN 324/MS 310). 원천값(batch §1~4=3, bizDay §1~4=8) 실측 대조로 "넓힘" 서술 정확.
+- **I5 (PASS)**: chuteNo 3자리 zero-pad 전 엔드포인트 통일 + classification "Chute mismatch"는 패딩 후 비교 명확화(KR 308/EN 325/MS 311).
+- **I6 (PASS)**: unprocessed GET **⚠ 비멱등 경고**(굵게) — 응답 유실 시 단순 재시도 금지·각 호출이 행 소비(KR 342 부수효과 note + 골든패스 329 / EN 346·564 / MS 345).
+- **I7 (PASS)**: B3에 타임아웃·재시도 지침(unprocessed 재시도 금지 / POST별 이중소비 주의 / 429 지수 백오프 / 500 불확실) — KR 545~550/EN 562~567/MS 548.
+- **Minor (PASS·전부 반영)**: M1 TOC PART I·B2C / PART II·B2B 구분자 span(3문서 각 2회) · M2 results 다중 (bizDay,batch) 그룹 허용(KR 426) · M3 box 송신 주체="박스 분류 설비·RCS 선택 구현"(KR 449) · M4 자동생성을 RCS 관측("빈 배열/생성 데이터 수신 가능")으로 재기술(KR 342) · M5 톤 분화 — master_spec 강한 3DS 무관 note 유지(MS 104·137, D5)/interface(KR·EN) note는 "PLC 상세는 마스터 소관"으로 완화 · M6 TOC 앵커 #b2b→**#b2b-ovw**(3문서 각 1) + 구 `href="#b2b"` **0건**.
+- **신규 결함 유입 0**: fix 서술이 api-spec/코드와 모순되거나 B2C를 훼손하지 않음. C1의 B2B pId 무검증 서술과 B2C pId 고유 서술은 별개 운영모드의 별개 계약(모순 아님).
+
+### 판정
+회귀 0(19 message·40 튜플·8 사유코드·EN=KR=MS·HTML 유효·210 GREEN·무변경 가드·B2C 무훼손) + fix 항목(C1·I1~I7·M1~M6) 사실·계약 정합 전항 충족, 신규 결함 0. **최상단 APPROVED 판정 유지.**
+
+### 검증 산물 정리
+- 임시 파서 스크립트(`/tmp/htmlcheck.py`·`/tmp/tuples.py`) 리포 외 위치·삭제. API/Sim 미기동(COM1 실 PLC 준수). 잔류 프로세스 0.
