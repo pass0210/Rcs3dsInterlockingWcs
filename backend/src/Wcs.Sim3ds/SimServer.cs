@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using System.Net;
+using System.IO.Ports;
 using System.Runtime.CompilerServices;
 using FluentModbus;
 using Microsoft.Extensions.Logging;
@@ -18,8 +18,28 @@ public sealed class SimServer : IAsyncDisposable
     // ─── 설정 ────────────────────────────────────────────────────────────────
     public sealed record Options
     {
+        // ─── 전송 선택(S-SIM3DS-RTU) ─────────────────────────────────────────
+        // "Tcp"(기본·현행 보존) | "Rtu". 미지정/기본 = Tcp → 기존 dotnet run 동작 바이트 동일.
+        // (WCS 측 기본은 Rtu이나, Sim3ds의 기존 관측 동작은 TCP였으므로 Sim3ds 기본은 Tcp로 두어 현행 보존 우선.)
+        public string Transport       { get; init; } = "Tcp";
+
+        // ─── TCP 전용 ─────────────────────────────────────────────────────────
         public string Host            { get; init; } = "127.0.0.1";
         public int    Port            { get; init; } = 1502;
+
+        // ─── RTU 전용(전부 설정값 — 절대규칙 #7, 하드코딩 금지) ────────────────
+        // 기본값은 WCS appsettings Sorters[0] placeholder와 정합(BaudRate=9600·Parity=Even·
+        // StopBits=One·UnitId=1·Timeout=1000). 단 PortName은 안전한 기본값 없음 —
+        // RTU 모드에서 미지정 시 fail-loud(우발적 COM1 점유 방지. WCS와 Sim은 시리얼 페어의 반대쪽 포트).
+        public string? PortName       { get; init; }          // 기본 없음 — RTU 시 명시 필수
+        public int     BaudRate       { get; init; } = 9600;
+        public string  Parity         { get; init; } = "Even"; // "Even"/"Odd"/"None"
+        public string  StopBits       { get; init; } = "One";  // "One"/"Two"
+        public int     ReadTimeoutMs  { get; init; } = 1000;
+        public int     WriteTimeoutMs { get; init; } = 1000;
+        public int     UnitId         { get; init; } = 1;      // Modbus 유닛 식별자(TCP/RTU 공통)
+
+        // ─── 시뮬레이션 타이밍 ────────────────────────────────────────────────
         public int    TiltDelayMs     { get; init; } = 200;   // 낙하 후 적재 대기
         public int    SortDurationMs  { get; init; } = 500;   // 분류 소요
         public int    MoveDurationMs  { get; init; } = 300;   // 이동 소요
@@ -33,6 +53,11 @@ public sealed class SimServer : IAsyncDisposable
         public int  InitialRCellNo { get; init; }          // 기본 0
         public int  InitialRSeq    { get; init; }          // 기본 0
         public bool InitialRFlag   { get; init; }          // 기본 false
+
+        // ─── RTU 파싱 헬퍼(WCS PlcTransportOptions와 동형 — Consistency Over Preference) ─────
+        // 잘못된 값은 Enum.Parse가 fail-loud(예: Parity="Weird" → 명확한 예외).
+        public Parity   ParsedParity   => Enum.Parse<Parity>(Parity, ignoreCase: true);
+        public StopBits ParsedStopBits => Enum.Parse<StopBits>(StopBits, ignoreCase: true);
     }
 
     // ─── 고장 주입 ───────────────────────────────────────────────────────────
@@ -61,12 +86,15 @@ public sealed class SimServer : IAsyncDisposable
     public bool InjectStickyRResidue { get; set; }
 
     // ─── 내부 ────────────────────────────────────────────────────────────────
-    private const byte UnitId = 1; // Modbus 유닛 식별자
+    private readonly byte                  _unitId;   // Modbus 유닛 식별자(설정값·기본 1)
 
     private readonly Options               _opt;
     private readonly ILogger<SimServer>    _log;
-    private readonly ModbusTcpServer       _server;
     private readonly Action<string>?       _timelineLog;
+
+    // 전송 계층은 StartAsync에서 생성(Transport 값 검증·fail-loud 포함). 종료 전까지 non-null.
+    private readonly IModbusRtuSerialPort? _injectedRtuPort; // 테스트 seam(주입 시 RTU-fake)
+    private ISimTransport?                 _transport;
 
     // 내부 HR 섀도 배열 — _server 버퍼와 항상 동기화(lock _hrLock)
     private readonly ushort[] _hr = new ushort[RegisterMap.BlockLength];
@@ -84,18 +112,35 @@ public sealed class SimServer : IAsyncDisposable
 
     public SimServer(Options opt, ILogger<SimServer>? log = null, Action<string>? timelineLog = null)
     {
-        _opt         = opt;
-        _log         = log ?? NullLogger<SimServer>.Instance;
-        _timelineLog = timelineLog;
-        _server      = new ModbusTcpServer(NullLogger<ModbusTcpServer>.Instance);
+        _opt             = opt;
+        _log             = log ?? NullLogger<SimServer>.Instance;
+        _timelineLog     = timelineLog;
+        _unitId          = (byte)opt.UnitId;
+        _injectedRtuPort = null; // 전송은 opt.Transport에 따라 StartAsync에서 선택
+    }
+
+    /// <summary>
+    /// 테스트 전용 생성자 — 주입된 <see cref="IModbusRtuSerialPort"/>로 RTU 슬레이브를 기동한다
+    /// (물리 COM 불요·CI에서 실 SimServer(RTU) 상태기계 왕복 검증용, 계약 (b)).
+    /// ModbusRtuMaster의 fake-port 주입 생성자 패턴과 동형(Consistency Over Preference).
+    /// opt.Transport 값과 무관하게 RTU-주입 모드로 동작한다.
+    /// </summary>
+    public SimServer(Options opt, IModbusRtuSerialPort fakePort,
+                     ILogger<SimServer>? log = null, Action<string>? timelineLog = null)
+    {
+        _opt             = opt;
+        _log             = log ?? NullLogger<SimServer>.Instance;
+        _timelineLog     = timelineLog;
+        _unitId          = (byte)opt.UnitId;
+        _injectedRtuPort = fakePort;
     }
 
     // ─── 시작·종료 ──────────────────────────────────────────────────────────
 
     public Task StartAsync(CancellationToken outerCt = default)
     {
-        // 유닛 등록 및 초기 레지스터 세팅
-        _server.AddUnit(UnitId);
+        // 전송 선택·검증(fail-loud: 잘못된 Transport / RTU PortName 미지정). 서버 버퍼는 여기서 확보.
+        _transport = SimTransportFactory.Create(_opt, _unitId, _injectedRtuPort);
 
         lock (_hrLock)
         {
@@ -117,9 +162,8 @@ public sealed class SimServer : IAsyncDisposable
         if (_opt.InitialRFlag || _opt.InitialRCellNo != 0 || _opt.InitialRSeq != 0)
             LogTimeline($"[프리셋] R 잔류: R_CellNo={_opt.InitialRCellNo} R_Seq={_opt.InitialRSeq} R_Flag={_opt.InitialRFlag}");
 
-        var ep = new IPEndPoint(IPAddress.Parse(_opt.Host), _opt.Port);
-        _server.Start(ep);
-        LogTimeline($"Sim3ds 서버 기동 {_opt.Host}:{_opt.Port}");
+        _transport.Start();
+        LogTimeline($"Sim3ds 서버 기동 {_transport.Endpoint}");
 
         _cts     = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
         _simLoop = Task.Run(() => RunSimLoopAsync(_cts.Token));
@@ -138,14 +182,14 @@ public sealed class SimServer : IAsyncDisposable
             catch (OperationCanceledException) { }
         }
 
-        _server.Stop();
+        _transport?.Stop();
         LogTimeline("Sim3ds 서버 종료");
     }
 
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
-        _server.Dispose();
+        _transport?.Dispose();
         _cts?.Dispose();
     }
 
@@ -384,7 +428,7 @@ public sealed class SimServer : IAsyncDisposable
     /// </summary>
     private void FlushToServerLocked()
     {
-        var span = _server.GetHoldingRegisters(UnitId);
+        var span = _transport!.Server.GetHoldingRegisters(_unitId);
         for (int i = 0; i < RegisterMap.BlockLength; i++)
             // ushort를 빅엔디언 short로 변환하여 서버 버퍼에 기록
             span[i] = (short)BinaryPrimitives.ReverseEndianness(_hr[i]);
@@ -396,7 +440,7 @@ public sealed class SimServer : IAsyncDisposable
     /// </summary>
     private void PullFromServerLocked()
     {
-        var span = _server.GetHoldingRegisters(UnitId);
+        var span = _transport!.Server.GetHoldingRegisters(_unitId);
         for (int i = 0; i < RegisterMap.BlockLength; i++)
         {
             ushort prev = _hr[i];
