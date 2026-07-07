@@ -115,7 +115,9 @@
       <a href="#s4">4 Interfaces</a><a href="#s5">5 API Definitions</a><a href="#s6">6 Reason Codes</a>
       <a href="#s7">7 Flow</a><a href="#s8">8 Timing &amp; Retry</a>
       <span style="align-self:center;color:#0F766E;font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:0 4px;">PART II · B2B ▸</span>
-      <a href="#b2b-ovw">Overview</a><a href="#b2b-if">Interfaces</a><a href="#b2b-fail">Failures</a>
+      <a href="#b2b-1">B1 Overview</a><a href="#b2b-2">B2 Communication</a><a href="#b2b-3">B3 Data Model</a>
+      <a href="#b2b-4">B4 Interface List</a><a href="#b2b-5">B5 API Definitions</a><a href="#b2b-6">B6 Failures</a>
+      <a href="#b2b-7">B7 Flow</a><a href="#b2b-8">B8 Timing·Retry</a>
     </nav>
   </header>
 
@@ -306,10 +308,20 @@
     <div class="sub">Batch-level input / classification / results built on pre-registered test data (bizDay + batch + barcode). It consists of five REST endpoints only; there is no 3DS Modbus handshake, no destination decision, no IF-08 status push, and no floor concept.</div>
   </div>
 
-  <section id="b2b-ovw">
-    <h2><span class="n">B1</span> B2B Overview &amp; Communication</h2>
+  <section id="b2b-1">
+    <h2><span class="n">B1</span> Overview &amp; Role</h2>
     <p>The B2B mode exchanges batch-level input, classification and results based on <b>pre-registered test data</b> (<code>bizDay</code> + <code>batch</code> + <code>barcode</code>). The destination (<code>chuteNo</code>) is <b>already assigned in the batch data</b>, so WCS does not decide it.</p>
+    <ul>
+      <li><b>Batch-based.</b> The unit of processing is pre-registered data grouped by <code>bizDay</code>/<code>batch</code> — not a real-time piece stream (B2C).</li>
+      <li><b>No destination decision.</b> <code>chuteNo</code> is already in the batch data, so WCS does not compute a destination.</li>
+      <li><b>One-way calls.</b> All five endpoints are RCS → WCS (<code>unprocessed</code> is GET, the rest POST). There is no WCS → RCS status push (IF-08).</li>
+      <li><b>Branch on <code>status</code>.</b> The client decides the processing outcome by the response <code>status</code> (S/F) field, not the HTTP status code.</li>
+    </ul>
     <div class="note b2b"><b>No 3DS integration.</b> B2B has <b>no destination decision, IF-08 status push, or 3D-sorter handshake</b> — it runs on the five REST APIs alone. (PLC registers, Modbus handshake and floor alignment are outside the RCS interface scope; see Part I · B2C and the master spec §07·§08.)</div>
+  </section>
+
+  <section id="b2b-2">
+    <h2><span class="n">B2</span> Communication</h2>
     <table>
       <tr><th style="width:150px">Item</th><th>Detail</th></tr>
       <tr><td>Protocol</td><td>REST over HTTP, <code>Content-Type: application/json</code></td></tr>
@@ -321,9 +333,38 @@
       <tr><td>Failure signaling</td><td>The client must always branch on the <b><code>status</code> field, not the HTTP status code</b></td></tr>
     </table>
     <p style="font-size:0.9em;color:var(--ink-faint);">※ The legacy original system (per the RCS contract source <code>api-spec-ko.html</code>) was at <code>192.168.0.150:5205</code> (on-prem, HTTP, single port) — new deployments use the per-deployment value above.</p>
-    <div class="note"><b>Two status axes (do not conflate).</b> The request-body <code>status</code> is <code>OK</code>/<code>NG</code> (work result — good/bad, regex <code>^(OK|NG)$</code>), while the response <code>status</code> is <code>S</code> (success) / <code>F</code> (failure — server processing outcome). They are <b>different axes</b> — e.g. an input that arrives with <code>status:"NG"</code> (bad) still returns <code>status:"S"</code> if stored normally. <code>pId</code> and <code>inductionNo</code> are <b>RCS-assigned Integer identifiers</b>; the server stores them without validating the value (details in the §B2 field tables).</div>
-    <div class="note b2b"><b>This document wins on conflict.</b> The B2B contract source is <code>api-spec-ko.html</code>, but this document intentionally widens a few field lengths — <code>batch</code> 1~10 (instead of <code>3</code> in source §1–4) and <code>bizDay</code> 8~10 (allowing both <code>YYYYMMDD</code> and <code>YYYY-MM-DD</code>, consistent with the common validation and box §5). On conflict, <b>follow this document</b> — those lengths in <code>api-spec-ko.html</code> are only a historical reference.</div>
+  </section>
+
+  <section id="b2b-3">
+    <h2><span class="n">B3</span> Data Model / Fields</h2>
+    <p>The <b>common fields</b> shared by the five B2B endpoints are defined once below. Each endpoint's table (B5) references this definition and lists only its <b>unique/variant fields</b>. Per-endpoint length/required variations are preserved in the footnotes.</p>
+    <table>
+      <tr><th style="width:120px">Field</th><th style="width:80px">Type</th><th style="width:70px">Length</th><th style="width:60px">Req. <sup>※</sup></th><th>Description</th></tr>
+      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Business day — <code>YYYYMMDD</code> or <code>YYYY-MM-DD</code> (e.g. <code>20260327</code> / <code>2026-03-27</code>). Common to all endpoints.</td></tr>
+      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch number (e.g. <code>001</code>). Common to all endpoints.</td></tr>
+      <tr><td><code>chuteNo</code></td><td>String</td><td>3 <sup>1</sup></td><td>Y</td><td>Chute number — normalized to a <b>3-digit zero-pad</b> (see the <b>chuteNo normalization</b> note below).</td></tr>
+      <tr><td><code>barcode</code></td><td>String</td><td>20 <sup>1</sup></td><td>△ <sup>2</sup></td><td>Item/content barcode — letters, digits, hyphen, underscore.</td></tr>
+      <tr><td><code>qty</code></td><td>Integer</td><td>-</td><td>△ <sup>3</sup></td><td>Grouped count of identical items — 1~9999, default 1 if omitted.</td></tr>
+      <tr><td><code>status</code></td><td>String</td><td>2</td><td>Y <sup>4</sup></td><td>Work status — <code>OK</code> (good) / <code>NG</code> (bad). ⚠ Different axis from the response <code>status</code> (S/F) — see note.</td></tr>
+      <tr><td><code>reason</code></td><td>String</td><td>255</td><td>N <sup>4</sup></td><td>Reason — required when <code>status</code> is NG.</td></tr>
+      <tr><td><code>pId</code></td><td>Integer</td><td>-</td><td>Y <sup>4</sup></td><td>Piece (input event) identifier — an <b>RCS-assigned integer</b>. Not present in the <code>unprocessed</code> response, so RCS fills it in. The server stores it without validation.</td></tr>
+      <tr><td><code>inductionNo</code></td><td>Integer</td><td>-</td><td>Y <sup>5</sup></td><td>Induction (infeed) number — an <b>RCS-assigned integer identifier</b>. The server stores it without validation.</td></tr>
+    </table>
+    <p style="font-size:0.9em;color:var(--ink-faint);">
+      <sup>※</sup> <b>The Req. value can vary by endpoint</b> — for fields marked <code>△</code> (<code>barcode</code>·<code>qty</code>), see the footnote for the per-endpoint required flag.<br>
+      <sup>1</sup> On the <code>box</code> endpoint, <code>chuteNo</code> length is <b>1~10</b> and <code>items[].barcode</code> length is <b>1~100</b> (3 and 20 respectively on the others).<br>
+      <sup>2</sup> <code>barcode</code> required varies by endpoint — <b>N</b> (optional) on <code>input</code>, Y on <code>classification</code>·<code>unprocessed</code>·<code>results</code>·<code>box</code>.<br>
+      <sup>3</sup> On the <code>unprocessed</code> response, <code>items[].qty</code> is <b>Y</b> (required) and "1 or more"; elsewhere (<code>input</code>·<code>classification</code>·<code>results</code>·<code>box</code>) it is N·1~9999·default 1.<br>
+      <sup>4</sup> <code>status</code>·<code>reason</code>·<code>pId</code> exist only on the <code>input</code>·<code>classification</code> requests.<br>
+      <sup>5</sup> <code>inductionNo</code> exists only on the <code>input</code> request.
+    </p>
     <div class="note"><b>chuteNo normalization.</b> The server normalizes <code>chuteNo</code> to a <b>3-digit zero-pad</b> on every endpoint (e.g. <code>"3"</code> → <code>"003"</code>). Classification's <b>chute match ("Chute mismatch") compares the padded value</b>, so <code>"1"</code> and <code>"001"</code> are treated as the same chute.</div>
+    <div class="note"><b>Two status axes (do not conflate).</b> The request-body <code>status</code> is <code>OK</code>/<code>NG</code> (work result — good/bad, regex <code>^(OK|NG)$</code>), while the response <code>status</code> is <code>S</code> (success) / <code>F</code> (failure — server processing outcome). They are <b>different axes</b> — e.g. an input that arrives with <code>status:"NG"</code> (bad) still returns <code>status:"S"</code> if stored normally. <code>pId</code> and <code>inductionNo</code> are <b>RCS-assigned Integer identifiers</b>; the server stores them without validating the value (details in the common field table above).</div>
+    <div class="note b2b"><b>This document wins on conflict.</b> The B2B contract source is <code>api-spec-ko.html</code>, but this document intentionally widens a few field lengths — <code>batch</code> 1~10 (instead of <code>3</code> in source §1–4) and <code>bizDay</code> 8~10 (allowing both <code>YYYYMMDD</code> and <code>YYYY-MM-DD</code>, consistent with the common validation and box §5). On conflict, <b>follow this document</b> — those lengths in <code>api-spec-ko.html</code> are only a historical reference.</div>
+  </section>
+
+  <section id="b2b-4">
+    <h2><span class="n">B4</span> Interface List</h2>
     <table>
       <tr><th style="width:70px">No.</th><th style="width:90px">Method</th><th style="width:260px">Path</th><th>Purpose</th></tr>
       <tr><td>①</td><td>GET</td><td><code>/api/v1/works/unprocessed?bizDay=</code></td><td>Query unprocessed batch (has side effects)</td></tr>
@@ -332,45 +373,21 @@
       <tr><td>④</td><td>POST</td><td><code>/api/v1/works/box</code></td><td>Box closing data (optional — if RCS implements it)</td></tr>
       <tr><td>⑤</td><td>POST</td><td><code>/api/v1/works/results</code></td><td>Send all work results (top-level array)</td></tr>
     </table>
-
-    <h3>B2B Golden Path (standard sequence)</h3>
-    <p>RCS calls in the following order. Each step's purpose and its <b>action on failure (especially whether a retry is safe)</b> are below.</p>
-    <div class="flow">
-      <span class="st">① unprocessed query</span><span class="ar">→</span>
-      <span class="st">② input</span><span class="ar">→</span>
-      <span class="st">③ classification</span><span class="ar">→</span>
-      <span class="st">④ box close (optional)</span><span class="ar">→</span>
-      <span class="st">⑤ results</span>
-    </div>
-    <table>
-      <tr><th style="width:110px">Step</th><th>Purpose</th><th>Action on failure</th></tr>
-      <tr><td>① <code>unprocessed</code></td><td>Obtain batch data to process + mark queried rows as "taken"</td><td><b>Do not retry</b> (non-idempotent — each call consumes rows). If the response is lost, re-querying fetches different rows, so use operator confirmation / re-sync. An empty array is not a failure.</td></tr>
-      <tr><td>② <code>input</code></td><td>Record input (grouped by <code>qty</code>)</td><td>On <code>status:"F"</code> the whole call is rejected (no partial) — check the cause via <code>message</code>. On "Not enough unprocessed rows," re-query ① to re-check availability, then resend. If no response arrived (timeout), there is a double-consume risk, so resend only after verifying whether it was applied.</td></tr>
-      <tr><td>③ <code>classification</code></td><td>Record classification result (grouped by <code>qty</code>)</td><td>Chute mismatch / already classified / insufficient rows will fail identically on retry unless the data is corrected. Fix the cause, then resend. The timeout-resend caution is the same as ②.</td></tr>
-      <tr><td>④ <code>box</code> (optional)</td><td>Record a box-level closing</td><td>Resending the same <code>(bizDay,batch,boxNo)</code> is rejected by the duplicate key — it is already stored, so no retry is needed.</td></tr>
-      <tr><td>⑤ <code>results</code></td><td>Send all results in bulk (top-level array)</td><td>If even one <code>barcode</code> is unregistered, the whole request is rejected (no partial INSERT). After fixing the barcode, <b>resending the whole request is safe</b>.</td></tr>
-    </table>
   </section>
 
-  <section id="b2b-if">
-    <h2><span class="n">B2</span> B2B Interfaces (5)</h2>
+  <section id="b2b-5">
+    <h2><span class="n">B5</span> API Definitions</h2>
+    <p>Each endpoint table lists only its <b>unique/variant fields</b> — the type, length and description of the common fields (<code>bizDay</code>·<code>batch</code>·<code>chuteNo</code>·<code>barcode</code>·<code>qty</code>·<code>status</code>·<code>reason</code>·<code>pId</code>·<code>inductionNo</code>) are in <b>B3</b>.</p>
 
     <h3><span class="ifid">①</span> Query Unprocessed Batch — <code>GET /api/v1/works/unprocessed?bizDay=</code></h3>
     <p>Queries the list of unprocessed data. <b>The response is a raw array, not <code>ApiResponse</code></b>, and when there is no data it returns an empty array <code>[]</code> + <code>200</code> (not a failure).</p>
     <div class="note"><b>Side effects.</b> It updates each queried row's <code>ReceiveTime</code> to the server time ("taken" marking). <b>⚠ It is a GET but not idempotent</b> — do <b>not</b> blindly retry even if the response fails to arrive. Each call consumes the rows it returns (ReceiveTime marking), so retrying fetches the <b>next</b> set of rows rather than the previous ones, which can lose data.<br>※ When there are 0 unprocessed rows and the server has an auto-generate config, auto-generation may be triggered on the spot (handled atomically in a transaction), but that is server-internal — <b>from RCS's viewpoint you only observe that "you may receive an empty array, or freshly generated data."</b></div>
-    <p><b>Request</b> (query parameter)</p>
-    <table>
-      <tr><th style="width:150px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Date to query (e.g. <code>20260327</code> or <code>2026-03-27</code>)</td></tr>
-    </table>
-    <p><b>Response</b> (raw array)</p>
+    <p><b>Request</b> — <code>bizDay</code> (query parameter, common B3) only. No unique fields.</p>
+    <p><b>Response</b> (raw array) — per-group <code>bizDay</code>·<code>batch</code> (common) + an <code>items[]</code> array:</p>
     <table>
       <tr><th style="width:180px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Date</td></tr>
-      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch</td></tr>
-      <tr><td><code>items</code></td><td>Array</td><td>-</td><td>Y</td><td>List of unprocessed data</td></tr>
-      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td>20</td><td>Y</td><td>Barcode</td></tr>
-      <tr><td>↳ <code>items[].chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number</td></tr>
+      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td>20</td><td>Y</td><td>Barcode (common B3)</td></tr>
+      <tr><td>↳ <code>items[].chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number (common B3)</td></tr>
       <tr><td>↳ <code>items[].qty</code></td><td>Integer</td><td>-</td><td>Y</td><td>Grouped count of identical items (same barcode + chuteNo) — 1 or more</td></tr>
     </table>
 <pre>[
@@ -386,18 +403,11 @@
 
     <h3><span class="ifid">②</span> Send Input Data — <code>POST /api/v1/works/input</code></h3>
     <p>Sends work input data. Call once with <code>qty</code>=N for N identical items (default 1 if omitted). If fewer than <code>qty</code> unprocessed rows remain, <b>nothing is processed</b> and <code>status:"F"</code> is returned (no partial processing).</p>
+    <p><b>Common fields</b> (B3): <code>bizDay</code>·<code>batch</code>·<code>chuteNo</code> (Y) · <code>barcode</code> (<b>N</b> — optional on input only) · <code>status</code> (Y) · <code>reason</code> (N) · <code>qty</code> (N) · <code>inductionNo</code> (Y) · <code>pId</code> (Y).</p>
+    <p><b>Unique fields</b></p>
     <table>
       <tr><th style="width:150px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Date</td></tr>
-      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch</td></tr>
-      <tr><td><code>inductionNo</code></td><td>Integer</td><td>-</td><td>Y</td><td>Induction (infeed) number — an <b>RCS-assigned integer identifier</b>. Not present in the <code>unprocessed</code> response, so RCS fills it in. The server stores it without validation.</td></tr>
-      <tr><td><code>chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number</td></tr>
-      <tr><td><code>pId</code></td><td>Integer</td><td>-</td><td>Y</td><td>Piece (input event) identifier — an <b>RCS-assigned integer</b>. Not present in the <code>unprocessed</code> response, so RCS fills it in. The server stores it without validation.</td></tr>
-      <tr><td><code>barcode</code></td><td>String</td><td>20</td><td>N</td><td>Barcode</td></tr>
-      <tr><td><code>status</code></td><td>String</td><td>2</td><td>Y</td><td>Status — <code>OK</code> or <code>NG</code></td></tr>
-      <tr><td><code>reason</code></td><td>String</td><td>255</td><td>N</td><td>Reason — required when <code>status</code> is NG</td></tr>
       <tr><td><code>inTime</code></td><td>String</td><td>20</td><td>Y</td><td>Input time (e.g. <code>2026-03-27 14:52:04</code>)</td></tr>
-      <tr><td><code>qty</code></td><td>Integer</td><td>-</td><td>N</td><td>Count of identical items input at once — 1~9999, default 1 if omitted</td></tr>
     </table>
 <pre>{
   "bizDay": "20260327",
@@ -415,17 +425,11 @@
 
     <h3><span class="ifid">③</span> Send Classification Data — <code>POST /api/v1/works/classification</code></h3>
     <p>Sends work classification results. Call once with <code>qty</code>=N for N identical items (default 1 if omitted). If fewer than <code>qty</code> unclassified rows remain, <b>nothing is processed</b> and <code>status:"F"</code> is returned.</p>
+    <p><b>Common fields</b> (B3): <code>bizDay</code>·<code>batch</code>·<code>chuteNo</code> (Y) · <code>barcode</code> (Y) · <code>status</code> (Y) · <code>reason</code> (N) · <code>qty</code> (N) · <code>pId</code> (Y).</p>
+    <p><b>Unique fields</b></p>
     <table>
       <tr><th style="width:150px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Date</td></tr>
-      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch</td></tr>
-      <tr><td><code>chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number</td></tr>
-      <tr><td><code>pId</code></td><td>Integer</td><td>-</td><td>Y</td><td>Piece (input event) identifier — an <b>RCS-assigned integer</b>. Not present in the <code>unprocessed</code> response, so RCS fills it in. The server stores it without validation.</td></tr>
-      <tr><td><code>barcode</code></td><td>String</td><td>20</td><td>Y</td><td>Barcode</td></tr>
-      <tr><td><code>status</code></td><td>String</td><td>2</td><td>Y</td><td>Status — <code>OK</code> or <code>NG</code></td></tr>
-      <tr><td><code>reason</code></td><td>String</td><td>255</td><td>N</td><td>Reason — required when <code>status</code> is NG</td></tr>
       <tr><td><code>sortTime</code></td><td>String</td><td>20</td><td>Y</td><td>Classification time (e.g. <code>2026-03-27 14:55:10</code>)</td></tr>
-      <tr><td><code>qty</code></td><td>Integer</td><td>-</td><td>N</td><td>Count of identical items classified at once — 1~9999, default 1 if omitted</td></tr>
     </table>
 <pre>{
   "bizDay": "20260327",
@@ -440,39 +444,16 @@
 }</pre>
     <p><b>Response:</b> <code>{ "status": "S"|"F", "message": "..." }</code> — same as ② (<code>status</code> String 1 · <code>message</code> String 100).</p>
 
-    <h3><span class="ifid">④</span> Send All Work Results — <code>POST /api/v1/works/results</code></h3>
-    <p>After all work is done, sends the entire results in bulk. Note that <b>the request body is a top-level JSON array</b> — it may carry <b>multiple</b> distinct <code>(bizDay, batch)</code> groups (each with its own <code>items</code>). If even one <code>barcode</code> is unregistered, the <b>whole request is rejected</b> (no partial INSERT).</p>
-    <table>
-      <tr><th style="width:180px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Date</td></tr>
-      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch</td></tr>
-      <tr><td><code>items</code></td><td>Array</td><td>-</td><td>Y</td><td>List of work-result data</td></tr>
-      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td>20</td><td>Y</td><td>Barcode</td></tr>
-      <tr><td>↳ <code>items[].chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number</td></tr>
-      <tr><td>↳ <code>items[].qty</code></td><td>Integer</td><td>-</td><td>N</td><td>Grouped count of identical result items — 1~9999, default 1 if omitted</td></tr>
-    </table>
-<pre>[
-  {
-    "bizDay": "20260327",
-    "batch": "001",
-    "items": [
-      { "barcode": "test001blk100", "chuteNo": "001", "qty": 3 },
-      { "barcode": "test001blk101", "chuteNo": "002" }
-    ]
-  }
-]</pre>
-    <p><b>Response:</b> <code>{ "status": "S"|"F", "message": "..." }</code> — same as ②.</p>
-
-    <h3><span class="ifid">⑤</span> Box Closing Data <span style="font-size:11px;color:var(--ink-faint);font-weight:600">(optional)</span> — <code>POST /api/v1/works/box</code></h3>
+    <h3><span class="ifid">④</span> Box Closing Data <span style="font-size:11px;color:var(--ink-faint);font-weight:600">(optional)</span> — <code>POST /api/v1/works/box</code></h3>
     <p>Stores box-level closing data. <b>The sender is the box-sorting equipment</b> — this may be RCS or a separate box sorter — and <b>RCS-side implementation of this endpoint is optional</b> (if not implemented, the other four endpoints are unaffected). Unlike Results, it <b>does not validate whether the barcode is registered</b> and simply stores it.</p>
+    <p><b>Common fields</b> (B3): <code>bizDay</code>·<code>batch</code> (Y). <code>chuteNo</code> and <code>items[].barcode</code> have <b>length variants</b> shown in the table below.</p>
+    <p><b>Unique/variant fields</b></p>
     <table>
       <tr><th style="width:180px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
-      <tr><td><code>bizDay</code></td><td>String</td><td>8~10</td><td>Y</td><td>Business day (e.g. <code>20260624</code> or <code>2026-06-24</code>)</td></tr>
-      <tr><td><code>batch</code></td><td>String</td><td>1~10</td><td>Y</td><td>Batch number</td></tr>
       <tr><td><code>boxNo</code></td><td>String</td><td>1~50</td><td>Y</td><td>Box number — unique within (bizDay, batch)</td></tr>
-      <tr><td><code>chuteNo</code></td><td>String</td><td>1~10</td><td>Y</td><td>Chute number — server applies 3-digit zero-pad</td></tr>
+      <tr><td><code>chuteNo</code></td><td>String</td><td><b>1~10</b></td><td>Y</td><td>Chute number — server applies 3-digit zero-pad (variant of the common B3 length 3)</td></tr>
       <tr><td><code>items</code></td><td>Array</td><td>-</td><td>Y</td><td>Contents list — at least 1 required</td></tr>
-      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td>1~100</td><td>Y</td><td>Content barcode — letters, digits, hyphen, underscore</td></tr>
+      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td><b>1~100</b></td><td>Y</td><td>Content barcode — letters, digits, hyphen, underscore (variant of the common B3 length 20)</td></tr>
       <tr><td>↳ <code>items[].qty</code></td><td>Integer</td><td>-</td><td>N</td><td>Quantity of the barcode — 1~9999, default 1 if omitted</td></tr>
       <tr><td><code>endTime</code></td><td>String</td><td>1~50</td><td>N</td><td>Box closing time</td></tr>
     </table>
@@ -488,10 +469,32 @@
   "endTime": "2026-06-24 10:00:00"
 }</pre>
     <p><b>Response:</b> <code>{ "status": "S"|"F", "message": "..." }</code> — same as ②.</p>
+
+    <h3><span class="ifid">⑤</span> Send All Work Results — <code>POST /api/v1/works/results</code></h3>
+    <p>After all work is done, sends the entire results in bulk. Note that <b>the request body is a top-level JSON array</b> — it may carry <b>multiple</b> distinct <code>(bizDay, batch)</code> groups (each with its own <code>items</code>). If even one <code>barcode</code> is unregistered, the <b>whole request is rejected</b> (no partial INSERT).</p>
+    <p><b>Common fields</b> (B3): per-group <code>bizDay</code>·<code>batch</code> (Y). The request <code>items[]</code> array is composed of common fields:</p>
+    <table>
+      <tr><th style="width:180px">Field</th><th style="width:90px">Type</th><th style="width:70px">Length</th><th style="width:70px">Req.</th><th>Description</th></tr>
+      <tr><td><code>items</code></td><td>Array</td><td>-</td><td>Y</td><td>List of work-result data</td></tr>
+      <tr><td>↳ <code>items[].barcode</code></td><td>String</td><td>20</td><td>Y</td><td>Barcode (common B3)</td></tr>
+      <tr><td>↳ <code>items[].chuteNo</code></td><td>String</td><td>3</td><td>Y</td><td>Chute number (common B3)</td></tr>
+      <tr><td>↳ <code>items[].qty</code></td><td>Integer</td><td>-</td><td>N</td><td>Grouped count of identical result items — 1~9999, default 1 if omitted</td></tr>
+    </table>
+<pre>[
+  {
+    "bizDay": "20260327",
+    "batch": "001",
+    "items": [
+      { "barcode": "test001blk100", "chuteNo": "001", "qty": 3 },
+      { "barcode": "test001blk101", "chuteNo": "002" }
+    ]
+  }
+]</pre>
+    <p><b>Response:</b> <code>{ "status": "S"|"F", "message": "..." }</code> — same as ②.</p>
   </section>
 
-  <section id="b2b-fail">
-    <h2><span class="n">B3</span> B2B Failure Responses (<code>status:"F"</code>)</h2>
+  <section id="b2b-6">
+    <h2><span class="n">B6</span> Failure Responses &amp; Reasons (<code>status:"F"</code>)</h2>
     <p>On failure, every endpoint returns <code>{"status":"F","message":"..."}</code>. The client must always branch on the <code>status</code> field, not the HTTP status code. The <code>message</code> strings below are the <b>exact strings</b> the server returns (braces <code>{...}</code> are runtime-substituted values).</p>
     <div class="note"><code>status:"F"</code> (server response) differs from the request-body <code>status:"NG"</code>. "F" means the server rejected/failed the call; "NG" is a bad item that is received normally and logged — the server <b>accepts</b> it and returns "S".</div>
 
@@ -531,21 +534,21 @@
       <tr><td>fewer unclassified rows than qty</td><td><code>Not enough unprocessed rows: requested {N}, available {M}.</code></td></tr>
     </table>
 
-    <h3>④ Results — <code>POST /api/v1/works/results</code></h3>
-    <table>
-      <tr><th style="width:46%">Condition</th><th>message</th></tr>
-      <tr><td>request array empty / null</td><td><code>No data to process.</code></td></tr>
-      <tr><td>all items have empty barcode, nothing to INSERT</td><td><code>No valid data to process.</code></td></tr>
-      <tr><td>barcode unregistered / bizDay·batch mismatch (any one)</td><td><code>Barcode '{barcode}' not found, or bizDay/batch does not match the registered data.</code></td></tr>
-    </table>
-
-    <h3>⑤ Box — <code>POST /api/v1/works/box</code></h3>
+    <h3>④ Box — <code>POST /api/v1/works/box</code></h3>
     <table>
       <tr><th style="width:46%">Condition</th><th>message</th></tr>
       <tr><td>duplicate (bizDay, batch, boxNo) resend</td><td><code>Box already exists for the given bizDay/batch/boxNo.</code></td></tr>
       <tr><td>items is an empty array</td><td><code>Items must contain at least one entry.</code></td></tr>
       <tr><td>qty out of range (0 or below)</td><td><code>The field Qty must be between 1 and 9999.</code></td></tr>
       <tr><td>calendar-invalid date (e.g. 20261332)</td><td><code>Invalid date: {value}</code></td></tr>
+    </table>
+
+    <h3>⑤ Results — <code>POST /api/v1/works/results</code></h3>
+    <table>
+      <tr><th style="width:46%">Condition</th><th>message</th></tr>
+      <tr><td>request array empty / null</td><td><code>No data to process.</code></td></tr>
+      <tr><td>all items have empty barcode, nothing to INSERT</td><td><code>No valid data to process.</code></td></tr>
+      <tr><td>barcode unregistered / bizDay·batch mismatch (any one)</td><td><code>Barcode '{barcode}' not found, or bizDay/batch does not match the registered data.</code></td></tr>
     </table>
 
     <h3>Common System Errors (all endpoints)</h3>
@@ -559,8 +562,34 @@
   "status": "F",
   "message": "Barcode not found, or bizDay/batch does not match the registered data."
 }</pre>
+  </section>
 
-    <h3>Timeout &amp; Retry Guidance</h3>
+  <section id="b2b-7">
+    <h2><span class="n">B7</span> Flow (Golden Path)</h2>
+    <p>RCS calls in the following order. Each step's purpose and its <b>action on failure (especially whether a retry is safe)</b> are below.</p>
+    <div class="flow">
+      <span class="st">① unprocessed query</span><span class="ar">→</span>
+      <span class="st">② input</span><span class="ar">→</span>
+      <span class="st">③ classification</span><span class="ar">→</span>
+      <span class="st">④ box close (optional)</span><span class="ar">→</span>
+      <span class="st">⑤ results</span>
+    </div>
+    <table>
+      <tr><th style="width:110px">Step</th><th>Purpose</th><th>Action on failure</th></tr>
+      <tr><td>① <code>unprocessed</code></td><td>Obtain batch data to process + mark queried rows as "taken"</td><td><b>Do not retry</b> (non-idempotent — each call consumes rows). If the response is lost, re-querying fetches different rows, so use operator confirmation / re-sync. An empty array is not a failure.</td></tr>
+      <tr><td>② <code>input</code></td><td>Record input (grouped by <code>qty</code>)</td><td>On <code>status:"F"</code> the whole call is rejected (no partial) — check the cause via <code>message</code>. On "Not enough unprocessed rows," re-query ① to re-check availability, then resend. If no response arrived (timeout), there is a double-consume risk, so resend only after verifying whether it was applied.</td></tr>
+      <tr><td>③ <code>classification</code></td><td>Record classification result (grouped by <code>qty</code>)</td><td>Chute mismatch / already classified / insufficient rows will fail identically on retry unless the data is corrected. Fix the cause, then resend. The timeout-resend caution is the same as ②.</td></tr>
+      <tr><td>④ <code>box</code> (optional)</td><td>Record a box-level closing</td><td>Resending the same <code>(bizDay,batch,boxNo)</code> is rejected by the duplicate key — it is already stored, so no retry is needed.</td></tr>
+      <tr><td>⑤ <code>results</code></td><td>Send all results in bulk (top-level array)</td><td>If even one <code>barcode</code> is unregistered, the whole request is rejected (no partial INSERT). After fixing the barcode, <b>resending the whole request is safe</b>.</td></tr>
+    </table>
+  </section>
+
+  <section id="b2b-8">
+    <h2><span class="n">B8</span> Timing &amp; Retry</h2>
+    <table>
+      <tr><th style="width:240px">Item</th><th style="width:150px">Value</th><th>Note</th></tr>
+      <tr><td>Rate limit</td><td>300 requests/min per IP</td><td>Over the limit returns <code>429</code> — see the retry rules below</td></tr>
+    </table>
     <ul>
       <li><b>Do not retry <code>unprocessed</code> (GET)</b> — it is non-idempotent and each call consumes rows. Even if you did not receive the response, re-querying fetches the next set of rows and loses data, so on timeout handle it via operator confirmation / re-sync.</li>
       <li><b>Retrying a POST is safe only when it is certain the server did not process it</b> — the connection never reached the server, or you received a definite <code>status:"F"</code> and fixed the cause. Blindly resending an <code>input</code>/<code>classification</code> that timed out without a response can <b>double-consume</b> the unprocessed pool, so verify whether it was applied (via a query or a <code>results</code> comparison) before resending. Resending <code>box</code> is safe because the duplicate key is rejected.</li>
