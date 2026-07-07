@@ -1,129 +1,249 @@
-# Sprint Contract — S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 잔류 대사 — off-by-one 연쇄 차단)
+[Sprint Contract] — S-FIELD-20CELLS
 
-> **감사 A-1 현장 발현 수정 스프린트** — 2026-07-06 현장 라이브 진단으로 확정된 결함.
-> `HandshakeOrchestrator`가 R_Flag를 **레벨**로 읽어 직전 건(또는 PLC 기동)의 잔류 R_Flag=1을
-> 새 건의 응답으로 오인 → 허위 RSEQ_MISMATCH → off-by-one 연쇄 자가지속.
-> WHAT/WHERE/검증만 규정. **정확한 메서드·시그니처·appsettings 키명·값·구현 배치는 Generator 재량(제약 내). 코드 구현 0.**
+── 배경 (WHY) ────────────────────────────────────────────────────────────────
+현장 3D Sorter는 물리 20셀(4행 5열)이지만, PLC 매핑이 **15번 셀까지만** 완료되어 있다.
+셀 16~20에 작업이 배정되면 미매핑 셀로 틸트 지령이 나가는 물리 리스크가 있다.
+따라서:
+  · 모니터링 화면은 물리 20셀을 그대로 보여준다(4×5=20 타일).
+  · 그러나 **작업 배정·선택 가능 셀은 1~15만**이어야 한다 — 16~20은 어떤 경로로도 선택 불가.
+현행 FIELD-16 시드(셀 1~16, 오더/배정 0701-CELL-01~16, 소터 chuteNo=1)는 이미 현장
+DB(Rcs3dsInterlockingWcs @ localhost SQL Server)에 적용돼 있다. 이 스프린트는 그 상태에서
+20셀·15가용으로 **전이**하고(멱등), 프론트를 4×5로 미러링한다.
 
-## 0. 메타
+── ★ 계획 단계 핵심 발견 (권장안의 근거) ─────────────────────────────────────
+cell 테이블에는 이미 `Enabled bit` 컬럼이 존재하며, 그것이 **이미 게이트로 동작**한다:
+  · EfCellSelector.SelectCell ②빈 셀 폴백: `c.Enabled` 필터로 비활성 셀 제외
+    (DbRepositories.cs:628).
+  · IF-05 SorterCanAcceptBarcode → HasFreeEnabledCell: `c.Enabled` 필터
+    (DestinationStatusService.cs:188).
+  · SorterFull 산출(ComputeSorterFull): Enabled 셀만 집계(:210) — 15셀 만재 판정 일관.
+  · 모니터링 셀 목록(GetCells): `Enabled` 필터 **없음**(:195) → 비활성 셀도 반환 +
+    DTO에 `Enabled` 포함(:221, CellStatusDto). 프론트는 `!cell.enabled`를 이미
+    회색 "비활성" 타일로 렌더(SortingSection.tsx:85-86,101-102) + 범례에 "비활성" 존재(:63).
+결론: **가용 게이트를 위한 신규 스키마/게이트 코드는 이미 존재한다.** 브리핑의 후보(a)
+"가용 플래그 신설(마이그레이션)"은 이 발견으로 재프레이밍된다 → "기존 Enabled 재사용".
+단, **주의(gap)**: `Enabled=0`은 ②빈 셀 폴백만 차단하고 ①활성 배정 재사용 경로
+(HasAssignedCellWithRoom / SelectCell ①)는 Enabled를 보지 않는다. 따라서 셀 16~20이
+**활성 cell_assignment를 갖지 않도록** 함께 보장해야 완전 차단이 성립한다(아래 §셀 16 처리).
 
-| 항목 | 값 |
-|------|-----|
-| Sprint ID | S-HANDSHAKE-RESIDUE |
-| Branch | `fix/handshake-rflag-residue` (생성 완료 — 현재 체크아웃) |
-| Base | `develop` (PR #30까지 병합) |
-| Detected Project Type | **Backend/API** (아래 투명성 노트 참조) |
-| Scaling | **1 Planner / 1 Generator / 1 Evaluator** (단일 컴포넌트·팬아웃 없음) |
-| Test baseline | **169 GREEN** (기동 시 `dotnet test`로 실제 카운트 재확인 — 완료 시 기존 전원 GREEN 유지 + 신규 시나리오 = 169+N) |
-| 스펙 소스 | `docs/SPEC.md` §4(C/R 핸드셰이크)·§6(Sim3ds 동작) / `tasks/audit-20260701-full.md` A-1 / 현장 실측(2026-07-06) |
-| 배경 상태 | 감사 A-1 CONFIRMED. 현장 로그로 5연쇄 재현 확인, 잔류 없는 깨끗한 상태에선 연속 2사이클 성공 확인. 수정 방향은 사용자 보고·확정 완료 — 본 계약은 이를 WHAT으로 구체화. |
+── Goal (WHAT) ───────────────────────────────────────────────────────────────
+현장 DB가 물리 20셀을 반영하되(모니터링 4×5=20 타일), 작업 배정·선택 가능 셀은 1~15로
+제한된다. 셀 16~20은 배정 재사용·빈 셀 폴백 어느 경로로도 선택되지 않으며, PLC 매핑이
+진행되면 데이터/설정 변경만으로(코드·스키마 무변경) 가용 상한을 15→20으로 확장할 수 있다.
+프론트 셀 그리드는 5열 고정(4×5 물리 미러링), 미가용 셀 16~20은 기존 "비활성" 렌더로 시각 구분.
 
-> **투명성 노트(프로젝트 타입)**: 레포는 구조상 Full-stack(`frontend/` + `backend/`)이다. 그러나 **이 스프린트의 변경 표면은 100% 백엔드 Modbus 핸드셰이크 계층**(`Wcs.PlcGateway` + `Wcs.Sim3ds` 테스트 더블 + `Wcs.Tests` + `docs/SPEC.md`)이며 **frontend·브라우저 표면 접촉 0**이다. 교차되는 "레이어"는 오케스트레이터 ↔ 단일 쓰기 큐 ↔ Modbus ↔ Sim-PLC로, frontend↔backend 데이터 흐름이 아니다. 따라서 Full-stack의 브라우저 E2E 슬롯은 **적용 불가(false gate)**이고, 정답 검증은 **Backend/API 필수 검증 = 자동 테스트 코드 실행**(Sim3ds Modbus 더블 기반 xUnit 통합 테스트)이다. Playwright/브라우저 검증은 이 스프린트에 해당 없음.
+── Detected Project Type: Full-stack ─────────────────────────────────────────
+(신호: 브라우저 진입점 frontend/src/pages/* 와 서버 라우트/컨트롤러
+backend/src/Wcs.Api/Controllers/* 가 동일 레포에 공존. IF-05 백엔드 게이트 + 셀 그리드
+프론트 두 계층을 함께 건드리므로 Full-stack.)
 
-## 1. 목표 (WHAT · 한 줄)
+── Implementation Scope (Generator가 구현할 것) ──────────────────────────────
+※ 아래 A안(권장) 기준. 게이트 메커니즘 최종 선택은 Questions 섹션의 사용자 확인 결과에
+   따른다. B안 선택 시 §Questions에 명시한 스코프 델타를 적용(재계획 또는 Generator 확장).
 
-`HandshakeOrchestrator`의 R단계 레벨-읽기 결함을 **"C 기입 전 R_Flag==0 관찰 보장(arming)"** 으로 무장하고, **기동 시 잔류 R_Flag 대사(reconciliation)** 를 추가해, 직전 건·PLC 기동 잔류가 새 건의 응답으로 오소비되어 발생하는 **허위 RSEQ_MISMATCH off-by-one 연쇄를 근본 차단**한다. 모든 PLC 쓰기는 단일 큐 경유(절대규칙 #1), 대기 상한은 전부 appsettings(절대규칙 #7), 잔류 대사 발생은 operation_log(HANDSHAKE)에 잔류값 포함 기록(관측성).
+1) 시드/DB (scripts/) — 16셀 → 20셀·15가용 전이 (멱등):
+   a. 셀 1~15: `Enabled=1`, Capacity=3 유지(현행과 동일).
+   b. 셀 16~20: 행 존재(20타일 요구) + `Enabled=0`. Capacity는 20셀 물리 일관성 위해 3 권장
+      (비활성 셀은 선택되지 않으므로 값 자체는 무영향 — Generator 재량).
+      → 셀 16은 UPDATE(Enabled 1→0), 셀 17~20은 INSERT(NOT MATCHED). 셀 1~15 무손상.
+   c. 셀 16의 기존 데이터 처리 (0701-CELL-16):
+      · 활성 cell_assignment(CellId=cell16, ReleasedAt IS NULL)를 **해제**(ReleasedAt=now). 멱등.
+      · 오더 0701-CELL-16을 `Status='CANCELLED'`로 전이(멱등). → 이유: ①활성 배정 재사용 경로가
+        Enabled를 보지 않는 gap을 닫고, ②barcode 0701-CELL-16이 유효 RUNNING 오더를 갖지 않게
+        해 IF-05 NG를 **1~15 점유 상태와 무관하게 결정적**으로 만든다. order_item 행은 보존
+        (append-only 원칙·이력). 예약/실적(reserved/sorted) 조작 금지.
+      · (대안 하위옵션 — 오더를 RUNNING으로 두고 배정만 해제: 1~15가 모두 점유일 때만 NG가 성립해
+        취약. 권장하지 않음. Generator는 CANCELLED 방식을 택하되, IF-05 barcode→목적지 해석
+        경로에서 실제 NG가 나오는지 코드로 확인할 것.)
+   d. 오더/아이템/배정의 N↔N 결정적 픽스처는 **1~15** 로 축소(15건 활성). 나머지 구조·소터
+      chuteNo=1·work_batch(FIELD-16, WorkDate=2026-07-01)는 유지.
+   e. 파일: 현행 scripts/seed-field-16cells.sql 갱신. 파일명은 S-FIELD-20CELLS 취지상
+      `seed-field-20cells.sql`로 리네임 권장(Generator 재량 — 리네임 시 헤더 주석/설계결정
+      블록도 20셀·15가용 기준으로 갱신하고, docs/기존 참조가 있으면 함께 갱신).
+   f. 멱등성: 전 구간 IF NOT EXISTS / NOT EXISTS / MERGE / UPDATE 보정 유지. 2회 이상 실행해도
+      셀 20·가용 15·배정 15·오더 CANCELLED(16) 불변. BEGIN TRAN/COMMIT + XACT_ABORT 유지.
+   g. **매핑 확장 경로 문서화**: 셀 주석 또는 별도 확장 스니펫으로 "PLC 매핑 완료 시
+      `UPDATE cell SET Enabled=1 WHERE CellNo BETWEEN 16 AND 20`(필요 시 오더/아이템/배정
+      16~20 추가) 만으로 가용 상한 확장" 명기. 코드/스키마 변경 불요임을 남길 것.
 
-## 2. Scope IN
+2) 백엔드 게이트 (A안: 코드 변경 없음) — 회귀 방지 테스트만 추가 (backend/tests, SQLite 더블):
+   · SelectCell: 셀 1~15가 전부 만재(작업수량 도달)이고 16~20이 Enabled=0·미배정일 때,
+     SelectCell이 **16~20을 절대 반환하지 않음**(빈 셀 폴백 차단 단정).
+   · IF-05 gate(SorterCanAcceptBarcode 또는 엔드포인트): 0701-CELL-16(또는 비활성 셀 대응
+     바코드) → NG. 0701-CELL-01/-15 → OK.
+   · SorterFull 일관성: 가용 15셀이 모두 만재 → SorterFull=true, 신규 바코드 IF-05 NG
+     (16~20 비활성 셀은 full 산출에서 제외됨을 단정).
+   · 테스트는 프로그래매틱 시드(SQLite in-memory 더블)로 20셀·15가용 상태를 구성한다
+     (.sql 파일은 실 SQL Server 재적용 절차로 별도 검증 — §Completion 참조).
 
-### 2A. 핸드셰이크 시작 시 잔류 대사 (arming) — `HandshakeOrchestrator`
-- **핵심 불변식**: 핸드셰이크 1건은 **R_Flag==0을 1회 관찰한 뒤에만** 이후 R_Flag==1 상승을 자기 응답으로 수용한다. 0 확인 이후의 레벨 읽기는 에지 감지와 등가.
-- **동작(WHAT)**: C(CellAssign) 큐 투입 **이전**에 스냅샷 R_Flag를 확인 →
-  - R_Flag==0 이면 → 그대로 진행(추가 지연 0 — 깨끗한 경로는 기존 타이밍 보존).
-  - R_Flag==1 이면 → **잔류로 간주**: (1) WARN 로그 + (2) operation_log(HANDSHAKE) 기록 — 잔류값 `rCellNo`/`rSeq` 포함(§2D 관측성) + (3) **ClearR 선행 큐 투입**(절대규칙 #1 — 큐 경유) + (4) 폴링 스냅샷에서 **R_Flag==0 확인 대기** → 확인 후에만 C 기입 진행.
-- **R_Flag==0 확인 대기 타임아웃**: 하드코딩 금지(절대규칙 #7) — 신규 appsettings 타이밍값(예: `Timing:RFlagClearConfirmTimeoutMs`, 키명·값 Generator 재량)에서 읽는다. 초과 시 **C를 기입하지 않고** 명확한 terminal Outcome으로 종결(§2C·시나리오 5). 대기 중 OFFLINE 감지도 기존 대기 루프들과 동형으로 명확 종결.
-- 배치(대사 로직을 `ExecuteAsync` 내 C 투입 직전 별도 단계로 둘지, `WaitCFlagZeroAsync`류와 나란히 둘지 등)와 폴링·에지 채널(`RFlagRaised`) 소비 여부는 **Generator 재량**. 절대규칙 #1(쓰기=큐)·#7(타이밍=설정)만 불가침.
+3) 프론트엔드 (frontend/src/pages/sections/SortingSection.tsx):
+   · CellsCard 그리드를 **5열 고정**으로 변경(현행 `grid-cols-2 sm:grid-cols-3 lg:grid-cols-4
+     xl:grid-cols-6` → 5열 고정). 20타일이 4행×5열로 물리 미러링. 좁은 폭에서 레이아웃이
+     깨지지 않도록 처리(고정 5열 유지가 요건 — 필요 시 컨테이너 가로 스크롤/최소폭).
+   · 미가용 셀(16~20) 시각 구분은 **기존 `!cell.enabled` 렌더로 자동 충족**(회색+"비활성" 배지).
+     별도 데이터/컬럼 추가 없음. 범례의 "비활성" 배지 유지. → 무리한 신규 UI 추가 금지.
+   · tsc/eslint 0 유지. CellStatus 타입은 이미 `enabled` 보유 — DTO/타입 변경 불요.
 
-### 2B. 기동 시 잔류 R_Flag reconciliation — `Wcs.PlcGateway`
-- **동작(WHAT)**: 소터 게이트웨이 기동 후 **첫 유효 폴에서 R_Flag==1**이면 PLC 기동 잔류로 간주 → **ClearR 큐 투입**(절대규칙 #1) + **WARN 로그 + operation_log 기록**(§2D — 잔류값 포함). PLC 기동 직후 R 영역 테스트 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가 소비하기 전에 차단.
-- **위치·방식은 Generator 재량**(폴 루프 내 1회 게이트 / 레지스트리 StartAsync 완료 후 훅 등) — 단 **쓰기는 반드시 단일 큐 경유**(절대규칙 #1, API/오케스트레이터 직접 Modbus 호출 금지).
-- **근거 명기(주석)**: 기동 잔류를 지우면 그 응답의 대기자는 없고 C_Seq 카운터도 리셋되므로 잔류 유지는 후속 전 건 오소비를 낳는다 — 클리어가 정당한 복구. (계약 문서화 요구, 코드 주석에도.)
+── Evaluation Criteria (Evaluator 판단 기준 + 가중) ──────────────────────────
+Full-stack 4기준 구조:
+  1. Integration Quality (★★★) — 시드 데이터(20셀·15가용) ↔ IF-05 게이트 ↔ 셀 선택 ↔
+     모니터링 API/프론트 타일이 하나의 진실("가용=Enabled=1인 1~15")로 정합. 계층 경계 갭 0.
+  2. Per-layer Quality (★★★)
+     · Backend/API: IF-05 OK/NG 판정이 정확·결정적. 절대규칙(단일 큐, TgtFloor, Ready 의미)
+       및 SPEC(§6 투입 가부) 위반 0. 순수 판정 로직 훼손 0.
+     · Web/UI(frontend): 4×5 그리드가 물리 배치를 명료하게 미러링, 비활성 타일 구분이 자연스럽고
+       일관(디자인 토큰·타이포·간격). AI-slop 아님.
+  3. Craft (★★) — 시드 멱등성·트랜잭션 안전, 엣지(셀 16 전이·전량 만재), 테스트 커버리지,
+     계층 간 타입 안전(enabled bool 일관).
+  4. Functionality (★★) — 전체 사용자 여정(현장 소터 선택→20타일→16~20 비활성; IF-05 15셀
+     정상·16 차단; 매핑 확장 데이터-온리)이 end-to-end로 성립. 데이터 무결성.
 
-### 2C. 잔류 대사 실패 경로 terminal Outcome — `HandshakeOrchestrator`
-- R_Flag==0 확인 대기가 타임아웃(ClearR 미반영 — 소터 오프라인·PLC 무ack 등)하면 **C를 기입하지 않고** 명확·테스트 가능한 terminal Outcome으로 종결(무한 대기·더티 상태 진행 금지).
-- 신규 `HandshakeOutcome` 값 추가 vs 기존값(예: OFFLINE 감지 시 `Offline`) 재사용은 **Generator 재량** — 단 (a) 조용히 성공/진행하지 않고, (b) 결과에 사유가 드러나며, (c) 테스트로 단정 가능해야 한다. `HandshakeResult` record 형상 확장이 필요하면 기존 소비처(관측 싱크·테스트) 회귀 0을 지킬 것.
+── Completion Conditions (Evaluator 통과 최소 조건) ──────────────────────────
+[전체]
+  · 전체 테스트 GREEN. 기준 카운트 175(=PR #31 병합 후 예상)이나 **하드코딩 금지** —
+    develop 분기 후 기동 시 실제 카운트를 재확인하고, 신규 회귀 테스트가 그 위에 GREEN으로 추가.
+  · 마이그레이션이 필요한 선택(B안)일 경우에만: SqlServer + Sqlite 양 provider 마이그레이션
+    up/down 검증. A안(권장)은 스키마 무변경이라 마이그레이션 없음.
+  · lint/type/format(check 모드) 독립 실행 결과 기록(tasks/sprint-feedback.md).
+[백엔드/데이터]
+  · SQLite 더블 테스트: (1) 1~15 만재 시 SelectCell이 16~20 미반환, (2) IF-05
+    0701-CELL-01/-15 OK·0701-CELL-16 NG, (3) 15셀 전량 만재 → SorterFull·IF-05 NG.
+[프론트]
+  · 실행 중인 앱에서 현장 소터(3DS #01) 선택 시 20타일이 5열×4행으로 렌더, 16~20 회색 "비활성".
+  · tsc·eslint 0. 콘솔 error/pageerror/React dev warning 0(Evaluator console.log 캡처).
+[실 DB 재적용 — ★ 안전 절차 필수 (2026-07-03 오염 사고 교훈)]
+  · 실 SQL Server 재적용은 **명시적 sqlcmd/SSMS 실행**으로만 — 앱 기동 시드 금지. 현장 DB의
+    `Database:SeedOnStartup`은 false 유지(환경 암묵 발동 금지). appsettings로 실 DB에 직행하는
+    자동 시드 벡터 없음을 확인.
+  · **사전 백업 필수**: 재적용 전 대상 DB 백업(BACKUP DATABASE, 또는 최소한 cell·
+    cell_assignment·wcs_order·order_item 스냅샷 내보내기). 백업 완료 확인 후에만 적용.
+  · 트랜잭션: 시드 전체가 단일 BEGIN TRAN/COMMIT(+XACT_ABORT ON) 안에서 원자 적용.
+  · 재적용 후 검증 쿼리로 다음 단정:
+      - cell 20행(CellNo 1~20), Enabled=1 인 셀 정확히 15개(1~15), Enabled=0 이 5개(16~20).
+      - 활성 cell_assignment(ReleasedAt IS NULL) 정확히 15건(01~15). 셀 16 배정 해제됨.
+      - wcs_order 0701-CELL-16 Status='CANCELLED'. 01~15 RUNNING·데이터 무손상.
+      - 멱등: 동일 스크립트 ×2 재실행 후 위 카운트 전부 불변.
+  · (실 DB가 손닿는 환경이 아니면: 동일 스키마의 로컬 SQL Server 인스턴스에 빈 DB로
+    `ef database update` 후 시드 적용해 검증하고, 그 절차를 sprint-feedback.md에 기록.
+    "코드 리뷰로 대체" 금지 — 실제 실행 증거 필수.)
 
-### 2D. 관측성 — operation_log(HANDSHAKE) 잔류 기록
-- 잔류 대사(2A)·기동 reconcile(2B) 발생 시 **operation_log의 HANDSHAKE 카테고리**에 잔류값(`rCellNo`/`rSeq`)을 포함해 기록 — 현장 원인 추적용.
-- 기록 경로는 **기존 관측 훅 재사용**: `HandshakeOrchestrator.OnStage(action, detailJson)`(잔류 대사용 신규 action 예: `HS_R_RESIDUE`) / PlcGateway 측은 기존 `OnWrite`/전이 훅 및 로깅. **훅은 부수 기록 전용 — 핸드셰이크·폴 본동작 의미·타이밍 0 변경, 핸들러 예외 격리(fail-safe)**(기존 S-OBSERVABILITY 계약 동형). 신규 폴 루프·신규 DB 초크포인트 도입 0.
+── Parallel Modules (선택 — Generator fan-out) ───────────────────────────────
+A안 기준 경계-청결 2모듈(공유 파일 쓰기 없음):
+  · [DATA] scripts/seed-*.sql 갱신 + backend/tests/* 회귀 테스트 추가.
+  · [FE]   frontend/src/pages/sections/SortingSection.tsx 그리드 5열 고정.
+두 모듈은 파일 경계가 분리되어 병렬 가능하나, 변경량이 작아 단일 Generator 순차도 무방
+(orchestrator 재량). B안 선택 시 [BE-GATE](게이트 코드 + 마이그레이션 + DTO) 모듈이 추가되고
+[FE]가 DTO 신필드에 의존하게 되어 순서 결합 발생 → 그 경우 단일 Generator 순차 권장.
 
-### 2E. Sim3ds — R 잔류 프리셋 수단 확인/추가 (테스트 더블)
-- **먼저 확인**: `SimServer`가 실측 PLC 동작을 이미 모사하는가 — (i) C 지령 수락 시 C_Flag 자체 클리어(현재 `RunSimLoopAsync` L169-175 = 예), (ii) SortDuration 후 R 에코+R_Flag=1(L232-240 = 예), (iii) ClearR까지 R 영역 유지·자체 클리어 안 함(현재 Sim은 R 자체 클리어 없음 — WCS ClearR로만 R 비움 = 예). **에코 지연은 SortDurationMs로 모사됨.**
-- **부재 확인분만 추가**: 테스트가 "핸드셰이크 시작 시점에 R_Flag=1(+R_CellNo/R_Seq 지정값) 잔류"를 결정적으로 세팅할 **프리셋 수단이 없으면** 추가(예: `Options`에 초기 R 잔류 필드, 또는 기동 후 R 영역 직접 세팅 API — HOW는 Generator). 실측 잔류값 (R_CellNo=20, R_Seq=123) 재현 가능해야 함.
-- Sim의 **기존 동작·기본 무잔류 초기화(현재 `StartAsync`가 `Array.Clear` 후 Ready=1만 세팅)는 보존** — 프리셋은 명시 opt-in.
+── Evaluation Dimensions (선택 — Evaluator expert pool) ──────────────────────
+functional only (단일 차원). 단, 실 DB 재적용 안전(백업·트랜잭션·멱등·비오염)은 functional
+검증 안에서 **BLOCKING 서브체크**로 다룬다(2026-07-03 교훈). 별도 병렬 차원으로 분리하지 않음.
 
-### 2F. 문서 동기화 — `docs/SPEC.md` §4
-- §4 C/R 핸드셰이크에 **잔류 대사 규칙** 추가: "R단계는 레벨이 아니라 arming(C 기입 전 R_Flag==0 관찰 보장) 기반 — 시작 시 R_Flag==1이면 잔류로 대사(WARN+operation_log+ClearR 선행) 후 R_Flag==0 확인하고 C 기입" + "기동 첫 폴 R_Flag==1은 잔류로 클리어". 필요 시 §7-B의 관련 미확정 항목에 A-1 해소 1줄 교차 표기(선택).
+── Verification Scenarios (Full-stack, mandatory) ────────────────────────────
+※ 아래는 A안(권장) 기준. B안 채택 시 §Questions의 스코프 델타에 대응하는 시나리오
+   (신 플래그가 게이트 3술어·DTO·타일에 반영, 마이그레이션 up/down 양 provider)를 추가한다.
 
-### 2G. 신규 테스트 (`backend/tests/Wcs.Tests/`)
-- §4 검증 시나리오 1~6을 자동 테스트로 결선(SQLite in-memory 더블 + Sim3ds Modbus 더블 — 기존 통합 테스트 패턴 재사용). 잔류 프리셋(2E)으로 결정적 재현.
+  === Web/UI (프론트 셀 그리드 — SortingSection) ===
+  · 각 surface 기본 상태: /api 기동 + 현장 소터(chuteNo=1) 20셀 시드 상태에서 분류 현황 화면
+    진입 → 소터 드롭다운 "3DS #01" 선택 → 셀 현황 카드에 **20개 타일이 5열×4행**으로 렌더.
+    스크린샷으로 열 수(5)·행 수(4)·타일 총 20 확인.
+  · sprint가 도입/변경하는 대체 상태: 셀 16~20 타일이 **회색+"비활성" 배지**(opacity 낮음,
+    미배정 표기)로, 셀 1~15의 활성 상태(여유/점유/근접/만재)와 시각적으로 구분됨을 스크린샷 확인.
+    (셀 1~15 중 만재/점유 타일이 있으면 그 상태 배지도 함께 확인.)
+  · 관련 빈/에러 상태: 셀이 없는(또는 미존재) destId 선택 시 "등록된 셀이 없습니다"/EmptyRow
+    경로가 정상 — 현장 소터에는 항상 20셀이 있으므로 대조 케이스로만 확인(회귀 방지).
+  · 다크 모드: 앱에 다크 모드 토글이 존재하면 20타일·비활성 구분을 다크에서도 확인. 토글이
+    없으면 N/A(사유: 앱은 단일 테마 디자인 토큰 사용으로 보임 — Evaluator가 토글 유무를
+    실제 확인 후 판정, 있으면 검증·없으면 N/A 기록).
+  · 변경 후 핵심 인터랙션 흐름: 소터 드롭다운에서 현장 소터 선택 → 그리드가 4×5로 갱신 →
+    비활성 16~20 확인 → (있으면) 다른 소터 선택 시 그 소터의 셀 수/배치로 갱신되는지 확인.
+    최종 스냅샷 1장이 아니라 select→갱신 상호작용을 번호 스크린샷으로 기록.
 
-## 3. Scope OUT (0 변경 — 무변경 가드)
+  === Backend/API ===
+  · 이 sprint가 건드리는 엔드포인트(method + path):
+      - POST /api/v1/destination-query   (IF-05 투입 목적지 조회 — OK/NG 판정)
+      - GET  /api/monitor/sorters/{destId}/cells   (셀 현황 목록 — 20행 반환 확인)
+      - (참고·회귀) GET /api/monitor/sorters, POST /api/v1/deposit-report(IF-10) — 직접 변경
+        없으나 15셀 만재→SorterFull 일관 검증에 사용.
+  · 엔드포인트별 happy path(입력→출력 형태):
+      - POST /api/v1/destination-query { barcode:"0701-CELL-01", pId, agvNo, inductionNo, qty,
+        timeStamp } → **OK**(소터 chuteNo=1 목적지, 셀 배정 가능). "0701-CELL-15"도 OK.
+      - GET /api/monitor/sorters/{fieldSorterDestId}/cells → 20개 CellStatusDto 배열,
+        CellNo 1~20, enabled=true 15개(1~15)·false 5개(16~20), 16~20 occupied=false·미배정.
+  · 엔드포인트별 관련 에러/거부 케이스(해당하는 것만 — 패딩 금지):
+      - POST /api/v1/destination-query { barcode:"0701-CELL-16", … } → **NG**(미매핑 셀 차단).
+        1~15가 전부 점유든 아니든 결정적으로 NG여야 함(오더 CANCELLED 근거).
+      - 가용 15셀 전량 만재 상태에서 임의 신규 바코드 destination-query → NG(SorterFull 일관).
+      - (자동화 테스트 코드로 재현 — 일회성 curl 금지. SQLite 더블 통합 테스트로 상태 구성.)
 
-- **동시 핸드셰이크 직렬화(F1b, todo.md)** — **OUT**. SPEC는 소터당 물리 직렬 dispatch 전제. 본 스프린트는 이를 **해결하지 않되 악화 금지**. ⚠ **주의(계약 명기)**: 잔류 대사 ClearR이 같은 소터에서 **진행 중인 다른 핸드셰이크의 응답을 지울 수 있다** — 순차 dispatch 전제가 유지되는 한 안전(한 소터엔 동시에 1건뿐). 동시 IF-10 허용은 별도 후속 스프린트.
-- **R_Flag 타임아웃 재시도 vs 포기 정책(SPEC §7-B)** — **OUT**(여전히 미정). 본 스프린트는 진짜 무응답 타임아웃 경로(시나리오 6)를 **회귀 보존**만 한다.
-- **핸드셰이크 정상 경로 의미 불변**: 깨끗한 상태의 성공/불일치/타임아웃 판정·C_Seq 증가·한 건씩 직렬·`OnStage` 기존 action 시그니처는 **불변**(2A 잔류 경로·2C terminal outcome·2D 신규 action 추가만).
-- **frontend 0 변경**: 이 스프린트는 백엔드 전용. `frontend/` 디렉터리 diff 0.
-- **셀 20/15 제약(S-FIELD-20CELLS)** — **OUT**(별도 스프린트, 다루지 않음).
-- **Wcs.Core 판정 엔진 무접촉**: `DepositDecider`·`RegisterMap`·`PlcSnapshot` 의미 불변(순수 함수 — 절대규칙 #8). `RegisterMap` 상수 변경 0.
-- **DB 스키마·마이그레이션 0**: operation_log는 조회/기록만(기존 경로), 스키마 변경 없음.
-- **appsettings 기존 값 불변**: Sorters[]/Provider/ConnectionStrings/기존 Timing 값 0 변경(신규 `RFlagClearConfirm` 류 타이밍 키 **추가만**).
+  === End-to-end (2계층 이상 교차 데이터 흐름) ===
+  · 시드 재적용 → API 기동 → 모니터링 프론트까지 관통:
+    (1) 20셀·15가용 시드 상태에서 API 기동 →
+    (2) GET /api/monitor/sorters/{destId}/cells 가 20행(enabled 15/비활성 5) 반환 →
+    (3) 프론트 셀 그리드가 그 20행을 4×5로 렌더하고 16~20을 "비활성"으로 표시 →
+    (4) POST /api/v1/destination-query barcode 0701-CELL-01 → OK / 0701-CELL-16 → NG →
+    (5) IF-05 OK로 배정·적재가 진행돼도 대상 셀 번호가 항상 1~15 범위임을 확인(16~20 미도달).
+    데이터(시드)가 게이트(IF-05/SelectCell)와 표시(모니터 API/프론트)에서 동일 진실로
+    관측됨을 계층 왕복으로 증명.
 
-## 4. Verification Scenarios (Backend/API — 필수, per-type 슬롯)
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3
+> (Web/UI 프론트 셀 그리드, Backend/API IF-05·cells 엔드포인트, End-to-end 시드→API→프론트
+> 교차 흐름). All slots filled: yes.
 
-> 서피스 정의: 이 스프린트의 검증 표면은 **HTTP 엔드포인트 형상 변경이 아니라** 내부 핸드셰이크 실행 경로다. 아래 "surface"를 (a) `HandshakeOrchestrator.ExecuteAsync(cellNo, ct)` 소터별 핸드셰이크(운영상 IF-10 `POST /api/v1/deposit-report` → TriggerSorterHandshake로 구동), (b) `PlcPollingService` 기동 폴 reconciliation, (c) 신규 appsettings 타이밍 키, (d) Sim3ds 잔류 프리셋 테스트 더블 표면으로 매핑한다. 모든 시나리오는 **Sim3ds Modbus 더블 기반 자동 xUnit 통합 테스트**로 검증(수동 curl/코드리뷰 대체 금지).
+── Questions (사용자 확인 필요 — Phase 1→2 게이트 대상) ───────────────────────
+게이트 메커니즘 선택은 novel decision이므로 **구현 착수 전 사용자 확인**을 요청한다. 후보와
+트레이드오프를 정리하고 권장안을 제시한다.
 
-**Slot 1 — 이 스프린트가 건드리는 surface(엔드포인트/실행 경로) 목록**:
-- `HandshakeOrchestrator.ExecuteAsync` — R단계 arming(2A) + 잔류 대사 실패 terminal outcome(2C) 추가.
-- `Wcs.PlcGateway`(PlcPollingService 또는 레지스트리 기동 경로) — 기동 첫 폴 잔류 reconciliation(2B). 쓰기는 단일 큐 경유.
-- 신규 appsettings 타이밍 키(예: `Timing:RFlagClearConfirmTimeoutMs`) — R_Flag==0 확인 대기 상한.
-- `SimServer` — R 잔류 프리셋 수단(2E, 부재 시 추가).
-- `docs/SPEC.md` §4 — 잔류 대사 규칙 문서(2F).
+Q1. 셀 16~20 배정/선택 차단 메커니즘을 무엇으로 할 것인가?
 
-**Slot 2 — Happy path (정상 입력 → 기대 결과 형상)**:
-- **[S1] 잔류→대사→성공**: R 영역에 (R_CellNo=20, R_Seq=123, R_Flag=1) 프리셋 → 핸드셰이크 시작 → **잔류 대사(ClearR 선행) 후 R_Flag==0 확인 → C 기입 → 진짜 응답 대사** → `HandshakeOutcome.Success`. (기존 레벨-읽기 코드였다면 이 케이스는 `RSeqMismatch`였음 — 회귀 대조로 fix 입증.) operation_log에 잔류값(rCellNo=20/rSeq=123) 포함 HANDSHAKE 기록 존재.
-- **[S4] 무잔류 정상 경로 회귀**: 깨끗한 상태(R_Flag=0)에서 연속 2건 핸드셰이크 → 2건 모두 `Success`, **추가 지연·잔류 대사 발화 0**(깨끗한 경로 기존 동작·타이밍 보존).
+  [A안 — 기존 Enabled=0 재사용 (★ 권장)]
+   · 방식: 셀 16~20을 `Enabled=0`으로 시드 + 셀 16 배정 해제 + 오더 16 CANCELLED.
+   · 장점: **스키마 마이그레이션 0, 게이트 코드 변경 0, DTO/타입 변경 0.** SelectCell②·
+     IF-05 HasFreeEnabledCell·ComputeSorterFull·모니터 목록·프론트 "비활성" 렌더가 모두 이미
+     Enabled를 존중 → 순수 시드 데이터 + 프론트 그리드 1줄 변경. 매핑 완료 시
+     `UPDATE Enabled=1`만으로 확장(데이터-온리). 블라스트 반경 최소.
+   · 단점/리스크: `Enabled`의 의미가 "운영 가용"과 "PLC 매핑됨"을 겸하게 되는 **의미 겸용**
+     (semantic overloading). 기능상 동일(미매핑 셀 = 운영 불가)하나, 훗날 "매핑됐지만 정비로
+     비활성" vs "매핑 안 됨"을 구분해야 하면 표현력이 부족. gap 보완 위해 셀 16 배정 해제가
+     반드시 함께 수행돼야 함(①경로가 Enabled 무시).
 
-**Slot 3 — 관련 에러/에지 케이스 (Planner가 해당분만 선정 — 패딩 금지)**:
-- **[S2] off-by-one 연쇄 재현→전건 성공**: 잔류 존재 상태에서 같은 소터 **연속 3건**(현장 back-to-back 재현) → **3건 모두 `Success`**. (기존 코드: 3건 모두 `RSeqMismatch` 연쇄 — 자가지속 연쇄가 차단됨을 단정.)
-- **[S3] 기동 reconcile**: 게이트웨이가 R_Flag=1(+R_CellNo/R_Seq 잔류) 상태에서 폴링 시작 → 잔류가 **ClearR로 클리어됨**(스냅샷 R_Flag==0 도달) + **WARN 로그** + operation_log HANDSHAKE 잔류 기록. 이후 첫 핸드셰이크가 잔류를 오소비하지 않음.
-- **[S5] R_Flag==0 확인 타임아웃**: 잔류 대사 ClearR이 반영되지 않는 상황(소터 오프라인/PLC 무ack 모사) → 신규 확인-대기 타임아웃 경로가 **C를 기입하지 않고** 명확한 terminal Outcome(2C)으로 종결(무한 대기·더티 진행 없음). 테스트로 outcome 단정.
-- **[S6] 진짜 R_Flag 무응답 타임아웃 회귀**: 응답 자체가 없는 경우(Sim `InjectNoResponse` 등) → 기존 `RFlagTimeout` 경로가 그대로 동작(회귀 보존). arming 도입이 이 경로를 훼손하지 않음.
-- **[S7] 전체 스위트 GREEN + 빌드 경고 0**: `dotnet test backend/Wcs.sln` → 기존 169 전원 GREEN + 신규 S1~S6 GREEN(합계 169+N), 실패 0. `dotnet build` 경고 0(기존 관행). 동시성/타이밍 취약분은 기존 flake 교훈대로 **≥5회 반복 + stash 대조**로 회귀 귀속(1회 GREEN 신뢰 금지 — S9/E2E flake 교훈).
+  [B안 — 신규 전용 플래그(예: cell.PlcMapped bit) 신설]
+   · 방식: 새 컬럼 추가 → EF 엔티티·마이그레이션(SqlServer+Sqlite 양 provider) → SelectCell②·
+     HasFreeEnabledCell·HasAssignedCellWithRoom·ComputeSorterFull 술어에 `&& PlcMapped` 추가 →
+     CellStatusDto/프론트 타일에 신필드 반영.
+   · 장점: 의미 분리 명확("가용/정비"와 "PLC 매핑"이 독립 축). 배정 재사용 경로(①)까지
+     플래그로 원천 차단 가능(A안의 gap을 코드로 닫음).
+   · 단점/리스크: **블라스트 반경 大** — 마이그레이션(2 provider)·공유 게이트 로직 3~4곳·
+     DTO·프론트 동시 변경. 절대규칙(순수 판정·단일 큐)·크로스-엔드포인트 동형 불변식
+     (IF-05⟺SelectCell)을 4곳에서 동시에 유지해야 함. 지금 필요하지 않은 구분을 위해 위험을
+     선지불. 회귀 위험 상승.
 
-## 5. Deliverables & 완료 조건 (Completion Gate)
+  [C안 — Capacity=0 semantics 재정의] → 기각 권고.
+   · 현행 `IsCellAtCapacity(NULL/≤0=무제한)`에서 Capacity≤0은 **무제한**을 뜻함 → Capacity=0은
+     의도와 정반대(무한 수용). 게다가 ②빈 셀 폴백은 Capacity를 보지 않고 Enabled·미점유만 보므로
+     Capacity로는 선택 자체를 못 막음. 공유 SorterCellQty 의미 반전은 위험. 기각.
 
-> **Fresh evidence 의무**: 모든 PASS는 "지금 실제로 돌린" raw 증거(테스트 러너 요약 raw line·`git diff --stat`·operation_log/로그 발췌·`dotnet run`+Sim3ds 콘솔이 필요하면 그 출력)를 `tasks/sprint-feedback.md`에 인용. Generator 보고·추정·이전 결과만으론 PASS 금지.
+  [D안 — 셀 행을 15까지만(16~20 미생성)] → 기각 권고.
+   · 모니터링 20타일(4×5) 요구와 정면 충돌(15타일만 렌더). 기각.
 
-- **① fix 입증(핵심)**: S1·S2가 GREEN이고, **동일 시나리오가 수정 전 코드에선 `RSeqMismatch`였음**을 대조 증거(stash/이전 커밋 대비 또는 arming 제거 시 RED)로 제시 — "레벨→arming" 전환이 실제로 연쇄를 끊었음을 입증.
-- **② 기동 reconcile(S3)·확인 타임아웃(S5)·무응답 회귀(S6)** 각각 자동 테스트 GREEN + 명확 outcome 단정.
-- **③ 무잔류 회귀(S4)**: 깨끗한 경로 성공 + 잔류 대사 미발화(추가 지연 0) 확인.
-- **④ 전체 169+N GREEN**(S7): raw 요약 인용. 타이밍 취약분 ≥5회 반복 + stash 대조.
-- **⑤ 절대규칙 준수 입증**: #1 — 모든 쓰기(잔류 ClearR·기동 reconcile ClearR)가 **단일 큐 경유**임을 소스/`OnWrite` 발화로 확인(오케스트레이터·API 직접 Modbus 호출 0). #7 — R_Flag==0 확인 타임아웃이 **appsettings에서 바인딩**(하드코딩 grep 0). #8 — `Wcs.Core` 판정 무접촉. #3 — TgtFloor 클리어 0(R 클리어만, 본 스프린트 대상·정당).
-- **⑥ 관측성**: 잔류 대사·기동 reconcile 발생 시 operation_log(HANDSHAKE)에 잔류값 포함 기록됨을 실증(테스트 또는 라이브 로그 발췌).
-- **⑦ 무변경 가드**: `git diff --stat` 판독 → 변경이 §2 IN 표면(`Wcs.PlcGateway`·`Wcs.Sim3ds`·`Wcs.Tests`·`docs/SPEC.md`·`appsettings*.json` 신규 타이밍 키)에만 국한. `git diff -- frontend` 빈 출력. `git diff -- backend/src/Wcs.Core` 판정 의미 불변. DbSeeder·마이그레이션·Sorters/Provider/ConnectionStrings 값 diff 0.
-- **⑧ 관측 무영향(fail-safe)**: 신규 `OnStage` action·기록 콜백이 논블로킹·예외 격리(핸드셰이크·폴 본동작 지연/중단 0) — 소스 확인 + ④ 타이밍 회귀로 실증.
+  → 권장: **A안**. 근거 = 스키마/게이트 코드 무변경으로 요구를 전부 충족하고, 매핑 확장이
+     데이터-온리이며, "매핑됐지만 정비로 비활성" 같은 미도래 요구를 위해 위험을 선지불하지 않음
+     (Minimal Impact·Simplicity First). A안의 gap(①경로 Enabled 무시)은 셀 16 배정 해제 +
+     오더 CANCELLED로 완결적으로 닫힌다.
+  → B안 선택 시 스코프 델타: [BE-GATE] 모듈 추가(엔티티+마이그레이션 2 provider + 게이트 술어
+     3~4곳 + DTO), [FE] 신필드 의존, Verification에 마이그레이션 up/down·신플래그 게이트
+     시나리오 추가. 이 경우 Planner 재계획 또는 Generator 확장으로 반영.
 
-**Completion**: ①~⑧ 전부 PASS + `tasks/lessons.md`에 A-1 교훈(레벨 vs 에지/arming·잔류 대사·기동 reconcile·off-by-one 연쇄 기전) 1행 + `docs/SPEC.md` §4 동기화 완료 + 프로세스/포트 정리(:1502·:5080 free) + git status 핸드오프 동일.
+Q2. 셀 16 기존 오더(0701-CELL-16) 처리: 권장은 **오더 CANCELLED + 배정 해제**(order_item 행은
+    이력 보존). "오더 RUNNING 유지 + 배정만 해제"는 1~15 전량 점유일 때만 NG가 성립해 취약 —
+    권장하지 않음. 이 결정에 이견이 있는지 확인.
 
-## 6. 함정 (Traps)
+Q3. 시드 파일명: `seed-field-16cells.sql` → `seed-field-20cells.sql` 리네임 권장(내용이 20셀·
+    15가용으로 실질 변경). 유지 선호 시 파일명은 그대로 두고 내용만 갱신 가능. 선호 확인.
 
-1. **깨끗한 경로 타이밍 회귀**: arming을 "항상 R_Flag==0 대기"로 구현하면 정상 건마다 지연 추가 위험. **R_Flag가 이미 0이면 지연 0으로 즉시 진행**(대기는 잔류 케이스에만). ③으로 실증.
-2. **PollIntervalMs(150) > RFlagPollMs(100) 창**: A-1의 실창. 잔류 대사는 이 창을 닫는 것이 목적 — R_Flag==0 확인을 **폴링 스냅샷 갱신 기준**으로 하되, 확인 대기 폴 간격과 타임아웃을 appsettings로.
-3. **ClearR 미반영 시 무한 대기**: R_Flag==0 확인 루프에 반드시 타임아웃(2C·S5) + OFFLINE 감지 종결. 더티 상태로 C 기입 진행 금지.
-4. **동시 핸드셰이크(F1b)와 혼동 금지**: 본 건은 '동시'가 아니라 '순차 연속'에서도 발생하는 별개 근본원인. per-소터 락으로 해소되지 않음. 잔류 ClearR이 동시 진행 건 응답을 지울 수 있다는 주의(순차 dispatch 전제) — Scope OUT에 명기, 악화 금지.
-5. **Sim R 자체 클리어 금지 보존**: 실측 PLC는 ClearR을 ack으로 R 유지(자체 클리어 안 함). Sim이 이 동작을 바꾸면 잔류 재현·회귀가 오염됨 — Sim 기존 R 유지 동작 보존, 프리셋만 opt-in 추가.
-6. **테스트 flake 귀속**: 핸드셰이크 통합 테스트는 타이밍 취약. 1회 GREEN 신뢰 금지 — ≥5회 반복 + stash 대조로 회귀 귀속(S9/IT4b/E2E 부하 flake 교훈). 고아 `Wcs.Sim3ds.exe`가 포트 점유·빌드 파일잠금 유발 가능 — 실패 시 kill 후 재시도.
-7. **관측 훅 fail-safe**: 신규 잔류 기록 콜백에서 동기 I/O·블로킹·예외 누수 금지(EmitStage try/catch 동형). 폴/핸드셰이크 핫패스 비지연.
-8. **테스트 provider 함정(교훈)**: 통합 테스트는 in-memory SQLite 더블. `Database:Provider` 즉시평가 키 override는 `builder.UseSetting`으로(2026-06-30 교훈) — 단 본 스프린트는 DB 스키마 무변경이라 대개 무관.
-
-## 7. Questions / Assumptions (모호점)
-
-> 수정 방향은 사용자 보고·확정 완료(배경). 아래는 Generator 재량 설계점과 전제 — **블로킹 질문 없음**. 진행 중 스펙 모호가 새로 발견되면 `docs/SPEC.md` "미확정 사항"에 기록.
-
-- **A1 (전제)**: 소터당 **순차 dispatch** 유지(SPEC 물리 직렬 전제). 동시 IF-10 직렬화(F1b)는 본 스프린트 밖 — 잔류 대사는 이 전제 위에서 안전.
-- **A2 (Generator 재량)**: R_Flag==0 확인 타임아웃 키명·기본값, arming 로직 배치, `RFlagRaised` 에지 채널 소비 여부, 신규 `HandshakeOutcome` 값 추가 vs 기존값 재사용 — 전부 Generator 결정(제약: 절대규칙 #1·#7·#8, terminal outcome은 테스트 가능·비-silent).
-- **A3 (전제)**: 기동 reconcile은 첫 유효(Online) 폴 기준 1회. 클리어된 잔류 응답의 대기자는 없고 C_Seq 리셋 상태이므로 유지가 아니라 클리어가 정당한 복구.
-- **A4 (확인 대상)**: Sim3ds가 실측 PLC 동작(C_Flag 자체 클리어·SortDuration 에코 지연·ClearR까지 R 유지)을 이미 모사함(2E에서 확인). **부재 확인분은 R 잔류 프리셋뿐** — 그것만 추가.
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Slot 1 surface 목록, Slot 2 happy path[S1·S4], Slot 3 error/edge[S2·S3·S5·S6·S7]). All slots filled: yes.
+── ★ 사용자 확정 (2026-07-07, Phase 1→2 게이트 통과) ─────────────────────────
+Q1 게이트 방식: **A안 — 기존 Enabled 재사용** (스키마·백엔드 코드 변경 0, 회귀 테스트만 추가)
+Q2 셀16 오더: **CANCELLED + 배정 해제** (order_item 이력 보존, IF-05 결정적 NG)
+Q3 파일명: **seed-field-20cells.sql로 리네임** (헤더 주석 20셀·15가용 기준 갱신)
+브랜치: feat/field-20cells — fix/handshake-rflag-residue(PR #31) 위에 스택, 병합 순서 #31→본 PR.
+테스트 기준 카운트: 이 브랜치는 #31 포함이므로 175 기대(기동 시 실제 재확인).
