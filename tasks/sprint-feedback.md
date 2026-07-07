@@ -1,84 +1,86 @@
-# Sprint Feedback — S-HANDSHAKE-RESIDUE (핸드셰이크 R_Flag 잔류 대사 — off-by-one 연쇄 차단)
+# Sprint Feedback — S-FIELD-20CELLS
 
-**APPROVED**
+**APPROVED** (2026-07-07, 1 iteration) — Evaluator 독립 검증, fresh evidence.
 
-## Phase 3 Evaluate (Evaluator fresh evidence · branch `fix/handshake-rflag-residue` · working tree · 2026-07-07)
-
-**최종 판정: APPROVED** — Verification Scenario S1~S7 + Completion Gate ①~⑧ + 동시성 blindspot 소스 점검 전부 PASS. 모든 증거는 Evaluator가 지금 직접 재실행한 raw tool output(빌드 요약·테스트 러너 요약 raw line·arming 비활성/복원 대조·git diff·grep)이다. Generator 요약은 신뢰하지 않고 전부 fresh 재현. 코드 수정·커밋·git 조작 없음.
-
-- 핸드오프 마커 확인: `tasks/sprint-log.md:2090` `## IMPLEMENTATION COMPLETE (S-HANDSHAKE-RESIDUE)` 존재.
-- 검증 방식: **Sim3ds TCP 더블 + xUnit 통합 테스트 전용**. COM1/RTU 미기동(현장 3DS는 이설로 물리 미연결 — 사용자 확인). appsettings Transport/COM/Sorters/Provider/ConnStr 무변경.
-- 베이스라인: `dotnet build` 오류 0 / 경고 10(전부 NU1903 SQLitePCLRaw 2.1.10 advisory — base develop 선재 의존성 부채, 코드 경고 아님). 신규 CS 경고 0.
+브랜치 `feat/field-20cells`. A안(기존 `cell.Enabled` 게이트 재사용 — 백엔드 프로덕션 코드 변경 0, 회귀 테스트만 추가) 확정 계약. 모든 Verification Scenario·Completion Condition을 직접 생성한 신선 증거로 통과. 커밋/push 없음(팀리드 권한). 핸드오프 마커 확인: `tasks/sprint-log.md:2149` `## IMPLEMENTATION COMPLETE — S-FIELD-20CELLS`.
 
 ---
 
-### ④ 전체 스위트 GREEN (S7) — PASS
-`dotnet test backend/Wcs.sln --no-build --blame-hang-timeout 180s` 연속 실행(전부 Evaluator fresh):
-```
-RUN 1  통과!  실패: 0, 통과: 175, 건너뜀: 0, 전체: 175  (14s)
-RUN 2  통과!  실패: 0, 통과: 175, 건너뜀: 0, 전체: 175  (17s)
-RUN 3  통과!  실패: 0, 통과: 175, 건너뜀: 0, 전체: 175  (17s)
-RUN 4  통과!  실패: 0, 통과: 175, 건너뜀: 0, 전체: 175  (19s)   ← arming 복원 후 재빌드 산출물
-```
-169 기존 + 6 신규(HandshakeResidueTests) = 175. 4회 연속 GREEN(hang/dump 0). 신규 테스트 단독 반복(`--filter ~HandshakeResidue`) NEW RUN 1~3 전부 `실패:0 통과:6` → 신규 테스트 총 관측 6회(3 단독 + 3 전체) 전원 GREEN, flake 0. 이전에 S7OfflineAlarmTests 포트경쟁 flake가 보고됐으나 4회 전체 run 전부 GREEN으로 미발현. 빌드 경고 = NU1903 10건(선재 의존성 advisory, 코드/CS 경고 0 — S-FOLDER-ORG 선례대로 스프린트 게이트와 무관·todo 부채).
+## Scenario 1 — 전체 테스트 ×2 (독립 재실행) : PASS
 
-### ① fix 입증(핵심) — PASS
-Evaluator가 직접 `HandshakeOrchestrator.cs`의 arming 호출(`ArmRFlagZeroAsync`)을 임시 주석 처리(백업 해시 대조로 복원 보장) 후 재빌드하여 S1/S2 실행:
-```
-[arming 비활성] 실패!  실패: 2, 통과: 0
-  S1  Actual: RSeqMismatch   [S1] Outcome=RSeqMismatch SentCSeq=1 RSeq=123
-  S2  Actual: RSeqMismatch   [S2] #1 Outcome=RSeqMismatch CSeq=1 RSeq=123
-```
-잔류 R_Seq=123을 새 건(cSeq=1) 응답으로 오소비 → **레벨-읽기 결함 재현(RED)**. 이후 원본 복원(파일 SHA256 `8619AAFD…8972C1` byte-identical 대조 확인) + `--no-incremental` 재빌드 후 동일 S1/S2 → `통과! 실패:0 통과:2`. ⇒ "레벨→arming" 전환이 off-by-one 연쇄를 실제로 끊었음을 Evaluator가 직접 입증.
-> 주의 기록: 파일 복원 직후 incremental `dotnet build`가 재컴파일을 스킵해 S1/S2가 stale(arming-비활성) 바이너리로 RED 재현 → `--no-incremental` 강제 재빌드로 GREEN 확정. 파일 복원 후 검증은 non-incremental 재빌드 필수(incremental build stale 함정).
+`dotnet test backend/Wcs.sln` 2회 독립 실행 — Generator 보고(178) 재확인:
+- RUN 1 (raw): `통과!  - 실패: 0, 통과: 178, 건너뜀: 0, 전체: 178, 기간: 17 s - Wcs.Tests.dll (net10.0)`
+- RUN 2 (raw): `통과!  - 실패: 0, 통과: 178, 건너뜀: 0, 전체: 178, 기간: 15 s - Wcs.Tests.dll (net10.0)`
+- 기준 카운트: 계약 175(=#31 병합 후) + 신규 회귀 3건 = **178** 정합. 하드코딩 아님(실측 재확인).
+- 빌드 경고 = NU1903(SQLitePCLRaw 2.1.10, GHSA-2m69) 5건 — base 선재 부채·todo 등재분(이 스프린트 무관, 백엔드 코드 diff 0으로 도입 불가). 오류 0.
 
-### ② S3 기동 reconcile / S5 확인 타임아웃 / S6 무응답 회귀 — PASS
-전부 자동 테스트 GREEN + 명확 outcome 단언(소스+테스트 재확인):
-- **S3** `S3_StartupReconcile_ResidueClearedByPollLoop`: Sim R 프리셋(20/123/RFlag=1) 기동 → 폴 루프 첫 유효 폴이 ClearR 큐 투입 → `!RFlag` 도달. 단언: `OnWrite("CLEAR_R")` 발화 + `OnRegisterChange(R_CellNo 20→0·R_Seq 123→0·R_Flag 1→0)` + 이후 핸드셰이크 `Success` + `HS_R_RESIDUE` 미발화(reconcile가 선처리).
-- **S5** `S5_ResidueClearNotReflected_TerminalTimeout_NoCWritten`: sticky 잔류(WCS ClearR를 Sim이 재천명 — PLC 무ack 모사) → `HandshakeOutcome.RFlagResidueTimeout`, `SentCSeq=0`, `ReceivedRSeq=123`, `HS_C_SENT` 부재(C 미기입), `HS_R_RESIDUE_TIMEOUT` 발화. terminal·비-silent·테스트 단정 가능(§2C 충족).
-- **S6** `S6_RealNoResponse_RFlagTimeout_Preserved`: `InjectNoResponse` → 기존 `RFlagTimeout` 경로 보존, `HS_R_RESIDUE` 미발화, `HS_C_SENT` 존재(C 정상 기입). arming 도입이 무응답 회귀 경로 훼손 안 함.
+## Scenario 2 — 실 DB 검증 (Rcs3dsInterlockingWcs @ localhost, sqlcmd -E) : PASS
 
-### ③ 무잔류 회귀(S4) — PASS
-`S4_CleanPath_TwoConsecutive_NoResidueReconcile`: 깨끗한 상태(R_Flag=0) 연속 2건 → 2건 모두 `Success` + `HS_R_RESIDUE`/`HS_R_ARMED` **미발화**(추가 지연 0·깨끗한 경로 기존 타이밍 보존). 소스에서도 `ArmRFlagZeroAsync`가 `if (!snap.RFlag) return null`로 즉시 진행(함정 1 회피) 확인.
+읽기 전용 검증 쿼리 + 멱등 재확인 목적 시드 1회 재실행(계약 허용). 원문 인용:
+- **cell**: total=20, Enabled=1 = `1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`(정확히 15), Enabled=0 = `16,17,18,19,20`(정확히 5). Capacity=3 × 20행.
+- **활성 cell_assignment(ReleasedAt IS NULL)**: 15건 = 셀 `1~15`. 셀 16 배정 해제됨(active에 미포함).
+- **released 이력 보존**: released 배정 10건(어제 현장 셀 1~9 해제분 9 + 셀16 해제 1), assign_total=25(원본 16 + 시드 1~9 활성 재수립 9). Generator 특기사항("적용 전 활성 7건[셀10~16]→시드가 1~9 활성 재삽입으로 15건 재수립") 정합, released 이력 소실 0.
+- **wcs_order**: `0701-CELL-16 = CANCELLED`, `01~15 = RUNNING`(15건) 무손상.
+- **order_item 16 보존**: barcode `0701-CELL-16`, PlannedQty=3, ReservedQty=0, SortedQty=0 (1행 잔존, 이력 보존). 배치 order_item 총 16.
+- **현장 실 데이터 무접촉**: piece=2 / piece_event=2 / sorter_command=2 (piece pId `908,909` = 어제 현장 셀8·9 분류 이력). 시드 SQL은 이 테이블을 참조조차 하지 않음(SQL 전문 판독 확인).
+- **사전 백업**: `cell_bak_field20`·`cell_assignment_bak_field20`·`wcs_order_bak_field20`·`order_item_bak_field20` 4개 잔존(롤백 안전망).
+- **멱등**: 시드 1회 재실행 → 요약 출력 `20 15 5 15 1` 불변. 재확인 쿼리 전량 불변(cells20/en15/dis5, active15, assign_total 25→25 중복삽입 0, order_item 16, order16 CANCELLED, piece/event/cmd 2/2/2). NOT EXISTS/MERGE/조건부 UPDATE로 재실행 안정.
 
-### ⑤ 절대규칙 준수 — PASS
-- **#1 (단일 큐)**: 잔류 대사 ClearR = 오케스트레이터 `_gw.EnqueueAsync(new PlcWrite.ClearR())` (HandshakeOrchestrator.cs:170). 기동 reconcile ClearR = 폴 루프 `_writeQueue.Writer.TryWrite(new PlcWrite.ClearR())` (PlcGateway.cs:300). 둘 다 단일 쓰기 큐 → 단일 컨슈머(`case PlcWrite.ClearR:` WriteMultipleRegisters + RmwD4Locked, :460-470)에서만 실 Modbus 쓰기. **오케스트레이터 직접 Modbus 호출 grep 0**(`WriteSingleRegister|WriteMultipleRegister|_master.Write|WriteAsync` → No matches).
-- **#7 (타이밍=설정)**: 확인 타임아웃 = `_opt.RFlagClearConfirmTimeoutMs`(appsettings `Timing:RFlagClearConfirmTimeoutMs=2000` + Program.cs TimingOptions/SorterTimingOverride 배선). Wcs.PlcGateway 신규 로직 하드코딩 ms **grep 0**(`Task.Delay([0-9]|AddMilliseconds([0-9]` → No matches; 대기는 `_opt.RFlagPollMs`/`_opt.RFlagClearConfirmTimeoutMs` 바인딩).
-- **#8 (Core 무접촉)**: `git diff --stat -- backend/src/Wcs.Core` **빈 출력**.
-- **#3 (TgtFloor)**: 오케스트레이터 TgtFloor 쓰기 0(R 클리어만). appsettings diff에 TgtFloor 무접촉.
+## Scenario 3 — 백엔드 게이트 회귀 (코드 판독 + 실행) : PASS
 
-### ⑥ 관측성 — PASS
-- 잔류 대사: S1 테스트가 `HS_R_RESIDUE` detail에 `"rCellNo":20`·`"rSeq":123` 포함을 단언(GREEN). `HS_R_ARMED`·`HS_C_SENT` 발화 확인.
-- 기동 reconcile: S3가 `OnWrite("CLEAR_R")` + `OnRegisterChange` 잔류값 전이(20→0·123→0·1→0)를 단언(GREEN).
-- operation_log 결선: `Program.cs:408` `bundle.SubscribeHandshakeStage((action,detail) => opLog.Log(HANDSHAKE, action, …))` — 기존 구독이 신규 action(HS_R_RESIDUE/HS_R_ARMED/HS_R_RESIDUE_TIMEOUT)을 자동으로 operation_log **HANDSHAKE** 카테고리에 기록(HS_R_RESIDUE_TIMEOUT은 "TIMEOUT" 포함 → ERROR 레벨). Wcs.Api 무변경.
+`backend/tests/Wcs.Tests/Field20CellsGateTests.cs` 직접 판독 — 느슨한 단정·mock 과다 아님:
+- **T1** `SelectCell_NeverReturnsDisabledCells_16to20`: 15가용 전부 점유·16~20 Enabled=0 미배정 구성 후 `UnoccupiedCellCount(enabledOnly:true)==0` & `(false)==5`로 "16~20은 물리적으로 비었지만 게이트 밖"을 명시 단정 → `SelectCell` null + 5회 반복 ≤15. **음성 대조**(셀16 Enabled=1 승격 시 SelectCell이 16 반환)로 "게이트=Enabled"를 역증명 — 공허 단정 배제의 정석.
+- **T2** `If05_Cells01And15_Ok_Cell16_Ng`: 실 HTTP `POST /api/v1/destination-query`(RcsPushWebApplicationFactory). CELL-01/-15 → OK+chuteNo, CELL-16 → NG+null, 그리고 piece_event `Reason=NO_DEST` 단정(CANCELLED 오더 → 1~15 점유 무관 결정적 NG).
+- **T3** `All15EnabledCellsFull_SorterFull_And_If05_Ng`: 15가용 전부 Cap=3 도달(COMPLETED sorter_command) 후 `Compute().Full==true`(비활성 16~20을 빈 셀로 세지 않음 — 세었다면 false) + 신규 바코드 IF-05 NG, piece_event `Reason=FULL`.
+- 실행(fresh, isolated): `dotnet test --filter Field20CellsGateTests` → `실패: 0, 통과: 3, 전체: 3, 기간: 4 s`. 프로그래매틱 SQLite 더블 + 실 DI(ICellSelector/IDestinationStatusService)·실 HTTP 사용, 단정은 정확한 셀번호·사유 문자열(NO_DEST/FULL)·카운트로 특정.
 
-### ⑦ 무변경 가드 — PASS
-`git status --porcelain` = 핸드오프 동일(9 M + 1 ??): Program.cs·appsettings.json·HandshakeOrchestrator.cs·PlcGateway.cs·SimServer.cs·docs/SPEC.md·tasks/{lessons,sprint-contract,sprint-log}.md(하네스 산출물) + `?? backend/tests/Wcs.Tests/HandshakeResidueTests.cs`.
-- `git diff --stat -- frontend` **빈 출력** / `-- backend/src/Wcs.Core` **빈 출력** / `-- Wcs.Data + Migrations.Sqlite/SqlServer` **빈 출력**.
-- appsettings diff = `RFlagClearConfirmTimeoutMs` 키 + 주석 추가만. Transport/COM/Sorters/Provider/ConnectionStrings/TgtFloor **무변경**(grep 확인).
+## Scenario 4 — 프론트 브라우저 검증 (Playwright, 실 브라우저) : PASS
 
-### ⑧ 관측 무영향(fail-safe) — PASS
-`EmitStage`(HandshakeOrchestrator:87-91)·`EmitWrite`(PlcGateway:508-512)·`EmitRegisterChanges`(:376-381) 전부 try/catch로 핸들러 예외 격리. 기동 reconcile 로깅도 try/catch 보호(:291-297) + 폴 루프 외곽 try/catch 내부. 타이밍 회귀 0(④ 4회 + ③ 깨끗한 경로 지연 0).
+백엔드(:5080, Production·SqlServer 실 DB) + frontend dev(:5173) 기동 후 Chromium(rev1228, playwright-core) 구동. 스크린샷 `screenshots/S-FIELD-20CELLS_20260707-100852/`(gitignored) 01~04 + console.log 보존. 육안 판독 완료:
+- `/monitor` → "분류 현황" 탭 클릭 → 소터 드롭다운 자동 `3DS #01 (오프라인)` 선택(소터 OFFLINE이어도 셀 그리드는 DB 데이터라 렌더).
+- **20타일 5열×4행**: `grid-cols-5` 존재(1개), computed `grid-template-columns = 190px×5`(=5열), 타일 20개, distinct row top-offset 4개(`249,346,442,539`)=4행.
+- **16~20 회색 "비활성"**: 비활성 배지 타일 정확히 5개 = 셀 `16,17,18,19,20`, 전부 opacity 0.6(`opacity-60`). 셀 1~15는 비활성 아님(점유, op 1.0). 스크린샷 02에서 하단 행 16~20 회색·"미배정" 육안 확인. 셀8·9는 1/3(현장 piece 908/909, 하단 sorter_command COMPLETED 2건과 정합).
+- **좁은 폭(<640px) 가로 스크롤**: viewport 500px에서 `overflow-x-auto` 컨테이너 scrollWidth=552 > clientWidth=234 → 5열 유지·가로 스크롤. 우측 스크롤 스크린샷 04로 5열 도달성 확인(타일 뭉개짐 0).
+- **콘솔 캡처(BLOCKING)**: console.log 3줄 전부 무해 — `[vite] connecting/connected`(debug) + React DevTools 안내(info). `pageerror` 0, `console.error` 0, React dev-mode warning(key/validateDOMNesting 등) 0, network 4xx/5xx 0.
+- **다크 모드**: 테마/다크 토글 부재(0개) → N/A(단일 테마 디자인 토큰). Evaluator 실제 확인 후 N/A 판정.
 
-### 동시성 blindspot 소스 점검(feedback-archive 교훈 — GREEN만으론 불충분) — PASS
-- **arming 대기 루프 취소**: `while(true) { await Task.Delay(_opt.RFlagPollMs, ct); … }` — ct 취소 시 OCE 전파(기존 WaitCFlagZero/WaitRFlagAndProcess와 동형). deadline 검사로 무한 대기 불가. 일관·안전.
-- **OnStage 신규 action 예외 격리**: 신규 4개 action 전부 EmitStage 경유(try/catch). 확인.
-- **startup reconcile 정확히 1회**: `startupReconciled`는 `RunPollLoopAsync` 지역변수 — 첫 Online 폴에서 RFlag 판정 전 true 세팅(:288) → poll-loop 1회 기동 = 게이트웨이 1회 기동당 1회. 재기동 시 새 루프에서 리셋. 확인.
-- **reconcile ClearR ↔ 이른 첫 핸드셰이크 경쟁**: 두 ClearR 모두 R 영역 0 기입(멱등) + 단일 큐 단일 컨슈머 직렬화 + arming이 잔류 재확인·재처리 → 최악 중복 ClearR(무해). per-소터 순차 dispatch 전제 위에서 안전(F1b는 Scope OUT·악화 없음). S1(런타임 잔류→arming)·S3(기동→reconcile) 두 타이밍 모두 GREEN으로 커버.
+## Scenario 5 — tsc·eslint (frontend, 독립 실행) : PASS
 
-### 프로세스/포트 정리 — PASS
-Wcs.Sim3ds/Wcs.Api/testhost/vstest.console 오펀 0 · 포트 1502·5080 free(연결 0). 임시 백업은 scratchpad 한정(리포 산출물 0). 워킹트리 핸드오프 동일.
+- `npm run typecheck`(tsc --noEmit) → exit 0, 0 error.
+- `npm run lint`(eslint .) → exit 0, 0 error.
+- 포매터(prettier 등)는 미구성(package.json scripts에 없음) → `not configured` 기록. tsc+eslint가 구성된 정적 검사이며 둘 다 clean.
+
+## Scenario 6 — 무변경 가드 (git diff 판독) : PASS
+
+- `git diff HEAD -- backend/src` → **빈 출력**(A안 프로덕션 코드 diff 0). Wcs.Core·PlcGateway·Api 무변경.
+- 변경 범위(`git status --short`): `scripts/seed-field-16cells.sql → seed-field-20cells.sql`(rename+rewrite, staged R + working M) · `frontend/src/pages/sections/SortingSection.tsx`(그리드 1블록) · 신규 `backend/tests/Wcs.Tests/Field20CellsGateTests.cs` · `tasks/*`. 계약 "scripts/·frontend SortingSection·신규 테스트·tasks 국한"과 정확히 일치.
+- SortingSection diff = `grid-cols-2 sm/lg/xl…` → `overflow-x-auto` 컨테이너 안 `grid-cols-5 gap-2 min-w-[600px]`(8줄, DTO/타입 무변경). 검증이 tracked 트리를 변경하지 않음(검증 후 git status 동일, 로그/wwwroot는 gitignored).
+
+## Scenario 7 — 동시성/사각 교훈 (시드 SQL 직접 판독) : PASS
+
+`scripts/seed-field-20cells.sql`(234줄) 전문 판독:
+- **트랜잭션 안전**: `SET XACT_ABORT ON` + 단일 `BEGIN TRANSACTION`/`COMMIT`. 셀 MERGE·오더/아이템/배정 INSERT·셀16 전이가 원자 적용.
+- **멱등 로직**: 셀=MERGE(MATCHED 조건부 UPDATE + NOT MATCHED INSERT), 오더/아이템/배정=`INSERT … WHERE NOT EXISTS`(부분유니크 ReleasedAt IS NULL 준수), 셀16 배정 해제=`UPDATE … WHERE ReleasedAt IS NULL`, 오더16 CANCELLED=`UPDATE … WHERE Status<>'CANCELLED'`. 결함 0(재실행 카운트 불변으로 실증).
+- **실적/예약 무조작**: order_item은 INSERT(NOT EXISTS)만, ReservedQty/SortedQty 미변경. piece/piece_event/sorter_command 미참조. fail-loud(`THROW 50001` — chuteNo=1이 SORTER_3D 아니면 중단). filtered index용 `QUOTED_IDENTIFIER/ANSI_NULLS ON`.
+- **백업 테이블 존재**: 4개 확인(위 Scenario 2). 앱 기동 시드 벡터 없음(base·Development 둘 다 `SeedOnStartup=false`, launchSettings 부재로 `dotnet run` 기본 Production — 실 DB 자동 시드 차단, 2026-07-03 사고 교훈 준수).
 
 ---
 
-## 판정 근거 요약
-①~⑧ 전부 PASS · S1~S7 전부 PASS · 동시성 blindspot 소스 점검 4항 PASS. 반복 FAIL·repeat-issue 없음(신규 결함 0 → lessons.md 승격 대상 없음; Generator가 이미 A-1 교훈 1행 등재). docs/SPEC.md §4-A 동기화 완료. → **APPROVED**.
+## Minor (비차단 — 다음 스프린트 Generator 참고, todo 아님)
+- 좁은 폭(500px)에서 페이지 body가 13px 가로 오버플로(scrollWidth 513 vs clientWidth 500). 셀 그리드는 `overflow-x-auto`로 완전 격리돼 원인 아님(원인은 하단 sorter_command DataGrid 8열 테이블 또는 레이아웃 패딩 — 선재·스코프 밖). 이 스프린트의 5열 그리드 요건은 컨테이너 내부 스크롤로 충족. 극단 좁은 폭에서 상단 타이틀 세로 래핑은 앱 기존 반응형 동작.
+- 프론트 포매터 미구성 — 향후 prettier 도입 고려 가능(선택).
 
-## Code Review Minor (4-Tier Step 4.5 — S-HANDSHAKE-RESIDUE, 병합 비차단·다음 스프린트 Generator 참조)
+## 정리 (검증 후)
+- 기동 백엔드(:5080)·프론트(:5173) 종료 완료. 포트 5080/5173/1502 **ALL FREE**. 고아 프로세스 0(chrome-headless/Wcs.Api/Wcs.Sim3ds 부재).
+- DB 최종 상태 클린(20/15/5/15/1, piece/event/cmd 2/2/2 — 라이브 IF-05 미발동으로 런타임 산물 0). 백업 테이블은 롤백 안전망으로 잔존(팀리드 확인 후 DROP 가능).
+- 스크린샷·console.log는 `screenshots/`(gitignored)에 보존. tracked 트리 무변경.
 
-1. **HS_R_RESIDUE가 operation_log에서 INFO로 분류** — Program.cs 레벨 분류기가 키워드(MISMATCH/TIMEOUT/OFFLINE) 기반이라 잔류 감지 이벤트가 INFO로 기록됨(ILogger는 WARN). 분류기에 RESIDUE 키워드 WARN 승격 권고(현장 추적성).
-2. **기동 reconcile가 spurious RFlagRaised 에지 미억제** — 첫 폴 잔류가 에지 채널에 발화. 현재 소비자 0이라 무해(pre-existing), 향후 에지 소비자 추가 시 잠복 함정 — 억제 또는 주석 명시.
-3. **InjectStickyRResidue 비-volatile** — 형제 `_noResponse`는 volatile. lock 경유 읽기라 실무 무해(테스트 더블 일관성 흠).
-4. **TimingOptions 레코드 중복 필드** — 실 바인딩은 PlcGatewayOptions 경유, TimingOptions 사본 미사용(기존 dual-record 패턴 답습). 통합 여지.
+## Code Review Minor (4-Tier Step 4.5 — S-FIELD-20CELLS, 병합 비차단·다음 스프린트 Generator 참조)
 
-리뷰어 백로그 권고: 대기 루프 deadline의 벽시계(DateTimeOffset.Now)→Stopwatch(monotonic) 일괄 전환 검토(코드베이스 전반 관행, 이 스프린트 밖). RFlagRaised 채널 소비자 부재 — 데드코드 정리 vs 소비 설계 확정 필요.
+1. **매핑 확장 주석 부정확** — seed-field-20cells.sql:27 "§4~6의 nums 범위" → 실제는 §4 하드코딩 VALUES 수동 확장 + @availMax=20(§5·6 자동 연동). 주석 정정 권장(확장 시 오독 방지, 1순위).
+2. **테스트 PlannedQty=100 vs 시드 3 불일치** — Field20CellsGateTests.cs:87,124. OVER 격리 의도로 보이나 주석 없음·헤더 "동형" 표현과 충돌. 사유 주석 or 3으로 정렬.
+3. **T1 5회 반복 루프 데드 브랜치** — :196-200. 첫 null 후 상태 불변이라 반복 무의미(무해). 정리 여지.
+4. **LoadCellQty pId 41000대가 같은 파일 "1~30000" 주석과 표면 불일치** — :286. 직접 삽입이라 동작엔 무관 — 범위 하향 or 우회 명시 주석.
+5. **grid-cols-5 전역 고정 트레이드오프** — SortingSection.tsx:76. 현장 소터(4×5)에 정확하나 셀 수가 5의 배수 아닌 소터엔 오도 가능. 요건 부합으로 수용 — 다중 소터 지형 시 셀 수 기반 열 도출 고려.
+
+리뷰어 권고: cells_enabled_15 검증 컬럼 술어에 Capacity 혼입 — 진단 의미 분리 여지(선택). stale 파일명 참조는 역사 기록이라 조치 불요.

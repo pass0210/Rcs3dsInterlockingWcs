@@ -2143,3 +2143,51 @@ Wcs.Sim3ds/Wcs.Api/testhost 오펀 0 · 포트 1502/5080 free 확인.
 
 ### 상태
 계약 §5 ①~⑧ 전부 PASS. 커밋/git 조작 없음. Evaluator 검증 대기.
+
+---
+
+## IMPLEMENTATION COMPLETE — S-FIELD-20CELLS (Generator, 2026-07-07)
+
+브랜치 feat/field-20cells (fix/handshake-rflag-residue/PR #31 위 스택). A안 확정: 기존 cell.Enabled 게이트 재사용 — **백엔드 프로덕션 코드 변경 0**, 회귀 테스트만 추가. 커밋/push 없음.
+
+### Change Summary
+1. **시드 리네임+재작성**: `scripts/seed-field-16cells.sql` → `git mv` → `scripts/seed-field-20cells.sql`.
+   - 셀 1~20 MERGE: 1~15 `Enabled=1·Cap=3`(무손상), 16~20 `Enabled=0·Cap=3`. 셀 16 은 MATCHED UPDATE(Enabled 1→0), 17~20 은 NOT MATCHED INSERT. CellNo 파생 `CASE WHEN n<=@availMax THEN 1 ELSE 0`.
+   - §7 셀 16 전이: (a) 셀 16 활성 cell_assignment `ReleasedAt=now` (b) 오더 `0701-CELL-16` `Status='CANCELLED'`(+ClosedAt/UpdatedAt). order_item 보존·예약/실적 무조작.
+   - 오더/아이템/배정 N↔N 픽스처를 1~15 로 축소(15건 활성). work_batch(FIELD-16·2026-07-01)·소터 chuteNo=1 유지.
+   - 멱등: 전 구간 MERGE/NOT EXISTS/조건부 UPDATE + `BEGIN TRAN`/`COMMIT`/`XACT_ABORT ON`. 매핑 확장 경로(`UPDATE cell SET Enabled=1 WHERE CellNo BETWEEN 16 AND 20`) 헤더 주석에 명기.
+   - 현장 실 데이터 무접촉 원칙: piece/sorter_command/piece_event 무접촉, order_item 은 INSERT(NOT EXISTS)만(실적 무조작).
+2. **백엔드 회귀 테스트**: 신규 `backend/tests/Wcs.Tests/Field20CellsGateTests.cs` 3건(프로그래매틱 SQLite 더블 · RcsPushWebApplicationFactory). 프로덕션 코드 diff 0.
+   - T1 `SelectCell_NeverReturnsDisabledCells_16to20` — 1~15 만재·16~20 Enabled=0 미배정 → SelectCell=null(16~20 미반환). 음성 대조: 셀 16 Enabled=1 승격 시 16 반환(게이트=Enabled 입증·매핑 확장 데이터-온리).
+   - T2 `If05_Cells01And15_Ok_Cell16_Ng` — IF-05 0701-CELL-01/-15 → OK(chuteNo=1) / 0701-CELL-16(CANCELLED) → NG·reason=NO_DEST(결정적).
+   - T3 `All15EnabledCellsFull_SorterFull_And_If05_Ng` — 가용 15셀 전량 작업수량 도달 → SorterFull=true·신규 IF-05 NG·reason=FULL. 비활성 16~20 은 미점유여도 full 산출 제외 단정(UnoccupiedCellCount enabledOnly=true→0 vs false→5).
+3. **프론트**: `SortingSection.tsx` CellsCard 그리드 `grid-cols-2 sm/lg/xl…` → `overflow-x-auto` 컨테이너 안 `grid-cols-5 gap-2 min-w-[600px]`(5열 고정·4×5 물리 미러링·좁은 폭 가로 스크롤+최소폭). 기존 `!cell.enabled` "비활성" 렌더·범례 그대로 활용(신규 UI/DTO/타입 변경 0).
+
+### Raw Test Results
+- 베이스라인(변경 전): `실패: 0, 통과: 175, 전체: 175` (기준 175 재확인).
+- 전체(변경 후): `실패: 0, 통과: 178, 전체: 178` — 3회 연속 GREEN(13s/13s/14s). 신규 3건 = 175+3.
+- 신규 테스트 표적 반복: `Field20CellsGateTests` 5/5 연속 GREEN(각 3s) — flake 0.
+- 프론트: `npm run typecheck`(tsc --noEmit) 0 error · `npm run lint`(eslint .) 0 error.
+- 빌드: `오류 0개` · `경고 10개`(전부 NU1903 SQLitePCLRaw 2.1.10 — base 선재 부채·todo 등재·스코프 밖).
+- 프로세스/포트: 테스트 후 포트 1502/5080 free · Wcs.Sim3ds/Wcs.Api 오펀 0.
+
+### 실 DB 재적용·검증·멱등 증거 (Rcs3dsInterlockingWcs @ localhost, sqlcmd -E, 앱 기동 시드 없음·SeedOnStartup=false 유지)
+**사전 백업(SELECT INTO):** `cell_bak_field20`=16 · `cell_assignment_bak_field20`=16 · `wcs_order_bak_field20`=16 · `order_item_bak_field20`=16 생성 완료. (롤백 안전망으로 DB에 잔존 — 확인 후 DROP 가능.)
+**적용 전 상태:** 셀 16(전부 Enabled=1) · 활성 배정 7건(셀 10~16 N↔N, 셀 1~9 는 어제 현장 분류 후 해제됨) · 오더 0701-CELL-16 RUNNING · piece=2/sorter_command=2/piece_event=2.
+**1회차 적용 후 검증(원문):**
+```
+cellNos_enabled1 = 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15   (Enabled=1 정확히 15)
+cellNos_enabled0 = 16,17,18,19,20                        (Enabled=0 정확히 5)
+cells_1to15_cap3_en1 = 15                                (1~15 Cap=3·Enabled=1 무손상)
+active_assign_cells = 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 (활성 배정 정확히 15·셀16 해제됨)
+order16 = CANCELLED                                       (0701-CELL-16 전이)
+orders_01to15_running = 15                               (01~15 RUNNING 무손상)
+order_item16_preserved = 1                               (order_item 이력 보존)
+piece=2 · sorter_command=2 · piece_event=2               (적용 전과 동일 — 무접촉)
+```
+**멱등(동일 스크립트 2·3회차 재실행):** 요약 출력 매회 `20 15 5 15 1` 불변. cells_total=20·enabled=15·disabled=5·active_assign=15·order16=CANCELLED·wcs_order=16·order_item=16 전부 불변. cell_assignment_total = 16(원본)+9(1회차에서 셀 1~9 활성 재수립)=25 로 1회차 후 정착, 2·3회차 25→25 불변(NOT EXISTS·부분유니크로 중복 삽입 0). piece/sorter_command/piece_event = 2/2/2 불변.
+
+### 절대규칙/스코프 준수
+- 백엔드 프로덕션 코드 diff 0(A안). Wcs.Core·PlcGateway 무변경. IF-09/IF-10 핸드셰이크·워드쓰기 트리거 없음(폴링조차 미기동 — sqlcmd 직접 적용). appsettings Transport/COM/Provider/ConnStr/SeedOnStartup 무변경.
+- S-HANDSHAKE-RESIDUE 코드리뷰 Minor 4건 무접촉(스코프 밖).
+- 변경 파일: `scripts/seed-field-20cells.sql`(rename+rewrite) · `backend/tests/Wcs.Tests/Field20CellsGateTests.cs`(신규) · `frontend/src/pages/sections/SortingSection.tsx`(그리드 1블록). 커밋/push 없음 — Evaluator 검증 대기.

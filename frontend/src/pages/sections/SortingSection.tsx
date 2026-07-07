@@ -70,8 +70,12 @@ function CellsCard({ destId }: { destId: number | null }) {
           <EmptyRow label="이 소터에 등록된 셀이 없습니다" />
         )}
         {destId !== null && !isLoading && !isError && (cells?.length ?? 0) > 0 && (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-            {cells!.map((c) => <CellTile key={c.cellNo} cell={c} />)}
+          // 물리 배치 미러링: 5열 고정(현장 소터 20셀 = 4행×5열). 좁은 폭에서는 컨테이너가
+          // 가로 스크롤하고 그리드는 최소폭을 유지해 5열이 깨지지 않는다(타일 뭉개짐 방지).
+          <div className="overflow-x-auto">
+            <div className="grid grid-cols-5 gap-2 min-w-[600px]">
+              {cells!.map((c) => <CellTile key={c.cellNo} cell={c} />)}
+            </div>
           </div>
         )}
       </CardContent>
