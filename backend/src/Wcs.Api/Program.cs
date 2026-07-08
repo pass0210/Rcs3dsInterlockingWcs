@@ -216,6 +216,10 @@ builder.Services.AddHostedService<Wcs.Api.B2B.ApiCallLogBackgroundWriter>();
 // ── S-B2B-2a: test-data 관리 서비스(수동생성·엑셀·조회·초기화·삭제+아카이브) — additive ──
 builder.Services.AddScoped<Wcs.Api.B2B.ITestDataService, Wcs.Api.B2B.TestDataService>();
 
+// ── S-B2B-3a: 조회 전용 서비스(로그·API호출이력·3-way 비교 / 투입+분류 Excel) — additive ──
+builder.Services.AddScoped<Wcs.Api.B2B.ILogService,       Wcs.Api.B2B.LogService>();
+builder.Services.AddScoped<Wcs.Api.B2B.ILogExportService, Wcs.Api.B2B.LogExportService>();
+
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════════
