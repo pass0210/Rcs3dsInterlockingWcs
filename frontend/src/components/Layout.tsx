@@ -41,9 +41,9 @@ const NAV_SETS: Record<UiMode, NavItem[]> = {
   ],
   b2b: [
     { to: '/data-generator', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '테스트 데이터 생성 · 업로드 · 관리' },
-    { to: '#', label: '로그 조회', icon: ScrollText, enabled: false, phase: 'B2B-3', title: '로그 조회', subtitle: '' },
-    { to: '#', label: '결과 비교', icon: GitCompare, enabled: false, phase: 'B2B-3', title: '결과 비교', subtitle: '' },
-    { to: '#', label: '박스 조회', icon: Package, enabled: false, phase: 'B2B-3', title: '박스 조회', subtitle: '' },
+    { to: '/logs', label: '로그 조회', icon: ScrollText, enabled: true, phase: null, title: '로그 조회', subtitle: '투입 · 분류 · API 호출 이력 · Excel 내보내기' },
+    { to: '/comparison', label: '결과 비교', icon: GitCompare, enabled: true, phase: null, title: '결과 비교', subtitle: '투입 · 분류 · 결과 3-way 대조' },
+    { to: '/boxes', label: '박스 조회', icon: Package, enabled: true, phase: null, title: '박스 조회', subtitle: '박스 목록 · 내품 상세' },
     { to: '#', label: '설정', icon: Settings, enabled: false, phase: 'B2B-3', title: '설정', subtitle: '' },
   ],
 }
