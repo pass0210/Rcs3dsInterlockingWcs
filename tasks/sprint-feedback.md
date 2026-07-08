@@ -1,95 +1,85 @@
-# Sprint Feedback — S-B2B-3b (조회 프론트엔드: 로그·비교·박스 3화면 + 내비 점등)
+# Sprint Feedback — S-B2B-2c (A4 라벨 인쇄 + 고급 포인터 다중선택 + 설정 페이지 부활)
 
 **APPROVED** — Evaluator, 2026-07-08 (1 iteration to pass).
 
-브랜치 `feat/b2b-3b-frontend-pages` (working tree, 미커밋). Evaluator 는 코드를 고치지 않음(read-only 검증).
+브랜치 `feat/b2b-2c-print-select-settings` (working tree, 미커밋). Evaluator 는 코드를 고치지 않음(read-only 검증).
 Ground truth = git HEAD/status + 실제 코드 판독 + 실 stack 브라우저 클릭스루. Generator 요약은 신뢰하지 않고 전부 독립 재현.
 
-핸드오프 확인: `tasks/sprint-log.md`에 `## IMPLEMENTATION COMPLETE — S-B2B-3b` 마커 존재(L3) → 활성화 정당.
+핸드오프 확인: `tasks/sprint-log.md` L2853 에 `## IMPLEMENTATION COMPLETE — S-B2B-2c` 마커 존재 → 활성화 정당.
+
+---
+
+## FIX ITER 1 재검증 (code-review #1 print-scope + #2 modal a11y) — **APPROVED 유지** (2026-07-08)
+
+Generator fix-only 1 iter(2 파일). Ground truth 로 재검증(주장 미신뢰). `## FIX ITER 1 — S-B2B-2c` 마커 sprint-log L2901.
+
+- **fix 범위 확정**: `git diff --numstat develop` — tracked 변경분은 `index.css`(37→39 +2)만 갱신, 나머지 7 tracked 파일 numstat 불변 · `PrintLabelPreview.tsx`(untracked) in-place 수정 · **backend diff 여전히 EMPTY**. Minor 항목 미접촉(fix-only 준수).
+- **정적 재실행**: tsc 0 · eslint 0/0 · vite build 0(선재 2경고만).
+- **FIX #1 (핵심·앱 전역 인쇄 회귀 해소)** — `page.emulateMedia({media:'print'})` 실측:
+  - 오버레이 **닫힘** 상태에서 `/logs`·`/data-generator`·`/monitor` 전부 `body.has-print-overlay` **클래스 부재** + `#root` **display:block(가시)** → 네이티브 Ctrl+P 가 더 이상 빈 시트로 인쇄 안 함(회귀 제거). (수정 전 무조건 `body>*{display:none}` 이 앱 전역을 숨겼음.)
+  - 오버레이 **열림** + print emulation → 클래스 present · `#root` **display:none** · `.print-overlay` **display:block** · 툴바 chrome display:none · 라벨 11 → 인쇄 시 라벨 문서만 정확히 출력.
+  - **닫기 후 클래스 제거(누수 0)** + `#root` 다시 display:block + 오버레이 unmount. CSSOM 규칙: `body.has-print-overlay > *:not(.print-overlay){display:none}` 로 게이트됨(무조건 `body>*` 억제 0).
+- **FIX #2 (모달 a11y)** — 실측: overlay `role="dialog"` · `aria-modal="true"` · `aria-label="라벨 인쇄 미리보기"`. 열림 시 포커스가 모달 내부(툴바 `인쇄` 버튼)로 이동 · **Tab×6 / Shift+Tab×3 모두 포커스 오버레이 내부 유지(트랩)** · **Escape 닫기 → 포커스 트리거("인쇄 (11)") 복원** + 스크롤락 해제. onClose ref 안정화(effect deps=[open]).
+- **무회귀 재확인**: 인쇄 DOM 2페이지(8+3)·grid 2×374.688px·라벨 374.7×255px==99.14×67.48mm·dual 6(SVG2)/single 5(SVG1)·CODE128 막대 29 그대로. 네트워크 external **0** · JsBarcode 로컬(`/node_modules/.vite/deps/jsbarcode.js`). 콘솔(내비 후 since-nav) error 0/warning 0.
+- 산물 정리: 브라우저 close · :5205/:5190 kill(foreign 5173/5174 미접촉) · scratch DB 삭제 · git status 핸드오프 원복. 스크린샷 `09-fixiter-print-modal-a11y-reverified.png`.
+
+→ **결론: 두 fix 모두 정상 반영 · 신규 결함 0 · 기존 W1~W7 무회귀. APPROVED 유지.**
 
 ---
 
 ## 검증 환경 (fresh)
 
-- 백엔드: `dotnet run --project backend/src/Wcs.Api --no-launch-profile`, **`ASPNETCORE_ENVIRONMENT=Production`**,
-  **시드 scratch SQLite**(`scratchpad/wcs-b2b-eval.db` — `dotnet ef database update`로 4개 마이그레이션 적용 후 python sqlite3로 시드).
-  `Database__Provider=Sqlite` · `ConnectionStrings__WcsDb=Data Source=<scratch>` · `Database__SeedOnStartup=false`(자동 시드 미발동) ·
-  **`Sorters__0__Transport=Tcp`**(현장 DB `Rcs3dsInterlockingWcs` 무접촉 · COM1/RTU 실 3DS PLC 무접촉 — lessons 2026-07-03/현장 PLC 준수). :5205 listen.
-- 프론트: Vite dev `:5173`(vite.config.ts server.port=5173 = 포트 source-of-truth, `.claude/ports.local.json` 부재 → 계약이 vite.config 명시 허용). `/api`·`/hubs` → :5205 proxy.
-- 시드 요약: test_data 5 · test_log 10(INPUT 6[활성5+보관1] · SORT 4[활성3+보관1]) · work_result 4(활성3+보관1) · box 3(B1×2·B2×1) · box_item 6 · api_call_log 7(2026-07-07 6 + 07-06 1).
+- 백엔드: `dotnet run --project backend/src/Wcs.Api --no-build -c Debug`, **`ASPNETCORE_ENVIRONMENT=Production`**,
+  **별도 scratch SQLite**(`scratchpad/wcs-eval-2c.db` — Generator 파일명과 다름 · DbInitializer 콜드스타트 자동 Migrate 로 스키마 생성).
+  `Database__Provider=Sqlite` · `ConnectionStrings__WcsDb=Data Source=<scratch>` · `Database__SeedOnStartup=false`(로그로 "시드 게이트 off" 확인 · 자동 시드 0) ·
+  **`Sorters__0__Transport=Tcp`**(현장 DB `Rcs3dsInterlockingWcs` 무접촉 · COM1/RTU 실 3DS PLC 무접촉 — lessons 2026-07-03/현장 PLC 준수). :5205 listen, `/health`=`{"status":"ok","db":true,"sorters":[]}`.
+- 프론트: Vite dev **`:5190 --strictPort`**(내 인스턴스). ⚠ 포트 노트: 계약의 source-of-truth 는 5173 이나 **선재 stale foreign vite 가 5173/5174 점유**(Generator 사전 경고) → false-PASS 방지 위해 내 전용 포트를 명시 기동. proxy 대상(5205)은 vite.config 소유라 listen 포트와 무관. 이 스프린트 코드가 서빙됨을 proxy 왕복(batch 900)으로 확인.
+- 시드: `test_data` 11행(batch 900, bizDay 2026-07-08) — **6 dual(barcode+barcode2) + 5 single(barcode2=NULL)**. `GET /api/test-data/detail` 11행 정확 반환(6 barcode2 보유).
 
-## Completion Conditions
+## 정적 검사 (독립 재실행 · raw)
 
-### #1 정적 검사(프론트) — PASS
-- `npm run lint`(eslint .) → **exit 0, 0 error / 0 warning**(fresh, Evaluator 재실행).
-- `npm run build`(tsc --noEmit + vite build) → **exit 0**. type-check 클린. 유일 경고 = `@microsoft/signalr` `/*#__PURE__*/` 주석(2건) + chunk>500kB — **선재**(F2 signalr 의존성, 이 스프린트 무관, index js 517kB). 이 스프린트 코드 경고 0.
+- `npm run typecheck`(tsc --noEmit) → **exit 0**.
+- `npm run lint`(eslint .) → **exit 0, 0 warning**.
+- `npm run build`(tsc+vite) → **exit 0**. 잔존 경고 2종(@microsoft/signalr `/*#__PURE__*/`, chunk>500kB=597.50kB)은 **선재 부채**(develop 번들도 이미 >500kB=517kB, F2 signalr — jsbarcode +80kB 이나 임계는 이미 초과) → 이번 스프린트 미도입.
+- `dotnet build backend/Wcs.sln` → **경고 0 / 오류 0**(NuGetAudit=false 로 NU1903 선재부채 격리).
+- 프론트 테스트 스크립트 없음(dev/build/typecheck/lint/preview only) → 재실행 대상 없음.
 
-### #2 기존 테스트 회귀 0 — PASS
-- `dotnet test backend/Wcs.sln` → **실패 0 / 통과 288 / 건너뜀 0 / exit 0**(fresh 재실행). 백엔드 무접촉 실증.
-- NU1903(SQLitePCLRaw.lib.e_sqlite3 2.1.10) 경고 5건 = **선재 전이 취약성 부채**(feedback-archive 다수 기록·이 스프린트 무관).
+## Verification Scenarios (W1~W7 · 전부 fresh evidence + 스크린샷)
 
-### #3 브라우저 클릭스루(Playwright, 실 stack) — PASS
-스크린샷 17장 `screenshots/S-B2B-3b_20260708-172912/`(01~17), console.log·network-all.log 동봉. 각 시나리오 navigate→click/fill→assert 재현·판독.
+- **W1** default state: 배치 900 선택 → 상세 11행 로드, 인쇄/삭제 버튼 **disabled**(detailChecked=0), 체크박스/전체선택 정상. `01-*.png`.
+- **W2** 설정 nav 점등: b2b nav `설정`→`/settings`(cursor-pointer·B2B-3 배지 없음). 설정 폼 기본값 = symbology **CODE128**, preset **a4-2x4**(대체 3종 disabled), 값표시 **on**. **자동생성 UI 0건**(autoGenTerms=[]). localStorage `wcs.print` 마운트 시 기록. `05-*.png`.
+- **W3** 고급 선택(실 마우스 이벤트 — page.mouse steps):
+  - drag 행2→5 → 연속 {BC-0002..0005}=4, 인쇄(4) enabled. `02-*.png`(하이라이트+배지 육안 확인).
+  - Shift+click(anchor 행2 → 행8) → 연속 {BC-0002..0008}=7. `03-*.png`. (초기 실패는 대상 행이 뷰포트 밖 → 뷰포트 1400×1900 확대 후 재현 = 코드 결함 아님, 계측으로 shiftKey 전달 확인.)
+  - Ctrl+click 누적: [BC-0001]→+0004→+0006(비연속)→0004 재클릭 toggle-off = {BC-0001,BC-0006}.
+  - 병존: 헤더 전체선택 → 11 · 개별 체크박스 해제 11→10(동일 detailChecked 단일소스, 제스처와 충돌 0) · 체크박스 클릭이 pointer 제스처 유발 안 함(closest 가드 작동).
+  - **필터-숨김 제외(B5)**: 바코드필터 'BC-0010' → 보이는 1행, 전체선택-보이는 토글이 **보이는 행만** 조작(숨은 9 checked 보존 → 필터 해제 시 복원). 보이는 행 기준 확정.
+- **W4** 인쇄 프리뷰(11 선택 · DOM+스크린샷): **2 페이지 · 8+3 분할**(data-page 1/2). grid `374.688px 374.688px`(2열=99.14mm), columnGap 7.37px, 라벨 **374.7×255px == 99.14×67.48mm 정확 일치**. `@page { size:a4; margin:0px }` + `body>* display:none` + `body>.print-overlay display:block` + `.print-page break-after:page` 실재(CSSOM 덤프). **dual 6(SVG 2개·실 JsBarcode 막대 29/32 rect) + single 5(SVG 1개)**, aria-label `바코드 BC-…`/`바코드 LOT-…`, chuteNo **3자리 zero-pad(슈트 001…011)**, invalid 0. `04-*.png`(육안: CODE128 실 바코드+값텍스트).
+- **W5** 설정 영속+반영: symbology CODE128→CODE39 시 미리보기 막대 [44,38]→[76,71] 변화 · 값표시 off 시 `<text>` [1,1]→[0,0]. **full reload 후 CODE39·off 유지**(localStorage `wcs.print`). 데이터 생성 복귀·재인쇄 → 프리뷰 헤더 "심볼로지 CODE39 · 값표시 OFF" + 라벨 막대 CODE39(46) + 값텍스트 0 → **설정→인쇄 단일소스 관통 확인**. `06-*.png`.
+- **W6** 빈/오류: 0-선택 시 인쇄 버튼 disabled + force-click 해도 인쇄 뷰 안 뜸(가드 작동). 심볼로지 EAN13(비숫자 표본) → **크래시 0**, invalid 배지 2 + "인코딩 불가" 폴백, 페이지 정상 렌더. `07-*.png`. (0-선택 토스트 가드는 방어코드로 소스 확인 — 주 가드는 disabled 버튼.)
+- **W7** 전체 흐름: b2b→데이터생성→배치선택→드래그선택→인쇄(dual 4·SVG 8)→설정 변경·저장→복귀·재인쇄 반영 = end-to-end 관통.
 
-**내비 점등(Layout)** — `01-b2b-nav-datagen.png`
-- B2B 모드: `데이터 생성`·`로그 조회`(/logs)·`결과 비교`(/comparison)·`박스 조회`(/boxes) 활성 링크 + `설정` 비활성(generic "B2B-3 예정" 툴팁 + `B2B-3` 배지, 링크 아님). ✔
-- 각 활성 링크 클릭 시 라우트 이동 + 헤더 타이틀/서브타이틀 갱신 + inset 브랜드바 active 표시 확인.
+## BLOCKING 게이트
 
-**화면 1 — 로그 조회(/logs)** — `02`~`07`
-- 기본 로드: 투입 탭 5행(equipmentNo=인덕션·PID·상태·로그시각·등록슈트 파생·수신시각 파생·활성 배지). ✔
-- 탭 전환: 분류(SORT) 탭 3행, API 호출 이력 탭 6행(상태코드 배지 201/200/500/400). **Excel 툴바·아카이브 필터는 API 탭에서 미노출**(계약 §D 정확). ✔
-- 아카이브 필터(분류 탭): active **3** → all **4**(보관 1행 등장) → archivedOnly **1**(0707-05 보관). API 왕복으로 행집합 변화 실증. ✔
-- 통합검색: "0707-02" 입력 → 3→**1**행 축소. ✔
-- **Excel 다운로드**: 투입 탭 버튼 클릭 → 브라우저 다운로드 `input_sort_logs_2026-07-07.xlsx` 발생(Content-Disposition filename + RFC5987 filename* 파싱). 다운로드 파일 검증 = **유효 xlsx**(6778B · magic `50 4B 03 04` · zip 10엔트리 incl. xl/worksheets/sheet1.xml). 성공 토스트. ✔
+- **콘솔/pageerror**: 내 인스턴스(localhost:5190) — clean navigation 후 전체 흐름 구동 시 **error 0 / warning 0 / React dev 경고 0 / pageerror 0**(유일 출력 = benign React DevTools INFO). all=true 버퍼의 `localhost:5174` error 다수는 **선재 foreign 인스턴스**(내 탭은 5190 단독 · 5174 미방문 · Generator 사전 경고 stale) → 내 origin 아님, 게이트 무관.
+- **폐쇄망(0 외부요청)**: performance resource 80건 **전부 same-origin localhost:5190**, **external 0**. JsBarcode = `localhost:5190/node_modules/.vite/deps/jsbarcode.js`(로컬 Vite dep, CDN 아님) · 폰트도 `@fontsource` 로컬. CSP `script-src 'self'` 호환.
 
-**화면 2 — 결과 비교(/comparison)** — `08`~`10`
-- 3단(투입/분류/결과) + 판정 표, 5행: 0707-01 **일치**(초록 배지), 0707-02 **불일치**(빨강 배지·행 핑크틴트, sort 002≠result 099), 0707-03 **누락**(회색 배지·행 앰버틴트·"누락" 셀 마커), 0707-04 일치, 0707-05 누락. 스크린샷 판독으로 **일치/불일치/누락 시각 구별 확인**. ✔
-- 상태 필터: 전체 **5** → 불일치 **1** → 누락 **2**, 카운트 배지 계약 술어 정확 반영. ✔
-- 아카이브 왕복: active→all 전환 시 0707-05(보관된 sort+result)가 **누락→일치**로 전이, 누락 카운트 **2→1**. 백엔드 archived 필터 소비 실증. ✔
+## 무접촉 가드
 
-**화면 3 — 박스 조회(/boxes)** — `11`~`15`
-- 기본: 좌 목록 3박스(BOX-001 내품2·BOX-002 내품1·BOX-003 내품3) + 우 "박스를 선택하세요". ✔
-- 마스터-디테일: BOX-001 클릭 → 우 내품 2행(0707-01×1·0707-02×2). BOX-003 클릭 → 3행(0707-03×3·0707-10×1·0707-11×1). 중첩 items[] 왕복 정확. ✔
-- batch 필터 "B1" → 좌 목록 2박스(BOX-003[B2] 제외) + **선택 해제**(우 "박스를 선택하세요" 복귀). ✔
+- **백엔드 무접촉**: `git diff --numstat develop -- backend/` **빈 출력** · migration/ModelSnapshot 변경 0 · `dotnet build` 0/0.
+- **B2C 회귀 0**: B2C 토글 → nav 원복(모니터링·3DS 워드 · 운영제어 F3 disabled), `/settings`·b2b 링크 부재, MonitorPage/StatusRail("등록된 소터 없음" = Tcp/무소터 정상 환경상태) 정상 렌더. `08-*.png`. Layout.tsx diff = b2b `설정` 항목 1줄만.
+- **변경 표면**: 프론트 modified 8(App/Layout/index.css/main/DataGeneratorPage/DetailGrid/package·lock) + 신규 6(Barcode/PrintLabelPreview/PrintSettingsProvider/labelLayout/printSettings/SettingsPage + types/jsbarcode.d.ts). 백엔드·b2c 0.
 
-**빈/에러 상태** — `15`, `16`
-- 빈: bizDay=2026-07-01 → 0행 EmptyRow "표시할 박스가 없습니다"(흰화면/무한스피너 아님). ✔
-- 에러: bizDay=2026-02-30(프론트 정규식 통과·백엔드 TryParseExact 거부 400) → ErrorRow "데이터를 불러오지 못했습니다 — Invalid date: 2026-02-30"(백엔드 message 표면화·fail-loud). ✔
+## Completion Conditions (계약 §Completion 1~10)
 
-**계층 교차 E2E(슬롯3) — 3종 전부 실 왕복 확인**: (1) Excel 클릭→GET /api/logs/export→200 xlsx+Content-Disposition→파일다운로드 (2) 비교 active↔all 백엔드 archived 반영 (3) 박스 items 중첩 DTO 우측 표시. curl 왕복도 6엔드포인트 전수 확인(E1 5/6/1·E2 3·E3 6/7·E5 active 2match/1mismatch/2missing→all missing 2→1·E6 3/2·E4 200 6778B·empty 0·error 400).
+1. build/lint/typecheck clean ✅ 2. dotnet build 0/0 ✅(백엔드 무접촉이라 test 회귀 구조적 0) 3. W1~W7 클릭스루+스크린샷 ✅ 4. A4 2×4/99.14×67.48·dual/single·chuteNo·8칸분할·0가드 ✅ 5. 드래그/Shift/Ctrl 3제스처+밖 mouseup+체크박스병존+필터제외 ✅ 6. 설정 점등·라우팅·reload 유지·인쇄 반영·자동생성 0 ✅ 7. 외부요청 0 ✅ 8. 콘솔 error/warning/React 0 ✅ 9. 백엔드 무접촉 diff 0 ✅ 10. B2C 무접촉 실측 ✅.
 
-### #4 콘솔/dev 경고 캡처(BLOCKING) — PASS
-- populated 페이지(로그 투입/분류/API·비교·박스) 전 구간 **console error 0 · warning 0 · pageerror 0 · React dev 경고 0**(key/validateDOMNesting/update-depth 부재). 세션 전체 console.log 판독.
-- 유일 error = 에러상태 테스트의 **의도된 400**(invalid date 2026-02-30) 3건(React Query 기본 3회 재시도) — 앱이 ErrorRow 로 명시 처리·표시하는 케이스 → **계약 명시 예외**(BLOCKING 아님). 처리되지 않은 4xx/5xx·uncaught 0.
+## Minor (비차단 — 다음 스프린트 Generator 참고, APPROVED 무관)
 
-### #5 폐쇄망 확인 — PASS
-- 전체 네트워크 요청(static 포함) **전부 `http://localhost:5173` 동일 출처**. 외부/CDN 호스트 **0건**. Inter 폰트는 로컬 `/node_modules/@fontsource-variable/inter/*.woff2`(CDN 아님). `/api`·`/hubs`는 vite proxy(동일 출처). (line71 `/api/boxes` ERR_ABORTED = React Query 요청 취소, 직후 line73 200 성공 — 정상.)
+- 없음(신규 결함 0). 설계상 메모: 필터로 **숨겨진** 행이 이미 checked 이면 `printRows`(= 전체 detailRows 필터)에는 남아 인쇄 대상이 됨. 계약 B5 는 "새 선택 제스처의 대상에서 제외"를 요구하며 그건 충족(range=filtered, select-all=visibleIds). 기존 check 지속은 표준 동작 · 결함 아님.
 
-### #6 브랜치 규율 — PASS
-- 작업 브랜치 `feat/b2b-3b-frontend-pages`(base develop). develop 직접 커밋 아님.
+## 검증 산물 정리
 
-## 절대 게이트
-- 폐쇄망 외부요청 0: **PASS**(위 #5).
-- B2C 무접촉: **PASS** — B2C 토글 → 내비 `모니터링/3DS 워드/운영 제어(F3 비활성)` 원상 복귀, StatusRail("소터 상태") 정상 렌더, MonitorPage(작업데이터/로봇이동중/분류현황 탭) 정상(`17-b2c-regression.png`). Layout.tsx 의 b2b NAV_SET 항목만 수정·b2c 배열/StatusRail/ModeToggle/PollIndicator 무접촉(코드 판독 확인).
-- 설정 화면 미생성 + 설정 내비 비활성 유지: **PASS**(Layout.tsx 설정 `enabled:false`·`phase:'B2B-3'` 유지, 라우트 미추가).
-- 콘솔 0 에러: **PASS**(위 #4).
-
-## 무접촉 가드(ground truth)
-- `git diff --stat -- backend/` **빈 출력** · `git status --porcelain -- backend/` **빈 출력** → 백엔드 0줄. ✔
-- 변경 표면 = frontend 수정2(App.tsx·Layout.tsx) + 신규8(logs.ts·search-input.tsx·ArchiveSelect.tsx·LogsPage.tsx·ComparisonPage.tsx·BoxesPage.tsx·TestLogGrid.tsx·ApiCallLogGrid.tsx) + 태스크파일(sprint-contract/log). 계약 스코프와 정확히 일치.
-
-## 통합 품질(코드 판독)
-- 프론트 TS 인터페이스(TestLogRow/ApiCallLogRow/ComparisonRow/BoxRow/BoxItemRow)가 `QueryDtos.cs` 5 record 와 **camelCase 필드 1:1 정확 일치**(Pid→pid 포함). 6 엔드포인트 경로·파라미터(bizDay·archived·date·batch) 계약대로 결선. ArchiveFilter 는 lib/testData.ts 어휘 재사용. bizDay·autoRefresh/refreshInterval(UiModeProvider)를 DataGenerator 동형으로 존중(`refetchInterval=autoRefresh?interval:false`·`keepPreviousData`). 기존 ui/*·StateMessage·FilterCell·format 재사용 — 새 시각언어 발명 0(디자인시스템 준수).
-
-## Minor (비블로킹 — APPROVED 무관)
-- (계약 스코프 내 결함 미발견.) 참고: 에러상태에서 native `<input type=date>`가 2026-02-30을 빈값으로 표시(브라우저 제약)하나, 실 사용자 경로에선 date picker가 비존재 날짜를 못 만들므로 실질 영향 0. 결함 아님.
-
----
-
-## FIX ITER 1 재검증 — 코드리뷰 #1(리스트 key)·#2(a11y role)
-- 코드리뷰(Step 4.5)에서 Important 1건(#1 ComparisonPage 리스트 key `${batch} ${barcode}` 비유니크 → 배치 내 동일 바코드 중복 시 React 중복 key 콘솔 에러 = BLOCKING 콘솔 게이트) + a11y Minor 1건(#2 status 필터 버튼 `role="tab"` 오용) 발견 → fix-only iter.
-- Generator 수정: ComparisonPage.tsx만 변경 — key에 맵 인덱스 추가(`${batch}-${barcode}-${i}`, BoxesPage 패턴 정합) + 부수로 발견된 stray NUL 바이트(write 아티팩트) 제거(전 10파일 스캔 0), status 필터를 `role="group"`+`aria-pressed` 토글로 교체(LOG 탭의 Radix Tabs는 무접촉). eslint 0/0, npm build clean, 백엔드 무접촉.
-- **Evaluator 재검증 결과(실 확인)**: **중복 바코드까지 시드**한 /comparison + /logs + /boxes 전 세션 콘솔 **0 errors / 0 warnings — 중복 key 경고 없음, 회귀 없음.** 즉 이전 잠복 경로(중복 key)를 실제로 발현시켜 게이트 통과 확인. (재검증 도중 사용자 요청으로 orchestrator가 세션을 일시정지 → 본 결과는 Evaluator가 정지 직전 보고한 실제 판독을 orchestrator가 기록·영속화한 것.)
-- 이연 Minor 6건(ArchiveSelect↔DataGenerator DRY·박스 선택 잔존·검색 haystack·그룹 구분선·Tabs 이중간격·미가상화)은 tasks/todo.md 등재.
-
-**APPROVED (fix iter 1 재검증 포함)**
+- 브라우저 close · 백엔드(:5205)/vite(:5190) kill(선재 5173/5174 foreign 미접촉) · scratch DB 삭제 · `.playwright-mcp`/`screenshots`/`wwwroot` 전부 gitignored 확인.
+- 핸드오프 시점 `git status` 원복: modified 8(frontend)+contract/log, 신규 6(frontend)+types/ — 평가 산물 유출 0.
+- 스크린샷: `screenshots/S-B2B-2c_20260708-215200/01~08-*.png`(덮어쓰기 없음).

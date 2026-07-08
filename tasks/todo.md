@@ -21,6 +21,13 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-B2B-2c 코드리뷰 이연 (Minor — 비차단, 인쇄·선택·설정)
+- [ ] [터치] `DetailGrid.tsx:58-64` 드래그가 `pointerup`만 해제 → `pointercancel` 시 draggingRef 잔류. 또 터치 포인터는 implicit capture로 `onPointerEnter` 미발화 → 터치 드래그선택 무동작. 데스크톱 마우스(실배포)는 정상. `pointercancel` 리스너 추가 검토.
+- [ ] [cosmetic] `SettingsPage.tsx:42,77` `Select`에 `w-full max-w-[280px]`가 inner `<select>`에 붙는데 `ui/select.tsx:8` 래퍼가 inline-flex content-width라 full-width 미해석. 전폭 의도면 래퍼에 width 부여.
+- [ ] [문서] `DataGeneratorPage.tsx:182-185` 인쇄가 컬럼필터로 숨은 체크행도 대상(단일 소스=삭제와 동일 동작). 의도임을 한 줄 주석.
+- [ ] [cleanup] `PrintLabelPreview.tsx:150` `row.barcode2 ?? ''`가 `dual` 분기 내부라 중복(무해).
+- [ ] [일관성] `PrintLabelPreview.tsx:49` 미리보기 backdrop 클릭 미닫힘(`ui/dialog.tsx`는 닫힘). 의도(오조작 방지)일 가능성 — 일관성만 참고.
+
 ## S-B2B-3b 코드리뷰 이연 (Minor — 비차단, 프론트 조회 3페이지)
 - [ ] [DRY] `ArchiveSelect.tsx`가 `ARCHIVE_LABELS`+보관 아이콘/라벨 마크업을 `DataGeneratorPage.tsx:29-33,234-248`와 중복. DataGeneratorPage도 ArchiveSelect 소비하도록 통합(라벨 단일 소스화).
 - [ ] [UX] `BoxesPage.tsx:42` 선택된 박스 상세가 통합검색으로 마스터에서 필터아웃돼도 잔존(`selected`를 `rows`가 아닌 `filtered`에서 해석하거나 필터아웃 시 선택 해제).
