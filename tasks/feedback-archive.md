@@ -2,6 +2,14 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-B2B-2c (A4 라벨 인쇄 + 고급 포인터 다중선택 + 설정 페이지 부활, 프론트 전용) — APPROVED (2026-07-08, 1 iteration)
+
+- **포인터 제스처(drag/Shift/Ctrl) 검증은 실 `page.mouse`(steps 보간) + 계측이 정답 — synthetic dispatch 나 무-steps 클릭은 거짓 결과를 낳는다**: onPointerEnter 는 React 가 native pointerover/pointerout 로 폴리필하므로 중간 행 진입 이벤트가 실제로 발화하려면 `page.mouse.move(to,{steps:N})` 실 이동이 필요(dispatchEvent(pointerenter) 는 React 델리게이션을 안 탐). **최대 함정: 대상 행이 뷰포트 밖이면 클릭이 `<html>` 에 떨어져 "제스처 무효果"= 거짓 FAIL** → pointerdown 계측(`{shift,ctrl,cell,row}`)으로 "클릭이 실제 행 TD 에 닿았는가 + modifier 가 전달됐는가"를 먼저 확인하고, 필요 시 뷰포트를 키워(예: 1400×1900) 전 행을 in-view 로 만든 뒤 재현. 선택 결과는 카운트가 아니라 **checked 바코드 집합**으로 단정(범위/토글/비연속을 구별).
+- **선재 foreign vite(다른 포트 점유)는 false-PASS 벡터 — 계약 source-of-truth 포트가 막혔으면 내 전용 포트를 `--strictPort` 로 명시 기동**: 5173/5174 에 stale 인스턴스(내 코드 아님)가 살아있으면 그걸 검증하면 sibling 코드를 PASS 처리할 위험. proxy 대상(백엔드 포트)은 vite.config 소유라 listen 포트를 바꿔도 무관하므로, 내 소스가 서빙됨을 proxy 왕복(시드 배치 조회)으로 확인하면 포트 이동이 정당. **콘솔 게이트도 같은 함정**: `all=true` 버퍼에 foreign origin(localhost:5174) error 가 섞이므로 — 내 origin(5190) 만 분리 판정하려면 clean navigation 후 `all=false`(since-nav) 캡처로 "내 인스턴스 error/warning 0" 을 독립 입증(탭 목록으로 내 탭이 단독임도 확인).
+- **인쇄용 DOM 은 mm→px 정합 + CSSOM @page 덤프로 픽셀-정확 검증(프린터 대화상자 자동화 불가의 정석 갈음)**: 라벨 99.14×67.48mm 는 `getBoundingClientRect` px == `mm×96/25.4` 계산값 일치로 단정(374.7×255px), 2열 grid 는 `gridTemplateColumns` 2값, 페이지 분할은 `.print-page[data-page]` 개수·라벨/페이지, `@page{size:A4;margin:0}`·`body>* display:none`·`body>.print-overlay display:block` 는 **styleSheets 순회로 실제 규칙 덤프**(CSSOM 은 `A4`→`a4`·`0`→`0px` 로 정규화하므로 정규식 매칭 시 대소문자/단위 유의). 바코드 실렌더는 SVG `rect/path` 개수>0 + aria-label 로, dual/single 은 `data-dual` + SVG 개수(2 vs 1) 로 확정.
+- **localStorage 설정→소비 단일소스 관통은 "설정 미리보기 변화"만으로 부족 — reload 후 실제 소비 화면(인쇄)에 반영을 재확인**: 심볼로지 변경 시 (a) 설정 미리보기 막대수 변화 + (b) `wcs.print` 직렬화 갱신 + (c) **full reload 후 값 유지** + (d) 소비 화면(인쇄 프리뷰) 헤더+막대+값텍스트에 반영, 4단을 모두 봐야 usePrintSettings 단일소스가 닫힌다. 값표시 off 는 SVG `<text>` 0 으로 정량 단정.
+- **프론트 전용 스프린트의 무접촉/무회귀 재적용(S-B2B-3b 정석)**: `git diff --numstat develop -- backend/` 빈 출력 + migration/snapshot 0 + `dotnet build` 0/0 = 백엔드 무접촉. B2C 회귀 0 은 코드 diff(Layout 1줄) 만으론 약하고 **모드 토글 실측**(nav 원복·b2b 링크 부재·MonitorPage/StatusRail 렌더)으로 닫음. 현장 DB 오염 3중 차단(scratch 파일명 상이·Provider=Sqlite override·Transport=Tcp) 상시 적용.
+
 ## S-B2B-3b (조회 프론트엔드 3화면[로그·비교·박스] + 내비 점등, 백엔드 무접촉) — APPROVED (2026-07-08, 1 iteration)
 
 - **프론트 전용 스프린트라도 실 stack 시드 scratch DB 로 검증 — DTO 미러 코드판독만으론 "왕복"이 안 닫힌다**: 6엔드포인트 소비 화면은 `dotnet ef database update`(Sqlite scratch)+python sqlite3 시드로 실 백엔드(:5205 Production·SeedOnStartup=false·`Sorters__0__Transport=Tcp`)를 세우고 vite(:5173) proxy 로 왕복시켜야 통합품질이 닫힌다. 현장 DB 오염 벡터 3중 차단(별도 scratch 파일명·Provider=Sqlite override·Transport=Tcp 로 COM1/RTU 실 3DS PLC 무접촉)이 lessons 2026-07-03/현장PLC 준수의 정석. `.claude/ports.local.json` 부재 시 계약이 `vite.config.ts server.port` 를 포트 source-of-truth 로 명시 허용하면 그걸 쓴다(하드코딩 아님).
@@ -470,3 +478,5 @@
 - [CODE-REVIEW] sprint=S-B2B-3a critical=0 major=1 minor=6 iter=1 (major=#1 파생필드 Frankenstein 행→단일 결정적 서브쿼리; +#4 export cancel/leak, #5 both-null match 저비용 동반수정; minor 4건 todo 이연)
 
 - [CODE-REVIEW] sprint=S-B2B-3b critical=0 major=1 minor=7 iter=1 (major=#1 ComparisonPage 리스트 key 비유니크→중복시 콘솔에러(BLOCKING게이트); +role=tab→aria-pressed a11y 동반; minor 6건 todo 이연)
+
+- [CODE-REVIEW] sprint=S-B2B-2c critical=0 major=2 minor=5 iter=1 (major=#1 무조건부 @media print가 타 페이지 Ctrl+P 백지화(앱전역 회귀), #2 인쇄모달 role/aria/focus 부재; minor 5건 todo 이연)

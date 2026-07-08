@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { UiModeProvider } from './components/UiModeProvider'
+import { PrintSettingsProvider } from './components/PrintSettingsProvider'
 import { ToastProvider } from './components/ToastProvider'
 import './index.css'
 
@@ -21,11 +22,13 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <UiModeProvider>
-        <ToastProvider>
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
-        </ToastProvider>
+        <PrintSettingsProvider>
+          <ToastProvider>
+            <BrowserRouter>
+              <App />
+            </BrowserRouter>
+          </ToastProvider>
+        </PrintSettingsProvider>
       </UiModeProvider>
     </QueryClientProvider>
   </StrictMode>,

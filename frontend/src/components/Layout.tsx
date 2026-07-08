@@ -44,7 +44,7 @@ const NAV_SETS: Record<UiMode, NavItem[]> = {
     { to: '/logs', label: '로그 조회', icon: ScrollText, enabled: true, phase: null, title: '로그 조회', subtitle: '투입 · 분류 · API 호출 이력 · Excel 내보내기' },
     { to: '/comparison', label: '결과 비교', icon: GitCompare, enabled: true, phase: null, title: '결과 비교', subtitle: '투입 · 분류 · 결과 3-way 대조' },
     { to: '/boxes', label: '박스 조회', icon: Package, enabled: true, phase: null, title: '박스 조회', subtitle: '박스 목록 · 내품 상세' },
-    { to: '#', label: '설정', icon: Settings, enabled: false, phase: 'B2B-3', title: '설정', subtitle: '' },
+    { to: '/settings', label: '설정', icon: Settings, enabled: true, phase: null, title: '설정', subtitle: '인쇄 설정 · 바코드 심볼로지 · 라벨 프리셋' },
   ],
 }
 

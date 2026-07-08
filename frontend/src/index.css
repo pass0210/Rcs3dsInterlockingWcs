@@ -92,3 +92,42 @@
   .lamp-live { animation: none; }
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   A4 라벨 인쇄(데이터 생성 페이지) — 화면에서는 모달 미리보기, 인쇄 시엔 라벨 문서만.
+   PrintLabelPreview 는 document.body 로 portal 되어 .print-overlay 가 body 직계 자식이 된다.
+   ⚠ 억제 규칙은 라벨 오버레이가 열려 있을 때만(body.has-print-overlay — PrintLabelPreview 가
+   open/close effect 에서 토글) 적용한다. 그래야 오버레이가 닫힌 다른 페이지(로그/비교/박스/모니터링/
+   데이터생성)의 네이티브 Ctrl+P 가 빈 시트로 인쇄되지 않는다(앱 전역 인쇄 회귀 방지).
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media print {
+  @page { size: A4; margin: 0; }
+  body.has-print-overlay { background: #fff !important; }
+
+  /* 오버레이 열림 상태에서만: 앱 본체(#root)·토스트/다이얼로그 포털 등 body 직계 자식을 숨기고 인쇄 문서만 남긴다. */
+  body.has-print-overlay > *:not(.print-overlay) { display: none !important; }
+  body.has-print-overlay > .print-overlay { display: block !important; }
+
+  .print-overlay {
+    position: static !important;
+    inset: auto !important;
+    background: #fff !important;
+    z-index: auto !important;
+  }
+  .print-overlay__chrome { display: none !important; }
+  .print-overlay__scroll {
+    overflow: visible !important;
+    background: #fff !important;
+    padding: 0 !important;
+  }
+  .print-doc { gap: 0 !important; width: auto !important; margin: 0 !important; }
+
+  /* 각 라벨 페이지 = 정확히 1장의 A4 시트. */
+  .print-page {
+    box-shadow: none !important;
+    margin: 0 !important;
+    break-after: page;
+    page-break-after: always;
+  }
+  .print-page:last-child { break-after: auto; page-break-after: auto; }
+}

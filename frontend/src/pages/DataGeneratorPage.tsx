@@ -1,10 +1,11 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { RotateCcw, Trash2, Archive } from 'lucide-react'
+import { RotateCcw, Trash2, Archive, Printer } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/ui/dialog'
+import { PrintLabelPreview } from '@/components/PrintLabelPreview'
 import { GenerateForm } from './sections/GenerateForm'
 import { SummaryGrid } from './sections/SummaryGrid'
 import { DetailGrid } from './sections/DetailGrid'
@@ -45,13 +46,14 @@ export function DataGeneratorPage() {
   const [detailChecked, setDetailChecked] = useState<Set<number>>(new Set())
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [busy, setBusy] = useState(false)
+  const [printOpen, setPrintOpen] = useState(false)
 
   // 조회.
   const summaryQ = useTestDataSummary(bizDay, interval)
   const detailQ = useTestDataDetail(selectedBatch, archived, interval)
   // 안정 식별자(useMemo 의존성 안정화 — react-hooks/exhaustive-deps).
   const summaryRows = useMemo(() => summaryQ.data ?? [], [summaryQ.data])
-  const detailRows = detailQ.data ?? []
+  const detailRows = useMemo(() => detailQ.data ?? [], [detailQ.data])
 
   const selectedKey = selectedBatch ? summaryKey(selectedBatch.bizDay, selectedBatch.batch) : null
 
@@ -100,6 +102,11 @@ export function DataGeneratorPage() {
       else ids.forEach((id) => next.add(id))
       return next
     })
+  }, [])
+
+  // 포인터 제스처(드래그·Shift 범위) — 선택 집합을 주어진 id 들로 정확히 교체.
+  const selectDetailExact = useCallback((ids: number[]) => {
+    setDetailChecked(new Set(ids))
   }, [])
 
   // ── 수신 초기화(요약 체크 배치) ─────────────────────────────────────────────
@@ -168,6 +175,22 @@ export function DataGeneratorPage() {
         }
       },
     })
+  }
+
+  // ── 인쇄(상세 체크 행 → A4 라벨) ────────────────────────────────────────────
+  //   detailChecked 에 담긴, 현재 로드된 상세 행들을 인쇄 대상으로 삼는다(단일 소스 소비).
+  const printRows = useMemo(
+    () => detailRows.filter((r) => detailChecked.has(r.id)),
+    [detailRows, detailChecked],
+  )
+
+  function requestPrint() {
+    if (printRows.length === 0) {
+      // 선택 0 가드(W6) — 인쇄 뷰를 띄우지 않고 토스트로 안내(원본 동작 재현).
+      toast('warning', '인쇄할 항목을 선택하세요.')
+      return
+    }
+    setPrintOpen(true)
   }
 
   async function onConfirm() {
@@ -249,6 +272,15 @@ export function DataGeneratorPage() {
             <Button
               variant="outline"
               size="sm"
+              onClick={requestPrint}
+              disabled={detailChecked.size === 0}
+            >
+              <Printer className="size-4" />
+              인쇄{detailChecked.size > 0 ? ` (${detailChecked.size})` : ''}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={requestDelete}
               disabled={detailChecked.size === 0}
               className="border-offline/50 text-offline hover:bg-offline/5"
@@ -267,6 +299,7 @@ export function DataGeneratorPage() {
             checked={detailChecked}
             onToggleCheck={toggleDetailCheck}
             onToggleVisible={toggleDetailVisible}
+            onSelectExact={selectDetailExact}
           />
         </CardContent>
       </Card>
@@ -280,6 +313,9 @@ export function DataGeneratorPage() {
         onConfirm={onConfirm}
         onCancel={closePending}
       />
+
+      {/* A4 라벨 인쇄 미리보기/인쇄 뷰 — 선택 행 소비(단일 소스). */}
+      <PrintLabelPreview open={printOpen} rows={printRows} onClose={() => setPrintOpen(false)} />
     </div>
   )
 }
