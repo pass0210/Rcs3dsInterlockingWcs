@@ -46,7 +46,7 @@ dotnet build backend/Wcs.sln                     # 솔루션 빌드 (M0에서 sl
 dotnet test backend/Wcs.sln                      # 전체 테스트
 dotnet test backend/Wcs.sln --filter Decider     # 판정 테스트만
 dotnet run --project backend/src/Wcs.Sim3ds   # 시뮬레이터 (기본 :1502)
-dotnet run --project backend/src/Wcs.Api      # WCS API (기본 :5080)
+dotnet run --project backend/src/Wcs.Api      # WCS API (기본 :5205)
 ```
 TargetFramework은 `net10.0`. 설치된 SDK가 다르면(`dotnet --list-sdks`) 모든 csproj의
 TargetFramework을 설치 버전(LTS 권장)으로 일괄 변경하라.

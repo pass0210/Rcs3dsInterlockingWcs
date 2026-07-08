@@ -27,7 +27,7 @@
 
 **이 프론트가 해소하는 감사 확정 갭**:
 - A-8 / SPEC §7-B: `ChuteCapacityService.OnCleared`의 production 호출자 0 → 슈트 FULL 비가역. PAUSED/RESUMED 런타임 전이 표면 자체가 없음(현재 `IsPaused`는 기동 시 1회만 세팅).
-- C-26 / SPEC §7-B: RCS 인바운드 API 전면 무인증 + `Urls=http://0.0.0.0:5080` 전 인터페이스 바인딩.
+- C-26 / SPEC §7-B: RCS 인바운드 API 전면 무인증 + `Urls=http://0.0.0.0:5205` 전 인터페이스 바인딩.
 
 **절대규칙 준수(설계 불변식)**: 이 프론트의 모든 PLC 쓰기는 예외 없이 **기존 소터별 단일 쓰기 큐(`PlcWriteQueue`)**를 경유한다(#1). 컨트롤러가 Modbus를 직접 호출하지 않는다. TgtFloor 쓰기는 컨슈머의 `TgtFloor==0` 재확인 가드를 그대로 탄다(#2). WCS는 TgtFloor를 클리어하지 않는다(#3) — 단, 운영자 수동 리셋은 SPEC §7-B에 "절대규칙 3 예외 명문화" 대상으로 이미 등재된 협의 항목이며, 노출 시 반드시 경고+확인을 건다. 모든 타이밍/설정은 appsettings 외부화(#7).
 
@@ -48,7 +48,7 @@
 frontend/                 Vite + React + TS 소스 (npm 프로젝트, .sln 무등록)
   src/                    페이지·컴포넌트·API client·SignalR client
   index.html
-  vite.config.ts          dev proxy → http://localhost:5080
+  vite.config.ts          dev proxy → http://localhost:5205
   package.json
 backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, .gitignore)
 ```
@@ -58,7 +58,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 - **운영**: `frontend`를 `npm run build` → `dist/`를 `backend/src/Wcs.Api/wwwroot/`에 배치 → **Wcs.Api가 `UseStaticFiles()` + SPA fallback(`MapFallbackToFile("index.html")`)로 서빙**. Windows Service 하나로 API + UI를 함께 제공(기존 배포 모델·`install-service.ps1` 무변경).
   - Program.cs 현재 상태: `app.MapControllers(); app.Run();`뿐 — **정적 서빙 미들웨어 없음**. F1에서 추가한다. 순서 주의: `UseStaticFiles()` → (인증 미들웨어, F3) → `MapControllers()` → `MapFallbackToFile("index.html")`. fallback은 `/api/**`를 삼키지 않도록 API 라우트가 우선.
   - **A-12 정합**: Serilog 파일 경로가 상대경로(`logs/`)여서 서비스 CWD(System32) 문제가 있듯, `wwwroot`도 `ContentRootPath`(=`AppContext.BaseDirectory`, `UseWindowsService`가 설정) 기준으로 해석되는지 확인. `UseStaticFiles` 기본은 `IWebHostEnvironment.WebRootPath`(ContentRoot/wwwroot)라 서비스에서도 정상. 배포 README에 명기.
-- **개발**: Vite dev server(`npm run dev`, 기본 :5173) + `vite.config.ts` proxy로 `/api`·`/hubs`(SignalR) → `http://localhost:5080`. 프론트/백엔드 동시 기동(`dotnet run --project backend/src/Wcs.Api` + `npm run dev`). 개발 중에만 cross-origin이므로 CORS는 dev 한정(1.4·4.5).
+- **개발**: Vite dev server(`npm run dev`, 기본 :5173) + `vite.config.ts` proxy로 `/api`·`/hubs`(SignalR) → `http://localhost:5205`. 프론트/백엔드 동시 기동(`dotnet run --project backend/src/Wcs.Api` + `npm run dev`). 개발 중에만 cross-origin이므로 CORS는 dev 한정(1.4·4.5).
 
 ### 1.3 라이브러리 선정 (최소 셋 — 과의존 금지)
 
@@ -191,7 +191,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 
 > **★확정(Q4, 2026-07-03)**: **인증 없음(사내망 신뢰)** — 아래 옵션 비교는 기록용. 유지되는 것: (a) 바인딩·방화벽 제한 + 내부망 전제 운영 문서 명문화(감사 C-26 해소 = 명문화 방식), 조작 확인 다이얼로그의 **작업자 이름 입력**(자유 입력 → destination_event.operator_id/detail 기록 — 인증 아님·감사 흔적용). F3 범위에서 로그인 구현 제거.
 
-현재: 무인증 + `0.0.0.0:5080`(감사 C-26/SPEC §7-B). 프론트는 이 갭과 함께 해소한다.
+현재: 무인증 + `0.0.0.0:5205`(감사 C-26/SPEC §7-B). 프론트는 이 갭과 함께 해소한다.
 
 | 옵션 | 장점 | 단점 | operator_id 귀속 |
 |---|---|---|---|
@@ -200,7 +200,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 | Windows 인증(Negotiate/AD) | 도메인 PC 무암호 SSO, AD 연동 | 도메인 조인 전제, 서비스 계정 구성 | 가능(AD 계정) |
 
 **권고(2층 방어)**:
-- (a) **바인딩·방화벽**: `Urls`를 실제 운영 NIC IP로 좁히거나 내부망 전제 + 방화벽(5080 인바운드를 RCS/운영 PC로 제한)을 `install-service.ps1`/운영 README에 명문화(C-26 권고 그대로).
+- (a) **바인딩·방화벽**: `Urls`를 실제 운영 NIC IP로 좁히거나 내부망 전제 + 방화벽(5205 인바운드를 RCS/운영 PC로 제한)을 `install-service.ps1`/운영 README에 명문화(C-26 권고 그대로).
 - (b) **인증 대상 분리**: `/api/ops`·`/api/monitor`·`/hubs/*`에 인증 적용. `/api/v1`(RCS)은 계약 주체가 RCS라 별도(SPEC §7-B "RCS 인증 Q" 대기) — 최소 API 키 1개라도 옵션(설정 외부화)으로 두고 문서화.
 - (c) **최소안 권고 = 간단 로그인(쿠키 기반)**. 이유: **운영자 제어(clear/pause/resume)는 `destination_event.operator_id` 감사가 계약(ERD)**이라 사용자 식별이 필요하다. 소수 계정을 config(해시)·소형 테이블로 관리. 도메인 조인 환경이 확인되면 **Windows 인증(Negotiate)을 선호안으로 승격**(무암호 SSO + AD 귀속) — §8-Q4로 사용자 확정.
 - 프론트는 prod에서 Wcs.Api가 **동일 출처**로 서빙하므로 CORS 불요. dev만 Vite proxy(동일 출처처럼 동작) → CORS는 개발 편의로 최소 허용 or proxy로 회피.
@@ -238,7 +238,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 
 ### F1 — 스캐폴드 + 정적 서빙 + 모니터링 읽기
 - 범위: `frontend/` Vite+React+TS 스캐폴드, antd/router/query 셋업, dev proxy. Wcs.Api `UseStaticFiles`+`MapFallbackToFile` + wwwroot 배치. `MonitoringController`(읽기 전용) + `IMonitoringQueries`(AsNoTracking). 페이지 ① 모니터링(A/B/C, 폴링). `.gitignore`·빌드 산출물 경로.
-- **Done**: `dotnet run --project backend/src/Wcs.Api` 후 `:5080`에서 SPA가 서빙되고, 배치/오더/in-flight/셀/sorter_command가 폴링으로 표시. 기존 146 스위트 GREEN + 신규 MonitoringController 통합 테스트. Playwright로 페이지 로드·데이터 표시 검증(`.mcp.json` 필요·7장).
+- **Done**: `dotnet run --project backend/src/Wcs.Api` 후 `:5205`에서 SPA가 서빙되고, 배치/오더/in-flight/셀/sorter_command가 폴링으로 표시. 기존 146 스위트 GREEN + 신규 MonitoringController 통합 테스트. Playwright로 페이지 로드·데이터 표시 검증(`.mcp.json` 필요·7장).
 - 선행 결선: 없음(읽기만). 정적 서빙 미들웨어 순서 확정.
 
 ### F2 — SignalR 실시간 + 워드 뷰(읽기 전용)
