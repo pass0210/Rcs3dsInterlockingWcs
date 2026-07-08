@@ -1,71 +1,123 @@
-# Sprint Feedback — S-B2B-2a (test-data 관리 API + 기록 아카이브[archived_at 소프트삭제], 백엔드)
+# Sprint Feedback — S-B2B-2b (프론트: B2C/B2B UI 토글 + /data-generator 페이지 + 아카이브 필터 UI)
 
 **APPROVED** — Evaluator, 2026-07-08 (1 iteration to pass).
 
-브랜치 `feat/b2b-2-datagen-toggle`(읽기 전용 — 커밋/수정/브랜치전환/fix 없음).
-핸드오프 마커: `tasks/sprint-log.md:2535` `## IMPLEMENTATION COMPLETE (B2B-2a)`.
-근거 문서: `docs/B2B-DATAGEN.md`(§1~3 캡처 정본)·`tasks/sprint-contract.md`(S-B2B-2a + 사용자 확정 Q1~Q4 블록).
-프로젝트 타입: **Backend/API**(2a는 백엔드 단독 — 프론트 2b는 별도 스프린트). 검증 시나리오 백엔드 1~4 전항 PASS(fresh evidence).
-실 `TEST_ORDER_DB`·원본 `BowooTestBatchSystem_v2` 대조는 범위 밖(pwd 경계).
+브랜치 `feat/b2b-2b-datagen-frontend`(읽기 전용 — 커밋/수정/브랜치전환/fix 없음).
+핸드오프 마커: `tasks/sprint-log.md:2628` `## IMPLEMENTATION COMPLETE (B2B-2b)`.
+근거: `docs/B2B-DATAGEN.md`(§4·§5·§7)·`tasks/sprint-contract.md`(S-B2B-2b + 사용자 확정 Q-A[인쇄·고급선택 2c 연기]).
+프로젝트 타입: **Full-stack**(변경 표면은 프론트 전용, 백엔드 소비만). 원본 `BowooTestBatchSystem_v2`·`TEST_ORDER_DB` 대조는 범위 밖(pwd 경계).
+
+검증 환경: 격리 스크래치 SQLite(`scratchpad/wcs-eval.db`, env override `Database__Provider=Sqlite`) + `Sorters[0]` chuteNo=30 **Tcp**(no-Sim → OFFLINE)로 기동. **현장 SqlServer·COM1 실 PLC 무접촉·IF-09/10 트리거 0**. vite dev :5173 proxy→:5080. (`.claude/ports.local.json` 부재 → 아래 Minor 참조.)
 
 ---
 
-## 검증 시나리오 결과 (fresh evidence)
+## 정적 게이트 (fresh, 독립 실행) — PASS
 
-### 1. ★ 아카이브 하드삭제 0 (핵심) — PASS
-- **코드 판독(grep `RemoveRange|.Remove(|ExecuteDelete|DELETE` on TestDataService.cs)**: 실호출은 **L289 `_db.B2bTestData.RemoveRange(entities)` 단 1건**(등록 원장·delete 전용). test_log·work_result 에는 하드삭제 호출 0 — L318 `l.ArchivedAt = now`(UPDATE), L16은 주석. → 아카이브는 archived_at UPDATE만.
-- **서비스 단위 테스트 3건 직접 실행 GREEN**으로 (a)~(e) 전수 단정:
-  - `Reset_ArchivesAssociatedLogsAndResults_NoHardDelete`: reset 후 (a) `B2bTestLogs.Count()==2`·`WorkResults.Count()==1` **COUNT 불변**(하드삭제 0) (b) 모든 로그·결과 `ArchivedAt != null` (c) `GetDetailAsync(..., ArchivedOnly)` 노출(InputStatus="OK") (d) `Active` 미노출(InputStatus/SortStatus null) + test_data 행 유지·ReceiveTime=null. SORT 로그는 TestDataId=null(barcode 폴백)인데도 (BizDay,Batch,Barcode) 키 매칭으로 정상 아카이브됨.
-  - `Delete_HardDeletesTestData_ButArchivesLogsAndResults`: delete 후 `B2bTestData.Count()==0`(등록 원장 하드삭제) + 로그/결과 `Count()==1` 잔존·`ArchivedAt != null`.
-  - `Delete_ScopeLimited_OtherBatchSameBarcode_Untouched`: 배치 001 동일 barcode `BC-X` 삭제 시 **배치 002의 동일 barcode 로그·결과 `ArchivedAt == null`(미영향)** — 원본 barcode-only 광범위 삭제 결함 미재현.
-- **API 통합 테스트 2건 GREEN**: `Reset_Api_ArchivesLogs_NoHardDelete`(실 HTTP `POST /reset` → DB 로그/결과 archived·잔존 + `detail?archived=active` inputStatus=null · `archived=archivedOnly` inputStatus="OK") · `Delete_Api_HardDeletesTestData_ArchivesLogs`(실 HTTP `DELETE /api/test-data` → test_data 하드삭제·로그/결과 archived 잔존).
-- **범위 정확성 판독**: `ArchiveAssociatedAsync` 스코프 키 = `HashSet<(BizDay,Batch,Barcode)>`(값 튜플 — 문자열 구분자 충돌 원천 회피). test_log 대상 = `TestDataId in ids` OR `(BizDay,Batch,Barcode) in keys`(둘 다 archived_at==null 만), work_result 대상 = `(BizDay,Batch,Barcode) in keys`. 다른 배치의 동일 barcode 는 TestDataId·키 튜플 모두 불일치로 정확히 제외.
+    $ npx tsc --noEmit        → tsc_exit=0
+    $ npx eslint .            → eslint_exit=0
+    $ dotnet test backend/Wcs.sln → 통과! 실패:0 통과:271 건너뜀:0 (15s)
 
-### 2. archived_at 마이그레이션 (양 provider add-only) — PASS
-- **SqlServer `ef migrations script AddB2BTables AddB2BArchivedAt`**(fresh): 정확히
-  `ALTER TABLE [work_result] ADD [archived_at] datetime2 NULL;` · `ALTER TABLE [test_log] ADD [archived_at] datetime2 NULL;` — **DROP/CREATE TABLE/기타 ALTER 0**.
-- **SQLite `ef migrations script`**(fresh): `ALTER TABLE "work_result" ADD "archived_at" TEXT NULL;` · `ALTER TABLE "test_log" ADD "archived_at" TEXT NULL;` — 동일 add-only 2건.
-- **SQLite 콜드스타트 end-to-end**: 임시 파일 DB에 전체 체인 `dotnet ef database update AddB2BArchivedAt` →
-  `Applying 'Initial' → 'AddOperationLog' → 'AddB2BTables' → 'AddB2BArchivedAt' → Done.`(exit 0).
-  스키마 실측(python sqlite3): 총 26테이블 중 **`archived_at` 보유 테이블 = 정확히 {test_log, work_result}**, `test_data`·`box`·`box_item`·`api_call_log` 미보유.
-- **ModelSnapshot diff(양 provider)**: 각 `+4/-0`(deleted=0) = `ArchivedAt` 프로퍼티 블록 2개(test_log·work_result)만 삽입, **기존 엔트리 재정렬/삭제 0**. 마이그레이션 `Down()`은 대칭 `DropColumn` 2건(롤백 add-only 반전).
+- tsc 0 · eslint 0(경고 0). 백엔드 회귀 스위트 **271/271 GREEN**(NU1903 SQLite transitive 취약성 경고 8건은 선재 — 이 스프린트 무관, 코드 경고 아님).
 
-### 3. 관리 API 계약 — PASS (SQLite 더블 통합 테스트 직접 실행)
-- **generate**: 라운드로빈 `chuteNos[i % chuteNos.Count]` + `ChuteNo.ToString("D3")`(zero-pad) + `NormalizeBizDay`(YYYY-MM-DD). `Generate_RoundRobin_*`(슈트 "1-2"×5 → 001×3·002×2)·`Generate_RangeAndSingles_Parsed_Deduped_Sorted`("1-3,5,5,2" → {1,2,3,5})·API `Generate_RoundTrip_Summary_Detail`(정규화 "2026-07-20"·count 4·001×2/002×2). BarcodeCount 상한 10000(`AppConstants.BarcodeCountMax` — RCS qty 9999와 별개 상수 확인).
-- **upload**: ClosedXML `XLWorkbook`. 헤더 자동감지(`IsDateLike`) + 5컬럼 신양식(col5=chute, col4=barcode2)/4컬럼 구양식(col4=chute, barcode2=null) 판별 + barcode 빈행 skip. 3중 검증 400(파일없음/0바이트·10MB초과·확장자·MIME 화이트리스트). `Upload_NewFormat5Col_*`·`Upload_OldFormat4Col_Headerless_*`·`Upload_EmptyBarcodeRowsSkipped_*`·`Upload_EmptyWorkbook_*` + API `Upload_HappyPath/EmptyFile/WrongExtension/WrongMime`.
-- **summary**: `GroupBy(BizDay,Batch)` + Count + `Max(ReceiveTime)` + BizDay/Batch desc(Ordinal). `Summary_GroupsByBatch_CountAndMaxReceiveTime_OrderedDesc`.
-- **detail**: 로그 LEFT-JOIN(TestDataId 우선·barcode 폴백) + ChuteNo **숫자정렬**(int 파싱 우선·실패 int.MaxValue) + 아카이브 필터 `active|all|archivedOnly`. `Detail_SortsAndMapsInputSortLogs`.
-- **DTO [StringLength]**: `Batch StringLength(10,Min1)`·`ChuteNos StringLength(200)`·`ChuteNos RegularExpression(^[\d\s,\-]+$)`·`BizDay RegularExpression`(길이 8/10 로 바운드)·`BarcodeCount Range(1,10000)`. 과길이/범위위반 → ModelState → **allowlist(/api/test-data) → B2BApiResponse.Fail** 400. `Generate_BarcodeCountOutOfRange_400_AllowlistFail`("BarcodeCount must be between 1 and 10000.")·`Generate_BadBizDayFormat_400_AllowlistFail` 실증.
-- **ApiResponse 형식**: `B2BApiResponse{status,message}` camelCase. 조회는 원시 배열(camelCase).
+## 무접촉·신규의존 0 게이트 — PASS
 
-### 4. 무접촉 — PASS
-- `git status`/`git diff HEAD`: 수정 tracked = `AppConstants.cs(+10/-0)`·`AppUtils.cs(+49/-0)`·`FailMessages.cs(+30/-0)`·`EntitiesB2B.cs(+8/-0)`·`WcsDbContext.cs(+4/-0)`·`Program.cs(+7/-2)`·`Wcs.Api.csproj(+2/-0)`·양 ModelSnapshot(+4/-0). 나머지 전량 **신규 untracked**(TestDataDtos·TestDataService·Controllers/B2B/TestDataController·마이그레이션 4·테스트 2).
-- **B2C 17테이블 `Entities.cs`·`RcsController`·기존 컨트롤러/라우트·B2B-1 RCS 5 API(`WorksControllers.cs`)·`WorkService.cs`(RCS)·기존 마이그레이션(Initial/AddOperationLog/AddB2BTables) = diff 0**(수정 목록에 미등장).
-- **Program.cs allowlist = additive**: `InvalidModelStateResponseFactory`가 works 접두 `||` test-data 접두 OR 매칭 → B2BApiResponse.Fail. **그 외(B2C monitor/ops) 경로는 `builtInFactory(context)`(ProblemDetails)로 그대로 위임**(fall-through 보존, L80). works 분기·B2C 400 형식 불변.
-- **WcsDbContext**: test_log·work_result Configure 에 `ArchivedAt.HasColumnName("archived_at").IsRequired(false)` 2줄 append만 — 기존 컬럼·인덱스 매핑 무변경.
-- **ModelSnapshot add-only**(§2 재확인): archived_at 2 프로퍼티만.
+- `git diff HEAD` 결과: **백엔드 0줄 · frontend/package.json 0줄 · package-lock.json 0줄**. 신규 npm 의존 0(jsbarcode 미설치·`@radix-ui/react-dialog` 미추가 — dialog 는 radix 미의존 자작 주장 검증됨. 기존 `@radix-ui/react-tabs`만 존재).
+- 기존 B2C lib/pages 무접촉 확인(diff 0): `lib/api.ts`·`MonitorPage.tsx`·`SortersPage.tsx`·`lib/signalr.ts`·`lib/useMonitorHub.ts`.
+- 변경 = frontend/src만: `App.tsx`(+20)·`Layout.tsx`(+153)·`main.tsx`(+12) additive 수정 + 신규 10파일(uiMode·testData·toast·UiModeProvider·ToastProvider·ui/dialog·DataGeneratorPage·sections/{GenerateForm,SummaryGrid,DetailGrid}). 브랜치 커밋은 docs 2파일뿐(선커밋).
+- main.tsx Provider 계층 `QueryClientProvider > UiModeProvider > ToastProvider > BrowserRouter > App` — QueryClient 옵션 무변경(additive). App.tsx 기존 /monitor·/sorters 라우트 보존 + `/data-generator` 추가 + `*`/`/`→`<ModeHome>`. Layout `useHubLifecycle()`·PollIndicator 상시 유지(B2C SignalR lifecycle 무접촉).
 
-### 5. 회귀 · baseline — PASS
-- `dotnet build backend/Wcs.sln -p:NuGetAudit=false`: **경고 0개 · 오류 0개**(신규 경고 0 — ClosedXML 0.104.2 컴파일 경고 유발 없음).
-- `dotnet test backend/Wcs.sln` **×2회**: 두 번 모두 `통과! 실패: 0, 통과: 270, 건너뜀: 0, 전체: 270`(13s, exit 0) — **결정적**.
-- 필터 분할: `--filter FullyQualifiedName~TestData` = `통과: 23`(신규). 270 − 23 = **247 baseline 불변**(계약 명시 247과 일치·회귀 0).
-- 오펀 프로세스 0(Wcs.Api/Wcs.Sim3ds/testhost none)·포트 5080/1502 free(검증 후 정리). 임시 SQLite 콜드스타트 DB 삭제.
+## 스코프 준수(Q-A 2c 연기) — PASS
 
-## 동시성·fail-safe 코드 판독 (사각 교훈 적용)
-- **reset/delete 트랜잭션 원자성**: `ArchiveAssociatedAsync`는 추적 엔티티 변경만(자체 SaveChanges 없음). reset·delete 각각 **단일 `SaveChangesAsync`** → EF 기본 트랜잭션으로 (로그/결과 archived_at UPDATE + test_data ReceiveTime null 또는 RemoveRange)가 원자 커밋. delete 는 아카이브 마킹을 RemoveRange 전에 수행(entities 키 필요) — 순서 정당.
-- **아카이브 범위 쿼리 정확성**: DB 로드는 `barcodes.Contains(l.Barcode) || (TestDataId in ids)` 광범위, 이후 in-memory `matchById || keys.Contains((BizDay,Batch,Barcode))` 정밀 필터. 값-튜플 집합이라 구분자 충돌 없음. 다른 배치 동일 barcode 는 TestDataId(타 배치 소속)·키 튜플 모두 불일치 → 정확 제외(테스트 실증).
-- **엑셀 스트림/크기 처리**: 컨트롤러가 `file.Length`(멀티파트 버퍼링 기지값)로 10MB 선검사 → 초과 400. `RequestSizeLimit(정확10MB)`는 멀티파트 오버헤드로 유효 10MB 파일을 413 선점하므로 의도적 미도입(주석 문서화), Kestrel 기본 ~28MB 하드백스톱. 서비스는 `using XLWorkbook(stream)` + 전체 try/catch → 파싱 예외 `Excel parsing error: {msg}` F.
-
-## Minor (비차단 — 다음 스프린트 Generator 읽기)
-- **[S-B2B-2a] Batch/ChuteNos 과길이 전용 400 테스트 부재**: `[StringLength(10)]`·`[StringLength(200)]` 속성은 존재하고 allowlist→400 경로는 BarcodeCount Range·BizDay 형식 테스트로 이미 실증됨(동일 ModelState 경로). 과길이 입력 자체를 직접 단정하는 테스트는 없음 — S-B2B-1 code-review 잔여 갭(ResultItem.ChuteNo·BoxRequest.EndTime)과 함께 후속에서 동형 테스트 추가 권고. (BizDay 는 StringLength 없으나 RegularExpression 이 길이 8/10 로 바운드 — SQL Server truncation 위험 0.)
-- **[S-B2B-2a] GenerateBarcode 랜덤 상한**: `Random.Shared.Next(1000, 9999)` 는 1000~9998(9999 미포함, 4자리 유지). 유니크 제약 없음(원본 동일·테스트 도구라 비차단). 대량 동일-ms 생성 시 이론적 충돌 가능하나 test_data.barcode 는 유니크 아님(다중 슈트 허용 설계).
+- grep(frontend/src): `JsBarcode`·`window.open`·`contextmenu`/`onContextMenu`·`onMouseEnter`/`onMouseDown`·`shiftKey`/`ctrlKey`/`metaKey`·`drag*`·`print(` **전부 0건**. A4 인쇄·로컬 JsBarcode 벤더링·드래그/Shift/Ctrl 고급선택·우클릭 컨텍스트 메뉴 **미구현 확인** = 2c 이연 준수(스코프 위반 0). 체크박스 다중선택만 구현(계약대로).
 
 ---
 
-**판정: APPROVED.** 백엔드 검증 1~4 전항 fresh evidence PASS.
-아카이브 하드삭제 0(RemoveRange=test_data 1건뿐·로그/결과 archived_at UPDATE만·COUNT 불변·스코프 한정 배치 밖 미영향)·양 provider add-only 마이그레이션(콜드스타트 스키마 archived_at∈{test_log,work_result}만·ModelSnapshot +4/-0)·6 관리 API 계약(라운드로빈 D3·ClosedXML 신구양식·3중검증 400·summary/detail 필터·숫자정렬)·무접촉(B2C·B2B-1 계약 diff 0·Program allowlist additive·builtInFactory fall-through 보존)·회귀 0(247 baseline 불변 + 신규 23 = 270 GREEN ×2)·빌드 경고 0 전부 충족.
+## 검증 시나리오 결과 (Full-stack — fresh browser evidence · Playwright)
 
-## Code Review (4-Tier Step 4.5 — S-B2B-2a)
-- **[Important·처리] #1 바코드 채번 중복** — 대량 생성 시 BC{ts}{rand4} 충돌 거의 확정. 사용자 확정=원본 중복 허용(수용) → docs/B2B-DATAGEN.md §2.1 수용 기록. (유일성 필요 시 배치 내 단조 카운터 후속.)
-- **[Important·fix] #2 엑셀 zip-bomb** — 10MB=압축크기, 팽창 OOM 가능 → 파싱 직후 행(100k)·열(64) 상한 가드 조기 F(AppConstants 상수). 테스트 1건.
-- **[Minor·todo] 대량 IN 절**(reset/delete/archive 최대 10000 파라미터 — EF9 OPENJSON/SQLite 인라인이라 실무 안전) / **detail Map O(행×로그)**(초대형 배치 메모리) / **동시 중복 delete→500**(단일 사용자 도구 저확률) / **MIME 화이트리스트에 octet-stream**(확장자+실파싱 백스톱) / **ValidationRules 이원화**(중복 아님·위치 분산). 전부 폐쇄망·원본 동일 맥락 수용.
+### (a) B2C/B2B 토글 + localStorage 유지 — PASS
+- `/`→`/monitor`(B2C 기본 랜딩·`ModeHome` 리다이렉트). 사이드바 B2C 세트(모니터링·3DS 워드·운영제어 **F3** disabled 배지)+타이틀 "실시간 모니터링"+StatusRail. 스샷 `01-b2c-monitor.png`.
+- "B2B 생성" 토글 → `/data-generator` 이동. B2B 세트(데이터 생성 + 로그/비교/박스/설정 **B2B-3** disabled 배지)+타이틀 "데이터 생성"+헤더 bizDay(native `<input type=date>`)·autoRefresh 토글·간격 Select. 스샷 `02-b2b-datagen-landing.png`.
+- **localStorage 유지**: 전체 페이지 재로드(`page.goto /`) 후 `/data-generator` 로 재랜딩(mode=b2b 복원). B2C 재토글 → `/monitor` 복귀. 스샷 `10-b2c-restored.png`.
+
+### (b) 데이터 생성 라운드로빈 (E2E-1) — PASS
+- 폼(배치 007·슈트 "1-4, 7"·개수 12) 제출 → 요약에 `2026-07-08 · 007 · 12` 노출 + 폼 리셋. 스샷 `04-generate-success-toast.png`.
+- 행 클릭 → 상세 12행. 슈트 분포 실측(DOM): 001×3·002×3·003×2·004×2·007×2 = 12 → 라운드로빈 [1,2,3,4,7] 정확 배분. 스샷 `03-detail-populated.png`.
+- **성공 토스트**: 유효 생성 시 success-tone 토스트(border-online) 렌더·message="Success"(백엔드 body.message 충실 표면화). in-page 결정적 캡처 `{appeared:true, text:"Success", isSuccessTone:true}`.
+
+### (c) ★ 아카이브 가시화 (E2E-2, 사수 요구) — PASS
+- 픽스처: 007 test_data id 1·2 에 INPUT+SORT 로그(status OK·archived_at NULL) 4건 직접 시딩.
+- active 필터: 해당 2행 투입/분류=**OK**(07-08 14:21:07) 표시(나머지 dash). 스샷 `05-archive-active-with-status.png`.
+- 요약 007 체크 → 수신 초기화 → **danger 확인 다이얼로그**(scrim·AlertTriangle·취소/초기화). 스샷 `06-confirm-dialog.png`.
+- 초기화 실행(200) → active 뷰 2행 **dash 로 사라짐**(archived 로그 제외) → `보관만`(archivedOnly) 전환 → **동일 2행 OK 재노출**(active 미노출). 스샷 `07-archivedonly-shows-reset.png`.
+- **DB 진실 대조**: test_log 007 = 4행 전부 `archived_at != NULL`(활성 0) = **하드삭제 0·소프트삭제 보존**. test_data 007 = 10행(삭제 2행은 하드삭제·등록원장). "삭제해도 보여줘" 가시화 end-to-end(frontend→API→DB→frontend) 입증.
+
+### (d) 엑셀 업로드 + 400 검증실패 error 토스트 — PASS
+- 3행 xlsx(신양식 5컬럼) 업로드 → 요약 `UPL · 3` 노출(DB UPL 3행). 스샷 `08-upload-success.png`.
+- **성공판정 `res.ok && body.status==="S"` 검증**: chuteNos="abc" 생성 제출 → HTTP **400**(network #69) → **error 토스트** message="ChuteNos may only contain digits, commas, hyphens, and spaces."(body.message 충실 표면화·200 F/400 을 실패로 표면화). in-page 결정적 캡처. 폼 미리셋(실패 시 값 유지). 스샷 `09-error-toast-400.png`·`09b`.
+
+### 회귀 0 (B2C) — PASS
+- `/monitor` 렌더·오더 테이블·StatusRail·PollIndicator 정상. `/sorters` 워드패널(D0~D6·D4 비트분해)·operation_log 라이브 테일·**"실시간 연결됨"(SignalR 허브 접속)** 정상 = useHubLifecycle 무접촉 실증. 스샷 `11-b2c-sorters-signalr.png`.
+
+### 콘솔 게이트 (BLOCKING) — PASS
+- pageerror 0 · React dev-mode warning 0 · app console.error 0. 세션 유일 error 4건 = **의도적 400** network 로그(`/api/test-data/generate`, 앱이 error 토스트로 표면화 — §7.1 sanction, JS 에러 아님). warning 0. info = React DevTools 배너뿐.
+
+---
+
+## Minor (비차단 — 다음 스프린트 Generator 참고, APPROVED 무관)
+
+1. **성공 토스트 message = 백엔드 "Success"(영문)**: `B2BApiResponse.Ok()` 기본 message 를 프론트가 그대로 표시(§7.1 "body.message 표면화" 충실). 한글 UX 일관성 관점에선 아쉬우나 백엔드 무접촉 스코프 밖(백엔드 message 개선은 후속). 프론트 폴백 `'완료되었습니다.'` 은 body.message 부재 시에만 발동.
+2. **`.claude/ports.local.json` 부재**: 포트 소스오브트루스 파일이 없음. 다만 orchestrator 가 스프린트 태스크에 5080/5173/1502 를 명시했고 vite.config·appsettings Urls 가 동 포트를 고정하며, 서버 2개를 Evaluator 가 직접 격리 기동(sibling 프로젝트 서버 접속 아님)이라 false-PASS 위험 0. 포트 정책상 orchestrator 가 파일을 생성하는 것이 정석.
+3. **`.playwright-mcp/` 미ignore**: Playwright MCP 산출 디렉터리가 프로젝트 루트에 untracked 로 생성됨(스냅샷/콘솔 로그). `screenshots/` 는 gitignore 되나 `.playwright-mcp/` 는 아님 → orchestrator 가 .gitignore 에 추가 권장(Evaluator 는 read-only 라 미수정).
+4. ToastProvider 의 `timers` Map 은 언마운트 시 일괄 clear 하지 않으나, 루트 상시 마운트라 실효 누수 0(정보성).
+
+## 스크린샷 (screenshots/S-B2B-2b_20260708-141900/ — gitignored)
+01-b2c-monitor · 02-b2b-datagen-landing · 03-detail-populated · 04-generate-success-toast ·
+05-archive-active-with-status · 06-confirm-dialog · 07-archivedonly-shows-reset ·
+08-upload-success · 09-error-toast-400 · 09b-error-toast-visible · 10-b2c-restored · 11-b2c-sorters-signalr.
+
+---
+
+## 종합 판정
+
+**Overall PASS — APPROVED.** 계약의 6개 완료조건(토글+localStorage·회귀 0·생성/관리 플로우·아카이브 필터·인쇄 게이트[2c 이연이라 N/A]·정적게이트)이 fresh evidence 로 전항 충족. Integration(res.ok && status==="S" 성공판정·200 F/400 실패 표면화·archived 파라미터·camelCase 정합)·프론트 Per-layer(Airbnb 토큰 일관·의도적 밀집 운영툴 정서·AI slop 아님)·Craft(tsc/eslint 0·콘솔 0·localStorage 화이트리스트 가드·컬럼필터 stopPropagation·AbortSignal·refetch 무효화)·Functionality(토글→생성→업로드→조회→reset→delete→아카이브 가시 전 경로) 모두 통과. 무접촉(백엔드·package·B2C lib/pages diff 0)·신규의존 0·스코프(인쇄·고급선택 미구현) 준수. Minor 4건은 비차단.
+
+## Code Review (4-Tier Step 4.5 — S-B2B-2b 프론트)
+- **[Important·fix] #1 Dialog 포커스 트랩 부재** — 파괴적 확인 모달인데 포커스 이동/트랩/복원 없어 배경 트리거 재발동 위험. 계약 명시분 → fix(포커스 트랩+복원).
+- **[fix 동봉] #2 onCancel useCallback 안정화 / #4 error 토스트 role=alert / #6 barcodeCount 클라 상한.**
+- **[Minor·todo] #3 ModeToggle tab 시맨틱 오용**(tabpanel 없음 → aria-pressed/nav+aria-current 권장) / **#5 includes·FilterCell 중복**(공용 추출) / **#7 bizDay 정규식 형식만(달력검증 아님 — native date+백엔드 400이 백스톱)** / **#8 body 스크롤잠금 대상이 main 실스크롤과 어긋남**(경미).
+- 보안(XSS) 0·크래시 0 — dangerouslySetInnerHTML 전무, 사용자입력 JSX 이스케이프, 엑셀 FormData 서버전송만.
+
+---
+
+## FIX ITER 2 재검증 (code-review 갭 #1·#2·#4·#6) — PASS · APPROVED 유지
+
+Evaluator delta 재검증, 2026-07-08 (read-only). 프론트 4파일만 변경(dialog.tsx·DataGeneratorPage.tsx·ToastProvider.tsx·GenerateForm.tsx). 핸드오프: `sprint-log.md` `## FIX ITER 2 (Dialog 포커스 트랩 + 접근성/UX 저비용)`. 최상단 S-B2B-2b APPROVED 보존.
+
+### 정적·무접촉·회귀 (fresh)
+- `npx tsc --noEmit` 0 · `npx eslint .` 0. 백엔드 `dotnet test` **271/271 GREEN 불변**(14s).
+- `git diff HEAD` — 백엔드·frontend/package.json·package-lock.json **0줄**(신규 npm 의존 0). 기존 B2C(/monitor·/sorters·lib/api) diff 0. 프론트 = App/Layout/main 수정 + 10신규 additive(fix-iter2 는 그중 4파일만 재수정).
+
+### #1 포커스 트랩(브라우저·핵심) — PASS
+- (a) danger 다이얼로그(수신 초기화) 오픈 시 초기 포커스 = **"취소"(첫 포커서블·파괴적 액션 안전 기본), inside dialog=true**.
+- (b) **Tab → "초기화"(마지막) → Tab wrap "취소"(첫) → Shift+Tab wrap "초기화"(마지막)** — 실 키 입력(Playwright keyboard), 매 스텝 `dialog.contains(activeElement)=true`. **양방향 트랩·배경 유출 0**. 스샷 `fixiter2/01-focus-trap-open.png`(초기화 포커스링 가시).
+- (c) **Esc → 다이얼로그 닫힘 + 포커스 복원 = 트리거 "수신 초기화 (1)"**(BUTTON). 확인(초기화) 클릭 경로 → 리셋 성공으로 트리거 disabled → **포커스 = `<main>`(tabindex=-1) 폴백**(body 유실 0·배경 재발동 차단). 스샷 `fixiter2/02-focus-restore-after-confirm.png`.
+- cleanup: `useEffect([open, onClose])` return 에서 keydown 리스너 해제·overflow 복원·포커스 복원 — onClose 안정화로 언마운트/재실행 churn 없음(아래 #2). 코드 판독 확인.
+
+### #2 onClose 안정화(effect churn 제거) — PASS
+- `ConfirmDialog.handleClose = useCallback(…, [onCancel])` + `busyRef`(busy 를 deps 밖으로) → busy 토글이 handleClose 재생성 안 함. `DataGeneratorPage.closePending = useCallback(() => setPending(null), [])` 안정 참조로 `onCancel` 전달. Dialog effect deps `[open, onClose]` 가 open 변화에만 재실행(매 렌더 churn 제거). busy 중 Escape/백드롭 닫기 무시(busyRef 가드) — 기존 busy 잠금 보존. 코드 판독 + 런타임(트랩 정상 동작)으로 확인.
+
+### #4 토스트 톤별 role — PASS(런타임)
+- error 토스트(생성 400) → **`role="alert"` / `aria-live="assertive"`**, text="ChuteNos may only contain digits, commas, hyphens, and spaces.".
+- warning 토스트(#6) → **`role="status"` / `aria-live="polite"`**. MutationObserver 대신 노드 폴링으로 결정적 캡처.
+
+### #6 count>10000 사전 차단 + noValidate — PASS(런타임)
+- barcodeCount=20000 제출 → 경고 토스트 `role=status/polite` "바코드 개수는 10000 이하여야 합니다." + **`/generate` 네트워크 미발화(generateNetworkFired:false, genBefore=genAfter=0)** — 서버 400 왕복 전 클라 차단. `<form noValidate>` 로 네이티브 말풍선 대신 앱 토스트 일원화(코드 확인, min/max 스피너 힌트 유지).
+
+### 콘솔·B2C 회귀 — PASS
+- pageerror 0 · React dev-mode warning 0 · app console.error 0. 세션 유일 error 1건 = 의도적 400 network 로그(#4 error-tone 테스트, §7.1 sanction). #6 은 network 미발화라 무에러.
+- B2C 회귀 0: `/sorters` h1="3DS 워드값" · 워드패널(C_CellNo~TgtFloor·D4 비트) · **SignalR "실시간 연결됨"=true**(useHubLifecycle 무접촉 실증) · B2C 세트(모니터링·3DS 워드·운영제어 F3). fix-iter2 는 Layout 미접촉이라 자연 보존. 스샷 `fixiter2/03-b2c-sorters-regression.png`.
+
+### 정리
+- dev서버·백엔드 종료 · 포트 5080/5173/1502 free · 격리 SQLite(scratchpad·현장 DB 무접촉·IF-09/10 트리거 0) · 스샷 `screenshots/S-B2B-2b_fixiter2_20260708-151200/`(gitignored). 커밋/수정/fix 0.
+
+**FIX ITER 2 재검증 결과: 4개 갭(#1 포커스 트랩·#2 onClose 안정화·#4 토스트 role·#6 count 상한) 전부 fresh evidence PASS. S-B2B-2b APPROVED 유지.**

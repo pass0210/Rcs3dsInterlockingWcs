@@ -2622,3 +2622,112 @@ Wcs.Api.csproj +2 / EntitiesB2B.cs +8 / WcsDbContext.cs +4 / ModelSnapshot(SqlSe
 - 빌드: `오류 0개` · 신규 경고 0(distinct = NU1903 pre-existing only).
 - 전체: `통과! 실패: 0, 통과: 271, 건너뜀: 0, 전체: 271` (직전 270 + zip-bomb 가드 1건).
 - 오펀 프로세스 0 · 포트 free. 커밋 금지(orchestrator 병합).
+
+---
+
+## IMPLEMENTATION COMPLETE (B2B-2b)
+
+> S-B2B-2b — 프론트 전용 슬라이스(B2C/B2B UI 토글 + /data-generator 페이지 + 아카이브 필터). Generator.
+> Branch feat/b2b-2b-datagen-frontend. 백엔드·package.json·package-lock 무접촉(신규 의존 0). 커밋 금지(orchestrator 병합).
+
+### 변경 요약
+
+**토글 + 전역 상태 (Context+localStorage)**
+- `frontend/src/lib/uiMode.ts` (신규): `UiModeContext`·`useUiMode`·타입·`REFRESH_INTERVALS`·`todayBizDay`·`loadUiModeState`(화이트리스트 가드)·`saveUiModeState`·`homePathFor`. mode('b2c'|'b2b')+bizDay('YYYY-MM-DD')+autoRefresh+refreshInterval. localStorage 키 `wcs.ui`, 손상값 필드별 폴백(파싱 실패/타입손상/범위이탈 → 기본값, 앱 크래시 0).
+- `frontend/src/components/UiModeProvider.tsx` (신규): Provider(lazy init 복원 + 변경 시 영속화).
+- `frontend/src/main.tsx` (수정): `QueryClientProvider > UiModeProvider > ToastProvider > BrowserRouter > App`. 기존 QueryClient 옵션 무변경.
+- `frontend/src/components/Layout.tsx` (수정): 하드코딩 NAV → **모드별 2세트**(NAV_SETS b2c/b2b), 동적 헤더 타이틀(활성 경로 매칭), 사이드바 **B2C/B2B 세그먼트 토글**(전환 시 homePathFor로 이동), **B2B 헤더 컨트롤**(native `<input type=date>` bizDay + autoRefresh 토글 + 간격 Select). B2C=StatusRail 유지. `useHubLifecycle()`·PollIndicator 상시 유지(기존 B2C 동작 무접촉). disabled+phase 배지 패턴 재사용(F3 / B2B-3).
+- `frontend/src/App.tsx` (수정): `/data-generator` 라우트 추가. `/`·`*` → `<ModeHome>`(활성 모드 기본 경로 리다이렉트: b2c→/monitor, b2b→/data-generator). 기존 /monitor·/sorters 보존.
+
+**/data-generator 페이지 (신규)**
+- `frontend/src/pages/DataGeneratorPage.tsx`: 3분할(좌 생성폼/업로드 · 중 요약 · 우 상세) 오케스트레이션. 요약체크(Set<string>)·상세체크(Set<number>)·선택배치·아카이브필터·ConfirmDialog pending·busy 상태. 수신초기화(요약체크 배치 상세 `Promise.all` 조회→id 취합→POST /reset, 확인 다이얼로그)·삭제(상세체크 ids→DELETE, 확인 다이얼로그). 성공 시 summary+detail invalidate.
+- `frontend/src/pages/sections/GenerateForm.tsx`: 생성폼(bizDay 읽기전용 표시·배치·슈트범위 힌트·바코드개수·Enter 제출·미입력 경고 토스트·성공 시 요약 리로드+폼 리셋) + 엑셀 업로드(accept=.xlsx,.xls·multipart file·성공/실패 토스트·리셋).
+- `frontend/src/pages/sections/SummaryGrid.tsx`: 요약 그리드(날짜·배치·수량·수신시간, 컬럼 텍스트필터·행 체크박스·행 클릭 시 상세 로드+선택 초기화·전체선택). FilterCell export(공용).
+- `frontend/src/pages/sections/DetailGrid.tsx`: 상세 그리드(바코드·슈트·투입상태·투입시간·분류상태·분류시간, 컬럼 필터·체크박스 다중선택·전체선택·빈/로딩/에러/미선택 상태).
+
+**lib/api test-data 클라이언트 (신규 · 기존 /api/monitor 무접촉)**
+- `frontend/src/lib/testData.ts`: BASE `/api/test-data`. **성공 판정 = res.ok && body.status==="S"**(200 F·400 → 실패 Outcome + body.message). generate·summary·detail(archived)·reset·remove(DELETE)·upload(multipart, Content-Type 미지정=브라우저 boundary). camelCase 타입 미러. 조회는 throw(TanStack Query 에러 표면화)+AbortSignal. useTestDataSummary·useTestDataDetail 훅(refetchInterval=autoRefresh 제어). summaryKey(NUL 구분 (bizDay,batch)).
+
+**최소 신규 infra**
+- `frontend/src/lib/toast.ts` + `frontend/src/components/ToastProvider.tsx` (신규): 비차단 토스트(success/error/warning/info, 자동소멸 4.5s·수동닫기·portal). 원본 UiContext 개념 재현.
+- `frontend/src/components/ui/dialog.tsx` (신규): shadcn-style Dialog(portal·scrim·Escape·백드롭 클릭·body 스크롤락) + ConfirmDialog(danger·busy 잠금). radix 미의존(자작).
+- native `<input type="date">`(bizDay)·jsbarcode 미도입. 신규 의존 0.
+
+### 정적 게이트 (raw)
+
+    $ npx tsc --noEmit
+    tsc_exit=0
+    $ npx eslint .
+    eslint_exit=0
+
+- tsc `--noEmit` 0 · eslint `.` 0(경고 0). React dev-mode warning 0.
+
+### 브라우저 검증 (Playwright · 실 백엔드 + vite dev)
+
+- 구동: 백엔드 `dotnet run --project backend/src/Wcs.Api` — **격리 스크래치 SQLite**(env override `Database__Provider=Sqlite`·`ConnectionStrings__WcsDb=<scratchpad>/wcs-b2b2b.db`·`SeedOnStartup=false`·`Sorters__0__Transport=Tcp`·Production) → **현장 SqlServer·COM1 실 PLC 무접촉**. IF-09/10 트리거 0(test-data DB API만). 소터 0대(빈 DB) OFFLINE로 정상 기동. vite dev :5173 proxy→:5080.
+- (a) **토글→메뉴 전환**: `/`→`/monitor`(B2C 기본). B2C 세트(모니터링·3DS 워드·운영제어 F3 배지)+타이틀 "실시간 모니터링"+StatusRail. B2B 토글 시 `/data-generator`로 이동, B2B 세트(데이터 생성 + 로그/비교/박스/설정 B2B-3 배지)+타이틀 "데이터 생성"+bizDay·autoRefresh 컨트롤. localStorage 유지(reload 후 `/`→`/data-generator`) 확인. B2C 재토글 시 `/monitor` 복귀(회귀 0).
+- (b) **생성→요약/상세**: 폼(배치 007·슈트 "1-4, 7"·개수 12) 제출 → success 토스트 + 요약에 007(12) 노출 → 행 클릭 → 상세 12행 라운드로빈(001×3·002×3·003×2·004×2·007×2) 반영. 검증 실패(슈트 "abc") → 400 → **error 토스트**(body.message "ChuteNos may only contain digits...") 표면화. 엑셀 업로드(3행 xlsx) → success 토스트 "3건 업로드 완료" + 요약 UPL 노출.
+- (c) **삭제/초기화→아카이브 필터(사수 요구)**: 007에 활성 INPUT/SORT 로그 픽스처 시딩 후 → active 뷰에서 해당 2행 투입/분류=OK 표시 → 요약 007 체크 → 수신 초기화(확인 다이얼로그) → **active 뷰에서 상태 사라짐(—)** → 아카이브 필터 `보관만` 전환 → **동일 2행이 archived 상태(OK/시각)로 재노출**(active 미노출·archivedOnly만). 상세 2행 체크 → 삭제(확인 다이얼로그) → 상세 12→10행(삭제분 제거). 
+- (d) **엑셀 업로드**: 위 (b)에 포함(3건 업로드 완료).
+- **콘솔**: pageerror 0 · React dev-mode warning 0 · app console.error 0. 유일 error 2건 = 의도적 400(`Failed to load resource: 400 /api/test-data/generate`) — 앱이 실패 토스트로 표면화하는 브라우저 네트워크 상태 로그(§7.1 sanction, JS 에러 아님). info = React DevTools 배너뿐.
+- **회귀**: /monitor·/sorters 렌더·라우팅·SignalR lifecycle·PollIndicator 보존. 백엔드 diff 0(파일 무변경).
+
+### 스크린샷 (screenshots/ — gitignored)
+
+- `screenshots/S-B2B-2b/01-b2c-monitor.png` — B2C 기본 진입(모니터링).
+- `screenshots/S-B2B-2b/02-b2b-datagen-landing.png` — B2B 토글 후 3분할 페이지.
+- `screenshots/S-B2B-2b/03-detail-populated.png` — 요약 행 클릭 → 상세 라운드로빈.
+- `screenshots/S-B2B-2b/04-generate-success-toast.png` — 생성 성공 토스트 + 요약 갱신.
+- `screenshots/S-B2B-2b/05-archive-active-with-status.png` — active 뷰(투입/분류 OK 표시).
+- `screenshots/S-B2B-2b/06-confirm-dialog.png` — 수신 초기화 확인 다이얼로그(danger).
+- `screenshots/S-B2B-2b/07-archivedonly-shows-reset.png` — 초기화 후 보관만에서 아카이브분 재노출.
+- `screenshots/S-B2B-2b/08-upload-success.png` — 엑셀 업로드 성공("3건 업로드 완료").
+- `screenshots/S-B2B-2b/09-error-toast-400.png` — 400 검증 실패 → error 토스트.
+- `screenshots/S-B2B-2b/10-b2c-restored.png` — B2C 재토글 회귀 확인.
+
+### 정리
+
+- dev 서버·백엔드 종료 · 포트 5080/5173/1502 free 확인. 잔여 dotnet/node는 IDE(C# Dev Kit)·vstest뿐(내 프로세스 아님·무접촉).
+- 스크래치 SQLite DB는 scratchpad(gitignored temp) — 현장 DB 무접촉. 커밋 금지(orchestrator=Evaluator).
+
+---
+
+## FIX ITER 2 (Dialog 포커스 트랩 + 접근성/UX 저비용)
+
+> 코드리뷰 갭 대응. Branch feat/b2b-2b-datagen-frontend. 백엔드·package.json 무접촉·신규 의존 0. 커밋 금지.
+> 손대지 않음(sprint-feedback todo 등재분): #3 ModeToggle tab 시맨틱 · #5 includes/FilterCell 중복추출 · #7 bizDay 달력검증 · #8 body 스크롤잠금 대상.
+
+### 변경 파일 (4)
+
+- **`frontend/src/components/ui/dialog.tsx`** — #1(필수) 포커스 트랩 + #2 onClose 안정화.
+  - open 시 다이얼로그 내 첫 포커서블(ConfirmDialog=취소 버튼, 파괴적 액션 안전 기본)로 focus 이동. 활성 버튼 부재(busy) 시 카드 컨테이너(tabIndex=-1) 폴백.
+  - Tab/Shift+Tab 포커스 트랩 — 경계에서 반대편 순환, 배경 유출 차단(FOCUSABLE 셀렉터로 포커서블 열거).
+  - 닫힐 때 트리거(직전 activeElement)로 복원. **단, 파괴적 확인 성공 시 트리거가 선택 해제로 disabled 되면 focus() no-op → body 유실이므로 그 경우 `main`(tabindex=-1)로 복원**(a11y — 포커스 유실/배경 재발동 차단).
+  - ConfirmDialog: `busy ? ()=>{} : onCancel`(매 렌더 새 함수) → `useCallback(handleClose, [onCancel])` + busyRef 로 **안정 onClose** → Dialog effect(keydown/overflow/focus) 재실행 churn 제거. busy 중 Escape/백드롭 닫기 무시.
+- **`frontend/src/pages/DataGeneratorPage.tsx`** — #2: `onCancel={() => setPending(null)}` → `const closePending = useCallback(() => setPending(null), [])` 로 안정화(Dialog effect churn 제거).
+- **`frontend/src/components/ToastProvider.tsx`** — #4: 토스트 톤별 role 분기 — error `role="alert"`/`aria-live="assertive"`, 그 외 `role="status"`/`aria-live="polite"`.
+- **`frontend/src/pages/sections/GenerateForm.tsx`** — #6: `count > 10000` 제출 전 경고 토스트(서버 400 왕복 전 차단). + `<form noValidate>` 추가 — 브라우저 네이티브 검증 말풍선(input `max`)이 onSubmit·앱 토스트를 선점하지 않게 검증을 앱 토스트로 일원화(min/max 는 스피너 힌트로 유지).
+
+### 정적 게이트 (raw)
+
+    $ npx tsc --noEmit
+    tsc_exit=0
+    $ npx eslint .
+    eslint_exit=0
+
+### 브라우저 검증 (Playwright · 격리 SQLite/Tcp — 현장 SqlServer·COM1 무접촉, IF-09/10 트리거 0)
+
+- **#1 포커스 트랩(danger 다이얼로그 = 수신 초기화)**:
+  - (a) 트리거(수신 초기화, data-trigger 마킹) 포커스 → Enter 로 오픈 → `focusInsideDialog:true`, activeText="취소"(첫 포커서블). 
+  - (b) Tab → "초기화"(마지막), Tab → "취소"(wrap), Shift+Tab → "초기화"(wrap back) — **양방향 전부 inside:true**(배경 유출 0).
+  - (c) Esc → `dialogClosed:true` + `focusRestoredToTrigger:true`(activeText="수신 초기화 (1)"). 확인(초기화) 클릭 경로 → 트리거가 선택 해제로 disabled → `focusOnBody:false, focusOnMain:true`(main tabindex=-1) — 포커스 유실 없이 main 복원.
+  - 스크린샷: `screenshots/S-B2B-2b/11-focus-trap-open.png`(오픈·취소 포커스) · `12-focus-restore-after-confirm.png`.
+- **#4 토스트 role**: error 토스트(생성 400) → `role="alert"`/`aria-live="assertive"`(text=서버 message "ChuteNos may only contain digits..."). 경고 토스트 → `role="status"`/`aria-live="polite"`. (MutationObserver 로 노드 추가 시점 캡처 — 토스트 4.5s 자동소멸 특성상 즉시 관측.)
+- **#6 count 상한**: barcodeCount=20000 제출 → 경고 토스트 `role="status"`/`polite` "바코드 개수는 10000 이하여야 합니다." + **`networkFired:false`**(/generate 미호출 — 서버 400 왕복 전 차단). `noValidate` 로 네이티브 말풍선 대신 앱 토스트 표출(스크린샷 13 = 네이티브 말풍선 부재 확인).
+  - 스크린샷: `screenshots/S-B2B-2b/13-warning-toast-count-cap.png`.
+- **콘솔**: pageerror 0 · React warning 0 · app console.error 0. 유일 error = 의도적 400 네트워크 로그(§7.1 sanction).
+- **회귀**: 생성/조회/reset(확인 다이얼로그)/delete 정상. B2C /monitor·/sorters 무접촉.
+
+### 정리
+
+- dev 서버·백엔드 종료 · 포트 5080/5173/1502 free. .playwright-mcp 임시산출물·업로드 픽스처 정리. 격리 SQLite(scratchpad) — 현장 DB 무접촉. 커밋 금지(orchestrator=Evaluator).
