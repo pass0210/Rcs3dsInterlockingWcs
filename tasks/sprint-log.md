@@ -2531,3 +2531,94 @@ Evaluator가 #1 동일 클래스(문자열 길이 미검증 → SQL Server 500·
 - S5 flake(pre-existing·부하유발·핸드셰이크 코드 0접촉·별도 todo)는 본 iter 무관 — 미착수(scope 밖 준수).
 
 ── Evaluator 재검증 대기(#1 완결·전수 커버·무접촉). ──
+
+## IMPLEMENTATION COMPLETE (B2B-2a) — test-data 관리 API + 기록 아카이브 (백엔드)
+
+> Generator · 2026-07-08 · Branch feat/b2b-2-datagen-toggle (미커밋 — orchestrator 병합)
+> 근거: docs/B2B-DATAGEN.md §1~3 · sprint-contract.md S-B2B-2a 사용자 확정 블록.
+
+### 변경 요약 (WHAT)
+1. **archived_at 소프트삭제 컬럼** — `Wcs.Data.B2B.TestLog`·`WorkResult`에 `DateTime? ArchivedAt`(`archived_at`
+   nullable) 추가 + `WcsDbContext` 매핑 2건. **test_data·box·box_item·api_call_log 무접촉**.
+2. **add-only ALTER 마이그레이션 2개**(provider별):
+   - `Wcs.Migrations.Sqlite/…_AddB2BArchivedAt`(TEXT NULL) · `Wcs.Migrations.SqlServer/…_AddB2BArchivedAt`(datetime2 NULL).
+   - 각각 `AddColumn(archived_at)` ×2(test_log·work_result)만. 기존 17 B2C·B2B 다른 5테이블 ALTER 0.
+   - ModelSnapshot diff = 각 +8줄(archived_at 프로퍼티 블록 2개)만·기존 엔트리 재정렬 0.
+3. **TestDataService**(신규, Scoped) — generate(라운드로빈)·upload(ClosedXML 신/구양식)·summary·detail(아카이브
+   필터 active|all|archivedOnly)·reset·delete. **아카이브 스코프 = 선택 (BizDay,Batch,Barcode) 집합 + test_log는
+   TestDataId** — 하드삭제 0(archived_at UPDATE만). RemoveRange 는 test_data(등록 원장·delete)에만.
+   - AppUtils: `ParseChuteNos`("1-5,8" 전개·중복제거·정렬)·`GenerateBarcode`(BC{ts}{rand4}) 추가(단일 소스).
+   - AppConstants: `TestDataRoutePrefix`·`UploadMaxBytes(10MB)`·`BarcodeCountMax(10000)` 추가.
+   - FailMessages: 생성/업로드 message 정본 12건 추가(§1.2·§2).
+4. **TestDataController**([Route("api/test-data")]) — generate·summary·detail·reset·delete·upload 6엔드포인트.
+   업로드 3중 검증(파일/크기/확장자·MIME) 400 + B2BApiResponse. GenerateRequest DTO 문자열 [StringLength] 전수.
+5. **Program.cs** — `AddScoped<ITestDataService,TestDataService>()` append + InvalidModelStateResponseFactory
+   allowlist에 `/api/test-data` **additive**(OR — /api/v1/works·B2C ProblemDetails 분기 불변).
+6. **Wcs.Api.csproj** — `ClosedXML 0.104.2` 추가(신규 경고 0 확인).
+
+### 무접촉 diff (numstat — 전부 additive)
+```
+AppConstants.cs +10 / AppUtils.cs +49 / FailMessages.cs +30 / Program.cs +9 -2(if 리팩터·works 분기 보존) /
+Wcs.Api.csproj +2 / EntitiesB2B.cs +8 / WcsDbContext.cs +4 / ModelSnapshot(SqlServer) +8 / ModelSnapshot(Sqlite) +8
+= 126 insertions, 2 deletions.
+신규파일: TestDataDtos.cs · TestDataService.cs · Controllers/B2B/TestDataController.cs · 마이그레이션 4개 · 테스트 2개.
+기존 B2C 17테이블·Entities.cs·기존 컨트롤러/라우트·B2B-1 RCS 5 API·기존 마이그레이션 = diff 0.
+```
+
+### 아카이브 하드삭제 0 실증
+- `grep RemoveRange TestDataService.cs` → 실호출 1건(L289) = `_db.B2bTestData.RemoveRange`(등록 원장·delete만).
+  test_log/work_result 에는 RemoveRange/DELETE 0(주석 L16·L318만). archived_at = UPDATE만.
+- 테스트 단정(서비스 `Reset_..._NoHardDelete`·`Delete_...ArchivesLogsAndResults`·`Delete_ScopeLimited_...`,
+  API `Reset_Api_...`·`Delete_Api_...`):
+  (a) reset/delete 후 test_log·work_result COUNT 불변(DB 잔존) (b) archived_at != null 세팅
+  (c) detail?archived=archivedOnly 노출 · (d) archived=active 미노출 (e) 다른 배치 동일 barcode 미영향(archived_at null).
+
+### 마이그레이션 up 검증 (양 provider)
+- SQLite: fresh DB `dotnet ef database update` 전체 체인 적용(Initial→AddOperationLog→AddB2BTables→AddB2BArchivedAt)
+  → `Done`. PRAGMA table_info: archived_at ∈ {test_log, work_result}, ∉ {test_data, box}.
+- SqlServer: `dotnet ef migrations script AddB2BTables AddB2BArchivedAt` →
+  `ALTER TABLE [work_result] ADD [archived_at] datetime2 NULL;` · `ALTER TABLE [test_log] ADD [archived_at] datetime2 NULL;`
+  (add-only 2건 · DROP/기타 테이블 0).
+
+### 테스트 결과 (raw)
+- baseline(착수): `통과! 실패: 0, 통과: 247, 건너뜀: 0, 전체: 247`.
+- B2B 필터: `통과! 실패: 0, 통과: 60`(기존 37 + 신규 23).
+- 최종 전체: `통과! 실패: 0, 통과: 270, 건너뜀: 0, 전체: 270` (247 불변 + 신규 23 GREEN).
+- 빌드: `오류 0개` · 신규 경고 0(distinct warning = NU1903 20건 = pre-existing 10 중복출력, baseline과 동일).
+- 오펀 프로세스 0(Wcs.Sim3ds/Wcs.Api none) · 포트 5080/1502 free.
+
+### 신규 테스트 (23건)
+- TestDataServiceTests(13): 라운드로빈 배분·범위파싱 중복제거·빈슈트 F·개수0 F · 신양식5컬럼·구양식4컬럼헤더리스·
+  빈barcode skip·빈시트 · summary 그룹핑/MAX/desc · detail 정렬/로그매핑 · **reset 아카이브·delete 아카이브·스코프 한정**.
+- TestDataApiTests(10): generate 라운드트립(summary/detail)·빈슈트 200F·Range 400·bizDay형식 400 ·
+  upload happy/빈파일/확장자/MIME · **reset·delete API 아카이브(하드삭제 0)**.
+
+── Evaluator 재검증 대기(백엔드 2a 완결·무접촉·아카이브 하드삭제 0 실증). 프론트(2b)는 별도 스프린트. ──
+
+## FIX (코드리뷰 후속: zip-bomb 가드 + 바코드 수용기록)
+
+> Generator · 2026-07-08 · Branch feat/b2b-2-datagen-toggle (미커밋). 사용자 결정 2건 반영 — 좁은 fix만.
+
+### #2 (가드 추가) 엑셀 업로드 zip-bomb/대용량 방어 — 코드
+- `TestDataService.UploadExcelAsync`: `new XLWorkbook(stream)` 파싱 직후 `RangeUsed()` null 체크 뒤,
+  `used.RowCount() > UploadMaxRows(100000) || used.ColumnCount() > UploadMaxColumns(64)`면 행 순회 **전**
+  조기 F `Excel file is too large.` 반환. RowCount/ColumnCount 는 used 범위 경계 산술(O(1)) — 팽창 폭주 차단.
+- `AppConstants`: `UploadMaxRows=100_000`·`UploadMaxColumns=64` 추가(하드코딩 금지·절대규칙 #7).
+- `FailMessages`: `ExcelTooLarge = "Excel file is too large."` 추가.
+- 파싱-실패 계열(§2.2)과 동일하게 서비스 F(컨트롤러 Ok→200+F)로 반환 — ExcelNoData/NoValidDataToUpload 형제 규칙과 일치.
+  (진짜 400 은 컨트롤러가 워크북을 열지 않아 불가 — 서비스 계층 F 가 이식 아키텍처상 정합. 계약 message는 "too large" F.)
+- 신규 테스트 1건: `Upload_ExceedsColumnLimit_TooLarge` — 65열 사용 → F `Excel file is too large.` + INSERT 0(조기 차단).
+
+### #1 (수용 기록) 바코드 채번 중복 허용 — 문서만(코드 0)
+- `docs/B2B-DATAGEN.md §2.1`에 수용 기록 1블록 추가: `BC{ts}{rand4}` 원본 동일·유니크 제약 없음, 대량 생성 시
+  밀리초·랜덤버킷 충돌로 중복 가능하나 **중복 허용 수용(사용자 확정 2026-07-08)**, 유일성 필요 시 배치 내 단조
+  카운터 접미 후속 개선. + `§2.2`에 zip-bomb 가드 알고리즘 반영 1줄(문서 truthful 유지).
+
+### 무접촉 유지
+- 아카이브·계약·그 외 로직 무변경. 기존 B2C·B2B-1 무접촉. 변경 = AppConstants(+6)·FailMessages(+2)·
+  TestDataService(업로드 가드 +5)·TestDataServiceTests(+1 테스트)·docs/B2B-DATAGEN.md(수용기록+가드주석).
+
+### 테스트 결과 (raw)
+- 빌드: `오류 0개` · 신규 경고 0(distinct = NU1903 pre-existing only).
+- 전체: `통과! 실패: 0, 통과: 271, 건너뜀: 0, 전체: 271` (직전 270 + zip-bomb 가드 1건).
+- 오펀 프로세스 0 · 포트 free. 커밋 금지(orchestrator 병합).

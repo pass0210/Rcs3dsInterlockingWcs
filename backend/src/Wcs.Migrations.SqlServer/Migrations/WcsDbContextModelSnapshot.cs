@@ -316,6 +316,10 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2")
+                        .HasColumnName("archived_at");
+
                     b.Property<string>("Barcode")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -400,6 +404,10 @@ namespace Wcs.Migrations.SqlServer.Migrations
                         .HasColumnName("id");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2")
+                        .HasColumnName("archived_at");
 
                     b.Property<string>("Barcode")
                         .IsRequired()
