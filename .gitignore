@@ -21,3 +21,6 @@ backend/src/Wcs.Api/wwwroot/
 screenshots/
 tasks/evidence/
 .claude/
+
+# Playwright MCP 세션 잔여물
+.playwright-mcp/
