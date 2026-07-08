@@ -58,3 +58,7 @@
 ## S-RCS-IF-REDESIGN P2 후속(코드리뷰 MINOR — 비차단)
 - [ ] [P2] 슈트(CHUTE) 복구 재푸시 비대칭 — 관찰 타이머가 SORTER_3D만 재평가. RCS 다운으로 슈트 푸시 실패 시 다음 슈트 이벤트(예약/투입/비움) 전까지 stale(상태오염 0·확정3 "다음 전이 시"는 충족, "복구 감지 시"는 미충족). 한산한 슈트 장시간 stale 가능. → 슈트도 주기 재평가 또는 RCS 헬스 복구 시 전 목적지 재펌프(하트비트 결정과 함께 후속).
 - [ ] [P2] teardown 중 disposed-CTS 접근 spurious error 로그 — DisposeAsync의 _cts.Dispose 후 lingering PumpAsync가 _cts.Token 접근 시 ObjectDisposedException→generic catch LogError(크래시·hang·미관찰예외 0·종료 클린). token 취득을 _stopped 가드로 감싸 조용히 종료 분기 권고.
+
+## S-B2B-1 후속(Evaluator 재검증 — 비차단)
+- [ ] [S-B2B-1][pre-existing flake·별도 이관] 핸드셰이크 S5 타이밍 테스트군(`HandshakeResidueTests.S5_ResidueClearNotReflected_TerminalTimeout_NoCWritten`·`S5RSeqMismatchTests.S5_RSeqMismatch_*`)이 전체 스위트/핸드셰이크군 병렬 실행 시 저빈도(~1/8~1/10) flake. **B2B 무관 확정**: B2B 0개 로드한 핸드셰이크군 단독 필터에서도 재현·단일 테스트 격리 시 8/8 GREEN. 실 Sim 소켓/타이밍 경합(s9-flake-under-e2e-load·e2e-parallel-load-surfaces-integration-flakes 동류). S9(ScenarioTests) 안정화 패턴(WaitUntilStableCount / 안정-관찰)을 이 두 테스트에도 적용 검토. 수정 대상=테스트 전용·production 0.
+- [ ] [S-B2B-1][#1 잔여 SQL Server 500 갭] `ResultItem.ChuteNo`(→`work_result.chute_no nvarchar(20)`)·`BoxRequest.EndTime`(→`box.end_time nvarchar(50)`)에 `[StringLength(20)]`/`[StringLength(50)]` 미부여 → 과길이 입력이 SQL Server truncation 500(SQLite 더블 은폐). FIX ITER 2가 닫은 barcode/batch/boxNo와 동일 클래스. StringLength 2건 + 과길이 400 테스트 2건 추가로 원천 완전 해소 권고.
