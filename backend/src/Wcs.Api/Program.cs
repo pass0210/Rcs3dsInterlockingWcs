@@ -62,8 +62,10 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options 
     var builtInFactory = options.InvalidModelStateResponseFactory;
     options.InvalidModelStateResponseFactory = context =>
     {
-        if (context.HttpContext.Request.Path.StartsWithSegments(
-                Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase))
+        // S-B2B-2a: allowlist 에 /api/test-data 추가(additive) — /api/v1/works· B2C ProblemDetails 불변.
+        var path = context.HttpContext.Request.Path;
+        if (path.StartsWithSegments(Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase)
+         || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase))
         {
             var firstError = context.ModelState
                 .Where(kv => kv.Value is not null && kv.Value.Errors.Count > 0)
@@ -210,6 +212,9 @@ builder.Services.AddScoped<Wcs.Api.B2B.IWorkService, Wcs.Api.B2B.WorkService>();
 builder.Services.AddScoped<Wcs.Api.B2B.IBoxService,  Wcs.Api.B2B.BoxService>();
 builder.Services.AddSingleton<Wcs.Api.B2B.ApiCallLogQueue>();
 builder.Services.AddHostedService<Wcs.Api.B2B.ApiCallLogBackgroundWriter>();
+
+// ── S-B2B-2a: test-data 관리 서비스(수동생성·엑셀·조회·초기화·삭제+아카이브) — additive ──
+builder.Services.AddScoped<Wcs.Api.B2B.ITestDataService, Wcs.Api.B2B.TestDataService>();
 
 var app = builder.Build();
 

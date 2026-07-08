@@ -8,6 +8,8 @@
     <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.4" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <!-- S-B2B-2a: test-data 엑셀 업로드 파싱(신/구양식 자동판별). 원본 BowooTestBatchSystem_v2 검증 라이브러리. -->
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />

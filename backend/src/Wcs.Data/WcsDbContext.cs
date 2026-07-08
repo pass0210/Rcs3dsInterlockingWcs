@@ -712,6 +712,8 @@ public class WcsDbContext : DbContext
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
             // test_data_id: FK 없이 인덱스만(원본 동일 · 1785 회피 · 이력 불변 · 사용자 확정 Q3).
             e.Property(x => x.TestDataId).HasColumnName("test_data_id").IsRequired(false);
+            // S-B2B-2a: archived_at 소프트삭제 — add-only nullable(기존 컬럼·인덱스 무변경).
+            e.Property(x => x.ArchivedAt).HasColumnName("archived_at").IsRequired(false);
 
             e.HasIndex(x => x.Barcode).HasDatabaseName("IX_test_log_barcode");
             e.HasIndex(x => x.LogType).HasDatabaseName("IX_test_log_log_type");
@@ -735,6 +737,8 @@ public class WcsDbContext : DbContext
             e.Property(x => x.Barcode).HasColumnName("barcode").HasMaxLength(50).IsRequired();
             e.Property(x => x.ChuteNo).HasColumnName("chute_no").HasMaxLength(20).IsRequired(false);
             e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
+            // S-B2B-2a: archived_at 소프트삭제 — add-only nullable(기존 컬럼·인덱스 무변경).
+            e.Property(x => x.ArchivedAt).HasColumnName("archived_at").IsRequired(false);
 
             e.HasIndex(x => new { x.BizDay, x.Batch }).HasDatabaseName("IX_work_result_biz_day_batch");
         });

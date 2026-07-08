@@ -49,6 +49,11 @@ public sealed class TestLog
     public DateTime? LogTime     { get; set; }   // inTime/sortTime 파싱값(파싱 실패 시 now)
     public DateTime  CreatedAt   { get; set; }   // B2B 로컬타임(DateTime.Now)
     public long?     TestDataId  { get; set; }   // test_data.id 참조(FK 없음 · 인덱스만)
+
+    // ── S-B2B-2a 기록 아카이브(소프트삭제) ────────────────────────────────────
+    // test_data reset/delete 시 연관 로그를 하드삭제하지 않고 이 컬럼만 세팅(보존).
+    // NULL = 활성 · 세팅됨 = 보관(아카이브). 조회 필터 active|all|archivedOnly 로 노출.
+    public DateTime? ArchivedAt  { get; set; }   // B2B 로컬타임(DateTime.Now). NULL=활성.
 }
 
 /// <summary>전체 작업 결과. results 엔드포인트가 append.</summary>
@@ -60,6 +65,9 @@ public sealed class WorkResult
     public string   Barcode   { get; set; } = string.Empty;
     public string?  ChuteNo   { get; set; }   // 3자리 zero-pad(nullable)
     public DateTime CreatedAt { get; set; }   // B2B 로컬타임(DateTime.Now)
+
+    // ── S-B2B-2a 기록 아카이브(소프트삭제) — TestLog 와 동일 의미 ──────────────
+    public DateTime? ArchivedAt { get; set; }  // B2B 로컬타임(DateTime.Now). NULL=활성.
 }
 
 /// <summary>박스 마감 헤더. (biz_day,batch,box_no) 유니크(재전송 방지).</summary>
