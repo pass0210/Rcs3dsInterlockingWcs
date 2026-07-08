@@ -53,6 +53,32 @@ builder.Services.Configure<WcsOptions>(builder.Configuration.GetSection("Wcs"));
 builder.Services.AddControllers(o =>
     o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true);
 
+// ── B2B(S-B2B-1): 검증실패 400 형식 경로분기 (사용자 확정 Q5 — 무접촉) ──────────
+// /api/v1/works/ 요청의 ModelState 실패만 B2B ApiResponse.Fail(firstError)로 400 응답한다.
+// 그 외 경로는 프레임워크 기본 팩토리(ProblemDetails)에 그대로 위임 → 기존 엔드포인트 400 형식 불변.
+// (이 Configure 는 AddControllers 의 ApiBehaviorOptionsSetup 등록 뒤에 실행되므로 builtInFactory 유효.)
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options =>
+{
+    var builtInFactory = options.InvalidModelStateResponseFactory;
+    options.InvalidModelStateResponseFactory = context =>
+    {
+        if (context.HttpContext.Request.Path.StartsWithSegments(
+                Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var firstError = context.ModelState
+                .Where(kv => kv.Value is not null && kv.Value.Errors.Count > 0)
+                .SelectMany(kv => kv.Value!.Errors)
+                .Select(e => e.ErrorMessage)
+                .FirstOrDefault(msg => !string.IsNullOrEmpty(msg))
+                ?? Wcs.Api.B2B.FailMessages.InvalidRequestBody;   // #18 fallback
+            return new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(
+                Wcs.Api.B2B.B2BApiResponse.Fail(firstError));
+        }
+        // /api/v1/works/ 밖 경로 — 기존 기본 동작 보존(무접촉).
+        return builtInFactory(context);
+    };
+});
+
 // ── SignalR 허브 (F2 실시간 관측 — WcsMonitorHub) ────────────────────────────
 // payload는 프론트 TS 타입과 1:1 카멜케이스로 직렬화(명시 — 기본값에 의존하지 않음).
 // 인증 없음(사용자 확정 — F3). MapHub 결선은 미들웨어 순서 섹션에서 수행.
@@ -174,6 +200,17 @@ builder.Services.AddScoped<Wcs.Api.Monitoring.IMonitoringQueries, Wcs.Api.Monito
 builder.Services.AddSingleton<MonitorRelayService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MonitorRelayService>());
 
+// ════════════════════════════════════════════════════════════════════════════
+// (D-B2B) S-B2B-1 배선 — B2B(작업 테스트 데이터) RCS 5개 API. 기존 배선 무접촉(append).
+//   IWorkService/WorkService · IBoxService/BoxService (Scoped — WcsDbContext 동일 수명).
+//   ApiCallLogQueue(Singleton) + ApiCallLogBackgroundWriter(HostedService) — /api/v1/works/ 한정 감사.
+//   큐 헬스체크 미이식(우리 /health 유지). api_call_log 미들웨어는 파이프라인 섹션에서 경로 한정 결선.
+// ════════════════════════════════════════════════════════════════════════════
+builder.Services.AddScoped<Wcs.Api.B2B.IWorkService, Wcs.Api.B2B.WorkService>();
+builder.Services.AddScoped<Wcs.Api.B2B.IBoxService,  Wcs.Api.B2B.BoxService>();
+builder.Services.AddSingleton<Wcs.Api.B2B.ApiCallLogQueue>();
+builder.Services.AddHostedService<Wcs.Api.B2B.ApiCallLogBackgroundWriter>();
+
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -233,6 +270,11 @@ app.UseStaticFiles();
 // (C) 엔드포인트 — Controller 이관 (RcsController: IF-05/IF-09/IF-10, MonitoringController: /api/monitor)
 // IF-08 투입 가부 폴링(deposit-permission)은 폐지 — Phase 2 WCS→RCS 푸시로 대체.
 // ════════════════════════════════════════════════════════════════════════════
+// ── B2B(S-B2B-1): api_call_log 감사 미들웨어 — /api/v1/works/ 한정(경로 밖 즉시 통과) ──
+// Q1(사용자 확정): 기존 /api/v1/ RCS 엔드포인트(destination-query 등) 미기록 → 무접촉.
+// 논블로킹 enqueue만(응답 비지연). 경로 밖 요청엔 무영향이라 기존 미들웨어 순서·동작 보존.
+app.UseMiddleware<Wcs.Api.B2B.RcsApiLoggingMiddleware>();
+
 app.MapControllers();
 
 // ════════════════════════════════════════════════════════════════════════════
