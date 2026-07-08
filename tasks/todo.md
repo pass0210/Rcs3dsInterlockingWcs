@@ -21,6 +21,12 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-S5-FLAKE 코드리뷰 이연 (Minor — 비차단·방어적·현재 미발현, Sim 하네스)
+- [ ] [대칭성] `SimServer.cs:182` `RegistersChanged += OnServerRegistersChanged` 구독에 대응 `-=` 부재(StopAsync/DisposeAsync). 현재 누수 0(서버·SimServer 동시 폐기·StartAsync 1회)이나, 향후 이중 StartAsync=이중구독/서버 수명역전=누수 함정. StopAsync에 `-=` 한 줄로 대칭화 권장(리뷰어 명시).
+- [ ] [Fail Loud] `SimServer.cs:353-369` 핸들러 try/catch 부재 + FluentModbus가 핸들러 예외를 조용히 삼켜(연결 드롭·무로그) CLAUDE.md "예외 삼키지 말 것"과 상충. 현재 provably non-throwing이라 방어용 — try/catch+`_log.LogError` 검토.
+- [ ] [정확성] `SimServer.cs:346-347` docstring "클리어가 관측상 전혀 반영되지 않음"은 과장(FC16이 R_CellNo/R_Seq는 0으로, R_Flag만 복원). 무해하나 "R_Flag가 관측상 클리어되지 않음"으로 정정 권장.
+- [ ] [업그레이드 체크리스트] fix는 FluentModbus 5.3.2 3동작(동기 RegistersChanged가 lock(Lock) 내·응답 전 / GetHoldingRegisters lock-free / 변화-게이트 이벤트)에 의존. 메이저 업그레이드 시 S5/S5b가 canary — 업그레이드 체크리스트에 명기.
+
 ## S-B2B-2c 코드리뷰 이연 (Minor — 비차단, 인쇄·선택·설정)
 - [ ] [터치] `DetailGrid.tsx:58-64` 드래그가 `pointerup`만 해제 → `pointercancel` 시 draggingRef 잔류. 또 터치 포인터는 implicit capture로 `onPointerEnter` 미발화 → 터치 드래그선택 무동작. 데스크톱 마우스(실배포)는 정상. `pointercancel` 리스너 추가 검토.
 - [ ] [cosmetic] `SettingsPage.tsx:42,77` `Select`에 `w-full max-w-[280px]`가 inner `<select>`에 붙는데 `ui/select.tsx:8` 래퍼가 inline-flex content-width라 full-width 미해석. 전폭 의도면 래퍼에 width 부여.

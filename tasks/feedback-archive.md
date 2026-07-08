@@ -2,6 +2,13 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-S5-FLAKE (핸드셰이크 S5 병렬-부하 flake 근본제거 — Sim 충실도 수정, 프로덕션 불변) — APPROVED (2026-07-08, 1 iteration)
+
+- **간헐 flake 근본원인 대조는 "결정적 가드 테스트를 fix 비활성화 상태에서 RED 로 직접 보는 것"이 유일한 신뢰 증거 — GREEN 반복만으론 인과 미증명**: S5 는 CPU 경합 하에서만 깨지므로 순수 병렬 96건으로도 재현이 불안정. 근본원인(Sim sticky 재천명이 Sim 루프 주기에만 일어나 WCS ClearR RMW 후 다음 flush 까지 서버 버퍼가 transient R_Flag=0 을 노출 → GW 폴이 샘플링 → arming 거짓 완료 → C 기입 → outcome 뒤집힘)은, 그 창을 **결정적으로** 잡는 가드 테스트(S5b: 단일 커넥션에서 "R_Flag 클리어→즉시 read-back" 100회, observedZero==0 단정)로 치환해야 스케줄링 무관하게 증명된다. Evaluator 가 fix(RegistersChanged 동기 재천명 구독 2줄) 비활성화 → S5b `Actual: 98`(RED) → 복원 → GREEN 을 직접 재현한 것이 "창이 실재하고 동기 재천명이 그것을 닫는다"의 유일한 직접 증거(Generator 주장 99/100 과 동일 차수 독립 확인).
+- **미커밋 파일 revert 대조는 Copy-Item 백업+SHA256 + `--no-incremental` 재빌드 + 테스트 프로젝트 전파가 필수 3종**: (1) `git checkout` 금지(HEAD 로 되돌아가 Generator 미커밋분 소실 — 2026-07-06 lessons) → Copy-Item 백업 후 복원, SHA256 재대조로 무손실 확인. (2) Sim 소스만 재빌드하면 **테스트 프로젝트 bin 의 캐시된 Wcs.Sim3ds.dll 이 stale** → `--no-build` 테스트가 옛 dll 로 돌아 거짓 GREEN(첫 시도에서 실제 발생). 반드시 **테스트 프로젝트를 `--no-incremental` 재빌드**해 갱신 dll 을 전파한 뒤 `--no-build` 실행. (3) 대조 후 git status/diff 로 원 diff 라인수(SimServer +46/-1) 보존 재확인.
+- **Sim 충실도(fidelity) 갭 = 테스트 하네스 결함이며 프로덕션 핸드셰이크는 옳다 — 마스킹 유혹(프로덕션 debounce/N회 연속 0)을 배제하는 것이 정답**: "ClearR 미반영(무ack PLC)" 고장은 관측상 R_Flag 가 0 으로 **한 순간도** 떨어지지 않아야 하는데, Sim 이 일시 반영(버퍼 0)했다 되돌린 것이 모순. 수정은 FluentModbus `ModbusServer.RegistersChanged`(쓰기 처리 스레드에서 FC06 응답 이전·동기 발화, 단일 GW 커넥션이라 다음 폴 read 이전)에서 R_Flag=1 즉시 복원 → 창 제거. 프로덕션 arming(R_Flag 진짜 1 유지 시 정확히 타임아웃)은 불변(Wcs.PlcGateway diff 빈 출력). 프로덕션에 창 회피 로직을 넣는 것은 마스킹이자 정상 ClearR 반영을 지연시키므로 배제 — 보호구역(절대규칙 #1~#5) 준수의 정석.
+- **ANTI-MASKING 게이트 정밀 판정: 테스트 내 Task.Delay/timeout 리터럴이 "레이스 은폐"인지 "스캐폴딩"인지 구분**: S5b 의 `Task.Delay(50)` 은 포트 바인딩 경쟁(SocketException) 재시도 백오프(기존 StartRobustAsync 동형), `readTimeoutMs:1000`/`iterations=100` 은 테스트 클라이언트 상한·반복수 → 절대규칙 #7(운영 타이밍 appsettings) 대상 아님·레이스 은폐 아님. 결정성은 동기 재천명에서 오지 리터럴에서 오지 않음(revert 대조가 증명). 원 S5 어서션(RFlagResidueTimeout·SentCSeq=0·DoesNotContain HS_C_SENT)은 diff 미포함 = 완전 불변으로 "원 의도 보존" 확인.
+
 ## S-B2B-2c (A4 라벨 인쇄 + 고급 포인터 다중선택 + 설정 페이지 부활, 프론트 전용) — APPROVED (2026-07-08, 1 iteration)
 
 - **포인터 제스처(drag/Shift/Ctrl) 검증은 실 `page.mouse`(steps 보간) + 계측이 정답 — synthetic dispatch 나 무-steps 클릭은 거짓 결과를 낳는다**: onPointerEnter 는 React 가 native pointerover/pointerout 로 폴리필하므로 중간 행 진입 이벤트가 실제로 발화하려면 `page.mouse.move(to,{steps:N})` 실 이동이 필요(dispatchEvent(pointerenter) 는 React 델리게이션을 안 탐). **최대 함정: 대상 행이 뷰포트 밖이면 클릭이 `<html>` 에 떨어져 "제스처 무효果"= 거짓 FAIL** → pointerdown 계측(`{shift,ctrl,cell,row}`)으로 "클릭이 실제 행 TD 에 닿았는가 + modifier 가 전달됐는가"를 먼저 확인하고, 필요 시 뷰포트를 키워(예: 1400×1900) 전 행을 in-view 로 만든 뒤 재현. 선택 결과는 카운트가 아니라 **checked 바코드 집합**으로 단정(범위/토글/비연속을 구별).
@@ -480,3 +487,5 @@
 - [CODE-REVIEW] sprint=S-B2B-3b critical=0 major=1 minor=7 iter=1 (major=#1 ComparisonPage 리스트 key 비유니크→중복시 콘솔에러(BLOCKING게이트); +role=tab→aria-pressed a11y 동반; minor 6건 todo 이연)
 
 - [CODE-REVIEW] sprint=S-B2B-2c critical=0 major=2 minor=5 iter=1 (major=#1 무조건부 @media print가 타 페이지 Ctrl+P 백지화(앱전역 회귀), #2 인쇄모달 role/aria/focus 부재; minor 5건 todo 이연)
+
+- [CODE-REVIEW] sprint=S-S5-FLAKE critical=0 major=0 minor=3 iter=0 (verdict=Yes/merge-ready; IL레벨 동시성 검증 통과·데드락 없음·프로덕션 무접촉. minor 3건 방어적·미발현 todo 이연)
