@@ -6,6 +6,7 @@ import { DataGeneratorPage } from './pages/DataGeneratorPage'
 import { LogsPage } from './pages/LogsPage'
 import { ComparisonPage } from './pages/ComparisonPage'
 import { BoxesPage } from './pages/BoxesPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { homePathFor, useUiMode } from '@/lib/uiMode'
 
 // 활성 모드의 기본 진입 경로로 리다이렉트(b2c→/monitor, b2b→/data-generator).
@@ -30,6 +31,8 @@ export default function App() {
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/comparison" element={<ComparisonPage />} />
         <Route path="/boxes" element={<BoxesPage />} />
+        {/* B2B 설정(S-B2B-2c): 인쇄 설정(심볼로지·값표시·프리셋) */}
+        <Route path="/settings" element={<SettingsPage />} />
         {/* 미매칭 SPA 경로 → 활성 모드 기본 페이지(백엔드 fallback이 index.html 반환 후 여기서 라우팅). */}
         <Route path="*" element={<ModeHome />} />
       </Route>

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { Table, THead, TBody, TR, TH, TD } from '@/components/ui/table'
 import { LoadingRow, ErrorRow, EmptyRow } from '@/components/StateMessage'
 import { FilterCell } from './SummaryGrid'
@@ -25,7 +25,9 @@ const EMPTY_FILTERS: DetailFilters = {
 }
 
 // ── 우측: 상세 그리드(바코드·슈트·투입상태·투입시간·분류상태·분류시간) ──────────
-//   · 컬럼 텍스트 필터. · 행 체크박스 다중선택(id). 아카이브 필터는 페이지 카드 헤더에서 전달.
+//   · 컬럼 텍스트 필터. · 행 체크박스 다중선택(id) + 전체선택. 아카이브 필터는 페이지 카드 헤더에서 전달.
+//   · 고급 포인터 다중선택(S-B2B-2c): 드래그-범위 / Shift-범위 / Ctrl(Cmd)-토글 — 기존 detailChecked 집합을 직접 조작.
+//     제스처 대상은 "보이는(필터 통과) 행"만이며 인쇄·삭제·체크박스가 동일 집합을 소비한다.
 export function DetailGrid({
   rows,
   loading,
@@ -34,6 +36,7 @@ export function DetailGrid({
   checked,
   onToggleCheck,
   onToggleVisible,
+  onSelectExact,
 }: {
   rows: DetailRow[]
   loading: boolean
@@ -42,8 +45,23 @@ export function DetailGrid({
   checked: Set<number>
   onToggleCheck: (id: number) => void
   onToggleVisible: (ids: number[], allChecked: boolean) => void
+  /** 포인터 제스처용 — 선택 집합을 주어진 id 들로 정확히 교체(드래그·Shift 범위). */
+  onSelectExact: (ids: number[]) => void
 }) {
   const [filters, setFilters] = useState<DetailFilters>(EMPTY_FILTERS)
+
+  // 포인터 제스처 상태(리렌더 없이 유지) — anchor(직전 기준 행 id) + 드래그 진행 여부.
+  const anchorRef = useRef<number | null>(null)
+  const draggingRef = useRef(false)
+
+  // 그리드 밖에서 마우스를 떼도 드래그가 종료되도록 window 레벨 pointerup 을 구독(B2).
+  useEffect(() => {
+    const end = () => {
+      draggingRef.current = false
+    }
+    window.addEventListener('pointerup', end)
+    return () => window.removeEventListener('pointerup', end)
+  }, [])
 
   const filtered = useMemo(() => {
     const f = filters
@@ -60,6 +78,44 @@ export function DetailGrid({
 
   const visibleIds = filtered.map((r) => r.id)
   const allChecked = visibleIds.length > 0 && visibleIds.every((id) => checked.has(id))
+
+  // anchor~target 사이 "보이는 행" 연속 범위 id. anchor 가 현재 보이지 않으면 target 단독.
+  function rangeIds(anchorId: number, targetId: number): number[] {
+    const ai = filtered.findIndex((r) => r.id === anchorId)
+    const bi = filtered.findIndex((r) => r.id === targetId)
+    if (ai === -1 || bi === -1) return [targetId]
+    const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai]
+    return filtered.slice(lo, hi + 1).map((r) => r.id)
+  }
+
+  function onRowPointerDown(e: ReactPointerEvent<HTMLTableRowElement>, id: number) {
+    // 체크박스·입력·버튼에서 시작된 이벤트는 무시(기존 상호작용/버블링 충돌 방지 — B5).
+    if ((e.target as HTMLElement).closest('input, button, label, a, select')) return
+    if (e.button !== 0) return // 좌클릭만
+    e.preventDefault() // 드래그 중 텍스트 블록 선택 방지
+
+    if (e.shiftKey && anchorRef.current !== null) {
+      // Shift+클릭 — anchor~클릭 연속 범위(B3). anchor 는 유지.
+      onSelectExact(rangeIds(anchorRef.current, id))
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl/Cmd+클릭 — 개별 토글 누적(B4).
+      onToggleCheck(id)
+      anchorRef.current = id
+      return
+    }
+    // 일반 클릭 — 단일 선택 + 드래그 시작(B2).
+    anchorRef.current = id
+    draggingRef.current = true
+    onSelectExact([id])
+  }
+
+  function onRowPointerEnter(id: number) {
+    // 드래그 중 다른 행 진입 → anchor~현재 연속 범위 실시간 갱신(B2).
+    if (!draggingRef.current || anchorRef.current === null) return
+    onSelectExact(rangeIds(anchorRef.current, id))
+  }
 
   if (!hasSelection) return <EmptyRow label="왼쪽 요약에서 배치를 선택하면 상세가 표시됩니다" />
   if (loading && rows.length === 0) return <LoadingRow label="상세 불러오는 중" />
@@ -111,7 +167,15 @@ export function DetailGrid({
           filtered.map((r) => {
             const isChecked = checked.has(r.id)
             return (
-              <TR key={r.id} className={cn(isChecked && 'bg-accent/10 hover:bg-accent/10')}>
+              <TR
+                key={r.id}
+                onPointerDown={(e) => onRowPointerDown(e, r.id)}
+                onPointerEnter={() => onRowPointerEnter(r.id)}
+                className={cn(
+                  'cursor-default select-none',
+                  isChecked && 'bg-accent/10 hover:bg-accent/10',
+                )}
+              >
                 <TD>
                   <input
                     type="checkbox"
