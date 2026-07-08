@@ -1,160 +1,182 @@
-# Sprint Contract — S-B2B-1 (B2B 신규 스키마 + RCS 5개 API 이식)
+# Sprint Contract — S-B2B-2 (test-data 관리 API + 기록 아카이브 + DataGenerator 페이지 + B2C/B2B 토글)
 
-> Branch: `feat/b2b-1-schema-api` · Base: `develop`
+> Branch: `feat/b2b-2-datagen-toggle` · Base: `develop` @ PR #38 병합(B2B-1 스키마·RCS 5 API 존재)
 > 작성: Planner Subagent · 2026-07-08
-> 스펙 근거(정본): `docs/B2B-SCHEMA.md`(신규 캡처) + `docs/api-spec-ko.html`(와이어 계약·실패 message) +
-> `docs/PROGRAM_STRUCTURE.md`(§2 API계약·§3 알고리즘·§9 데이터개념) + `docs/wcs_rcs_interface_kr.html`(B2B 파트).
+> 스펙 근거(정본): `docs/B2B-DATAGEN.md`(신규 캡처 — 관리 API·아카이브·화면·토글) +
+> `docs/B2B-SCHEMA.md`(B2B-1 스키마·서비스·통합노트) + `docs/PROGRAM_STRUCTURE.md`(§2.1·§3.2.1·§6.1·§9.1·§11.2) +
+> `docs/FRONTEND.md`(우리 프론트 스택·컨벤션). Generator·Evaluator는 **pwd 밖(원본) 접근 금지** — 위 문서가 유일 근거.
 
 ## Goal
 
-원본 `BowooTestBatchSystem_v2`의 B2B(작업 테스트 데이터) 백엔드를 이 프로젝트로 **완전 분리 이식**한다.
-B2B-1은 그 **기반 층**: 신규 6테이블 스키마 + 양 provider add-only 마이그레이션 + RCS 5개 API(엔드포인트·
-서비스 로직) + 테스트. 기존 B2C(WCS↔RCS↔3DS) 17테이블·엔티티·코드·라우트는 **0 변경(무접촉)**.
+원본 `BowooTestBatchSystem_v2`의 **프론트 전용 test-data 관리 계층**을 이 프로젝트로 완전 분리 이식한다.
+B2B-2는: (1) 관리 API(수동생성·조회·초기화·삭제·엑셀업로드), (2) **★기록 아카이브(archived_at 소프트삭제)
+재설계**, (3) **DataGenerator 프론트 페이지**(우리 스택 재개발), (4) **B2C/B2B UI 토글**(메뉴 세트 전환).
+기존 B2C 17테이블·엔티티·코드·라우트 + B2B-1 산출물의 **계약 부분은 0 변경**(신규 추가·B2B add-only ALTER만).
 
 ## 확정 방침 (사용자 — 불변)
 
-1. **완전 분리·무접촉**: 기존 17테이블·엔티티·코드·라우트·마이그레이션 **0 변경**. 신규 B2B만 추가. 안정성 최우선.
-2. **신규 테이블 6개**: `test_data · test_log · work_result · box · box_item · api_call_log`
-   (**`auto_generate_config` 제외** — 자동생성 미이식). 박스도 B2B 전용 신규.
-3. **마이그레이션**: `Wcs.Migrations.SqlServer` / `Wcs.Migrations.Sqlite` 각각에 B2B 테이블 **추가만**(기존 ALTER 0).
-4. **API 5개**(`api-spec-ko.html` 와이어 계약대로): unprocessed(GET·부수효과 ReceiveTime 마킹·자동생성 트리거 없음·
-   0건=`[]`) · input · classification · results(최상위 JSON 배열) · box.
-   - 응답 `{status:"S"|"F", message}`. **실패 message verbatim**(`docs/B2B-SCHEMA.md §4` = `api-spec-ko.html` 정본).
-   - `pId·inductionNo` = RCS 자체생성 정수, **서버 미검증·그대로 저장**. chuteNo 3자리 zero-pad.
-   - 범위: bizDay 8~10 · batch 1~10 · qty 1~9999.
-   - **HTTP 코드**: 비즈니스 실패=200+F / 검증 실패=400 / 예외=500.
-5. **비즈니스 로직**(`docs/B2B-SCHEMA.md §6`): qty 묶음(가용<qty 전량거부·Take N) · unprocessed 그룹핑
-   (Batch→Barcode+ChuteNo, qty=COUNT, ReceiveTime 일괄 마킹) · results 사전 존재검증(전체거부·chuteNo 미검증) ·
-   box (bizDay,batch,boxNo) 중복거부·barcode 미검증.
+1. **완전 분리·무접촉**: 기존 B2C 17테이블·엔티티·코드·라우트 + B2B-1 산출물 계약(RCS 5 API·엔티티 형상·기존
+   마이그레이션) **0 변경**. 신규 추가 + **B2B 테이블 add-only ALTER**(archived_at)만. 안정성 최우선.
+2. **B2C/B2B UI 토글 = UI 전환만**: 헤더/사이드바 메뉴 세트 전환(B2C=모니터링·3DS워드·(F3 운영제어) /
+   B2B=데이터생성·(후속 로그·비교·박스·설정)). **백엔드 API는 양쪽 상시 활성(모드 게이트 없음)**. 토글 상태는 프론트 전역.
+3. **자동생성 미이식**(B2B-1 확정): `auto_generate_config`·자동생성 트리거·`auto-config` 페이지·`preview-chutes` 제외.
+   **수동 생성(슈트범위+바코드개수 라운드로빈)·엑셀 업로드만 이식**.
+4. **★ 기록 아카이브 (사용자·사수 확정 2026-07-08)**: test_data 삭제/초기화 시 `test_log`·`work_result`를
+   **하드삭제 금지 → `archived_at` 소프트삭제(보존)**. 원본의 **barcode 키 하드 연관삭제**(§3.3·§11.2 위험 지적)를
+   이식하지 말 것. 조회에 "삭제됨/보관" 필터로 아카이브분 조회 가능.
 
-## Non-Goals (B2B-1 범위 밖 — 후속)
+## Non-Goals (B2B-2 범위 밖 — B2B-3 후속)
 
-- `auto_generate_config` 및 자동생성 로직 전체(미이식 확정).
-- 프론트 전용 조회 API: TestData 관리 GET · logs · comparison · **`GET /api/boxes`** · excel export → **B2B-2/3(프론트)**.
-- 전역 인프라: rate limiter · CORS · OpenAPI · 전역 예외 미들웨어 · HealthChecks 확장(기존 `/health` 유지) → 필요 시 후속.
-- 실 `TEST_ORDER_DB` 재적용/시드 대조 → **orchestrator/사용자 몫**(Generator는 SQLite 테스트 더블만).
+- 로그 조회(`/api/logs/input`·`/sort`·`/api-calls`) + Logs 페이지.
+- 결과 3-way 비교(`/api/test-data/comparison`) + ResultComparison 페이지.
+- 박스 조회(`GET /api/boxes`) + Boxes 페이지(B2B-1에서 이미 B2B-3로 이연 확정).
+- Excel export(`/api/logs/export`) + 자동생성/인쇄 **설정 페이지**(Settings). (인쇄 **기능** 자체는 DataGenerator에 포함.)
+- 자동생성 전체(`auto_generate_config` 등) — 미이식 확정(불변).
+- 실 `TEST_ORDER_DB` 재적용/시드 대조 — orchestrator/사용자 몫(Generator는 SQLite 더블만).
 
-## Scope 결정 — B2B-1 경계 확정(권장안) + 사용자 게이트 Questions
+## Scope 결정 — 분할 권장(권장안) + 사용자 게이트 Questions
 
-Planner 권장으로 아래를 **B2B-1에 포함**하되, D2·D4·D5는 사용자 확정 게이트다.
+스코프가 크다(관리 API + 아카이브 마이그레이션[백] + 큰 프론트 페이지 + 토글[프론트] + 프론트 인프라 신규).
+아래 4개 novel 결정은 **사용자 확정 게이트**다.
 
-**포함(권장 확정)**
-- 6엔티티(§2) + `WcsDbContext` DbSet/Configure 추가 + provider별 add-only 마이그레이션 2개.
-- `IWorkService/WorkService`, `IBoxService/BoxService`, 5개 컨트롤러(`api/v1/works/*`).
-- B2B 전용 `ApiResponse`·요청 DTO·`AppUtils.NormalizeBizDay`·`AppConstants`(D3 포맷·qty 9999) 신규 이식.
-- xUnit 테스트(단위: 서비스 로직 / 통합: 5 API 계약, SQLite 더블).
+- **Q1 [스코프 분할] — 권장: 2-Phase 순차 (2a 백엔드 → 2b 프론트)**
+  - (a) **[권장] 2a → 2b 순차 2스프린트**: `2a` = 관리 API + **아카이브 마이그레이션/서비스**(백엔드, 검증=xUnit) →
+    병합 → `2b` = DataGenerator 페이지 + B2C/B2B 토글 + 프론트 인프라(프론트, 검증=tsc/eslint/브라우저).
+    근거: 프론트 E2E(Evaluator 브라우저 의무)가 **실 API를 구동**해야 관측 가능 → 백엔드 선행·병합이 자연스럽다.
+    B2B-1(백엔드 단독)·FRONTEND.md F1~F3 순차 선례와 정합. 스택 PR 병합 사고(memory) 회피 — 순차 병합이 안전.
+  - (b) 단일 스프린트 + **Parallel Modules**(백/프론트 경계로 fan-out, worktree 격리): 계약(`docs/B2B-DATAGEN.md`)
+    선고정 후 병렬 개발. 리스크: 프론트 E2E가 미병합 백엔드에 의존 → worktree 병합·스테일 베이스(memory) 리스크↑.
+  - **권장 (a)**. 본 계약은 2a·2b 스코프를 모두 정의하되, 확정 시 **Generator는 2a(백엔드)부터 착수**.
 
-**게이트 Questions (novel 결정 — 사용자 확정 필요)**
+- **Q2 [토글 전역상태 방식] — 권장: React Context + localStorage**
+  - 현 프론트엔 전역 스토어 없음(main.tsx: QueryClientProvider>BrowserRouter>App).
+  - (a) **[권장] React Context**(`UiModeProvider` — 원본 GlobalContext/UiContext 개념) + localStorage 영속(화이트리스트
+    가드). 새 의존 0. mode(`b2c`|`b2b`) + B2B용 bizDay/autoRefresh를 함께 보관(B2B-3 재작업 방지).
+  - (b) 라우트 기반(`/b2c/*`·`/b2b/*` 접두 — 딥링크·무스토어, 라우팅 재편) · (c) Zustand(신규 의존 — 과설계).
 
-- **Q1 [D1] api_call_log 채우는 방식**
-  - (a) 원본 `RcsApiLoggingMiddleware`+`ApiCallLogQueue`(백그라운드 writer)를 이식하되 **경로를 `/api/v1/works/`로 한정**.
-  - (b) 테이블만 만들고 채우기는 기존 `operation_log`/Serilog로 대체(미들웨어 미이식).
-  - **권장 (a)**: api_call_log는 요청/응답 원문·duration·client_ip·http_status를 담는 **API 와이어 감사** 전용 테이블로,
-    도메인 관측 스트림인 operation_log와 목적이 다르고 후속 프론트(B2B-2/3)가 이 테이블을 조회한다. 단 **반드시 경로 한정**
-    (전 `/api/v1/` 접두 이식 시 기존 RCS 엔드포인트까지 기록 → 무접촉 위반). 큐 헬스체크는 이식 제외(우리 /health 유지).
+- **Q3 [reset/delete + 아카이브 시맨틱] — 권장: 아래**
+  - **reset**: 선택 test_data `ReceiveTime=null`(행 유지) + 연관 `test_log`/`work_result` **archived_at 마킹**.
+  - **delete**: 선택 test_data **하드삭제**(등록 원장 제거 — 정당) + 연관 로그/결과 **archived_at 마킹**.
+    - test_data 자체를 소프트삭제할지 vs 하드삭제할지 = 이 게이트. **권장: 하드삭제**(원본 동작·로그/결과만 보존).
+  - **아카이브 스코핑(원본 결함 교정)**: 원본은 `barcode` 단독 키로 배치 밖까지 하드삭제(§11.2 위험). 교정 →
+    선택 행의 **`(BizDay,Batch,Barcode)` 조합 집합**(+ test_log는 `TestDataId in ids` 합집합)으로 스코프 한정.
+    → 확정 필요: (권장) 스코프 한정 아카이브 vs 원본식 barcode 전역(비권장).
 
-- **Q2 [D2] 프론트용 `GET /api/boxes` 포함 여부**
-  - (a) B2B-1 제외(BoxController는 POST `api/v1/works/box`만) — 조회는 프론트 스프린트와 함께.
-  - (b) BoxService.GetBoxesAsync가 사소하니 함께 포함.
-  - **권장 (a)**: B2B-1 = "RCS 수집(ingestion) 계층"으로 경계를 깔끔히. 조회 표면은 프론트와 함께 검증하는 게 자연스럽다.
-
-- **Q3 [D3] 네이밍·ERD 원칙 적용도**
-  - 테이블/컬럼명은 **원본 그대로 snake_case**(우리 컨벤션과 동일 — 충돌 없음, §7 확인). id `long ValueGeneratedOnAdd`.
-  - `created_at`: 원본 `DateTime.Now`(로컬) vs 우리 ERD 원칙 **UTC**. **권장: `DateTime.UtcNow`**로 우리 ERD 정합.
-    (단 log_time/receive_time은 클라이언트 inTime/sortTime 파싱값 — 원문 의미 보존.)
-  - `box_item→box` FK: 원본 CASCADE. 단일 캐스케이드 경로라 1785 위험 없음 → **권장: CASCADE 유지**(원본 동작 보존).
-  - test_log.test_data_id: **FK 없이 인덱스만**(원본 동일·1785 회피·이력 불변). CHECK 제약은 원본에 없으므로 미도입
-    (검증은 DataAnnotations). — **사용자 확정 필요: created_at UTC vs 원본 로컬**.
-
-- **Q4 [D4] api_call_log(및 400 형식) — 아래 D5와 묶어 Q1과 함께 확정**
-
-- **Q5 [D5] 검증실패 400 형식 & ArgumentException 처리 (무접촉 필수)**
-  - 원본은 **전역** `InvalidModelStateResponseFactory` + 전역 `GlobalExceptionMiddleware`로 400/500을 `ApiResponse` 형식화.
-    우리 프로젝트엔 없고, **전역 도입 시 기존 컨트롤러 400/500 형식이 바뀐다(동작 변경 → 무접촉 위반)**.
-  - **권장**: (i) `InvalidModelStateResponseFactory`를 **경로 분기**로 등록 — `/api/v1/works/`면 `ApiResponse.Fail(firstError)`,
-    그 외는 기존 기본(ProblemDetails) 유지. (ii) `NormalizeBizDay`의 `ArgumentException`→400은 **B2B 컨트롤러/서비스 국소 try/catch**로.
-    전역 미들웨어·전역 팩토리 무조건 교체는 금지. — **사용자 확정 필요**.
-
-> Scope 분할 판단: B2B-1은 위 경계(6테이블+마이그레이션+5 API+로직+테스트, 프론트/자동생성/전역인프라 제외)로
-> **단일 스프린트에 적정**하다(추가 분할 불요). api_call_log 미들웨어 이식이 부담되면 D1을 (b)로 축소해 더 줄일 수 있음.
+- **Q4 [아카이브 UI 필터 위치] — 권장: DataGenerator 상세 그리드 토글**
+  - (a) **[권장] 상세 그리드에 "보관 포함/보관만"(`active|all|archivedOnly`) 토글** → detail 조회 `archived` 파라미터.
+    reset/delete 직후 archived 행을 같은 화면에서 확인. (b) 별도 아카이브 뷰(B2B-3 로그 페이지로 이연).
+  - **권장 (a)** — B2B-2 자체에서 아카이브 동작을 눈으로 검증 가능해야 함(사용자 확정 시나리오와 정합).
 
 ## Implementation Scope (Generator가 할 일 — WHAT)
 
-1. **엔티티 6개** 신규(`docs/B2B-SCHEMA.md §1·§2` 형상 그대로) — B2B 전용 네임스페이스.
-2. **`WcsDbContext`에 DbSet 6 + Configure 메서드 6 추가**(ToTable/인덱스/FK/동시성 없음 — append 위주).
-   기존 17테이블 Configure 및 ModelSnapshot 기존 엔트리 **diff 0**.
-3. **마이그레이션 2개**(provider별) — B2B 6테이블 CreateTable + 인덱스(UNIQUE `IX_box_biz_day_batch_box_no` 포함)만.
-   기존 테이블 ALTER 0.
-4. **서비스**: WorkService(unprocessed/input/classification/results — **auto-gen 블록 제거**), BoxService(§6 로직).
-5. **컨트롤러 5개** + DTO + ApiResponse + AppUtils/AppConstants. 실패 message verbatim(§4).
-6. **DI/Program.cs 배선**(최소·경로 한정 — Q1/D5 확정 반영). 기존 배선·미들웨어 순서 보존.
-7. **테스트**: DepositDecider 스타일 순수 서비스 단위 테스트(qty 묶음·그룹핑·존재검증·chute 매칭·중복거부) +
-   API 통합 테스트(SQLite 더블, 5 엔드포인트 계약·부수효과·실패 message·results 배열·pId 미검증 저장).
+### 2a — 백엔드(관리 API + 아카이브) — Q1 확정 시 선행
+1. **아카이브 스키마**: `Wcs.Data.B2B.TestLog`·`WorkResult`에 `DateTime? ArchivedAt`(`archived_at` nullable) 추가.
+   `WcsDbContext` Configure에 매핑 추가(다른 컬럼·인덱스 무변경).
+2. **마이그레이션 2개**(provider별): `test_log`·`work_result`에 `AddColumn(archived_at)`만. **기존 B2C 17테이블·B2B
+   다른 5테이블 무변경**. ModelSnapshot diff = 2컬럼 추가로만 국한.
+3. **`ITestDataService`/`TestDataService`**(Scoped): `GenerateAsync`(라운드로빈) · `UploadExcelAsync`(신/구양식 판별) ·
+   `GetSummaryAsync` · `GetDetailAsync`(로그 조인 + **아카이브 필터**) · `ResetReceiveTimeAsync`(**아카이브**) ·
+   `DeleteAsync`(**아카이브**). 알고리즘·실패 message = `docs/B2B-DATAGEN.md §2·§3`. 슈트파서/zero-pad/채번은
+   B2B-1 `AppUtils`/`AppConstants` 정합(단일 소스).
+4. **`TestDataController`**(`[Route("api/test-data")]`, Controllers/B2B/) — 6 엔드포인트(§1 표). 검증실패 400 형식은
+   `InvalidModelStateResponseFactory` 경로 allowlist에 `/api/test-data` **추가**(additive — `/api/v1/works/`·B2C 불변).
+5. **DI/패키지**: `AddScoped<ITestDataService,TestDataService>()` append. **`ClosedXML` 패키지 추가**(Wcs.Api). `UploadMaxBytes` 상수 추가.
+6. **테스트**: 서비스 단위(라운드로빈·엑셀 신/구양식·summary/detail·**아카이브 스코핑**) + API 통합(6 엔드포인트 계약 +
+   **★아카이브 시나리오**). `B2bWebApplicationFactory` 재사용.
 
-> 기술 세부(코드 구조·헬퍼 분해·트랜잭션 방식)는 Generator 재량. 계약은 **형상·완료조건·검증**만 고정.
+### 2b — 프론트(DataGenerator + 토글) — 2a 병합 후
+7. **프론트 인프라**: 확인 다이얼로그(shadcn-style Dialog) + 토스트(경량) 신규(원본 UiContext 개념). B2B UI 상태
+   Context(mode + bizDay + autoRefresh, Q2). `lib/api.ts`에 test-data 호출 추가(또는 TanStack Query 훅).
+8. **DataGenerator 페이지**(`/data-generator`) — `docs/B2B-DATAGEN.md §4`: 3분할 레이아웃, 생성 폼(Enter 제출),
+   엑셀 업로드, 요약/상세 그리드, **드래그·Shift·Ctrl 다중선택 + 우클릭 메뉴**, 컬럼 필터, reset/delete(확인 다이얼로그),
+   **A4 라벨 인쇄(로컬 JsBarcode·듀얼바코드·XSS 방지 DOM 조립)**, **아카이브 토글(Q4)**.
+9. **B2C/B2B 토글**(§5): `Layout.tsx` NAV를 모드별 2세트 + 동적 헤더 타이틀(disabled+phase 배지 재사용). `App.tsx`에
+   `/data-generator` 라우트 + 기본 진입 리다이렉트를 활성 모드 기준으로. 기존 B2C 라우트·페이지 동작 보존.
+10. **로컬 자산**: `frontend/public/JsBarcode.all.min.js` vendoring(외부 CDN 금지 — 폐쇄망).
+
+> 기술 세부(컴포넌트 분해·훅 구조·트랜잭션 방식)는 Generator 재량. 계약은 형상·완료조건·검증만 고정.
 
 ## Done 조건
 
-- [ ] B2B 6엔티티 + WcsDbContext 배선. 기존 ModelSnapshot 기존 엔트리 변경 0.
-- [ ] `Wcs.Migrations.SqlServer`/`Wcs.Migrations.Sqlite` add-only 마이그레이션 2개 — 양 provider **up 성공**,
-      기존 테이블 스키마 **무변경**(신규 CreateTable만).
-- [ ] 5개 RCS API가 `docs/B2B-SCHEMA.md §3` 계약 부합: 라우트·요청/응답·부수효과(unprocessed ReceiveTime 마킹·
-      0건 `[]`·자동생성 없음)·results 최상위 배열·pId 미검증 저장·chuteNo 3자리.
-- [ ] 실패 message **verbatim**(§4) — 서비스 방출 문자열이 정본과 byte-for-byte 일치(테스트로 고정).
-- [ ] 비즈니스 로직: qty 묶음(가용<qty 전량거부) · unprocessed 그룹핑 · results 사전 존재검증(전체거부·chuteNo 미검증) ·
-      box 중복거부(barcode 미검증).
-- [ ] HTTP 코드: 비즈니스 실패 200+F / 검증실패 400 / 예외 500. 기존 엔드포인트 400/500 형식 **불변**(무접촉).
-- [ ] **기존 전체 테스트 스위트 GREEN 불변**(B2C 회귀 0) + 신규 B2B 테스트 GREEN.
-- [ ] `dotnet build backend/Wcs.sln` 경고 0(기존 기준 대비 신규 경고 0).
+**공통**
+- [ ] `dotnet build backend/Wcs.sln` 신규 경고 0. **기존 전체 테스트 스위트 GREEN 불변**(B2C·B2B-1 회귀 0) + 신규.
+- [ ] 무접촉: 기존 B2C 17테이블·엔티티·라우트·페이지 + B2B-1 계약(RCS 5 API·엔티티 형상·기존 마이그레이션) diff 0.
 
-## 검증 시나리오 (Backend/API — 표면 백엔드)
+**2a(백엔드)**
+- [ ] `archived_at` add-only 마이그레이션 2개(provider별) up 성공 — `test_log`·`work_result`에 컬럼 추가만,
+      기존 테이블(B2C·B2B 다른 5) 무변경. ModelSnapshot diff가 2컬럼 추가로만 국한.
+- [ ] 6 관리 엔드포인트가 `docs/B2B-DATAGEN.md §1·§2` 계약 부합: generate 라운드로빈·bizDay 정규화, upload 신/구양식
+      판별·3중 검증, summary 그룹핑·정렬, detail 로그 조인·정렬·아카이브 필터.
+- [ ] **★아카이브**: reset/delete가 연관 `test_log`·`work_result`를 **DELETE 하지 않고** `archived_at` 마킹(하드삭제 0).
+      스코프가 선택 `(BizDay,Batch,Barcode)`(+test_log는 TestDataId)로 한정(배치 밖 미영향).
+
+**2b(프론트)**
+- [ ] `/data-generator` 렌더 + 생성/업로드/조회/reset/delete/인쇄 플로우 동작. 다중선택(드래그·Shift·Ctrl)·우클릭 메뉴 동작.
+- [ ] B2C/B2B 토글로 **메뉴 세트·헤더 타이틀·기본 진입**이 전환. 기존 B2C 페이지 동작 보존. 백엔드 모드 게이트 없음.
+- [ ] 아카이브 UI 토글로 archived 행 조회 가능(Q4). 인쇄가 로컬 JsBarcode로 동작(외부 CDN 요청 0).
+- [ ] `tsc --noEmit` 0 · `eslint .` 0 · 브라우저 콘솔 error 0.
+
+## 검증 시나리오 (Full-stack)
 
 > **Evaluator는 fresh evidence 의무**: 아래를 직접 실행한 출력으로 판정(캐시·추정 금지).
+> baseline 테스트 수는 sprint 시작 시 확정(현재 xUnit `[Fact]`/`[Theory]` 선언 230개; InlineData 전개 실측치로 고정).
 
-1. **마이그레이션 무접촉 대조**: 신규 마이그레이션의 `Up()`에 기존 17테이블 관련 `AlterTable/AlterColumn/DropXxx`
-   **0건**임을 diff로 확인. `WcsDbContextModelSnapshot` 변경이 B2B 6테이블 추가로만 국한.
-2. **양 provider up**: SqlServer/Sqlite 각각 `dotnet ef database update`(또는 통합 테스트 EnsureCreated) 성공.
-   SQL Server는 빈 DB 콜드스타트 up 검증(가능 환경). SQLite in-memory 더블로 통합 테스트 기동.
-3. **5 API 계약 부합**: 통합 테스트로 성공/실패 경로 — 특히 (a) unprocessed 부수효과(2회 호출 시 2회차 빈 배열) +
-   0건 `[]`, (b) input/classification qty 묶음·가용부족 전량거부, (c) classification chute mismatch/이미분류,
-   (d) results 최상위 배열·존재검증 전체거부·chuteNo 미검증 저장, (e) box (bizDay,batch,boxNo) 중복거부,
-   (f) pId·inductionNo 미검증 그대로 저장.
-4. **실패 message verbatim**: 각 F 경로 응답 message가 §4와 정확히 일치.
-5. **HTTP 코드**: 검증실패(잘못된 status·qty 범위·bizDay 형식) 400, 비즈니스 실패 200+F, NormalizeBizDay 비존재날짜 처리.
-6. **회귀 0**: `dotnet test backend/Wcs.sln` — 기존 스위트 전부 GREEN(수치는 §Planner self-check로 sprint 시작 시 baseline 고정).
-7. **실 TEST_ORDER_DB 대조는 이 계약 범위 밖**(orchestrator/사용자). Generator는 SQLite 더블만.
+**백엔드(2a)**
+1. **마이그레이션 무접촉 대조**: 신규 마이그레이션 `Up()`에 `archived_at` `AddColumn`(test_log·work_result)만.
+   기존 테이블 `Alter/Drop` 0. 양 provider(SqlServer 콜드스타트 up 가능 시 / Sqlite EnsureCreated) 성공.
+2. **관리 API 계약**: generate(라운드로빈 슈트 배분·bizDay 정규화 저장) · upload(5컬럼 신양식/4컬럼 구양식 판별·헤더 자동감지·
+   3중 검증 실패 message) · summary(그룹·MAX(receiveTime)·정렬) · detail(INPUT/SORT 조인·TestDataId 우선·정렬).
+3. **★아카이브 핵심 시나리오(테스트로 단정)**: test_data 생성 → 관련 test_log/work_result 시드 →
+   (a) `reset(ids)`: test_data.receive_time=null, 연관 로그/결과가 **DB에 존재하며** `archived_at != null` +
+   `detail?archived=active`엔 미노출·`archived=archivedOnly`엔 노출. (b) `delete(ids)`: test_data 행 제거되되
+   연관 로그/결과는 **삭제되지 않고** archived. (c) 스코프: 다른 배치의 동일 barcode 로그는 **미영향**(원본 결함 미재현).
+4. **회귀 0**: `dotnet test backend/Wcs.sln` — 기존 스위트 전부 GREEN + 신규 B2B-2 테스트 GREEN.
+
+**프론트(2b)**
+5. **페이지 플로우**(Playwright/`.mcp.json`): `/data-generator` 로드 → 생성 폼 제출 → 요약/상세 조회 → 상세 다중선택
+   (드래그·Shift·Ctrl) → 우클릭 체크 → delete 확인 다이얼로그 → archived 토글로 보존 확인. 콘솔 error 0.
+6. **토글**: B2C↔B2B 전환 시 사이드바 메뉴 세트·헤더 타이틀·기본 진입 경로가 바뀌고, 기존 모니터링/3DS 페이지는 정상.
+7. **인쇄·폐쇄망**: 인쇄 팝업이 로컬 `/JsBarcode.all.min.js`만 로드(network 탭 외부 CDN 0), 라벨이 A4 규격으로 렌더.
+8. **정적 게이트**: `tsc --noEmit`·`eslint .` 0.
 
 ## Risks & Mitigation
 
-- **무접촉 위반(최대 리스크)**: 전역 미들웨어/팩토리/rate limiter 도입이 기존 엔드포인트 동작을 바꿀 수 있음.
-  → D1·D5 권장(경로 한정·국소 처리) 준수. 마이그레이션 add-only diff 검사(검증1).
-- **ModelSnapshot 오염**: 단일 `WcsDbContext`에 B2B 추가 시 스냅샷 재생성으로 기존 엔트리가 재정렬/변경될 위험.
-  → add-only migration 생성 후 스냅샷 diff가 B2B 테이블 추가로만 국한되는지 확인.
-- **실패 message 표류**: 리팩터로 문자열이 미세 변경되면 계약 위반. → 테스트로 문자열 고정(검증4).
-- **`/health` 라우트 충돌**: 원본 HealthChecks 이식 금지(우리 MapGet 유지). §7 확인.
+- **무접촉 위반(최대 리스크)**: (a) InvalidModelStateResponseFactory 경로 allowlist 확장이 B2C ProblemDetails를 바꾸면 안 됨
+  → `/api/test-data` **추가만**(기존 분기 보존)·테스트로 B2C 400 형식 불변 확인. (b) Layout/App 토글 개편이 기존 B2C 라우트
+  동작을 바꾸면 안 됨 → 기존 페이지 렌더·라우팅 회귀 확인.
+- **아카이브 하드삭제 잔존**: 리팩터 중 `RemoveRange(logs/results)`가 남으면 계약 위반 → 검증3으로 **DB 잔존 단정**.
+- **아카이브 스코프 과잉**: 원본 barcode 전역 키를 그대로 이식하면 배치 밖 오염 → `(BizDay,Batch,Barcode)` 한정·검증3(c).
+- **ModelSnapshot 오염**: archived_at 추가 시 스냅샷 재생성으로 기존 엔트리 재정렬 위험 → diff가 2컬럼 추가로만 국한 확인.
+- **프론트 신규 의존 남발**: 확인 다이얼로그·토스트·날짜입력을 무거운 라이브러리로 도입 금지 → shadcn-style 자작 + native
+  `<input type="date">`. JsBarcode는 로컬 vendoring(CDN 금지).
+- **프론트 E2E가 실 API 의존**: Q1(a) 순차 채택 시 2a 병합 후 2b — E2E가 실 관리 API를 구동해 관측(권장 근거).
 
 ## Planner self-check
 
-- [x] 원본 DB 스키마를 **INFORMATION_SCHEMA/sys로 실측 덤프**(컬럼·타입·NULL·기본값·PK/UNIQUE 인덱스·FK·identity) →
-      `docs/B2B-SCHEMA.md §1`로 캡처. CHECK 제약 0건 확인.
-- [x] 원본 엔티티·서비스(WorkService/BoxService)·DTO·컨트롤러·유틸·미들웨어·Program.cs 정독 → §2·§3·§5·§6·§7 캡처.
-      원본은 **참조 전용**으로만 열람, 수정/커밋 없음.
-- [x] 실패 message 정본을 `api-spec-ko.html`에서 추출 → §4에 19종 정리(자리표시자 포함).
-- [x] 우리 프로젝트 충돌 실측: 테이블명 충돌 0 / 라우트 충돌 0 / `/health` 충돌 有(이식 금지) /
-      미들웨어·400 팩토리 전역성 위험 식별 → §7·D1·D5.
-- [x] dual-provider 마이그레이션 구조·테스트 하네스(FakeModbusWebApplicationFactory + EnsureCreated + SQLite) 확인.
-- [x] 스코프 경계 확정(6테이블+마이그레이션+5 API+로직+테스트) + Non-Goals 명시 + 게이트 Q1~Q5로 novel 결정 사용자에 위임.
-- [ ] **사용자 확정 대기**: Q1(api_call_log 방식) · Q3(created_at UTC vs 로컬) · Q5(400/예외 처리 경로 한정 방식).
-      확정 후 Generator 착수. (Generator/Evaluator는 pwd 밖 접근 금지 — `docs/B2B-SCHEMA.md`가 유일 근거.)
+- [x] 원본 `TestDataService`(generate/upload/summary/detail/reset/delete)·`TestDataController`·`GenerateRequest` 정독 →
+      알고리즘·계약·실패 message를 `docs/B2B-DATAGEN.md §1·§2`로 캡처. 원본은 **참조 전용**, 수정/커밋 없음.
+- [x] 원본 하드 연관삭제(barcode 키 `RemoveRange`) 확인 → 사용자 확정 아카이브(archived_at)로 §3 재설계(스코프 한정·교정 포함).
+- [x] 원본 `DataGenerator.jsx`(934줄) 정독 → 레이아웃·다중선택(드래그/Shift/Ctrl)·우클릭 메뉴·A4 인쇄(로컬 JsBarcode·
+      듀얼바코드·XSS DOM 조립)를 `§4`로 캡처. 우리 스택(React19+TS+Tailwind)으로 재개발 지시(원본 복사 금지).
+- [x] 우리 프로젝트 실측: 백엔드 B2B-1 산출물(엔티티·WcsDbContext·마이그레이션·RCS 5 API·B2bWebApplicationFactory·
+      경로분기 팩토리·SPA 정적서빙)·프론트 구조(Layout NAV·App Routes·main Provider·`components/ui`·전역 스토어 부재)·
+      ClosedXML 부재·라우트 충돌 0 확인 → §5·§6·Implementation Scope에 반영.
+- [x] 스코프 분할 판단: 2a(백)→2b(프론트) 순차 권장 + 단일+Parallel Modules 대안 — Q1로 사용자 위임.
+- [x] novel 결정 4건(스코프 분할 Q1 · 토글 전역상태 Q2 · reset/delete+아카이브 시맨틱 Q3 · 아카이브 UI 필터 Q4)을
+      권장안과 함께 게이트 Question으로. 기술 세부는 Generator 몫.
+- [ ] **사용자 확정 대기**: Q1(분할) · Q2(토글 상태) · Q3(reset/delete+아카이브 스코프) · Q4(아카이브 필터 위치).
+      확정 후 Generator 착수(Q1(a)면 2a 백엔드부터). Generator/Evaluator는 pwd 밖 접근 금지 —
+      `docs/B2B-DATAGEN.md` + `docs/B2B-SCHEMA.md` + `docs/PROGRAM_STRUCTURE.md`가 유일 근거.
 
 ── ★ 사용자 확정 (2026-07-08, Phase 1→2 게이트) ──────────────────────────────
-Q1 [D1] api_call_log: **미들웨어 이식(경로 /api/v1/works/ 한정)** — RcsApiLoggingMiddleware+ApiCallLogQueue+
-   BackgroundWriter 이식하되 /api/v1/works/ 접두만 기록(기존 RCS destination-query 등 미기록 = 무접촉). 큐 헬스체크 미이식.
-Q2 [D2] GET /api/boxes: **제외** — B2B-1은 수집 계층(POST works/*)만. 조회는 B2B-3(프론트).
-Q3 [D3] created_at: **원본 로컬타임(DateTime.Now)** — 원본 BowooTestBatchSystem_v2 동작 보존.
-   ⚠ 기존 B2C 테이블은 UTC이나 B2B는 로컬 — 분리 테이블이라 무방하되 코드/스키마 주석에 "B2B는 원본 호환 로컬타임(B2C UTC와 상이)" 명기.
-   (log_time/receive_time은 클라이언트 inTime/sortTime 파싱값 — 원문 의미 보존.)
-Q5 [D5] 400/예외: **경로 한정·국소** — InvalidModelStateResponseFactory 경로 분기(/api/v1/works/만 ApiResponse.Fail,
-   그 외 기존 ProblemDetails 유지) + ArgumentException은 B2B 국소 try/catch. 전역 미들웨어/팩토리 무조건 교체 금지.
-box_item→box FK: CASCADE 유지(단일 경로·1785 위험 없음). test_log.test_data_id: FK 없이 인덱스만(원본 동일).
-실행: 단일 Generator(백엔드). 기존 B2C 무접촉·경로한정이 최대 리스크 — Evaluator가 무접촉 diff·회귀 중점 검증.
+Q1 스코프: **2a 백엔드 → 2b 프론트 순차 분할**. **이번 = S-B2B-2a(백엔드만)**: test-data 관리 API
+   (generate 수동생성·summary·detail·reset·delete·upload) + archived_at 마이그레이션/서비스 + 아카이브 조회.
+   프론트(생성 페이지·B2C/B2B 토글)는 B2B-2b(2a 병합 후).
+Q2 토글 전역상태: React Context + localStorage(mode+bizDay+autoRefresh) — B2B-2b에서.
+Q3 reset/delete + 아카이브: reset=ReceiveTime 초기화(미처리 복귀)+연관 로그 archived_at / delete=test_data
+   하드삭제+연관 로그 archived_at. **아카이브 범위=선택 행의 (BizDay,Batch,Barcode) 집합 + test_log는 TestDataId로**
+   (원본 barcode-only 광범위 하드삭제 교정 — 하드삭제 0). 
+Q4 아카이브 UI: 상세 조회 active|all|archivedOnly 3상태 필터(2b). 2a에서 API가 이 필터 파라미터 지원.
+무접촉: 기존 B2C + B2B-1 계약(RCS 5 API·엔티티 계약 컬럼) 0 변경. archived_at는 test_log·work_result
+   add-only ALTER(신규 B2B 테이블·기존 B2C 무접촉). ModelState 팩토리 allowlist에 /api/test-data 추가(additive).
+신규 의존성: ClosedXML(엑셀 파싱) — 백엔드. 자동생성/auto-config/preview-chutes 제외(확정).
