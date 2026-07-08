@@ -21,6 +21,14 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-B2B-3b 코드리뷰 이연 (Minor — 비차단, 프론트 조회 3페이지)
+- [ ] [DRY] `ArchiveSelect.tsx`가 `ARCHIVE_LABELS`+보관 아이콘/라벨 마크업을 `DataGeneratorPage.tsx:29-33,234-248`와 중복. DataGeneratorPage도 ArchiveSelect 소비하도록 통합(라벨 단일 소스화).
+- [ ] [UX] `BoxesPage.tsx:42` 선택된 박스 상세가 통합검색으로 마스터에서 필터아웃돼도 잔존(`selected`를 `rows`가 아닌 `filtered`에서 해석하거나 필터아웃 시 선택 해제).
+- [ ] [UX] `TestLogGrid.tsx:157` 통합검색 haystack에 한글 `equipmentLabel`("인덕션"/"슈트") 포함 → "슈트" 검색 시 분류탭 전행 매치. 컬럼 실값만 대상으로 좁힐지 검토.
+- [ ] [cosmetic] `ComparisonPage.tsx:148-159` GROUP border-left 구분선이 헤더행엔 있고 필터입력행엔 없음(`FilterCell`가 className 미수용, `SummaryGrid.tsx:130`). 그룹 경계선 필터행에서 끊김.
+- [ ] [cosmetic] `LogsPage.tsx:27` Tabs `gap-3` + TabsContent `mt-4` 이중 세로 간격.
+- [ ] [성능·의식적선택] 입력/분류/비교 그리드 미가상화(하루치 바코드 전량 렌더) — 기존 DetailGrid/SummaryGrid와 일관이라 이번 PR 허용. 대량 시 TanStack virtualization 검토.
+
 ## S-B2B-3a 코드리뷰 이연 (Minor — 비차단, 읽기전용 조회 API)
 - [ ] [#2 방어] E1/E2/E5(`LogService`)는 `bizDay` 생략 시 상한 없이 전체 materialization(E3만 500 캡). 소규모·내부망 전제라 저위험이나 E1/E2에 안전 `Take` 또는 bizDay 필수 가드 검토.
 - [ ] [#3 성능] E5 3-way 매칭이 `foreach(test_data)` 안에서 `pool.Where().OrderBy().FirstOrDefault()` 매행 재스캔·재정렬 → O(T×(I+S+R)). 루프 전 `ILookup<(Batch,Barcode)>`·`Dictionary<TestDataId>` 프리빌드로 준선형화. #2와 함께 처리 권장.

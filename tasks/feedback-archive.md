@@ -2,6 +2,16 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-B2B-3b (조회 프론트엔드 3화면[로그·비교·박스] + 내비 점등, 백엔드 무접촉) — APPROVED (2026-07-08, 1 iteration)
+
+- **프론트 전용 스프린트라도 실 stack 시드 scratch DB 로 검증 — DTO 미러 코드판독만으론 "왕복"이 안 닫힌다**: 6엔드포인트 소비 화면은 `dotnet ef database update`(Sqlite scratch)+python sqlite3 시드로 실 백엔드(:5205 Production·SeedOnStartup=false·`Sorters__0__Transport=Tcp`)를 세우고 vite(:5173) proxy 로 왕복시켜야 통합품질이 닫힌다. 현장 DB 오염 벡터 3중 차단(별도 scratch 파일명·Provider=Sqlite override·Transport=Tcp 로 COM1/RTU 실 3DS PLC 무접촉)이 lessons 2026-07-03/현장PLC 준수의 정석. `.claude/ports.local.json` 부재 시 계약이 `vite.config.ts server.port` 를 포트 source-of-truth 로 명시 허용하면 그걸 쓴다(하드코딩 아님).
+- **비교화면 match/mismatch/missing 시각구별은 시드 설계로 3판정 동시 재현 + 스크린샷 판독이 필수**: test_data(spine 5행)에 대해 1행=INPUT+SORT(001)+RESULT(001)→일치, 1행=SORT(002)+RESULT(099)→불일치, 1행=INPUT only→누락, +아카이브된 SORT/RESULT 1행으로 **active→all 전환 시 누락→일치 전이(누락 카운트 2→1)**를 만들어 아카이브 왕복까지 한 시드로 닫는다. 판정 배지 색(초록/빨강/회색)+행 틴트+"누락" 셀 마커는 DOM 텍스트가 아니라 **스크린샷 이미지 판독**으로만 시각구별이 확정됨.
+- **에러상태(400 ErrorRow)를 실 사용자경로 없이 재현 = localStorage 주입으로 프론트 화이트리스트 통과·백엔드 검증 실패 값 찾기**: bizDay 가 native `<input type=date>`라 비존재 날짜를 UI 로 못 만든다. `wcs.ui` localStorage 의 bizDay 정규식(`^\d{4}-\d{2}-\d{2}$`)은 통과하되 백엔드 `NormalizeBizDay`(TryParseExact)가 거부하는 `2026-02-30` 을 주입→reload 하면 실 400→ErrorRow 파이프라인을 그대로 탄다. 백엔드 무접촉 프론트 스프린트의 에러상태 검증 정석.
+- **콘솔 BLOCKING 게이트에서 "의도된 처리된 4xx"는 명시 예외 — 단 populated 페이지의 error/warning 0 을 별도 입증**: 에러상태 테스트가 유발한 400(React Query 3회 재시도 = 3 error 엔트리)은 앱이 ErrorRow 로 처리·표시하므로 예외. 그러나 이건 populated 페이지가 깨끗함을 면제하지 않는다 — 세션 전체 console.log 를 판독해 "유일 error = 그 의도된 400뿐, 정상 페이지는 error/warning/pageerror/React경고 0"을 분리 입증해야 게이트가 닫힌다.
+- **Excel 다운로드 검증 = 다운로드 이벤트 발생 + 받은 바이트를 zip 으로 재검증(magic `50 4B 03 04`·xl/worksheets 엔트리)**: 버튼 클릭→브라우저 다운로드 파일명(Content-Disposition filename\*/RFC5987 파싱 결과)이 트리거됨 + 저장된 파일이 유효 xlsx(zip 오픈·시트 엔트리 존재)임을 둘 다 봐야 "실 파일 다운로드"가 닫힌다. curl `-D -` 로 Content-Type/Content-Disposition 헤더 + size 도 병행 대조.
+- **B2C 무접촉 게이트 = 모드 토글 후 내비 배열 원복 + StatusRail 렌더 실측(코드 diff 만으론 약함)**: Layout.tsx 의 b2b NAV_SET 항목만 수정한 스프린트라도 "B2C 토글→내비 3항목(모니터링/3DS워드/운영제어 F3비활성) 복귀 + StatusRail 정상 + MonitorPage 렌더"를 브라우저로 실측해야 회귀 0 이 닫힌다. Tcp override 로 소터 미연결이면 StatusRail "등록된 소터 없음"은 정상(환경 산물, 회귀 아님).
+- **MCP Playwright 산출물(스크린샷·console·network·다운로드)은 repo 루트에 떨어져 working tree 오염 — 검증 후 gitignored `screenshots/{sprint}/` 로 이동 필수**: `.playwright-mcp`·`screenshots` 는 gitignored 지만 MCP 가 스크린샷/로그를 cwd(repo 루트)에 저장하면 untracked 로 남아 orchestrator 커밋에 섞일 수 있다. 검증 종료 시 전부 screenshots 하위로 mv + scratch DB/프로세스 정리로 핸드오프 시점 git status 를 원복.
+
 ## S-B2B-3a (조회 백엔드 API 6종: 로그·API호출이력·Excel·3-way 비교·박스 + 아카이브 필터 소비, 읽기 전용) — APPROVED (2026-07-08, 1 iteration)
 
 - **읽기 전용 additive 조회 스프린트의 무접촉 판정 = numstat 삽입-only + 신규 migration 0 + ModelSnapshot 0**: 4개 기존 파일 전부 `git diff --numstat develop`이 `N/0`(삭제 0 = 순수 append)이고 `git status`에 migration/snapshot 파일 0건이면 "스키마 무변경·기존 계약 무훼손"이 닫힌다. E5 comparison 을 기존 `TestDataController`에 얹을 때 **생성자를 건드리지 않는 `[FromServices]` 메서드 주입**이 정답 — 생성자에 `ILogService`를 추가하면 기존 DI 계약(ITestDataService만)을 바꾸는 diff가 생긴다. 같은 파일 additive(BoxService.GetBoxesAsync ↔ ProcessBoxAsync 무접촉)는 메서드 단위 diff 로 무접촉 확인.
@@ -458,3 +468,5 @@
 - [CODE-REVIEW] sprint=S-B2B-2b critical=0 major=1 minor=7 iter=2 (#1 Dialog 포커스트랩 fix + #2·#4·#6 저비용, 나머지 minor todo. Evaluator APPROVED 브라우저·271 GREEN)
 
 - [CODE-REVIEW] sprint=S-B2B-3a critical=0 major=1 minor=6 iter=1 (major=#1 파생필드 Frankenstein 행→단일 결정적 서브쿼리; +#4 export cancel/leak, #5 both-null match 저비용 동반수정; minor 4건 todo 이연)
+
+- [CODE-REVIEW] sprint=S-B2B-3b critical=0 major=1 minor=7 iter=1 (major=#1 ComparisonPage 리스트 key 비유니크→중복시 콘솔에러(BLOCKING게이트); +role=tab→aria-pressed a11y 동반; minor 6건 todo 이연)
