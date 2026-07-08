@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-B2B-3a (조회 백엔드 API 6종: 로그·API호출이력·Excel·3-way 비교·박스 + 아카이브 필터 소비, 읽기 전용) — APPROVED (2026-07-08, 1 iteration)
+
+- **읽기 전용 additive 조회 스프린트의 무접촉 판정 = numstat 삽입-only + 신규 migration 0 + ModelSnapshot 0**: 4개 기존 파일 전부 `git diff --numstat develop`이 `N/0`(삭제 0 = 순수 append)이고 `git status`에 migration/snapshot 파일 0건이면 "스키마 무변경·기존 계약 무훼손"이 닫힌다. E5 comparison 을 기존 `TestDataController`에 얹을 때 **생성자를 건드리지 않는 `[FromServices]` 메서드 주입**이 정답 — 생성자에 `ILogService`를 추가하면 기존 DI 계약(ITestDataService만)을 바꾸는 diff가 생긴다. 같은 파일 additive(BoxService.GetBoxesAsync ↔ ProcessBoxAsync 무접촉)는 메서드 단위 diff 로 무접촉 확인.
+- **provider-중립은 코드 판독으로만 닫힌다(SQLite GREEN ≠ SQL Server valid 재적용) — smell grep + 실행 위치 구분**: 스키마 변경 0 읽기 전용이라 실 SQL Server 왕복 대신 `grep -E 'strftime|EF\.Functions\.(Like|DateDiff)|FromSqlRaw|ExecuteSql|\.Sqlite'` 0건 + LINQ 형태 판독이 계약이 요구한 검증. 핵심 구분: E4/E5 는 `ToListAsync` **후** LINQ-to-objects(완전 중립), E1/E2 파생필드는 `.Select` 안의 상관 서브쿼리 `FirstOrDefault()`(EF Core→OUTER APPLY, 양 provider 지원), E3 는 `Take`(TOP/LIMIT). 전부 provider-특이 API 미의존. 주의: 파생 슈트/수신시각을 서브쿼리 2개로 뽑아 OUTER APPLY 2회(경미 성능·기능 정확)·barcode 중복 시 무순서 FirstOrDefault=임의 1행(원본 §3.2.6 "Barcode 단독" 동작 보존, DTO 주석 명시) — 결함 아님.
+- **아카이브 3상태 검증 게이트 = active/archivedOnly/all + 미인식→active + DB COUNT 불변(S-B2B-2a 게이트 재적용)**: 한 테스트에서 활성1+아카이브1 시드 후 4상태(active=1·archivedOnly=1·all=2·bogus=1) HTTP 카운트 + `db.B2bTestLogs.Count()==2` 단정이 "필터가 소프트삭제를 정확 반영 + 하드삭제 0"을 한 번에 닫는다. 3-way 비교의 아카이브 소비는 별도 테스트(archived 로그 → hasInput active=false/archivedOnly=true)로 셀 단위 검증.
+- **3-way 매칭 Batch 포함 키 교정의 입증 = 음성 대조(같은 bizDay·barcode·다른 batch → 미오매칭) + 양성 대조 동시**: 이월 Barcode-only 결함을 이식하지 않았음은 "B2 test_data 는 B1 로그를 오매칭 안 함(hasInput/Sort/Result 전부 false·isMissing)" 음성 + "B1 정상 isMatch" 양성을 한 테스트에 병치할 때만 닫힌다(S-B2B-2a 스코프 교정 음성대조 패턴 동형). `MatchLog`/`MatchResult`가 `TestDataId` 우선 + `(Batch,Barcode)` 폴백 + `HashSet<long> used` 로 사용된 로그 id 재사용 금지 — 중복 barcode 다행 시 1:1 배분 보장.
+- **Excel export 검증 = 바이트를 ClosedXML 로 재파싱해 셀 값 단정(유효 xlsx + 페어링·소요시간·층매핑 동시)**: `resp.ReadAsByteArrayAsync()` → `new XLWorkbook(ms)` → 헤더:값 딕셔너리로 barcode 행을 찾아 Phase1(TestDataId 1:1)·Phase2((Batch,Barcode) 폴백)·소요시간("5.0"/"3.0" F1·span≥0)·인덕션 층("1→2층"/"3→1층"/"5→공백")·SORT 미매칭 칸 공백을 전부 단정. "바이너리를 되열 수 있다"가 곧 유효 xlsx 증거.
+- **하드코딩 금지(#7) 상한은 상수 + 초과 시드 테스트로**: api-calls 500 상한을 `AppConstants.ApiCallLogMaxItems`로 외부화하고 505 시드→500 반환 단정으로 상수 경유 실증. 인덕션→층 매핑(1·2=2층/3·4=1층)은 설비 고정 물리 규칙이라 문서화 하드코딩 유지(시간값 아님·#7 대상 아님) — Craft 판정에서 이 구분 유지.
+
 ## S-B2B-2a (test-data 관리 API + 기록 아카이브[archived_at 소프트삭제], 백엔드) — APPROVED (2026-07-08, 1 iteration)
 
 - **"하드삭제 0" 소프트삭제 재설계 검증의 결정적 게이트 = COUNT 불변 단정 + RemoveRange grep 화이트리스트**: "archived_at 로 바꿨다"는 GREEN 만으론 부족 — reset/delete 후 `test_log`/`work_result` **행 COUNT 가 불변**(`Count()==N` 그대로)임을 테스트가 직접 단정해야 "DB 에서 사라지지 않음"이 닫힌다. 병행으로 서비스 파일에 `RemoveRange|.Remove(|ExecuteDelete|DELETE` grep → 실호출이 **등록 원장(test_data) 1건으로만** 한정되고 로그/결과 경로는 archived_at UPDATE 뿐임을 화이트리스트로 확정. 리팩터 중 로그 RemoveRange 잔존이 최대 리스크이므로 "존재하는 삭제 호출을 전수 열거해 정당 대상만 남는가"가 판정자.
@@ -447,3 +456,5 @@
 - **[EVALUATOR 자기-사고] Playwright MCP file_upload 는 allowed-root 밖 파일 거부 + 드라이브 문자 대소문자 민감**: 스크래치의 xlsx 는 프로젝트 루트 밖이라 거부 → gitignored `screenshots/` 로 복사 후 사용. 그 후에도 `C:\...` 거부 → allowed root 표기가 `c:\...`(소문자)라 **소문자 드라이브+백슬래시**로 넘겨야 통과. 업로드 검증 시 픽스처를 프로젝트 루트 내부에 두고 경로 대소문자 정합 필요.
 - [CODE-REVIEW] sprint=S-B2B-2b pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-B2B-2b critical=0 major=1 minor=7 iter=2 (#1 Dialog 포커스트랩 fix + #2·#4·#6 저비용, 나머지 minor todo. Evaluator APPROVED 브라우저·271 GREEN)
+
+- [CODE-REVIEW] sprint=S-B2B-3a critical=0 major=1 minor=6 iter=1 (major=#1 파생필드 Frankenstein 행→단일 결정적 서브쿼리; +#4 export cancel/leak, #5 both-null match 저비용 동반수정; minor 4건 todo 이연)
