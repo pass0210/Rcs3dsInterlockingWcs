@@ -1,22 +1,68 @@
-import { NavLink, Outlet } from 'react-router-dom'
-import { Activity, Cpu, SlidersHorizontal, Radio } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import {
+  Activity,
+  Cpu,
+  SlidersHorizontal,
+  Radio,
+  Database,
+  ScrollText,
+  GitCompare,
+  Package,
+  Settings,
+  RefreshCw,
+} from 'lucide-react'
+import { useEffect, useState, type ComponentType } from 'react'
 import { StatusRail } from './StatusRail'
 import { fmtClock } from '@/lib/format'
 import { POLL_MS } from '@/lib/queries'
 import { useHubLifecycle } from '@/lib/useMonitorHub'
+import { REFRESH_INTERVALS, homePathFor, useUiMode, type UiMode } from '@/lib/uiMode'
+import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
-// 좌측 내비 항목 — 모니터링(F1)·3DS 워드(F2) 활성. 운영 제어(F3)는 배지로 예고(고아 링크 아님).
-const NAV = [
-  { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null as string | null },
-  { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null as string | null },
-  { to: '#', label: '운영 제어', icon: SlidersHorizontal, enabled: false, phase: 'F3' },
-]
+interface NavItem {
+  to: string
+  label: string
+  icon: ComponentType<{ className?: string }>
+  enabled: boolean
+  phase: string | null
+  title: string
+  subtitle: string
+}
+
+// ── 모드별 메뉴 세트(docs/B2B-DATAGEN.md §5) ──────────────────────────────────
+//   B2C: 모니터링(F1)·3DS 워드(F2) 활성 + 운영 제어(F3 배지). 기존 항목·동작 무접촉.
+//   B2B: 데이터 생성(S-B2B-2b) 활성 + 로그·비교·박스·설정(B2B-3 배지 예고).
+const NAV_SETS: Record<UiMode, NavItem[]> = {
+  b2c: [
+    { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null, title: '실시간 모니터링', subtitle: '작업 데이터 · 로봇 이동중 · 분류 현황' },
+    { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null, title: '3DS 워드값', subtitle: 'D0~D6 레지스터 실시간 관찰' },
+    { to: '#', label: '운영 제어', icon: SlidersHorizontal, enabled: false, phase: 'F3', title: '운영 제어', subtitle: '' },
+  ],
+  b2b: [
+    { to: '/data-generator', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '테스트 데이터 생성 · 업로드 · 관리' },
+    { to: '#', label: '로그 조회', icon: ScrollText, enabled: false, phase: 'B2B-3', title: '로그 조회', subtitle: '' },
+    { to: '#', label: '결과 비교', icon: GitCompare, enabled: false, phase: 'B2B-3', title: '결과 비교', subtitle: '' },
+    { to: '#', label: '박스 조회', icon: Package, enabled: false, phase: 'B2B-3', title: '박스 조회', subtitle: '' },
+    { to: '#', label: '설정', icon: Settings, enabled: false, phase: 'B2B-3', title: '설정', subtitle: '' },
+  ],
+}
+
+const REFRESH_LABEL: Record<number, string> = { 3000: '3초', 5000: '5초', 10000: '10초', 30000: '30초' }
 
 export function Layout() {
-  // 앱 수명 동안 SignalR 실시간 연결 유지 + oplog 이벤트 → TanStack Query 무효화(§2.3).
+  // 앱 수명 동안 SignalR 실시간 연결 유지 + oplog 이벤트 → TanStack Query 무효화(§2.3·B2C).
+  // 모드와 무관하게 상시 유지 — 기존 B2C 동작 무접촉(회귀 0).
   useHubLifecycle()
+
+  const { mode } = useUiMode()
+  const location = useLocation()
+  const nav = NAV_SETS[mode]
+
+  // 헤더 타이틀 — 현재 경로에 매칭되는 활성 메뉴 기준(없으면 모드 기본 항목).
+  const active = nav.find((n) => n.enabled && n.to === location.pathname)
+  const header = active ?? nav.find((n) => n.enabled) ?? nav[0]
+
   return (
     <div className="flex h-full">
       {/* ── 좌측 내비 ─────────────────────────────────────────────── */}
@@ -31,8 +77,13 @@ export function Layout() {
           </div>
         </div>
 
+        {/* B2C/B2B 모드 토글 */}
+        <div className="border-b border-line px-2 py-2">
+          <ModeToggle />
+        </div>
+
         <nav className="flex flex-col gap-0.5 p-2">
-          {NAV.map((item) => {
+          {nav.map((item) => {
             const Icon = item.icon
             if (!item.enabled) {
               return (
@@ -78,16 +129,90 @@ export function Layout() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-4 border-b border-line bg-panel px-5 py-3">
           <div>
-            <h1 className="text-[16px] font-semibold leading-tight tracking-[-0.01em] text-ink">실시간 모니터링</h1>
-            <p className="text-[12px] text-faint">작업 데이터 · 로봇 이동중 · 분류 현황</p>
+            <h1 className="text-[16px] font-semibold leading-tight tracking-[-0.01em] text-ink">
+              {header.title}
+            </h1>
+            {header.subtitle && <p className="text-[12px] text-faint">{header.subtitle}</p>}
           </div>
-          <StatusRail />
+          {/* 우측 컨트롤 — B2C: 소터 상태 레일 / B2B: 업무일자 + 자동 새로고침 */}
+          {mode === 'b2c' ? <StatusRail /> : <B2bHeaderControls />}
         </header>
 
         <main className="min-w-0 flex-1 overflow-auto p-5">
           <Outlet />
         </main>
       </div>
+    </div>
+  )
+}
+
+// B2C/B2B 세그먼트 토글 — 전환 시 해당 모드 기본 페이지로 이동.
+function ModeToggle() {
+  const { mode, setMode } = useUiMode()
+  const navigate = useNavigate()
+
+  const select = (m: UiMode) => {
+    if (m === mode) return
+    setMode(m)
+    navigate(homePathFor(m))
+  }
+
+  return (
+    <div className="flex rounded-lg border border-line bg-elevated p-0.5" role="tablist" aria-label="UI 모드">
+      {(['b2c', 'b2b'] as UiMode[]).map((m) => (
+        <button
+          key={m}
+          role="tab"
+          aria-selected={mode === m}
+          onClick={() => select(m)}
+          className={cn(
+            'flex-1 rounded-md px-2 py-1 text-[12px] font-semibold transition-colors',
+            mode === m ? 'bg-panel text-ink shadow-card' : 'text-muted hover:text-ink',
+          )}
+        >
+          {m === 'b2c' ? 'B2C 관제' : 'B2B 생성'}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// B2B 헤더 컨트롤 — 전역 업무일자(native date) + 자동 새로고침 토글(+간격).
+function B2bHeaderControls() {
+  const { bizDay, setBizDay, autoRefresh, setAutoRefresh, refreshInterval, setRefreshInterval } = useUiMode()
+  return (
+    <div className="flex items-center gap-3">
+      <label className="flex items-center gap-2 text-[12px] text-faint">
+        업무일자
+        <input
+          type="date"
+          value={bizDay}
+          onChange={(e) => setBizDay(e.target.value)}
+          className="h-8 rounded-lg border border-line bg-panel px-2 text-[13px] text-ink focus-visible:outline-2 focus-visible:outline-ink"
+        />
+      </label>
+      <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
+        <input
+          type="checkbox"
+          checked={autoRefresh}
+          onChange={(e) => setAutoRefresh(e.target.checked)}
+          className="size-3.5 cursor-pointer accent-[var(--color-brand-active)]"
+        />
+        <RefreshCw className={cn('size-3.5', autoRefresh && 'text-online')} />
+        자동 새로고침
+      </label>
+      <Select
+        value={refreshInterval}
+        onChange={(e) => setRefreshInterval(Number(e.target.value))}
+        disabled={!autoRefresh}
+        aria-label="새로고침 간격"
+      >
+        {REFRESH_INTERVALS.map((ms) => (
+          <option key={ms} value={ms}>
+            {REFRESH_LABEL[ms]}
+          </option>
+        ))}
+      </Select>
     </div>
   )
 }
