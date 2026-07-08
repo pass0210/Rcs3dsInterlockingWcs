@@ -174,6 +174,13 @@ public sealed class SimServer : IAsyncDisposable
         // 전송 선택·검증(fail-loud: 잘못된 Transport / RTU PortName 미지정). 서버 버퍼는 여기서 확보.
         _transport = SimTransportFactory.Create(_opt, _unitId, _injectedRtuPort);
 
+        // ── sticky 고장 충실도(S-S5-FLAKE) ────────────────────────────────────────
+        // WCS 쓰기가 서버 버퍼를 바꾸는 "그 순간" 동기적으로(쓰기 처리 스레드·ModbusServer.Lock 보유 중)
+        // R_Flag를 복원할 수 있도록 RegistersChanged 이벤트를 구독한다(핸들러는 sticky 비활성 시 즉시 반환
+        // — 다른 모든 테스트/전송에 영향 0). 클라이언트 연결(Start) 이전에 구독해 첫 쓰기부터 포착.
+        _transport.Server.EnableRaisingEvents = true;
+        _transport.Server.RegistersChanged   += OnServerRegistersChanged;
+
         lock (_hrLock)
         {
             Array.Clear(_hr, 0, _hr.Length);
@@ -272,8 +279,10 @@ public sealed class SimServer : IAsyncDisposable
                     // WCS가 FluentModbus를 통해 쓴 값을 섀도에 반영
                     PullFromServerLocked();
 
-                    // 고장주입(§2C/S5): WCS ClearR로 R_Flag가 꺼졌으면 즉시 재천명(PLC 무ack·ClearR 미반영 모사).
+                    // 고장주입(§2C/S5): WCS ClearR로 R_Flag가 꺼졌으면 재천명(PLC 무ack·ClearR 미반영 모사).
                     // 실측 PLC의 "R 자체 클리어 안 함"은 그대로 두고 "클리어가 반영 안 되는 고장"만 재현.
+                    // 주 경로는 RegistersChanged 이벤트(OnServerRegistersChanged)가 쓰기 즉시 동기 복원한다
+                    // — 이 Sim 루프 재천명은 백스톱(이벤트가 이미 복원했으면 여기선 무변화). S-S5-FLAKE.
                     if (InjectStickyRResidue && (_hr[RegisterMap.Flags] & RegisterMap.D4.R_Flag) == 0)
                     {
                         _hr[RegisterMap.Flags] |= RegisterMap.D4.R_Flag;
@@ -319,6 +328,42 @@ public sealed class SimServer : IAsyncDisposable
             catch (Exception ex)
             {
                 _log.LogError(ex, "Sim3ds 루프 예외");
+            }
+        }
+    }
+
+    // ─── sticky 고장 충실도 훅(S-S5-FLAKE) ───────────────────────────────────
+
+    /// <summary>
+    /// FluentModbus <c>RegistersChanged</c> 핸들러 — WCS 클라이언트 쓰기가 서버 버퍼를 변경한 직후
+    /// (쓰기 처리 스레드에서 동기 발화, async 서버는 <c>ModbusServer.Lock</c> 보유 중)에 호출된다.
+    ///
+    /// sticky 고장(<see cref="InjectStickyRResidue"/>) 활성 시, WCS ClearR(D4 RMW FC06)가 R_Flag를
+    /// 0으로 바꾸는 그 순간 R_Flag=1을 즉시 복원한다. 이벤트가 FC06 응답 반환 이전(그리고 GW의 다음 폴
+    /// FC03 read 이전 — 단일 커넥션 직렬)에 동기 실행되므로, 서버 버퍼는 sticky 구간에서 R_Flag=0을
+    /// "한 순간도" 노출하지 않는다. 이로써 GW 폴이 일시적 0을 샘플링해 arming(잔류 대사)을 거짓 완료시키던
+    /// 창(S-S5-FLAKE 근본원인 — CPU 경합 시 Sim 루프 재천명 지연으로 확대)을 스케줄링과 무관하게 결정적으로
+    /// 제거한다. "ClearR 미반영" 고장을 충실히(=클리어가 관측상 전혀 반영되지 않음) 모델링 —
+    /// 실 무ack PLC의 의미와 일치. sticky 비활성이면 즉시 반환(다른 모든 테스트·전송에 영향 0).
+    ///
+    /// 잠금 안전성: 핸들러는 <c>_hrLock</c>만 취득한다. GetHoldingRegisters는 내부적으로
+    /// ModbusServer.Lock을 취득하지 않으므로(FluentModbus 5.3.2 — 무동기 span 반환), Sim 루프
+    /// (_hrLock→버퍼)와 이 핸들러(ModbusServer.Lock→_hrLock) 사이에 락 순서 순환이 없다(데드락 없음).
+    /// </summary>
+    private void OnServerRegistersChanged(object? sender, RegistersChangedEventArgs e)
+    {
+        if (!_stickyRResidue || e.UnitIdentifier != _unitId) return;
+
+        lock (_hrLock)
+        {
+            var span = RequireTransport().Server.GetHoldingRegisters(_unitId);
+            // 서버 버퍼는 빅엔디언 저장 — Flags 워드만 역변환해 R_Flag 확인/복원(Flush/Pull과 동형 변환).
+            ushort flags = BinaryPrimitives.ReverseEndianness((ushort)span[RegisterMap.Flags]);
+            if ((flags & RegisterMap.D4.R_Flag) == 0)
+            {
+                flags |= RegisterMap.D4.R_Flag;
+                span[RegisterMap.Flags] = (short)BinaryPrimitives.ReverseEndianness(flags);
+                _hr[RegisterMap.Flags]  = flags; // 섀도 일관성 — 다음 Sim 루프 Pull이 되돌리지 않도록.
             }
         }
     }

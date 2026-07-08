@@ -310,6 +310,71 @@ public sealed class HandshakeResidueTests
         Assert.Contains(h.Stages, s => s.action == "HS_C_SENT");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // S5b — Sim 충실도 불변식(S-S5-FLAKE 회귀 가드): sticky 고장 활성 구간에서 WCS가 R_Flag를
+    //       클리어해도 서버 버퍼는 R_Flag=0을 "관측상 한 번도" 노출하지 않는다.
+    //
+    // 배경: S5는 xUnit 병렬 전체 스위트의 CPU 경합 하에서만 간헐 실패했다. 근본원인은 Sim의
+    //   sticky 재천명이 Sim 루프(SimLoopMs) 주기에만 일어나, WCS ClearR RMW가 서버 버퍼에
+    //   R_Flag=0을 쓴 뒤 다음 Sim 루프까지의 [RMW-write, 재천명] 창(부하 시 확대)에서 버퍼가
+    //   R_Flag=0을 노출 → GW 폴이 그 0을 샘플링해 arming(잔류 대사)을 거짓 완료 → C 기입 →
+    //   outcome이 RFlagResidueTimeout이 아니게 됨. 수정: Sim이 RegistersChanged 이벤트에서
+    //   쓰기 즉시(동기·FC06 응답 이전) R_Flag=1을 복원해 창을 제거.
+    //
+    // 이 테스트는 그 불변식을 스케줄링 무관하게 결정적으로 단언한다 — 단일 커넥션에서
+    //   "R_Flag 클리어 → 즉시 read-back"을 반복하며 read-back이 항상 R_Flag=1임을 확인.
+    //   (수정 되돌리면: 재천명이 Sim 루프까지 지연되므로 write 직후 read-back이 R_Flag=0을
+    //    잡아 결정적으로 RED — revert-대조 가드.)
+    // ─────────────────────────────────────────────────────────────────────────
+    [Fact]
+    public async Task S5b_StickyResidue_ServerBufferNeverExposesRFlagZero()
+    {
+        // Sim만 필요(GW/HS 불요) — 실 Modbus 클라이언트로 서버 버퍼 충실도를 직접 검증.
+        // 포트 경쟁(GetFreePort TOCTOU)에 강인하게 재시도하며, 성공한 port를 캡처해 master 연결에 재사용.
+        SimServer? sim = null;
+        int port = 0;
+        for (int attempt = 0; attempt < 6; attempt++)
+        {
+            port = GetFreePort();
+            var candidate = new SimServer(DefaultSimOpt(port));
+            try { await candidate.StartAsync(); sim = candidate; break; }
+            catch (SocketException ex)
+            {
+                _out.WriteLine($"[포트 경쟁 재시도 {attempt + 1}] {ex.Message}");
+                await candidate.DisposeAsync();
+                await Task.Delay(50);
+            }
+        }
+        Assert.NotNull(sim);
+        await using var _ = sim!;
+
+        // 잔류 세팅(R_Flag=1) + sticky 고장 주입(WCS 클리어 미반영 모사 — 실 PLC 무ack).
+        sim!.SetRResidue(FieldRCellNo, FieldRSeq);
+        sim.InjectStickyRResidue = true;
+
+        using var master = new ModbusTcpMaster("127.0.0.1", port, readTimeoutMs: 1000);
+        master.Connect();
+
+        // 단일 커넥션에서 "R_Flag 클리어(RMW FC06) → 즉시 read-back(FC03)"을 반복.
+        // 각 클리어는 서버 버퍼에 R_Flag=0을 쓰지만, RegistersChanged 훅이 FC06 응답 이전에
+        // 동기 복원하므로 read-back은 항상 R_Flag=1이어야 한다(스케줄링 무관·결정적).
+        const int iterations = 100;
+        int observedZero = 0;
+        for (int i = 0; i < iterations; i++)
+        {
+            var before = await master.ReadHoldingRegistersAsync(RegisterMap.Flags, 1, CancellationToken.None);
+            ushort cleared = (ushort)(before[0] & ~RegisterMap.D4.R_Flag); // R_Flag만 클리어(다른 비트 보존)
+            await master.WriteSingleRegisterAsync(RegisterMap.Flags, (short)cleared, CancellationToken.None);
+
+            var after = await master.ReadHoldingRegistersAsync(RegisterMap.Flags, 1, CancellationToken.None);
+            if ((after[0] & RegisterMap.D4.R_Flag) == 0) observedZero++;
+        }
+
+        _out.WriteLine($"[S5b] {iterations}회 클리어 후 즉시 read-back에서 R_Flag=0 관측 = {observedZero}");
+        // 충실도 불변식: sticky 활성 구간에서 R_Flag=0은 관측상 한 번도 노출되지 않는다.
+        Assert.Equal(0, observedZero);
+    }
+
     // ── 헬퍼 ──────────────────────────────────────────────────────────────────
     private static async Task WaitUntilAsync(Func<bool> cond, int timeoutMs, string msg, int pollMs = 20)
     {
