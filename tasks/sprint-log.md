@@ -2731,3 +2731,71 @@ Wcs.Api.csproj +2 / EntitiesB2B.cs +8 / WcsDbContext.cs +4 / ModelSnapshot(SqlSe
 ### 정리
 
 - dev 서버·백엔드 종료 · 포트 5080/5173/1502 free. .playwright-mcp 임시산출물·업로드 픽스처 정리. 격리 SQLite(scratchpad) — 현장 DB 무접촉. 커밋 금지(orchestrator=Evaluator).
+
+---
+
+## IMPLEMENTATION COMPLETE — S-B2B-3a (조회 백엔드 API: 로그·비교·박스·Excel)
+
+> Generator · 2026-07-08 · Branch `feat/b2b-3a-query-backend`
+
+### 요약
+프론트 전용 **읽기 전용 조회 API 6종(E1~E6)**을 순수 additive 로 신설. 신규 마이그레이션 0(스키마 변경 없음),
+기존 B2C(17테이블/라우트/페이지)·B2B-1/2 계약(RCS `/api/v1/works/*`·`/api/test-data/*` 쓰기·엔티티·양 provider
+마이그레이션·ModelSnapshot) **0 변경**. 전체 스위트 GREEN(회귀 0).
+
+### 신규 파일
+- `backend/src/Wcs.Api/B2B/QueryDtos.cs` — 조회 응답 record 5종(TestLogRow·ApiCallLogRow·ComparisonRow·BoxRow·BoxItemRow, camelCase).
+- `backend/src/Wcs.Api/B2B/LogService.cs` — `ILogService`/`LogService`(Scoped): E1 input·E2 sort·E3 api-calls·E5 3-way 비교.
+  - E1/E2: `test_log`(bizDay·log_type) + 아카이브 필터. 파생 슈트·수신시각을 **상관 서브쿼리**(OUTER APPLY, Barcode 단독 매칭 — 원본 §3.2.6 특성 보존)로 인라인(N+1 회피).
+  - E3: `api_call_log` date 필터 + 최신순 **상한 500**(`AppConstants.ApiCallLogMaxItems`, 하드코딩 0).
+  - E5: `test_data` 기준행 순회 → INPUT/SORT `TestDataId` 우선 + **(Batch,Barcode) 폴백**·사용된 id 재사용 금지, RESULT `SORT.ChuteNo` 우선. **매칭 키에 Batch 포함**(이월 Barcode-only 결함 교정). 아카이브 필터 소비.
+- `backend/src/Wcs.Api/B2B/LogExportService.cs` — `ILogExportService`/`LogExportService`(Scoped): E4 하이브리드 페어링 Excel.
+  - Phase1(TestDataId 1:1, LogTime→Id Queue) → Phase2(미매칭 INPUT ← 미사용 SORT (Batch,Barcode) LogTime 오름차순 zip). 소요시간=(SORT−INPUT)초·"F1"·span≥0. 인덕션→층(1·2=2층/3·4=1층/그외 공백). 기본 active 로그만. ClosedXML 재사용.
+- `backend/src/Wcs.Api/Controllers/B2B/LogController.cs` — `[Route("api/logs")]`: E1/E2/E3/E4.
+- `backend/src/Wcs.Api/Controllers/B2B/BoxesController.cs` — `[Route("api/boxes")]`: E6.
+- `backend/tests/Wcs.Tests/B2B/QueryApiTests.cs` — E1~E6 통합 15 테스트.
+
+### 변경 파일(전부 additive · numstat 삽입만·삭제 0)
+- `AppConstants.cs` (+3) — `ApiCallLogMaxItems = 500`.
+- `BoxService.cs` (+27) — `GetBoxesAsync(bizDay, batch?)` 추가(기존 `ProcessBoxAsync` 무접촉).
+- `Controllers/B2B/TestDataController.cs` (+19) — E5 `GET comparison` 추가(`ILogService` `[FromServices]` 메서드 주입 — 생성자 무접촉).
+- `Program.cs` (+4/-0) — `AddScoped<ILogService,LogService>()`·`AddScoped<ILogExportService,LogExportService>()` append.
+
+### 엔드포인트 (경로·응답)
+| # | 메서드·경로 | 응답 |
+|---|---|---|
+| E1 | `GET /api/logs/input?bizDay=&archived=` | 원시 배열(camelCase), 0건 [] |
+| E2 | `GET /api/logs/sort?bizDay=&archived=` | 원시 배열 |
+| E3 | `GET /api/logs/api-calls?date=` | 원시 배열(최신순 ≤500) |
+| E4 | `GET /api/logs/export?bizDay=&batch=` | `.xlsx` 바이너리 + Content-Disposition |
+| E5 | `GET /api/test-data/comparison?bizDay=&archived=` | 원시 배열 |
+| E6 | `GET /api/boxes?bizDay=&batch=` | 원시 배열 |
+
+에러: bizDay/date 비존재 날짜 → 400(#17 국소 catch, "Invalid date: ..."). E4·E6 bizDay 누락 → 400 Fail("bizDay parameter is required."). E4 생성 오류 → 400 Fail.
+
+### 검증
+- `dotnet test backend/Wcs.sln`: **286 통과 / 0 실패 / 0 건너뜀**(이전 271 + 신규 15, 회귀 0). `dotnet build` 오류 0(신규 경고 0; NU1903 SQLitePCLRaw 선재 부채만 — todo 격리).
+- 아카이브 3상태(active/archivedOnly/all/미인식→active) + DB COUNT 불변(하드삭제 0) 단정.
+- 3-way: 일치/불일치/누락 + **Batch 포함 키 음성 대조**(같은 bizDay·같은 barcode·다른 batch → 오매칭 0 · isMissing) + 양성 대조.
+- Excel: 유효 xlsx 파싱 + Phase1/Phase2 페어링 · 소요시간("5.0"/"3.0") · 층매핑(1→2층/3→1층/5→공백) · SORT 미매칭 칸 공백.
+- E3 500 상한(505 시드 → 500 반환) + date 필터.
+- 무접촉 실증: `git diff --numstat -- backend/`= 4파일 전부 삽입만/삭제 0. 마이그레이션·ModelSnapshot·appsettings·B2C **변경 0**. 신규 마이그레이션 0.
+
+### 비고
+- `tasks/sprint-contract.md` 의 git diff(2b→3a)는 **Planner 가 이번 스프린트 계약으로 교체한 것**(Planner 소유 산출물) — 내 코드 변경 아님.
+- `EntitiesB2B.cs` 무접촉을 위해 아카이브 필터를 TestLog/WorkResult 별 오버로드로 인라인(IArchivable 인터페이스 도입해 엔티티에 부착하는 방식 회피).
+
+---
+
+## FIX ITER 1 — S-B2B-3a (code review #1/#4/#5)
+
+> Generator · 2026-07-08 · fix-only(지정 3항목 외 무접촉)
+
+- **#1 (correctness) `LogService.cs` E1/E2 파생 필드**: 슈트·수신시각을 **2개 독립 상관 서브쿼리(무정렬 FirstOrDefault)** → **단일 결정적 서브쿼리**(`.OrderBy(d=>d.Id).Select(new{ChuteNo,ReceiveTime}).FirstOrDefault()`)로 통합. 동일 barcode 다중 test_data 시 두 필드가 서로 다른 행에서 섞이는 'Frankenstein' 행 방지 + 단일 OUTER APPLY + 결정성 확보(Evaluator Minor 2건도 동시 해소). 회귀 테스트 `E1_DerivedFields_ComeFromSameRow_NoFrankenstein` 추가(동일 barcode 2행 → 슈트·수신시각 둘 다 최소 Id 행에서).
+- **#4 (robustness) `LogController.cs` export catch-all**: `catch(OperationCanceledException){throw;}` 추가(클라이언트 취소 → 400 아님·상위 위임) + 그 외 예외는 `ILogger<LogController>` 로 서버 로깅 후 **원문 미노출** 제네릭 `Fail("Export failed.")` 반환(기존 `Fail($"...{ex.Message}")` 제거). 생성자에 `ILogger<LogController>` 주입.
+- **#5 (precision) `LogService.cs` IsMatch**: `sort.EquipmentNo == result.ChuteNo` 가 둘 다 null 일 때 true 되던 오판정 → `sort!.EquipmentNo is not null && sort.EquipmentNo == result!.ChuteNo` 가드. 테스트 `E5_Comparison_BothChuteNull_NotMatch` 추가(3자 존재·슈트 둘 다 null → isMatch=false·isMissing=false).
+
+### 검증
+- `dotnet test backend/Wcs.sln`: **288 통과 / 0 실패 / 0 건너뜀**(신규 17 QueryApiTests 포함, 회귀 0). QueryApiTests 격리 17/17. 빌드 오류 0·신규 경고 0.
+- 1회차 full-suite 에서 `HandshakeResidueTests.S5_...` 1건 실패 관측 → 격리 재실행 PASS + 2회차 full-suite 288 GREEN 로 **기존 병렬-부하 타이밍 flake**(todo `s9-flake-under-e2e-load`·S-B2B-1 후속 등재분, B2B 무관·PLC/핸드셰이크 코드 무접촉) 귀속.
+- 지정 3항목 외 무접촉(다른 Minor: unbounded materialization·O(n²) match·FilterArchive DRY·comparison 주석 — 미변경, 별도 로깅분).

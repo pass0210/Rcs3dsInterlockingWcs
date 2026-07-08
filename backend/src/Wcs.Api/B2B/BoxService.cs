@@ -14,6 +14,12 @@ public interface IBoxService
 {
     /// <summary>박스 마감 — (bizDay,batch,boxNo) 중복이면 F, 아니면 Box+Items 원자 저장.</summary>
     Task<B2BApiResponse> ProcessBoxAsync(BoxRequest req, CancellationToken ct = default);
+
+    /// <summary>
+    /// E6(S-B2B-3a) — 박스 목록 + 내품 조회(§2.3). bizDay 필수(비존재 → ArgumentException #17),
+    /// batch 옵션(생략 시 해당 bizDay 전체). 읽기 전용 · 기존 ProcessBoxAsync 무접촉(additive).
+    /// </summary>
+    Task<List<BoxRow>> GetBoxesAsync(string bizDay, string? batch, CancellationToken ct = default);
 }
 
 public sealed class BoxService : IBoxService
@@ -56,5 +62,26 @@ public sealed class BoxService : IBoxService
         await _db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         return B2BApiResponse.Ok();
+    }
+
+    // ── E6(S-B2B-3a) 박스 목록 + 내품 조회 — 읽기 전용 additive(§2.3) ────────────────────────
+    public async Task<List<BoxRow>> GetBoxesAsync(string bizDay, string? batch, CancellationToken ct = default)
+    {
+        var nDay = AppUtils.NormalizeBizDay(bizDay);   // 비존재 날짜 → ArgumentException(#17)
+
+        var q = _db.B2bBoxes.Where(b => b.BizDay == nDay);
+        if (!string.IsNullOrWhiteSpace(batch))
+            q = q.Where(b => b.Batch == batch);
+
+        // 내품(Items)을 컬렉션 프로젝션으로 프리로드 — N+1 회피(단일 조회로 부모-자식 로드).
+        return await q
+            .OrderBy(b => b.Batch).ThenBy(b => b.BoxNo).ThenBy(b => b.Id)
+            .Select(b => new BoxRow(
+                b.Id, b.BizDay, b.Batch, b.BoxNo, b.ChuteNo, b.EndTime, b.CreatedAt,
+                b.Items
+                    .OrderBy(i => i.Id)
+                    .Select(i => new BoxItemRow(i.Barcode, i.Qty))
+                    .ToList()))
+            .ToListAsync(ct);
     }
 }

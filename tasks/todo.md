@@ -21,6 +21,12 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-B2B-3a 코드리뷰 이연 (Minor — 비차단, 읽기전용 조회 API)
+- [ ] [#2 방어] E1/E2/E5(`LogService`)는 `bizDay` 생략 시 상한 없이 전체 materialization(E3만 500 캡). 소규모·내부망 전제라 저위험이나 E1/E2에 안전 `Take` 또는 bizDay 필수 가드 검토.
+- [ ] [#3 성능] E5 3-way 매칭이 `foreach(test_data)` 안에서 `pool.Where().OrderBy().FirstOrDefault()` 매행 재스캔·재정렬 → O(T×(I+S+R)). 루프 전 `ILookup<(Batch,Barcode)>`·`Dictionary<TestDataId>` 프리빌드로 준선형화. #2와 함께 처리 권장.
+- [ ] [#6 DRY] `LogService.FilterArchive`가 `TestLog`/`WorkResult` 두 near-identical 오버로드. 공용 `IArchivable{ DateTime? ArchivedAt }` 제네릭 검토(EF 식트리 번역 주의 — 현행 허용).
+- [ ] [#7 문서] `GetResultComparisonAsync`는 test_data 기준 순회라 마스터가 하드삭제된 아카이브 로그/결과는 `archived=all`에도 미표출(설계 의도). 한 줄 주석으로 필터버그 오인 방지.
+
 ## S-OBSERVABILITY 후속 (코드리뷰 MINOR — 비차단)
 - [ ] [운영 전 필요] **operation_log 보존 14일 정의만·퍼지 일배치 미구현** → 무한 증가. 장기 운영 전 퍼지 배치 추가.
 - [ ] [정리] `OperationLogService` unbounded Channel → BoundedChannel(DropOldest)+appsettings capacity. Detail JSON 수기 보간 → System.Text.Json 직렬화. 5개 WebApplicationFactory `UseSetting` 중복 → 헬퍼 추출. `appsettings.Development.json`에 Provider=Sqlite/Transport=Tcp 오버라이드(dev/sim DX). 제품 SqlServer 부팅분기 dotnet test 사각 → SqlServer smoke 테스트.

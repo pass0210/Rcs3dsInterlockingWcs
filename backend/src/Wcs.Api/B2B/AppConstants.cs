@@ -17,6 +17,9 @@ public static class AppConstants
     /// <summary>api_call_log 응답 본문 DB 저장 시 절단 길이.</summary>
     public const int LogTruncateDbLength = 4000;
 
+    /// <summary>api_call_log 조회(E3) 최대 반환 건수 — 하드코딩 금지(절대규칙 #7). 원본 §3.5.</summary>
+    public const int ApiCallLogMaxItems = 500;
+
     /// <summary>api_call_log 큐 용량(Bounded Channel).</summary>
     public const int ApiCallLogQueueCapacity = 10_000;
 

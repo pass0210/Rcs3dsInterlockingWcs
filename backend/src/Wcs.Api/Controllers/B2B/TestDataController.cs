@@ -78,6 +78,25 @@ public sealed class TestDataController : ControllerBase
         }
     }
 
+    // ── E5 GET /api/test-data/comparison?bizDay=&archived= — 투입/분류/결과 3-way 비교 ──────
+    // 원본이 comparison 을 TestDataController 에 둔 것과 정합(additive). 로직은 ILogService(§3.2.7).
+    // ILogService 는 [FromServices] 메서드 주입 — 기존 생성자(ITestDataService 만) 무접촉.
+    [HttpGet("comparison")]
+    public async Task<IActionResult> Comparison(
+        [FromQuery] string? bizDay, [FromQuery] string? archived,
+        [FromServices] ILogService logSvc, CancellationToken ct)
+    {
+        try
+        {
+            var filter = TestDataService.ParseArchiveFilter(archived);
+            return Ok(await logSvc.GetResultComparisonAsync(bizDay, filter, ct));   // 원시 배열(0건이면 [])
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(B2BApiResponse.Fail(ex.Message));   // #17 Invalid date
+        }
+    }
+
     // ── POST /api/test-data/reset — 수신시간 초기화 + 연관 아카이브(§3.3) ──────────
     [HttpPost("reset")]
     public async Task<IActionResult> Reset([FromBody] List<long>? ids, CancellationToken ct)
