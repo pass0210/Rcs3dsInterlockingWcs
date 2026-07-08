@@ -2,6 +2,13 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-B2B-2a (test-data 관리 API + 기록 아카이브[archived_at 소프트삭제], 백엔드) — APPROVED (2026-07-08, 1 iteration)
+
+- **"하드삭제 0" 소프트삭제 재설계 검증의 결정적 게이트 = COUNT 불변 단정 + RemoveRange grep 화이트리스트**: "archived_at 로 바꿨다"는 GREEN 만으론 부족 — reset/delete 후 `test_log`/`work_result` **행 COUNT 가 불변**(`Count()==N` 그대로)임을 테스트가 직접 단정해야 "DB 에서 사라지지 않음"이 닫힌다. 병행으로 서비스 파일에 `RemoveRange|.Remove(|ExecuteDelete|DELETE` grep → 실호출이 **등록 원장(test_data) 1건으로만** 한정되고 로그/결과 경로는 archived_at UPDATE 뿐임을 화이트리스트로 확정. 리팩터 중 로그 RemoveRange 잔존이 최대 리스크이므로 "존재하는 삭제 호출을 전수 열거해 정당 대상만 남는가"가 판정자.
+- **아카이브 스코프 교정(barcode-only over-broad → (BizDay,Batch,Barcode) 값튜플)의 입증 = 음성 대조 테스트(다른 배치 동일 barcode 미영향)**: 원본 결함은 barcode 단독 키로 배치 밖까지 건드린 것 → 교정 검증은 "선택 배치는 archived" 양성만으론 약하고, **동일 barcode·다른 batch 행이 `ArchivedAt == null` 로 남는 음성 대조**가 스코프 한정을 역증명한다. 값-튜플 `HashSet<(string,string,string)>` 은 문자열 구분자 충돌을 원천 회피(구분자 join 키의 함정 회피). DB 는 barcode 로 광범위 로드하되 in-memory 에서 튜플/ids 정밀 필터가 정답.
+- **add-only ALTER 마이그레이션 무접촉 판정 = ef script 2줄 + 콜드스타트 스키마 실측(archived_at 보유 테이블 집합)**: `ef migrations script <prev> <new>` 가 정확히 `ALTER TABLE ADD` 2건(DROP/CREATE 0)임을 양 provider 로 확인 + **임시 파일 DB 콜드스타트 후 `archived_at` 보유 테이블 = 정확히 {test_log, work_result}**(python sqlite3 PRAGMA 순회)로 대상 테이블 국한을 실측. ModelSnapshot 은 `+N/-0`(deleted=0) 으로 기존 엔트리 재정렬 0 확인(재정렬은 delete+add 로 나타남). SQLite CLI 부재 시 python sqlite3 로 스키마 순회가 대체 경로.
+- **allowlist 확장(ModelState 400 경로분기) 무접촉 = OR 추가 + else fall-through(builtInFactory) 보존 판독**: `/api/test-data` 를 400 형식화 allowlist 에 추가할 때 기존 works 분기를 `||` OR 로 확장하고 **매칭 안 되는 B2C 경로는 `builtInFactory(context)`(ProblemDetails) 로 그대로 위임**됨을 코드 판독으로 확인 → B2C 400 형식 불변. numstat `-2`(if 리팩터)가 있어도 works 접두 체크가 보존되면 additive. reset/delete 는 단일 SaveChanges 로 (아카이브 UPDATE + test_data DELETE/UPDATE) 원자 커밋 — 별도 명시 트랜잭션 불요.
+
 ## S-RCS-DOCS-B2B-POLISH (B2B Part II를 B2C 문법으로 재구성 — B1~B8·공통필드표·균질틀·순서 일원화, 계약 무손실) — APPROVED (2026-07-07, 1 iteration)
 
 - **재구성(정보 재배치) 스프린트의 무손실 게이트 = 공통표+고유표+각주를 "합산"해 엔드포인트별로 원천 대조 + 제거(-)라인 전수 회계**: F3(공통 필드표 신설)로 필드가 per-endpoint 표에서 공통표(B3)로 이동했으므로, 개별 표만 보면 필드가 "사라진" 것처럼 보인다. 무손실은 (공통 9필드 + 각주 5개 변형 + B5 고유필드)를 합쳐 원천 §1~5의 각 엔드포인트 필드셋을 재구성해 대조할 때만 닫힌다. box `chuteNo 1~10`·`barcode 1~100`, input `barcode=N`, unprocessed `qty=Y "1이상"` 같은 **각주로 밀려난 변형이 누락 1순위 후보**. 병행으로 `git diff HEAD` 제거(-)라인 전수 = 구 표 값이 전부 신 위치에 재출현하는지 회계.
@@ -428,3 +435,4 @@
 - **테스트 팩토리 static 공유상태 함정 재발 방지(S-CLEANUP-FIELD 교훈 적용 확인)**: B2B 통합테스트가 두 번째 `IClassFixture`가 되며 `FakeModbusWebApplicationFactory`의 static `_dbName` double-seed 충돌 위험 → Generator가 **INSTANCE-level `_dbName={Guid}` 전용 `B2bWebApplicationFactory` 신설**(기존 팩토리 무접촉)로 선제 격리. teardown은 `ApiCallLogQueue.Complete()`로 채널 결정적 종료(testhost-channel-race 방어). 교훈이 실제 코드 설계에 반영된 사례.
 - [CODE-REVIEW] sprint=S-B2B-1 pending(orchestrator Step 4.5 — Evaluator 미수행 영역)
 - [CODE-REVIEW] sprint=S-B2B-1 critical=0 major=1 minor=6 iter=3 (#1 문자열길이검증 BLOCKING→iter2/3 완결·DTO 전수커버, #5 fail-safe, 나머지 minor todo. S5 flake=pre-existing 별도이관)
+- [CODE-REVIEW] sprint=S-B2B-2a critical=0 major=2 minor=5 iter=2 (#1 바코드 수용기록·#2 zip-bomb 가드 fix, 나머지 minor todo. Evaluator APPROVED 271 GREEN)

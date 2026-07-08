@@ -84,10 +84,21 @@
 - **`ParseChuteNos(string)`**(static, 재사용): 위 파싱 로직. (원본은 자동생성 preview에도 썼으나 B2B-2는 preview 미이식.)
 - **`GenerateBarcode()`**(static): `$"BC{DateTime.Now:yyyyMMddHHmmssfff}{Random.Shared.Next(1000,9999)}"`.
 
+> **★ 바코드 채번 중복 허용 — 명시적 수용 기록 (사용자 확정 2026-07-08 · 코드리뷰 후속 #1)**
+> 바코드 채번은 원본 `BowooTestBatchSystem_v2`와 **동일**(`BC{ts}{rand4}`, 유니크 제약 없음). 대량 생성 시
+> (슈트당 ~150건+) 같은 밀리초·랜덤버킷 충돌로 **중복 바코드가 발생할 수 있으나**, 원본 호환·이식 충실도
+> 우선으로 **중복 허용을 수용**한다(사용자 확정 2026-07-08). 유일성이 필요해지면 배치 내 단조 카운터
+> 접미(예: `BC{ts}{rand4}-{seq}`)로 후속 개선. `test_data.barcode`는 유니크 인덱스가 아니므로 중복 저장은
+> 스키마상 정상이며, 투입/분류(input/classification)는 `(barcode,bizDay,batch)` 후보를 **전량** 대상으로 해
+> 중복분도 각각 처리된다(누락 아님).
+
 ### 2.2 `UploadExcelAsync(Stream)` — 엑셀 판별
 - **라이브러리**: 원본은 `ClosedXML.Excel`(`XLWorkbook`). 우리 백엔드엔 없음 → **`ClosedXML` 패키지 추가 필요**
   (Wcs.Api). (대안 OpenXML SDK는 구현량↑. ClosedXML 권장 — 원본 검증됨.)
 - 워크시트 1번 `RangeUsed().RowsUsed()`. 행 0개면 F `Excel file contains no data.`
+- **zip-bomb/대용량 방어(코드리뷰 후속 #2)**: `RangeUsed()` 직후 사용 범위 `RowCount()`·`ColumnCount()`가 상한
+  (`AppConstants.UploadMaxRows=100000`·`UploadMaxColumns=64`, 하드코딩 금지) 초과면 행 순회 **전** F `Excel file is too large.`
+  로 조기 차단(압축 해제 팽창 폭주 방지 — O(1) 경계 산술).
 - **헤더 자동감지**: 1행 1열 값이 날짜형(`IsDateLike`: 8자리 숫자 또는 `YYYY-MM-DD` 10자리)이면 헤더 없음 → startRow=0,
   아니면 헤더 있음 → startRow=1.
 - **양식 판별(행별)**: 컬럼 = (1)BizDay (2)Batch (3)Barcode (4)col4 (5)col5.
