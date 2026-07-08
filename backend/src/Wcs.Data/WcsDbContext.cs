@@ -44,6 +44,15 @@ public class WcsDbContext : DbContext
     // 횡단 운영 로그(S-OBSERVABILITY) — 17번째 테이블
     public DbSet<OperationLog>    OperationLogs    { get; set; } = null!;
 
+    // ── B2B(작업 테스트 데이터) DbSet 6개 (S-B2B-1 — append) ────────────────
+    // 기존 17테이블과 완전 분리. 형상: docs/B2B-SCHEMA.md §1·§2. 네임스페이스 Wcs.Data.B2B.
+    public DbSet<B2B.TestData>    B2bTestData      { get; set; } = null!;
+    public DbSet<B2B.TestLog>     B2bTestLogs      { get; set; } = null!;
+    public DbSet<B2B.WorkResult>  B2bWorkResults   { get; set; } = null!;
+    public DbSet<B2B.Box>         B2bBoxes         { get; set; } = null!;
+    public DbSet<B2B.BoxItem>     B2bBoxItems      { get; set; } = null!;
+    public DbSet<B2B.ApiCallLog>  B2bApiCallLogs   { get; set; } = null!;
+
     // ── 보조 프로퍼티 — 현재 provider 판별 ───────────────────────────────
     private bool IsSqlite    => Database.ProviderName == ProviderSqlite;
     private bool IsSqlServer => Database.ProviderName == ProviderSqlServer;
@@ -68,6 +77,13 @@ public class WcsDbContext : DbContext
         ConfigureAlarm(m);
         ConfigureDestinationEvent(m);
         ConfigureOperationLog(m);
+        // ── B2B(작업 테스트 데이터) 6테이블 (S-B2B-1 — append) ─────────────
+        ConfigureB2bTestData(m);
+        ConfigureB2bTestLog(m);
+        ConfigureB2bWorkResult(m);
+        ConfigureB2bBox(m);
+        ConfigureB2bBoxItem(m);
+        ConfigureB2bApiCallLog(m);
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -644,6 +660,153 @@ public class WcsDbContext : DbContext
             // filtered index 아님 → 물리 컬럼명 대소문자 207 함정 비해당.
             e.HasIndex(x => new { x.SorterChuteNo, x.At })
              .HasDatabaseName("IX_operation_log_sorter_at");
+        });
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // B2B(작업 테스트 데이터) 테이블 설정 (S-B2B-1)
+    // 형상 정본: docs/B2B-SCHEMA.md §1. 컬럼명 원본 그대로 snake_case(HasColumnName).
+    // 기존 17테이블 Configure 및 ModelSnapshot 기존 엔트리 무변경(add-only).
+    // ⚠ created_at 은 B2B 로컬타임(DateTime.Now) — 원본 호환(B2C UTC와 상이 · 사용자 확정 Q3).
+    // ────────────────────────────────────────────────────────────────────────
+
+    private static void ConfigureB2bTestData(ModelBuilder m)
+    {
+        m.Entity<B2B.TestData>(e =>
+        {
+            e.ToTable("test_data");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.BizDay).HasColumnName("biz_day").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Batch).HasColumnName("batch").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Barcode).HasColumnName("barcode").HasMaxLength(50).IsRequired();
+            e.Property(x => x.ChuteNo).HasColumnName("chute_no").HasMaxLength(10).IsRequired();
+            e.Property(x => x.ReceiveTime).HasColumnName("receive_time").IsRequired(false);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
+            e.Property(x => x.Barcode2).HasColumnName("barcode2").HasMaxLength(50).IsRequired(false);
+
+            e.HasIndex(x => new { x.BizDay, x.Batch }).HasDatabaseName("IX_test_data_biz_day_batch");
+            e.HasIndex(x => x.Barcode).HasDatabaseName("IX_test_data_barcode");
+            e.HasIndex(x => x.BizDay).HasDatabaseName("IX_test_data_biz_day");
+        });
+    }
+
+    private static void ConfigureB2bTestLog(ModelBuilder m)
+    {
+        m.Entity<B2B.TestLog>(e =>
+        {
+            e.ToTable("test_log");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.LogType).HasColumnName("log_type").HasMaxLength(10).IsRequired();
+            e.Property(x => x.BizDay).HasColumnName("biz_day").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Batch).HasColumnName("batch").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Barcode).HasColumnName("barcode").HasMaxLength(50).IsRequired();
+            e.Property(x => x.EquipmentNo).HasColumnName("equipment_no").HasMaxLength(20).IsRequired(false);
+            e.Property(x => x.Pid).HasColumnName("pid").HasMaxLength(50).IsRequired(false);
+            e.Property(x => x.Status).HasColumnName("status").HasMaxLength(5).IsRequired(false);
+            e.Property(x => x.Reason).HasColumnName("reason").HasMaxLength(200).IsRequired(false);
+            e.Property(x => x.LogTime).HasColumnName("log_time").IsRequired(false);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
+            // test_data_id: FK 없이 인덱스만(원본 동일 · 1785 회피 · 이력 불변 · 사용자 확정 Q3).
+            e.Property(x => x.TestDataId).HasColumnName("test_data_id").IsRequired(false);
+
+            e.HasIndex(x => x.Barcode).HasDatabaseName("IX_test_log_barcode");
+            e.HasIndex(x => x.LogType).HasDatabaseName("IX_test_log_log_type");
+            e.HasIndex(x => x.LogTime).HasDatabaseName("IX_test_log_log_time");
+            e.HasIndex(x => new { x.BizDay, x.LogType, x.LogTime })
+             .HasDatabaseName("IX_test_log_biz_day_log_type_log_time");
+            e.HasIndex(x => x.TestDataId).HasDatabaseName("IX_test_log_test_data_id");
+        });
+    }
+
+    private static void ConfigureB2bWorkResult(ModelBuilder m)
+    {
+        m.Entity<B2B.WorkResult>(e =>
+        {
+            e.ToTable("work_result");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.BizDay).HasColumnName("biz_day").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Batch).HasColumnName("batch").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Barcode).HasColumnName("barcode").HasMaxLength(50).IsRequired();
+            e.Property(x => x.ChuteNo).HasColumnName("chute_no").HasMaxLength(20).IsRequired(false);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
+
+            e.HasIndex(x => new { x.BizDay, x.Batch }).HasDatabaseName("IX_work_result_biz_day_batch");
+        });
+    }
+
+    private static void ConfigureB2bBox(ModelBuilder m)
+    {
+        m.Entity<B2B.Box>(e =>
+        {
+            e.ToTable("box");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.BizDay).HasColumnName("biz_day").HasMaxLength(10).IsRequired();
+            e.Property(x => x.Batch).HasColumnName("batch").HasMaxLength(10).IsRequired();
+            e.Property(x => x.BoxNo).HasColumnName("box_no").HasMaxLength(50).IsRequired();
+            e.Property(x => x.ChuteNo).HasColumnName("chute_no").HasMaxLength(10).IsRequired();
+            e.Property(x => x.EndTime).HasColumnName("end_time").HasMaxLength(50).IsRequired(false);
+            e.Property(x => x.CreatedAt).HasColumnName("created_at").IsRequired();  // B2B 로컬타임
+
+            e.HasIndex(x => new { x.BizDay, x.Batch }).HasDatabaseName("IX_box_biz_day_batch");
+            // 재전송 방지 UNIQUE (biz_day, batch, box_no)
+            e.HasIndex(x => new { x.BizDay, x.Batch, x.BoxNo })
+             .IsUnique()
+             .HasDatabaseName("IX_box_biz_day_batch_box_no");
+        });
+    }
+
+    private static void ConfigureB2bBoxItem(ModelBuilder m)
+    {
+        m.Entity<B2B.BoxItem>(e =>
+        {
+            e.ToTable("box_item");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.BoxId).HasColumnName("box_id").IsRequired();
+            e.Property(x => x.Barcode).HasColumnName("barcode").HasMaxLength(100).IsRequired();
+            e.Property(x => x.Qty).HasColumnName("qty").IsRequired();
+
+            e.HasIndex(x => x.BoxId).HasDatabaseName("IX_box_item_box_id");
+
+            // 유일한 FK: box_item → box, ON DELETE CASCADE.
+            // 단일 캐스케이드 경로 → SQL Server 1785 위험 없음(원본 동작 보존 · 사용자 확정 Q3).
+            e.HasOne(x => x.Box)
+             .WithMany(x => x.Items)
+             .HasForeignKey(x => x.BoxId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+    }
+
+    private static void ConfigureB2bApiCallLog(ModelBuilder m)
+    {
+        m.Entity<B2B.ApiCallLog>(e =>
+        {
+            e.ToTable("api_call_log");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedOnAdd();
+
+            e.Property(x => x.Endpoint).HasColumnName("endpoint").HasMaxLength(100).IsRequired();
+            e.Property(x => x.HttpMethod).HasColumnName("http_method").HasMaxLength(10).IsRequired();
+            e.Property(x => x.RequestBody).HasColumnName("request_body").IsRequired(false);  // nvarchar(max)
+            e.Property(x => x.ResponseStatus).HasColumnName("response_status").HasMaxLength(10).IsRequired(false);
+            e.Property(x => x.ResponseBody).HasColumnName("response_body").IsRequired(false); // nvarchar(max)
+            e.Property(x => x.HttpStatusCode).HasColumnName("http_status_code").IsRequired();
+            e.Property(x => x.DurationMs).HasColumnName("duration_ms").IsRequired();
+            e.Property(x => x.ClientIp).HasColumnName("client_ip").HasMaxLength(50).IsRequired(false);
+            e.Property(x => x.ErrorMessage).HasColumnName("error_message").HasMaxLength(500).IsRequired(false);
+            e.Property(x => x.CalledAt).HasColumnName("called_at").IsRequired();  // B2B 로컬타임
+
+            e.HasIndex(x => x.CalledAt).HasDatabaseName("IX_api_call_log_called_at");
+            e.HasIndex(x => x.Endpoint).HasDatabaseName("IX_api_call_log_endpoint");
         });
     }
 

@@ -86,6 +86,335 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.ToTable("alarm", (string)null);
                 });
 
+            modelBuilder.Entity("Wcs.Data.B2B.ApiCallLog", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("CalledAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("called_at");
+
+                    b.Property<string>("ClientIp")
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("client_ip");
+
+                    b.Property<long>("DurationMs")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("duration_ms");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("endpoint");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("error_message");
+
+                    b.Property<string>("HttpMethod")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("http_method");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("http_status_code");
+
+                    b.Property<string>("RequestBody")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("request_body");
+
+                    b.Property<string>("ResponseBody")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("response_body");
+
+                    b.Property<string>("ResponseStatus")
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("response_status");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CalledAt")
+                        .HasDatabaseName("IX_api_call_log_called_at");
+
+                    b.HasIndex("Endpoint")
+                        .HasDatabaseName("IX_api_call_log_endpoint");
+
+                    b.ToTable("api_call_log", (string)null);
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.Box", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Batch")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("batch");
+
+                    b.Property<string>("BizDay")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("biz_day");
+
+                    b.Property<string>("BoxNo")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("box_no");
+
+                    b.Property<string>("ChuteNo")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("chute_no");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("EndTime")
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("end_time");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BizDay", "Batch")
+                        .HasDatabaseName("IX_box_biz_day_batch");
+
+                    b.HasIndex("BizDay", "Batch", "BoxNo")
+                        .IsUnique()
+                        .HasDatabaseName("IX_box_biz_day_batch_box_no");
+
+                    b.ToTable("box", (string)null);
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.BoxItem", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Barcode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("barcode");
+
+                    b.Property<long>("BoxId")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("box_id");
+
+                    b.Property<int>("Qty")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("qty");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BoxId")
+                        .HasDatabaseName("IX_box_item_box_id");
+
+                    b.ToTable("box_item", (string)null);
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.TestData", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Barcode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("barcode");
+
+                    b.Property<string>("Barcode2")
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("barcode2");
+
+                    b.Property<string>("Batch")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("batch");
+
+                    b.Property<string>("BizDay")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("biz_day");
+
+                    b.Property<string>("ChuteNo")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("chute_no");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTime?>("ReceiveTime")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("receive_time");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Barcode")
+                        .HasDatabaseName("IX_test_data_barcode");
+
+                    b.HasIndex("BizDay")
+                        .HasDatabaseName("IX_test_data_biz_day");
+
+                    b.HasIndex("BizDay", "Batch")
+                        .HasDatabaseName("IX_test_data_biz_day_batch");
+
+                    b.ToTable("test_data", (string)null);
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.TestLog", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Barcode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("barcode");
+
+                    b.Property<string>("Batch")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("batch");
+
+                    b.Property<string>("BizDay")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("biz_day");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("EquipmentNo")
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("equipment_no");
+
+                    b.Property<DateTime?>("LogTime")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("log_time");
+
+                    b.Property<string>("LogType")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("log_type");
+
+                    b.Property<string>("Pid")
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("pid");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("reason");
+
+                    b.Property<string>("Status")
+                        .HasMaxLength(5)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("status");
+
+                    b.Property<long?>("TestDataId")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("test_data_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Barcode")
+                        .HasDatabaseName("IX_test_log_barcode");
+
+                    b.HasIndex("LogTime")
+                        .HasDatabaseName("IX_test_log_log_time");
+
+                    b.HasIndex("LogType")
+                        .HasDatabaseName("IX_test_log_log_type");
+
+                    b.HasIndex("TestDataId")
+                        .HasDatabaseName("IX_test_log_test_data_id");
+
+                    b.HasIndex("BizDay", "LogType", "LogTime")
+                        .HasDatabaseName("IX_test_log_biz_day_log_type_log_time");
+
+                    b.ToTable("test_log", (string)null);
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.WorkResult", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Barcode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("barcode");
+
+                    b.Property<string>("Batch")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("batch");
+
+                    b.Property<string>("BizDay")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("biz_day");
+
+                    b.Property<string>("ChuteNo")
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT")
+                        .HasColumnName("chute_no");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("created_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BizDay", "Batch")
+                        .HasDatabaseName("IX_work_result_biz_day_batch");
+
+                    b.ToTable("work_result", (string)null);
+                });
+
             modelBuilder.Entity("Wcs.Data.Cell", b =>
                 {
                     b.Property<long>("Id")
@@ -739,6 +1068,17 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Navigation("Piece");
                 });
 
+            modelBuilder.Entity("Wcs.Data.B2B.BoxItem", b =>
+                {
+                    b.HasOne("Wcs.Data.B2B.Box", "Box")
+                        .WithMany("Items")
+                        .HasForeignKey("BoxId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Box");
+                });
+
             modelBuilder.Entity("Wcs.Data.Cell", b =>
                 {
                     b.HasOne("Wcs.Data.Destination", "Destination")
@@ -880,6 +1220,11 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Navigation("Destination");
 
                     b.Navigation("WorkBatch");
+                });
+
+            modelBuilder.Entity("Wcs.Data.B2B.Box", b =>
+                {
+                    b.Navigation("Items");
                 });
 
             modelBuilder.Entity("Wcs.Data.Cell", b =>

@@ -2392,3 +2392,142 @@ F1 넘버링(B1~B8) · F2 순서모순(정의·실패부를 골든패스 box④/
 - **B2C 파트·골든패스 순서**(unprocessed→input→classification→box→results) 불변 — B3 공통표 외 미접촉.
 
 ### 커밋/push 없음 — Evaluator 재검증 대기 (docs/rcs-interface-b2b-b2c).
+
+---
+
+## IMPLEMENTATION COMPLETE — S-B2B-1 (B2B 신규 스키마 + RCS 5개 API 이식) · Generator
+
+Branch: `feat/b2b-1-schema-api` (커밋/push 없음 — Evaluator 투입 대기). 사용자 확정(Q1/Q3/Q5) 반영.
+
+### 변경 요약
+
+**엔티티 6개** (신규 `backend/src/Wcs.Data/B2B/EntitiesB2B.cs`, 네임스페이스 `Wcs.Data.B2B`)
+- `TestData·TestLog·WorkResult·Box·BoxItem·ApiCallLog` — docs/B2B-SCHEMA.md §1·§2 형상 그대로. 컬럼 snake_case.
+- created_at = 로컬타임(DateTime.Now, Q3) — 엔티티·주석에 "B2C UTC와 상이" 명기. auto_generate_config 제외.
+
+**WcsDbContext** (`backend/src/Wcs.Data/WcsDbContext.cs`, +163 insertions·0 deletions)
+- DbSet 6 + Configure 6 append. 기존 17테이블 Configure·ModelSnapshot 기존 엔트리 diff 0(numstat deleted=0).
+- box_item→box FK CASCADE(단일 경로). test_log.test_data_id FK 없이 인덱스만. UNIQUE IX_box_biz_day_batch_box_no.
+
+**마이그레이션 2개** (add-only, 양 provider)
+- `20260708001112_AddB2BTables`(SqlServer) / `20260708001125_AddB2BTables`(Sqlite): 6 CreateTable + 14 CreateIndex.
+- 기존 테이블 ALTER/DROP/AddColumn **0건**(op 카운트로 확인). ModelSnapshot +357/+345 전부 insertion(0 deletion).
+- SQL Server DDL: `dotnet ef migrations script` 생성 성공(6 CREATE TABLE·0 ALTER/DROP — 서버 없이 검증).
+
+**서비스** (`backend/src/Wcs.Api/B2B/`)
+- `WorkService`(unprocessed/input/classification/results) — §6 로직. **자동생성 블록 제거**: unprocessed 0건→빈 배열·트리거 없음.
+- `BoxService`(§6.5) — (bizDay,batch,boxNo) 중복거부·barcode 미검증·빈 barcode 필터·트랜잭션 원자 저장.
+- 실패 message 19종은 `FailMessages`(§4 verbatim 정본) 단일 진실로 고정.
+
+**컨트롤러 5개** (`backend/src/Wcs.Api/Controllers/B2B/WorksControllers.cs`, 라우트 `api/v1/works/*`)
+- unprocessed[GET]·input·classification·results·box. DTO(`Dtos.cs`)·`B2BApiResponse`·`AppUtils.NormalizeBizDay`·`AppConstants`.
+- pId·inductionNo 미검증 그대로 저장. chuteNo 3자리 zero-pad. results 최상위 JSON 배열. HTTP: 비즈니스 실패 200+F / 검증 400 / (500 전역핸들러 미도입=Non-Goal).
+
+**사용자 확정 반영**
+- Q1: `RcsApiLoggingMiddleware`+`ApiCallLogQueue`(Singleton·DropOldest)+`ApiCallLogBackgroundWriter`(HostedService) 이식, **`/api/v1/works/` 경로 한정**(기존 RCS 엔드포인트 미기록). 큐 헬스체크 미이식.
+- Q3: created_at=DateTime.Now(로컬) — 코드·마이그레이션 주석 명기.
+- Q5: `InvalidModelStateResponseFactory` 경로분기(`/api/v1/works/`만 ApiResponse.Fail(firstError)·그 외 builtInFactory 위임) + ArgumentException(#17)은 B2B 컨트롤러 국소 try/catch. 전역 교체 없음.
+
+**테스트** (`backend/tests/Wcs.Tests/B2B/`, 신규 32개)
+- 서비스 단위(`B2bServiceTests`, 17): qty 묶음 가용<qty 전량거부·그룹핑 Batch→Barcode+ChuteNo qty=COUNT·results 사전존재검증 전체거부·chute 매칭/mismatch·이미분류·박스 중복거부·빈 barcode 필터·NormalizeBizDay 비존재날짜.
+- API 통합(`B2bApiTests`, 15): 5 엔드포인트 계약·부수효과(2회차 빈배열·0건 [])·실패 message verbatim·results 최상위 배열·pId 미검증 저장·HTTP 코드(400/200+F/#17)·api_call_log 경로 한정(works 기록 O·destination-query 기록 X).
+- 전용 `B2bWebApplicationFactory`(INSTANCE-level DB명) 신설 — 기존 `FakeModbusWebApplicationFactory`(static _dbName) 무접촉. (착수 시 그 static 공유로 double-seed 충돌 발견 → 별도 팩토리로 격리 해소.)
+
+### baseline / 최종 테스트 raw
+
+- baseline(착수 시): `통과! - 실패: 0, 통과: 210, 건너뜀: 0, 전체: 210`
+- 최종(4회 연속 GREEN·flake 0): `통과! - 실패: 0, 통과: 242, 건너뜀: 0, 전체: 242` (= 210 회귀 불변 + 신규 B2B 32)
+- 빌드: `오류 0개` · 신규 경고 0(warning 코드 distinct = NU1903 only, SQLitePCLRaw 선재 audit). 오펀 프로세스 0.
+- SQLite up: 통합 테스트 EnsureCreated 로 B2B 6테이블 기동 검증. SQL Server up: 빈 서버 fresh update 는 Evaluator/사용자 몫(DDL script 유효성만 선검증).
+
+### 무접촉 diff 확인 결과
+
+- `git diff --numstat`: 수정 tracked 4파일 전부 **deleted=0**(순수 insertion): Program.cs +42, WcsDbContext.cs +163, ModelSnapshot(SqlServer) +357, ModelSnapshot(Sqlite) +345.
+- 기존 B2C 파일(Entities.cs·RcsController·Initial/AddOperationLog 마이그레이션·DbSeeder·Wcs.Api/Dtos·Repositories) **수정 0**(name-only 대조).
+- 신규 파일: `Wcs.Data/B2B/`·`Wcs.Api/B2B/`·`Wcs.Api/Controllers/B2B/`·`Wcs.Tests/B2B/`·양 provider AddB2BTables 마이그레이션.
+- CLAUDE.md·hooks·appsettings.json 무접촉. 절대규칙(#1 단일 큐 등) 무관(B2B는 PLC 독립).
+
+── Evaluator 투입 대기(무접촉 diff·회귀·실패 message verbatim·마이그레이션 add-only 중점 검증). ──
+
+---
+
+## FIX ITER 2 (문자열 길이 검증 + Enqueue fail-safe) · Generator
+
+코드리뷰 BLOCKING 2건만 수정(#2/#3 TOCTOU·#6·#7·Nit 미착수 — scope 밖). 커밋/push 없음.
+
+### #1 (BLOCKING) 문자열 길이 검증 — SQL Server 500→400 (계약 위반 차단)
+`backend/src/Wcs.Api/B2B/Dtos.cs` 요청 DTO에 `[StringLength]` 추가(길이 = docs/B2B-SCHEMA.md §1 컬럼 정의 / 원본 검증 규칙):
+- Batch(전 4 DTO): `[StringLength(10, MinimumLength=1)]` — 계약 batch 1~10 · biz*.batch nvarchar(10).
+- Input/Classification Barcode: `[StringLength(50)]` — test_data/test_log.barcode nvarchar(50)(B2B-SCHEMA 길이).
+- ResultItem Barcode: `[StringLength(50)]` — work_result.barcode nvarchar(50).
+- BoxItemDto Barcode: `[StringLength(100)]` — box_item.barcode nvarchar(100).
+- Input/Classification ChuteNo: `[StringLength(20)]` — 원본 규칙 ≤20(SORT equipment_no nvarchar(20)).
+- Box BoxNo: `[StringLength(50)]`(box.box_no) · Box ChuteNo: `[StringLength(10)]`(box.chute_no, 원본 ≤10).
+- Reason(Input/Classification): `[StringLength(200)]` — test_log.reason nvarchar(200).
+- (BizDay 는 기존 정규식 #10 이 8/10자로 상한 → 별도 불요.)
+- 400 응답은 기존 경로분기 팩토리로 `ApiResponse.Fail(firstError)` 형식(무접촉 유지). 길이 message 는 DataAnnotations 기본(#13/#15 와 동형 — verbatim 카탈로그 밖 신규 검증이나 형식은 ApiResponse F).
+- **검증 테스트 3건 추가**(`B2bApiTests`): batch 11자·barcode 51자(input)·box item barcode 101자 → 각 400 + ApiResponse "F".
+
+### #5 (fail-safe) api_call_log Enqueue 예외 격리
+`backend/src/Wcs.Api/B2B/RcsApiLoggingMiddleware.cs` — `Enqueue`(Mask/ExtractStatus/Truncate/TryEnqueue 포함) 전체를 try/catch로 감쌈. 감사 로깅 예외가 본 API 응답을 절대 방해하지 않음(예외 무시 · 관측 훅 fail-safe).
+
+### 변경 파일
+- `backend/src/Wcs.Api/B2B/Dtos.cs` (신규 파일 내 수정 — StringLength 추가)
+- `backend/src/Wcs.Api/B2B/RcsApiLoggingMiddleware.cs` (신규 파일 내 수정 — Enqueue try/catch)
+- `backend/tests/Wcs.Tests/B2B/B2bApiTests.cs` (신규 파일 내 — 길이 검증 테스트 3건 추가)
+- 기존 B2C 코드 무접촉: 추적 수정 파일은 여전히 Program.cs +42/-0, WcsDbContext.cs +163/-0, ModelSnapshot +357/-0·+345/-0 (순수 insertion). 위 3개는 전부 신규 B2B 파일.
+
+### 테스트 결과 (raw)
+- 빌드: `오류 0개` · 신규 경고 0(distinct warning = NU1903 pre-existing only).
+- 전체: `통과! - 실패: 0, 통과: 245, 건너뜀: 0, 전체: 245` (기존 210 + B2B 32 + 신규 길이 3 = 245).
+- 반복 실행 중 **1건 간헐 실패 관측** → `S5RSeqMismatchTests.S5_RSeqMismatch_AlarmAndSorterCommandMismatch` (기존 B2C 핸드셰이크 타이밍 테스트, ~1/8 빈도).
+  - **귀속(pre-existing 부하 유발 flake — 내 코드 무관)**: (a) S5 단독 반복 8/8 GREEN(결정적) (b) 내 diff 는 PlcGateway/Sim3ds/Core/ScenarioTests 등 핸드셰이크 코드 **0줄 접촉**(`git diff --name-only` 확인) (c) 시나리오 호스트에서 내 런타임 영향 무시가능(경로한정 미들웨어 즉시 통과 · api_call_log writer 는 빈 큐 parked) (d) 문서화된 flake 클래스(lessons: s9-flake-under-e2e-load, e2e-parallel-load-surfaces-integration-flakes) — 신규 테스트 35건 추가로 병렬 부하↑ → S5 잠재 타이밍 취약이 임계 초과. **B2B 로직·B2C 로직 회귀 아님. S5 타이밍 수정은 본 scope(#1/#5) 밖 — 별도 이관 권고.**
+
+── Evaluator 재검증 대기(#1 길이검증 400·#5 fail-safe·무접촉·S5 flake 귀속 확인). ──
+
+---
+
+## FIX ITER 3 (문자열 길이 검증 완결) · Generator
+
+Evaluator가 #1 동일 클래스(문자열 길이 미검증 → SQL Server 500·SQLite 은폐)의 잔여 2필드 지적. 좁은 완결 fix만. 커밋/push 없음.
+
+### 잔여 2필드 [StringLength] 추가 (`backend/src/Wcs.Api/B2B/Dtos.cs`, 길이 = B2B-SCHEMA §1 실컬럼)
+- `ResultItem.ChuteNo` → `[StringLength(20)]` — work_result.chute_no **nvarchar(20)**.
+- `BoxRequest.EndTime` → `[StringLength(50)]` — box.end_time **nvarchar(50)**.
+
+### works DTO 문자열 필드 StringLength 전수 커버 확인 (이 클래스 완전 종결)
+모든 works 요청 DTO 문자열 필드를 DB 컬럼 매핑과 대조 — 잔여 미커버 0 확인:
+| 필드 | DB 컬럼(§1) | 커버 |
+|---|---|---|
+| Batch(4 DTO) | biz*.batch nvarchar(10) | [StringLength(10,Min=1)] (iter2) |
+| Input/Classification Barcode | test_*.barcode nvarchar(50) | [StringLength(50)] (iter2) |
+| ResultItem.Barcode | work_result.barcode nvarchar(50) | [StringLength(50)] (iter2) |
+| BoxItemDto.Barcode | box_item.barcode nvarchar(100) | [StringLength(100)] (iter2) |
+| Input/Classification ChuteNo | equipment_no nvarchar(20) | [StringLength(20)] (iter2) |
+| Box.BoxNo | box.box_no nvarchar(50) | [StringLength(50)] (iter2) |
+| Box.ChuteNo | box.chute_no nvarchar(10) | [StringLength(10)] (iter2) |
+| Input/Classification Reason | test_log.reason nvarchar(200) | [StringLength(200)] (iter2) |
+| **ResultItem.ChuteNo** | **work_result.chute_no nvarchar(20)** | **[StringLength(20)] (iter3 신규)** |
+| **BoxRequest.EndTime** | **box.end_time nvarchar(50)** | **[StringLength(50)] (iter3 신규)** |
+| BizDay(4 DTO) | biz_day nvarchar(10) | 정규식 #10 이 8/10자로 상한 — 500 불가(StringLength 불요·verbatim #10 우선) |
+| Status(input/classification) | status nvarchar(5) | 정규식 #12(OK|NG=2자) 상한 — 500 불가 |
+| InductionNo/PId(int) | equipment_no(20)/pid(50) | int.ToString() ≤11자 — 오버플로 불가 |
+| InTime/SortTime | log_time **datetime2**(파싱값) | 문자열 컬럼 아님(원문 미저장) |
+→ **works 요청 DTO 문자열 필드 StringLength 전수 커버 완료. 이 클래스 종결.**
+
+### 검증 테스트 2건 추가 (`B2bApiTests`, 기존 3건과 동형)
+- `Results_ItemChuteNoTooLong_Returns400_ApiResponseF`: results chuteNo 21자 → 400 + F.
+- `Box_EndTimeTooLong_Returns400_ApiResponseF`: box endTime 51자 → 400 + F.
+
+### 변경 파일 (전부 신규 B2B 파일 내 — 기존 B2C 무접촉)
+- `backend/src/Wcs.Api/B2B/Dtos.cs` (StringLength 2건 추가)
+- `backend/tests/Wcs.Tests/B2B/B2bApiTests.cs` (테스트 2건 추가)
+- 추적 코드 diff 불변(순수 insertion·deleted=0): Program.cs +42, WcsDbContext.cs +163, ModelSnapshot +357·+345. 핸드셰이크/PlcGateway/Sim3ds/ScenarioTests 0 접촉.
+
+### 테스트 결과 (raw)
+- 빌드: `오류 0개` · 신규 경고 0(distinct = NU1903 pre-existing only).
+- B2B: `통과! 실패: 0, 통과: 37`(35+2) — 3회 결정적 GREEN.
+- 전체: `통과! 실패: 0, 통과: 247, 전체: 247`(245+2).
+- S5 flake(pre-existing·부하유발·핸드셰이크 코드 0접촉·별도 todo)는 본 iter 무관 — 미착수(scope 밖 준수).
+
+── Evaluator 재검증 대기(#1 완결·전수 커버·무접촉). ──

@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Wcs.Data;
 
@@ -11,9 +12,11 @@ using Wcs.Data;
 namespace Wcs.Migrations.SqlServer.Migrations
 {
     [DbContext(typeof(WcsDbContext))]
-    partial class WcsDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260708001112_AddB2BTables")]
+    partial class AddB2BTables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
