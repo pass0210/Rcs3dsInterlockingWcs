@@ -270,3 +270,53 @@
 - **프론트 검증**: tsc/eslint 0, 콘솔 error 0(브라우저). 생성/조회/삭제 플로우 + 토글 메뉴 전환 + 인쇄 팝업.
 - **무접촉**: 기존 B2C 17테이블·엔티티·라우트·페이지, B2B-1 산출물 계약(RCS 5 API·엔티티 형상·기존 마이그레이션)
   0 변경. B2B 테이블 add-only ALTER(archived_at)만. 기존 전체 테스트 스위트 GREEN 불변 + 신규.
+
+---
+
+## 7. B2B-2b 프론트 착수 보강 (delivered API 정합 · 통합지점 · 다크모드 · 범위 게이트)
+
+> 작성: Planner Subagent (S-B2B-2b) · 2026-07-08. B2B-2a(백엔드) 병합(PR #39) 후 **프론트 전용** 슬라이스 착수 보강.
+> Generator는 pwd 밖(원본 `BowooTestBatchSystem_v2`) 접근 금지 — 본 §7 + §1~§6 + 우리 프론트 기존 코드 +
+> 실 `/api/test-data/*`(구동)만으로 구현. 아래는 원본 화면 요구(§4·§5)를 **실제 delivered 2a API·현 프론트 코드**에
+> 맞춰 검증·구체화한 것.
+
+### 7.1 delivered API 정합 (2a 실측 — 프론트 계약 확정)
+백엔드 실측(`Wcs.Api/Controllers/B2B/TestDataController.cs`·`B2B/TestDataDtos.cs`·`B2B/TestDataService.cs`) 기준.
+프론트는 **이 형상·HTTP 시맨틱에 정확히** 맞춘다(§1 표의 구체화).
+
+- **응답 시맨틱(핵심 함정)**: 관리 액션(generate/reset/delete/upload)은 **비즈니스 실패도 HTTP 200** +
+  body `{ status:"S"|"F", message }`(`B2BApiResponse`). 검증 실패(DataAnnotations·비존재 날짜·upload 3중 검증)만
+  **HTTP 400** + 동일 `{ status:"F", message }` body. → 프론트 성공 판정은 **`res.ok && body.status==="S"`**,
+  그 외(200 F 포함·400)는 실패 토스트(`body.message` 노출). 단순 `res.ok` 판정은 200 F 를 성공 오인 → 금지.
+- **generate**: `POST /api/test-data/generate` body `{ bizDay, batch, chuteNos, barcodeCount:int }`
+  (검증: bizDay `^\d{8}$|^\d{4}-\d{2}-\d{2}$`, batch 1~10자, chuteNos `^[\d\s,\-]+$`·≤200, barcodeCount 1~10000).
+- **summary**: `GET /api/test-data/summary?bizDay=` → `[{ bizDay, batch, count, receiveTime }]`(camelCase, 0건 `[]`). bizDay 생략 시 전체.
+- **detail**: `GET /api/test-data/detail?bizDay=&batch=&archived=`(bizDay·batch 둘 다 필수·누락 400) →
+  `[{ id, bizDay, batch, barcode, barcode2, chuteNo, receiveTime, createdAt, inputStatus, inTime, sortStatus, sortTime }]`.
+  `archived` ∈ `active|all|archivedOnly`(미지정·미인식 → active). **아카이브 필터 UI 가 이 값을 전달**.
+- **reset**: `POST /api/test-data/reset` body `[<long id>…]`(원시 JSON 배열) → `{ status, message }`.
+- **delete**: `DELETE /api/test-data` body `[<long id>…]`(원시 JSON 배열) → `{ status, message }`.
+- **upload**: `POST /api/test-data/upload` multipart field `file` → 성공 200 `{ status:"S", message:"{n}건 업로드 완료" }`.
+  실패: 파일없음/>10MB/확장자/MIME → 400, 파싱실패 → 200 F.
+
+### 7.2 현 프론트 통합지점 (우리 코드 실측 — 무접촉 경계)
+- `frontend/src/lib/api.ts`: 현재 `/api/monitor` 전용 클라이언트(GET·Accept 헤더만). **test-data 는 별도 클라이언트/훅**
+  신설(BASE `/api/test-data`, POST·DELETE body·multipart·query 지원). 기존 monitor 클라이언트 무접촉.
+- `frontend/src/main.tsx`: `QueryClientProvider > BrowserRouter > App`. **전역 스토어 없음** → `UiModeProvider`(Context+localStorage) 삽입.
+- `frontend/src/App.tsx`: Routes = `/`(→/monitor)·`/monitor`·`/sorters`·`*`(→/monitor). `/data-generator` 추가 +
+  `/` 리다이렉트를 **활성 모드 기본 페이지**로(b2c→`/monitor`, b2b→`/data-generator`).
+- `frontend/src/components/Layout.tsx`: 하드코딩 `NAV`(3항목) + 헤더 타이틀 "실시간 모니터링" 고정 → 모드별 2세트 +
+  동적 타이틀. **disabled+phase 배지 패턴 그대로 재사용**(현 "운영 제어 F3" 배지). `<PollIndicator>`·`StatusRail`·SignalR
+  lifecycle 은 B2C 전용이므로 B2B 모드에서 노출 여부는 Generator 판단(회귀 0 전제).
+- `frontend/src/components/ui/*`: badge·button·card·meter·select·table·tabs 존재. **Dialog·Toast 없음** → 신설.
+- **stack**: React19+TS+Tailwind v4+TanStack Query/Table+react-router7. **단일 라이트 테마 — 다크모드 없음**(index.css 명시:
+  "단일 테마, 다크모드 없음"). → 원본 헤더의 **다크모드 토글은 이식하지 않음**. 원본 헤더 컨트롤 중 **bizDay(전역 업무일자)+
+  autoRefresh(+간격)만 이식**.
+- **dev 검증 경로**: vite dev(:5173) proxy `/api`→:5080. E2E 는 백엔드(`dotnet run --project backend/src/Wcs.Api`) +
+  프론트(`npm run dev`) 동시 기동. 포트는 `.claude/ports.local.json`(orchestrator 할당) 기준 — 하드코딩 금지.
+- `frontend/public/`: **부재** — 인쇄 포함 시 여기에 `JsBarcode.all.min.js` vendoring + `npm i jsbarcode`(§4.6).
+
+### 7.3 인프라 신규 (최소 도입)
+- **확인 다이얼로그**(reset/delete danger 확인) + **토스트**(success/warning/error): shadcn-style 자작(radix 프리미티브 허용).
+  원본 `UiContext`(비차단 토스트 + await confirm) 개념 재현. 무거운 UI 라이브러리 금지.
+- **날짜 입력**: native `<input type="date">` 권장(react-datepicker 미이식 — 새 의존 회피).
