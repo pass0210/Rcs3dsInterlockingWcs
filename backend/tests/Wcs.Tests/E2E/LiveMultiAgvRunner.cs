@@ -11,9 +11,9 @@ namespace Wcs.Tests.E2E;
 //   다중 AGV 동시 부하를 인가한다. 로그·DB·push 수신은 orchestrator가 육안 관찰(§7).
 //
 //   실행 방식(orchestrator step — APPROVED 후):
-//     WCS_LIVE_BASEURL 환경변수에 라이브 WCS base URL(예: http://127.0.0.1:5080)을 설정하고
+//     WCS_LIVE_BASEURL 환경변수에 라이브 WCS base URL(예: http://127.0.0.1:5205)을 설정하고
 //     이 [Fact]를 명시 필터로 실행한다. 환경변수 미설정이면 Skip(자동 회귀 0 영향).
-//       예) WCS_LIVE_BASEURL=http://127.0.0.1:5080 \
+//       예) WCS_LIVE_BASEURL=http://127.0.0.1:5205 \
 //           dotnet test --filter "FullyQualifiedName~LiveMultiAgvRunner"
 //
 //   파라미터(환경변수, 전부 선택 — 기본값 내장):
