@@ -170,7 +170,7 @@ function ModeToggle() {
             mode === m ? 'bg-panel text-ink shadow-card' : 'text-muted hover:text-ink',
           )}
         >
-          {m === 'b2c' ? 'B2C 관제' : 'B2B 생성'}
+          {m === 'b2c' ? 'B2C' : 'B2B'}
         </button>
       ))}
     </div>
