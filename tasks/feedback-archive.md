@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-F3b (B2C "운영 제어" 프론트엔드 · F3a Ops API 소비, 프론트 전용) — APPROVED (2026-07-09, 1 iteration)
+
+- **PLC-affecting UI 검증의 안전 격리 = "전용 3포트 + provider override + 기동로그 증거"가 계약의 핵심 게이트 — 유저 현장 :5205/COM1/현장DB 동시 가동 중에도 충돌 0**: Sim3ds TCP :1512(NOT COM1/RTU) + Wcs.Api :5215(`Urls` **config 키 직접 오버라이드** — base appsettings `"Urls":0.0.0.0:5205`가 env ASPNETCORE_URLS를 눌러 5205 바인드하는 함정 회피가 필수) + 스크래치 SQLite(`Database:Provider=Sqlite`+scratchpad 파일, SeedOnStartup=true는 provider override 하에서만 안전) + Vite :5194. 안전 증거는 **기동 로그 문자열**(`Now listening on http://127.0.0.1:5215`·`provider=…Sqlite, dataSource=…scratch`·`transport=Tcp host=127.0.0.1:1512`)로 실증. API 로그 keyword 전수검사 시 "Rcs3dsInterlockingWcs" 매치는 **repo 폴더명이 파일경로에 포함**된 false-positive와 실 SqlServer 연결을 구분해야 함(경로≠연결). Release 빌드로 유저 Debug bin 파일잠금(MSB3021) 회피.
+- **operatorName-in-body 실증 = 200-vs-400 논증 + `window.fetch` 인터셉터 캡처 이중화**: F3a가 blank operator에 400을 주므로 UI POST의 200 자체가 "operatorName 존재"의 논리적 증거지만, 인터셉터로 실 requestBody(`{"floor":5,"operatorName":"평가담당자"}` 등 6요청)를 캡처하면 fresh evidence로 확정. 클라 범위검증(floor 99·cellNo 99999)은 **인터셉터 empty(네트워크 0)**로 "선제 차단"을 역증(토스트 렌더만으론 약함).
+- **pingPongGuard 정직표면화 검증 = D6≠0 상태를 실제로 만든 뒤 2차 쓰기**: TgtFloor=0에 floor=5 쓰기(pingPongGuard:false·성공토스트·D6 라이브5) → D6=5(≠0)에서 floor=7 쓰기 → 응답 `pingPongGuard:true`가 **success 아닌 warning 토스트**로 분기됨을 응답body+사전경고 다이얼로그로 확인. 성공 위장 0. Sim 소비가 가드로 7 스킵(D6 5 유지)까지 정합.
+- **콘솔 BLOCKING 게이트는 "운영 중 authoritative 캡처"가 판정자 — teardown/정리 산물과 분리**: 운영 전구간 `all=true` 캡처 = 0 errors. browser_close 시 32-error 버스트는 **`git checkout vite.config.ts`가 Vite hot-reload→proxy를 :5205로 재지정**해 발생한 500 버스트(단일, 108571ms+, 앱은 `[hub] 2s 후 재시도`로 graceful)= 내 정리순서 산물이지 코드 결함 아님. 교훈: **라이브 dev 서버 kill 전에 config 원복 금지**(hot-reload 함정). foreign node가 계약 예시포트(:5192) 점유 시 --strictPort로 내 포트 이동(:5194, S-B2B-2c false-PASS 회피).
+- **계약이 지정한 재사용 컴포넌트를 대체해도 "제약 준수 + 정신 충족"이면 위반 아님**: 계약 §4는 `ConfirmDialog` 재사용을 명시했으나 Generator는 `Dialog` 프리미티브 직접 사용 — ConfirmDialog엔 blank-operator confirm-disabled 레버가 없어 계약의 "공백이면 확인 비활성"을 정직 구현하려면 필요했고, **dialog.tsx 무수정 + 동일 focus-trap 인프라 재사용**으로 계약 정신(포커스트랩·busy잠금·danger) 충족. 대체의 근거가 계약 요구를 더 잘 만족시키면 각하 아님.
+- **프론트 전용 무접촉 재확인**: `git diff develop --stat -- backend/` 빈 출력 + vite build를 **스크래치 outDir로 돌려 유저 서빙 중 wwwroot 무접촉** + F2(/sorters) 편집컨트롤 0건 누출(읽기전용 무개조) + DEFERRED 슈트 O1 깨진 스텁 0.
+
 ## S-S5-FLAKE (핸드셰이크 S5 병렬-부하 flake 근본제거 — Sim 충실도 수정, 프로덕션 불변) — APPROVED (2026-07-08, 1 iteration)
 
 - **간헐 flake 근본원인 대조는 "결정적 가드 테스트를 fix 비활성화 상태에서 RED 로 직접 보는 것"이 유일한 신뢰 증거 — GREEN 반복만으론 인과 미증명**: S5 는 CPU 경합 하에서만 깨지므로 순수 병렬 96건으로도 재현이 불안정. 근본원인(Sim sticky 재천명이 Sim 루프 주기에만 일어나 WCS ClearR RMW 후 다음 flush 까지 서버 버퍼가 transient R_Flag=0 을 노출 → GW 폴이 샘플링 → arming 거짓 완료 → C 기입 → outcome 뒤집힘)은, 그 창을 **결정적으로** 잡는 가드 테스트(S5b: 단일 커넥션에서 "R_Flag 클리어→즉시 read-back" 100회, observedZero==0 단정)로 치환해야 스케줄링 무관하게 증명된다. Evaluator 가 fix(RegistersChanged 동기 재천명 구독 2줄) 비활성화 → S5b `Actual: 98`(RED) → 복원 → GREEN 을 직접 재현한 것이 "창이 실재하고 동기 재천명이 그것을 닫는다"의 유일한 직접 증거(Generator 주장 99/100 과 동일 차수 독립 확인).
@@ -491,3 +500,5 @@
 - [CODE-REVIEW] sprint=S-S5-FLAKE critical=0 major=0 minor=3 iter=0 (verdict=Yes/merge-ready; IL레벨 동시성 검증 통과·데드락 없음·프로덕션 무접촉. minor 3건 방어적·미발현 todo 이연)
 
 - [CODE-REVIEW] sprint=S-F3a critical=0 major=2 minor=7 iter=1 (major: I-1 O4/O6 floor/cellNo/seq 상한부재→(short) 무음 오버플로 PLC 기입, I-2 AlreadyInState 멱등분기 인메모리 재조정 스킵; minor 7건 todo 이연). 2-Evaluator(기능+안전) 재검증 예정.
+
+- [CODE-REVIEW] sprint=S-F3b critical=0 major=0 minor=5 iter=0 (verdict=Yes/merge-ready; API 계약 정확일치·fail-loud 정직표시 검증. minor 5건: bound 리터럴 OPS_LIMITS 유도·ConnBadge 중복추출·pingPong 사전힌트 주석·a11y aria-describedby·Dialog 초기포커스 문서화 — todo 이연)
