@@ -939,7 +939,7 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         _out.WriteLine($"[IF-05 반전] 슈트 FULL → OK chuteNo={body.ChuteNo}");
 
         // OnCleared 후에도 OK 유지(슈트는 항상 보냄).
-        await capacity.OnCleared(dest1.Id);
+        await capacity.OnCleared(dest1.Id, "test-op");
         Assert.Equal(WcsHold.None, capacity.GetHold(dest1.Id));
 
         var req2  = new { pId = 10051, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null };
@@ -993,7 +993,7 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         await db.SaveChangesAsync();
 
         // 4. OnCleared → DB에 last_cleared_at 영속화 + 인메모리 리셋
-        await capacity.OnCleared(dest4.Id);
+        await capacity.OnCleared(dest4.Id, "test-op");
         Assert.Equal(WcsHold.None, capacity.GetHold(dest4.Id));
 
         // 5. InitializeFromDbAsync 직접 재실행 (재시작 시뮬레이션)

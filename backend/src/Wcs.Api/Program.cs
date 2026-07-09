@@ -166,6 +166,12 @@ builder.Services.AddSingleton<IHostedService>(sp =>
 // scoped WcsDbContext는 IServiceScopeFactory(싱글톤)로 스코프 생성해 취득(확정3 — captive 회피).
 builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
 
+// ── IDestinationControlService — B2C 운영자 런타임 PAUSED/RESUMED 전이 (S-F3a) ──
+// OpsController(/api/ops/destinations/{id}/pause|resume)가 소비. DB Status 전이 + destination_event
+// (operatorId) + CHUTE 인메모리 반영(ChuteCapacityService)을 한 단위로 수행. PLC 쓰기 없음(Q3 LOCK).
+// 싱글톤 — scoped WcsDbContext는 IServiceScopeFactory로 취득(DestinationStatusService와 동형).
+builder.Services.AddSingleton<IDestinationControlService, DestinationControlService>();
+
 // ── Phase 2: IF-08 아웃바운드 푸시 (WCS → RCS destination-status) ──────────────
 // ① named HttpClient(IHttpClientFactory 경유 — 직접 new HttpClient() 금지, 소켓 고갈 방지).
 //    타임아웃은 설정값(Wcs:RcsPush:HttpTimeoutMs). 하드코딩 0(절대규칙 #7).

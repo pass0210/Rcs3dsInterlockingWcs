@@ -1225,7 +1225,7 @@ public class S8FullPausedTests : IAsyncLifetime
         _out.WriteLine($"[S8 반전] 슈트 FULL → IF-05 OK chuteNo={body.ChuteNo}");
 
         // OnCleared 후에도 OK 유지(슈트는 항상 보냄).
-        await capacity.OnCleared(dest1.Id);
+        await capacity.OnCleared(dest1.Id, "test-op");
         var resp2 = await _client!.PostAsJsonAsync("/api/v1/destination-query",
             new { pId = 15002, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null });
         var body2 = await resp2.Content.ReadFromJsonAsync<DestinationQueryResponse>();

@@ -49,10 +49,22 @@ public interface IChuteCapacityService
 
     /// <summary>
     /// 슈트 비움(CLEARED) 이벤트 — DB 영속화 후 집계 리셋.
-    /// chute_detail.last_cleared_at = UtcNow + destination_event(CLEARED) append 후 인메모리 카운터 0으로 리셋.
-    /// 재시작 시 InitializeFromDbAsync가 last_cleared_at 기준으로 재구성하므로 DB 영속화 필수.
+    /// chute_detail.last_cleared_at = UtcNow + destination_event(CLEARED, operatorId) append 후
+    /// 인메모리 카운터 0으로 리셋. 재시작 시 InitializeFromDbAsync가 last_cleared_at 기준으로
+    /// 재구성하므로 DB 영속화 필수.
+    /// A-8 해소: 이 메서드의 production 호출자(OpsController /api/ops/chutes/{id}/clear)를 신설해
+    /// FULL 슈트를 운영자가 비워 복구할 수 있게 한다(operatorId = 조작 작업자 이름, 감사 귀속).
     /// </summary>
-    Task OnCleared(long destinationId);
+    Task OnCleared(long destinationId, string operatorId);
+
+    /// <summary>
+    /// 슈트 PAUSED/RESUMED 인메모리 반영(런타임 전이) — chute 전용.
+    /// DB Status 전이·destination_event append는 IDestinationControlService가 트랜잭션으로 수행하고,
+    /// 그 커밋 이후 이 메서드가 인메모리 IsPaused를 반영 + OnChuteStateChanged 발화(게이트·푸시 재평가)한다.
+    /// destId가 CHUTE 인메모리 집계에 없으면(소터 등) no-op — 소터 정지는 DB Status만으로 산출되며
+    /// DestinationStatusService.ComputeSorter가 DB를 직접 읽는다(인메모리 불요).
+    /// </summary>
+    void ApplyPauseStateInMemory(long destinationId, bool paused);
 }
 
 /// <summary>
@@ -283,7 +295,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
     /// DB 트랜잭션 처리(chute_detail.last_cleared_at + destination_event(CLEARED))가 완료된 후
     /// 인메모리 카운터를 리셋한다. 락 보유 중 I/O를 하지 않도록 DB 쓰기 후 락 진입.
     /// </remarks>
-    public async Task OnCleared(long destinationId)
+    public async Task OnCleared(long destinationId, string operatorId)
     {
         // ① 락 밖에서 DB 트랜잭션 수행 (싱글톤에서 스코프 서비스 사용)
         using (var scope = _scopeFactory.CreateScope())
@@ -299,11 +311,12 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
                 detail.UpdatedAt     = now;
             }
 
-            // destination_event(CLEARED) append
+            // destination_event(CLEARED, operatorId) append — A-8: 운영자 귀속 기록.
             db.DestinationEvents.Add(new DestinationEvent
             {
                 DestinationId = destinationId,
                 EventType     = DestinationEventType.CLEARED,
+                OperatorId    = operatorId,
                 At            = now,
             });
 
@@ -325,7 +338,26 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
             _rwLock.ExitWriteLock();
         }
 
-        _log.LogInformation("[ChuteCapacity] destinationId={Id} CLEARED — last_cleared_at 갱신·인메모리 리셋", destinationId);
+        _log.LogInformation("[ChuteCapacity] destinationId={Id} CLEARED(op={Op}) — last_cleared_at 갱신·인메모리 리셋",
+            destinationId, operatorId);
+        RaiseChuteStateChanged(destinationId);
+    }
+
+    /// <inheritdoc/>
+    public void ApplyPauseStateInMemory(long destinationId, bool paused)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            // CHUTE 집계에 있는 경우만 반영(소터 destId는 no-op — DB Status로 산출).
+            if (_states.TryGetValue(destinationId, out var state))
+                state.IsPaused = paused;
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+        // 게이트(GetHold)·푸시(DestinationStatusPusher)·STATE 훅 재평가 — 락 밖 발화.
         RaiseChuteStateChanged(destinationId);
     }
 

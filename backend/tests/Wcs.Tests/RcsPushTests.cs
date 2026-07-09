@@ -418,7 +418,7 @@ public class RcsPushTests
         Assert.False(rcs.LastFor(4)!.Ready, "만재 → ready:false");
 
         // false→true: 비움(OnCleared)
-        await capacity.OnCleared(dest4.Id);
+        await capacity.OnCleared(dest4.Id, "test-op");
         await WaitUntilAsync(() => rcs.CountFor(4) >= 3, 5000, "슈트4 false→true 푸시");
         await WaitUntilExactAsync(() => rcs.CountFor(4), 3, stableCount: 5, timeoutMs: 4000, "false→true 후 안정");
         Assert.True(rcs.LastFor(4)!.Ready, "비움 → ready:true");
