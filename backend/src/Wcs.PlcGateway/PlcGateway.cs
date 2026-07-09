@@ -484,11 +484,17 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
             switch (write)
             {
                 case PlcWrite.SetTgtFloor(var floor):
-                    // 쓰기 직전 TgtFloor==0 재확인 — 핑퐁 차단(절대 규칙 #2)
-                    var snapTgt = _latest;
-                    if (snapTgt.TgtFloor != 0)
+                    // 쓰기 직전 TgtFloor==0 재확인 — 핑퐁 차단(절대 규칙 #2).
+                    // S-F3B-FOLLOWUP 3-A: 폴 스냅샷(_latest, ≤PollIntervalMs stale)이 아니라
+                    // _clientLock 임계구역 안에서 D6(TgtFloor)를 fresh FC03로 직접 읽어 판정한다.
+                    // 이로써 급속 2연타에서 1번째가 방금 쓴 TgtFloor를 2번째가 즉시 관측(결정적 차단).
+                    // read+write가 같은 임계구역 안이라 폴·다른 쓰기와 프레임 교차 없음(절대규칙 #1 보존).
+                    var freshTgt = await _master.ReadHoldingRegistersAsync(
+                        RegisterMap.TgtFloor, 1, ct).ConfigureAwait(false);
+                    int curTgtFloor = freshTgt[0];
+                    if (curTgtFloor != 0)
                     {
-                        _log.LogWarning("[쓰기 큐] SetTgtFloor 스킵 — TgtFloor={V}(≠0, 핑퐁 차단)", snapTgt.TgtFloor);
+                        _log.LogWarning("[쓰기 큐] SetTgtFloor 스킵 — TgtFloor={V}(≠0, 핑퐁 차단·fresh-read)", curTgtFloor);
                         return;
                     }
                     await _master.WriteSingleRegisterAsync(
@@ -498,11 +504,17 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     break;
 
                 case PlcWrite.CellAssign(var cellNo, var seq):
-                    // C_Flag==0 확인
-                    var snapC = _latest;
-                    if (snapC.CFlag)
+                    // C_Flag==0 확인.
+                    // S-F3B-FOLLOWUP 3-A: 폴 스냅샷(_latest, ≤PollIntervalMs stale)이 아니라
+                    // _clientLock 임계구역 안에서 D4(Flags)를 fresh FC03로 직접 읽어 C_Flag를 판정한다.
+                    // 급속 2연타에서 1번째가 방금 세팅한 C_Flag=1을 2번째가 즉시 관측 → 결정적으로 거부
+                    // (C 영역 D0/D1 덮어쓰기 방지). read+write가 같은 임계구역 안이라 프레임 교차 없음(#1 보존).
+                    var freshFlags = await _master.ReadHoldingRegistersAsync(
+                        RegisterMap.Flags, 1, ct).ConfigureAwait(false);
+                    bool cFlagNow = (freshFlags[0] & RegisterMap.D4.C_Flag) != 0;
+                    if (cFlagNow)
                     {
-                        _log.LogWarning("[쓰기 큐] CellAssign 스킵 — C_Flag=1(이미 세팅됨)");
+                        _log.LogWarning("[쓰기 큐] CellAssign 스킵 — C_Flag=1(이미 세팅됨·fresh-read)");
                         return;
                     }
                     // C_CellNo·C_Seq FC16(멀티 레지스터 쓰기, D0~D1)

@@ -58,6 +58,9 @@ export interface EnqueueData {
   operatorName: string
   cellNo?: number
   seq?: number
+  // O6 전용 advisory(O4 pingPongGuard 미러) — true면 이미 C_Flag=1(진행 중)이라 컨슈머가
+  // 이 쓰기를 스킵할 수 있음. 최종 권위는 컨슈머 fresh-read 가드(백엔드 3-A). O5는 미포함.
+  cFlagGuard?: boolean
 }
 
 // ── 공통 POST 헬퍼 ───────────────────────────────────────────────────────────
