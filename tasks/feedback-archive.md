@@ -503,3 +503,5 @@
 
 - [CODE-REVIEW] sprint=S-CELL-ACCUM critical=0 major=2 minor=5 iter=1 (major: #2 LoadedQtyByCell hot-path 이력전량 메모리로드 성능회귀, #1 SortedQty RMW 동시충돌시 Finalize 전체롤백; fix에 동반 #3/#4/#5/#7 정리; #6 이연). 2-Evaluator(기능+정합성) 재검증 예정.
 - [CODE-REVIEW] sprint=S-F3b critical=0 major=0 minor=5 iter=0 (verdict=Yes/merge-ready; API 계약 정확일치·fail-loud 정직표시 검증. minor 5건: bound 리터럴 OPS_LIMITS 유도·ConnBadge 중복추출·pingPong 사전힌트 주석·a11y aria-describedby·Dialog 초기포커스 문서화 — todo 이연)
+
+- [CODE-REVIEW] sprint=S-F3B-FOLLOWUP critical=0 major=0 minor=4 iter=0 (verdict=Yes/merge-ready; fresh-read 가드 동시성 정확·단일 _clientLock·D4/D6 canonical 파싱·읽기실패 OFFLINE·Ready precheck 수동전용 read-only·자동경로 무접촉. minor 4건 주석/a11y todo 이연)

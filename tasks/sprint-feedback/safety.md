@@ -1,59 +1,64 @@
-# SAFETY: PASS — S-F3a (B2C 운영 제어 백엔드 · PLC 쓰기 경로)
+# SAFETY: PASS — S-F3B-FOLLOWUP (셀입력 라벨 · Ready-아닐-때 수동쓰기 무시 · PLC 코어 fresh-read 가드)
 
 > SAFETY Evaluator · 2026-07-09 · dimension = 안전 경계(하드 게이트)만. functional은 별도(functional.md).
-> Ground truth = git diff(develop) + 코드 직접 판독 + 독립 재실행 테스트. Generator 요약 불신, 파일 직접 확인.
-> **재검증 = FIX ITER 1 반영본** (code review I-1 config 상한 + I-2 인메모리 재동기). 이전 302 GREEN 판정 → 305 GREEN 갱신.
-> Handoff 마커: `tasks/sprint-log.md` L3005 `## IMPLEMENTATION COMPLETE — S-F3a`. fix-iter delta = `WcsOptions.cs`+`appsettings.json`(I-1), `OpsController.cs`/`DestinationControlService.cs` 갱신(I-1/I-2).
+> Ground truth = git diff(develop) + 코드 직접 판독 + 독립 재실행 테스트(Sim3ds TCP + in-memory SQLite 전용). Generator 요약 불신·파일 직접 확인.
+> Handoff 마커 확인: `tasks/sprint-log.md` 말미 `## IMPLEMENTATION COMPLETE — S-F3B-FOLLOWUP` 존재.
+> 검증 방식: `dotnet test`만 사용(절대 `dotnet run --project Wcs.Api` 미사용 — S-2 트랩: 기본 Production=COM1/RTU+현장 DB). 실 PLC 워드 쓰기 0·현장 DB 접근 0.
 
-## Fix-iter delta 검증 대상 (working tree, 미커밋)
-- **I-1(입력 위생):** `Wcs.Api/Infrastructure/WcsOptions.cs`(+48, `OpsWriteLimits`) · `Wcs.Api/appsettings.json`(+6, `Wcs:OpsLimits`) · `OpsController.cs` O4/O6에 상한 검증 추가(`IOptions<WcsOptions>` 주입).
-- **I-2(상태 정합):** `DestinationControlService.cs` AlreadyInState 경로도 `ApplyPauseStateInMemory` 호출(DB↔인메모리 divergence self-heal).
-- **불변(재확인):** OpsController O1~O6·enqueue 래퍼·감사 결선·PlcGateway 코어.
-
----
-
-## 7개 안전 게이트 — 전부 PASS (fix 후 재확인)
-
-### GATE 1 — 단일 쓰기 큐 (절대규칙 #1) : PASS
-- no-direct-Modbus grep(`Wcs.Api` 전체): 히트는 선재 인프라 3파일(`Program.cs` 배선·`SorterGatewayRegistry.cs` 팩토리·`WcsTeardownGuard.cs` 종료)뿐. **OpsController·DestinationControlService·WcsOptions에 Modbus 직접 호출 0.** I-1은 검증 + `IOptions` 주입만 추가(Modbus 무관).
-- 워드 쓰기 경로 불변: `GetBundle → Enqueue*Async → _polling.EnqueueAsync(PlcWrite.*) → 단일 컨슈머`. 런타임 증거: O5/O6 테스트가 컨슈머 전용 `PLC_WRITE` op-log 출현 단언(단일 큐 경유 이중 입증).
-
-### GATE 2 — SAFE-3 ONLY (Q2 LOCK) : PASS
-- `git diff develop -- backend/src/Wcs.PlcGateway/` = 빈 출력 → PlcWrite 유니온(SetTgtFloor·CellAssign·ClearR) 무변경, 신규 레코드 0. `WriteRawRegister`/`SetD4Bit` 미도입. I-1은 임의 레지스터 경로를 열지 않고 **좁힌다**(상한 추가).
-
-### GATE 3 — TgtFloor 게이트(#2) + 비클리어(#3) : PASS
-- 컨슈머 `TgtFloor==0` 가드(`PlcGateway.cs:486-496`) 무변경(diff 빈 출력). Ops는 같은 enqueue 경로 → 우회 불가.
-- #3: `floor<1 → 400` 유지 + I-1로 `floor>{상한} → 400` 추가. 상한 검증은 enqueue **이전**(우회 아님·추가 위생). `currentTgtFloor`/`pingPongGuard` 정직 응답 유지. WCS가 TgtFloor에 0 쓰는 경로 없음.
-
-### GATE 4 — 보호구역 PlcGateway/HandshakeOrchestrator 무변경 : PASS
-- **`git diff develop -- backend/src/Wcs.PlcGateway/` = EMPTY (fix 후 재확인 = 0 lines).** HandshakeOrchestrator 무변경. 핸드셰이크 S1~S6: 전체 305 GREEN(핸드셰이크·시나리오 포함).
-
-### GATE 5 — Sim 전용, 현장 위험 0 : PASS
-- 테스트 = `SimWebApplicationFactory`(Transport=Tcp·127.0.0.1·동적 포트) + in-memory SQLite 스크래치 DB. COM1/RTU/SerialPort 실접근 0(유일 매치는 "미접근" 주석). 실 PLC 워드 쓰기 0. 현장 DB 오염 0.
-- I-1 신규 테스트도 동일 팩토리(Sim TCP)로만 검증.
-
-### GATE 6 — 하드코딩 타이밍 0(#7) + 마이그레이션 0 : PASS
-- **바운드 = CONFIG 유래(리터럴 아님):** `WcsOptions.OpsLimits`가 `builder.Services.Configure<WcsOptions>(builder.Configuration.GetSection("Wcs"))`(Program.cs:47, 선재)로 `appsettings.json → "Wcs:OpsLimits"`(MaxTgtFloor:20·MaxCellNo:1000·MaxCellSeq:30000) 바인딩. OpsController는 `wcsOptions.Value.OpsLimits.EffectiveMax*` 사용 — **하드코딩 리터럴 상한 0.**
-- **하드 타입 상한(wrap 절대 방지):** `RegisterCeiling = short.MaxValue(32767)`는 언어 상수. `EffectiveMax* = Math.Min(설정값, RegisterCeiling)` → 설정을 아무리 크게 잡아도 32767 초과 유효화 불가 → 컨슈머 `(short)` 캐스트 음수 wrap 원천 차단(설정 오설정 방어).
-- **설정 기본값 sane:** MaxTgtFloor=20(운영층 2·물리 층수 상회), MaxCellNo=1000(SPEC 16셀 대폭 상회), MaxCellSeq=30000(32767 아래 헤드룸). 정상 값 거부 없고 타입 상한 아래인 합리적 안전 천장.
-- **마이그레이션 0:** `git diff develop --name-only -- '*Migrations*' '*Snapshot*'` = 0. config 키 추가는 스키마 중립(DB 무영향). `destination_event.OperatorId` 선재.
-
-### GATE 7 — 감사 무결성(append-only, operator 귀속) : PASS
-- clear/pause/resume → `destination_event(CLEARED|PAUSED|RESUMED, OperatorId)` **Add-only**(update/delete 없음). operatorName 필수(공백/누락 → 400). 워드 쓰기 자동 감사 = 컨슈머 `PLC_WRITE`.
-- **I-2 재확인:** AlreadyInState는 여전히 event 중복 append 0(감사 잡음 방지). 인메모리 `ApplyPauseStateInMemory`만 추가 호출 → DB Status ↔ ChuteState.IsPaused **수렴(divergence 아님·self-heal)**. 인메모리 flip은 `ChuteCapacityService.ApplyPauseStateInMemory` 내 `_rwLock.EnterWriteLock()` 임계구역, `RaiseChuteStateChanged`는 락 밖. DestinationControlService는 호출 시 락 미보유(DB scope dispose 후) → 락 순서/데드락/상태 발산 위험 0.
+## 대상 diff (develop 기준)
+```
+backend/src/Wcs.Api/Controllers/OpsController.cs   | +58  (Ready 사전점검 409 + O6 cFlagGuard advisory)
+backend/src/Wcs.PlcGateway/PlcGateway.cs           | +20 / -8  (두 가드 판정원천 _latest → fresh FC03)
+backend/src/Wcs.Sim3ds/SimServer.cs                | +19  (test seam SetReady(bool) — 테스트 전용)
+backend/tests/... (OpsControllerTests +121, PlcGatewayIntegrationTests +66)
+frontend/src/lib/ops.ts +3 · frontend/src/pages/sections/OpsControls.tsx +71
+```
 
 ---
 
-## I-1 검증 (over-limit → 400 · ZERO enqueue)
-- 코드: O4는 `floor<1`(400) → `floor>maxFloor`(400) **둘 다 `GetBundle`/`EnqueueSetTgtFloorAsync` 이전**. O6는 `cellNo/seq<1` → `>EffectiveMax*` 검증 후에만 `EnqueueCellAssignAsync`. 바운드 초과값은 큐에 절대 도달 못 함.
-- 테스트: `O4_FloorAboveBound_Returns400_NoEnqueue`(floor=21 설정상한 바로 위·floor=70000 타입상한 초과 → 둘 다 400, **D6 미변경으로 enqueue 0 단언**), `O6_CellNoOrSeqAboveBound_Returns400_NoEnqueue`(cellNo>1000·seq>30000·타입상한 초과 → 400). 전부 GREEN.
+## 5개 안전 게이트 — 전부 PASS
 
-## Fresh 재실행 증거 (Evaluator 독립 실행, fix 반영본)
-- `dotnet build backend/Wcs.sln` — 오류 0, 경고 10(전부 선재 NU1903 SQLitePCLRaw CVE·신규 CS 경고 0).
-- `dotnet test --filter OpsControllerTests` — **16/16 GREEN**(13→16, +3 신규: O4/O6 상한 + 추가). 7s.
-- `dotnet test backend/Wcs.sln`(전체, foreground blocking) — **305 GREEN / 0 실패 / 0 skip**(18s). 302→305(+3). 회귀 0.
-- 위생: `Wcs.Sim3ds.exe` orphan 0. 잔류 testhost.exe 2개(중복 concurrent run 잔재)는 확인 후 정리 완료.
+### GATE 1 — PROTECTED-ZONE 최소성 · 큐/락/RMW/의미 보존 · #2/#3 : PASS
+- **최소 diff(load-bearing만):** `PlcGateway.cs` 변경은 정확히 두 가드의 **판정 원천 교체**뿐 (`PlcGateway.cs:486-519`).
+  - `SetTgtFloor`: `var snapTgt = _latest; if (snapTgt.TgtFloor != 0)` → `var freshTgt = await _master.ReadHoldingRegistersAsync(RegisterMap.TgtFloor,1,ct); if (freshTgt[0] != 0)` (:492-499).
+  - `CellAssign`: `var snapC = _latest; if (snapC.CFlag)` → `var freshFlags = await _master.ReadHoldingRegistersAsync(RegisterMap.Flags,1,ct); if ((freshFlags[0] & RegisterMap.D4.C_Flag)!=0)` (:512-519).
+  - 나머지: 큐 구조·`_writeQueue`·`RunWriteConsumerAsync`·`RmwD4LockedAsync`·`EmitWrite` 관측 훅·OFFLINE 전이·이벤트 = **무변경**. 로그 문구만 `·fresh-read` 접미 추가.
+- **fresh read가 `_clientLock` 안(원자 read-then-write, #1 보존):** `ProcessWriteAsync`는 `_clientLock.WaitAsync`(:479) … `finally _clientLock.Release()`(:546) 임계구역 하나. fresh read(:492/:512)는 그 안. `_clientLock` 획득처 = 폴 루프(:255), 재연결(:388), 컨슈머(:479) 셋뿐 — 폴/쓰기가 같은 락 직렬. **read+write 프레임 교차 없음.** 컨슈머 내부 `_master.Read...`는 락 재획득 안 함(기존 `RmwD4LockedAsync`와 동일 패턴) → reentrancy/deadlock 0.
+- **가드 의미 불변:** SetTgtFloor는 `TgtFloor != 0`이면 skip(#2 핑퐁), CellAssign은 `C_Flag==1`이면 skip. 임계값·방향 동일 — 원천만 정확화.
+- **#3(WCS 비클리어) 온전:** SetTgtFloor case는 `WriteSingleRegisterAsync(TgtFloor, (short)floor)`만; 0-클리어 경로 없음. O4 컨트롤러는 `req.Floor < 1 → 400`(`OpsController.cs:140`) 유지 → floor>=1만 수락, 수동 클리어 미노출.
 
-## 판정
-FIX ITER 1(I-1 config 상한+하드 short 천장 · I-2 인메모리 self-heal) 반영 후 7개 안전 게이트 전부 재충족. 바운드는 config 유래·리터럴 아님·하드 short.MaxValue 천장으로 wrap 불가, over-limit는 400·enqueue 0, 보호구역(PlcGateway) 바이트 무변경, safe-3 유지, 마이그레이션 0(config 추가는 스키마 중립), 감사 append-only, I-2는 divergence 없이 write-lock 하 수렴. **SAFETY: PASS.**
-(functional 차원은 functional.md 참조 — APPROVED는 두 차원 AND.)
+### GATE 2 — 자동/오케스트레이트 경로 무손상 (crux) : PASS
+- **`HandshakeOrchestrator.cs` diff = 0** (git 확인). **`Wcs.Core/**`(DepositDecider·RegisterMap·모델) diff = 0.** **`RcsController.cs` diff = 0** (AlignSorterToOperationalFloor 무변경).
+- **Ready 게이트가 공유 컨슈머 case에 없음:** `PlcGateway.cs`의 SetTgtFloor/CellAssign case에 `Ready` 판정 부재(코드 판독 확인). Ready 게이트는 `OpsController.ReadyPrecheck`(수동) + FE에만 존재. → 자동 IF-09(Ready==0에 TgtFloor 기입) 무영향.
+- **테스트 입증(fresh):** `IF09_AutoAlign_WritesTgtFloor_EvenWhenReadyZero_NoRegression` GREEN — Sim Ready=0에서도 D6 기입. 핸드셰이크 `IT1/IT2/IT3`(IT3c 포함) 그룹 **7/7 GREEN**(격리 재실행). fresh-read는 C 기입 시 C_Flag==0(정상)이라 통과 → 무회귀.
+
+### GATE 3 — Ready 사전점검 manual-only + 정확 : PASS
+- O4(`:153`)·O6(`:227`) enqueue **직전** `ReadyPrecheck(bundle,...)` 호출 → `!Online` 또는 `!Ready`면 `Conflict(409)` 반환·enqueue 0·WARN 감사 1행(`OpsController.cs:245-270`).
+- **O5 ClearR(`:182-202`)는 ReadyPrecheck 미호출** — 무조건 enqueue(복구 도구, Q1). 확인.
+- 사전점검 원천 = `bundle.Latest`(폴 스냅샷, **읽기만**) — 신규 동기 Modbus 읽기 표면 0(#1). Ready는 초 단위 레벨이라 ~150ms stale 허용, 서브-폴 rapid-double은 GATE 4 컨슈머 가드가 최종 차단.
+- 테스트: `O4_NotReady_Returns409_NoEnqueue`·`O6_NotReady_Returns409_NoEnqueue`·`O5_ClearR_NotReady_StillAllowed`·`O6_CellAssign_CFlagGuard_ReportsAdvisory` 모두 GREEN.
+
+### GATE 4 — fresh-read 가드 결정적 + provider/PLC-safe : PASS
+- **하드코딩 타이밍 0:** 신규 상수·sleep·타임아웃 도입 없음(diff 확인). 결정성은 큐 직렬 + `_clientLock` read+write 원자성에서 나옴(타이밍-luck 아님).
+- **deadlock/reentrancy 0:** fresh read는 이미 보유한 `_clientLock` 안에서 `_master`를 직접 호출(재획득 없음) — `RmwD4LockedAsync` 기존 패턴과 동형.
+- **결정성 실측:** `IT3d_RapidDoubleCellAssign_SecondRejected_ByFreshRead` 격리 **3/3 GREEN**(131/134/125ms). Sim 상태루프 동결(InjectNoResponse) 후 CellAssign 2연타 → 2번째 skip 로그 + C 영역 11/101 유지(22/202 미덮어씀) 이중 단언.
+- **비-vacuous 확인:** IT3d는 실 TCP Sim 서버 레지스터를 GW 폴로 관측해 C 영역 보존을 단언하고 skip-로그 출현을 대기 — 가드를 `_latest`로 되돌리면 서브-폴 창에서 2번째가 통과해 skip 로그 미발생 → 대기 타임아웃 RED. 테스트가 fix에 load-bearing(코드 판독으로 확인).
+
+### GATE 5 — 마이그레이션 0 · 신규 PLC 쓰기 타입 0 · safe-3 : PASS
+- **Migrations diff = 0** (`Wcs.Data/Migrations/` git 확인). `cFlagGuard`는 응답 DTO 전용·DB 무관.
+- **PlcWrite 타입 = SetTgtFloor·CellAssign·ClearR 셋뿐**(`PlcGateway.cs:30/33/36`) — 신규 타입 0. Sim `SetReady`는 슬레이브 test seam(마스터 쓰기 큐 아님).
+
+---
+
+## SAFETY 하드 제약 (검증 인프라) — 준수
+- 전 과정 `dotnet test`(SimWebApplicationFactory: in-memory SQLite + 동적 포트 TCP Sim; PlcGatewayIntegrationTests: ephemeral TCP Sim). **`dotnet run --project Wcs.Api` 미사용** → COM1/RTU·현장 SqlServer 미접근. 실 PLC 워드 쓰기 0.
+- 검증 전 고아 `Wcs.Sim3ds.exe`/`Wcs.Api.exe` 0 (tasklist 확인).
+
+## 회귀 관찰
+- **전체 스위트: 318/318 GREEN × 3 연속**(각 18s). + IT3d 3/3, 신규 7군, 핸드셰이크 7군 격리 GREEN.
+- 앞선 1회 run에서 1/318 실패(비-changed-path) 관측되었으나 **후속 4회 full run 전부 318/318**로 미재현 — `tasks/lessons.md` s9-flake-under-e2e-load / e2e-parallel-load-surfaces-integration-flakes(부하 하 저빈도 타이밍 flake)와 정합. changed-path 테스트(IT3d·Ops·핸드셰이크)는 격리·반복 결정적 → 이 변경의 회귀 아님.
+- `WcsTeardownGuard SocketException` 로그 = 문서화된 testhost-teardown-channel-race(PASS 후 teardown 노이즈, pass/fail 무관). 
+- 빌드 0 오류 · 신규 CS 경고 0(경고 10건 전부 선재 NU1903 SQLitePCLRaw).
+
+## 결론
+**SAFETY: PASS.** PROTECTED-ZONE 변경은 fresh-read 가드 2개로 최소화(`_clientLock` 내부 원자 read-then-write, 단일 큐·RMW·의미 불변, #2/#3 보존). 공유 컨슈머 case에 Ready 게이트 미주입 — 자동 IF-09·오케스트레이트 핸드셰이크 무손상(diff 0 + 테스트 GREEN). Ready 사전점검은 OpsController 수동 경로 전용·읽기만·O5 제외. 마이그레이션 0·신규 PLC 쓰기 타입 0. Sim/스크래치-DB 전용 검증(실 COM1/RTU·현장 DB 미접근).
