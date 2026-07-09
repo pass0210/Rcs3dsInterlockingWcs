@@ -491,3 +491,5 @@
 - [CODE-REVIEW] sprint=S-S5-FLAKE critical=0 major=0 minor=3 iter=0 (verdict=Yes/merge-ready; IL레벨 동시성 검증 통과·데드락 없음·프로덕션 무접촉. minor 3건 방어적·미발현 todo 이연)
 
 - [CODE-REVIEW] sprint=S-F3a critical=0 major=2 minor=7 iter=1 (major: I-1 O4/O6 floor/cellNo/seq 상한부재→(short) 무음 오버플로 PLC 기입, I-2 AlreadyInState 멱등분기 인메모리 재조정 스킵; minor 7건 todo 이연). 2-Evaluator(기능+안전) 재검증 예정.
+
+- [CODE-REVIEW] sprint=S-CELL-ACCUM critical=0 major=2 minor=5 iter=1 (major: #2 LoadedQtyByCell hot-path 이력전량 메모리로드 성능회귀, #1 SortedQty RMW 동시충돌시 Finalize 전체롤백; fix에 동반 #3/#4/#5/#7 정리; #6 이연). 2-Evaluator(기능+정합성) 재검증 예정.

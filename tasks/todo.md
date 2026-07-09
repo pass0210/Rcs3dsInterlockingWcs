@@ -21,6 +21,12 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-CELL-ACCUM 이연 (Minor — 비차단, 셀 누적 바인딩)
+- [ ] [코드리뷰 #6][방어] `DbRepositories.Finalize`가 이미 COMPLETED된 오더에 초과 piece 도착 시 SortedQty를 PlannedQty 초과로 증가시키고 SelectCell②가 새 셀 배정 — benign(ReservedQty 게이트가 선차단)이나 무가드 경로. `order.Status==COMPLETED`면 증가 skip/로그 검토.
+- [ ] [정합성 minor·후속][동시성] 동시 동일-오더 IF-10을 한 소터에 보내면 SelectCell② read-then-create race로 **중복 활성 배정** 가능. 직렬 dispatch 전제(SPEC §6 물리 직렬)에선 미발생 — 동시 IF-10 허용 시 원자 배정 필요. 관련: [[single-sorter-concurrent-handshake-gap]].
+- [ ] [정합성 minor][선재] `SelectCell`② 비-RUNNING 오더에 무배정 셀 반환(이번 스프린트 무변경·선재 동작).
+- [ ] [정합성 minor][테스트] E2E AB A2가 주석은 "동일 셀" 주장하나 단언은 총 qty만 검증 — 단언 강화 여지.
+
 ## S-F3a 코드리뷰 이연 (Minor — 비차단, 운영제어 백엔드)
 - [ ] [일관성] `OpsController`가 ILogger/IOperationLogger는 생성자 주입인데 WcsDbContext/IChuteCapacityService/ISorterGatewayRegistry/IDestinationControlService는 `[FromServices]` 메서드 주입 — MonitoringController(순수 생성자 주입)와 불일치.
 - [ ] [async] O1 `ClearChute`가 동기 `FirstOrDefault`(async 메서드 내) + `OnCleared`가 CancellationToken 없이 FindAsync/SaveChangesAsync — 전이 경로는 RequestAborted 전달하는데 불일치. `FirstOrDefaultAsync`+토큰 권장.
