@@ -34,6 +34,54 @@ public sealed record WcsOptions
     /// 하트비트 주기 등 신규 타이밍은 전부 여기서 읽는다(하드코딩 금지, 절대규칙 #7).
     /// </summary>
     public MonitorOptions Monitor { get; init; } = new();
+
+    /// <summary>
+    /// 운영자 워드 쓰기(OpsController O4/O6) 유효 범위 상한(입력 위생 — S-F3a code review I-1).
+    /// 하드코딩 금지(절대규칙 #7) — appsettings "Wcs:OpsLimits"에서 읽는다.
+    /// </summary>
+    public OpsWriteLimits OpsLimits { get; init; } = new();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// OpsWriteLimits — 운영자 워드 쓰기(O4 SetTgtFloor·O6 CellAssign) 유효 범위 상한.
+//
+// 배경(S-F3a code review I-1): 큐 컨슈머(PlcGateway.ProcessWriteAsync)는 floor/cellNo/seq를
+//   무조건 (short)로 캐스트해 D6/D0/D1에 기입한다. int DTO에 short.MaxValue(32767) 초과값이
+//   바인딩되면 검증을 통과해 **조용히 wrap(음수/오값)**되어 PLC에 잘못 기입된다 — 이 스프린트가
+//   보호하는 operator→PLC 표면에서의 Fail-Loud 위반. 따라서 상한 검증으로 400 거부한다.
+//
+// 이중 상한(둘 중 낮은 값으로 캡):
+//   ① 도메인 sane 상한(설정값 MaxTgtFloor/MaxCellNo/MaxCellSeq) — 현장 물리 규모 상회.
+//   ② 하드 타입 상한 RegisterCeiling(=short.MaxValue) — 설정을 잘못 크게 잡아도 절대 wrap 불가.
+// 절대규칙 #7: 도메인 상한은 하드코딩 리터럴이 아니라 설정값. 타입 상한은 언어 상수(리터럴 아님).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>appsettings.json "Wcs:OpsLimits" 섹션 — 운영자 워드 쓰기 유효 범위 상한.</summary>
+public sealed record OpsWriteLimits
+{
+    /// <summary>
+    /// PLC 16-bit 홀딩 레지스터 하드 상한. 이 값 초과는 컨슈머의 (short) 캐스트에서 wrap하므로
+    /// 어떤 설정값도 이 상한을 넘겨 유효 처리될 수 없다(설정 오설정 방어 — Fail Loud). 언어 상수.
+    /// </summary>
+    public const int RegisterCeiling = short.MaxValue;   // 32767
+
+    /// <summary>O4 SetTgtFloor(D6) 최대 유효 층 번호. 현장 물리 층수 상회(운영층 2). 기본 20.</summary>
+    public int MaxTgtFloor { get; init; } = 20;
+
+    /// <summary>O6 CellAssign 최대 셀 번호(D0). 현장 셀 수(SPEC §8 16셀) 크게 상회. 기본 1000.</summary>
+    public int MaxCellNo { get; init; } = 1000;
+
+    /// <summary>O6 CellAssign 최대 C_Seq(D1). 레지스터 상한 아래 헤드룸. 기본 30000.</summary>
+    public int MaxCellSeq { get; init; } = 30000;
+
+    /// <summary>floor 유효 상한(도메인 sane 상한과 하드 타입 상한 중 낮은 값).</summary>
+    public int EffectiveMaxTgtFloor => Math.Min(MaxTgtFloor, RegisterCeiling);
+
+    /// <summary>cellNo 유효 상한(도메인 sane 상한과 하드 타입 상한 중 낮은 값).</summary>
+    public int EffectiveMaxCellNo => Math.Min(MaxCellNo, RegisterCeiling);
+
+    /// <summary>seq 유효 상한(도메인 sane 상한과 하드 타입 상한 중 낮은 값).</summary>
+    public int EffectiveMaxCellSeq => Math.Min(MaxCellSeq, RegisterCeiling);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

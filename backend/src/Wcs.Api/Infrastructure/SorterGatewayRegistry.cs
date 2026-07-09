@@ -57,6 +57,19 @@ public sealed class SorterBundleHandle
     public ValueTask EnqueueSetTgtFloorAsync(int floor, CancellationToken ct = default) =>
         _polling.EnqueueAsync(new PlcWrite.SetTgtFloor(floor), ct);
 
+    // ── S-F3a: Ops 진단용 워드 쓰기 enqueue 래퍼 2종(EnqueueSetTgtFloorAsync와 동형) ─────
+    // 절대규칙 #1: 컨트롤러/서비스가 Modbus를 직접 호출하지 않고, 이 번들 전용 단일 큐로만 enqueue한다.
+    // PlcWrite.ClearR·CellAssign 레코드와 컨슈머(ProcessWriteAsync) case는 Wcs.PlcGateway에 이미 존재 —
+    // 여기(Wcs.Api)는 그 기존 큐 경로를 노출하는 박막 래퍼일 뿐이다(PlcGateway 코어 무변경).
+
+    /// <summary>R 영역 강제 클리어(진단)를 소터별 쓰기 큐에 투입 → 컨슈머가 D2·D3=0 + R_Flag clear(RMW).</summary>
+    public ValueTask EnqueueClearRAsync(CancellationToken ct = default) =>
+        _polling.EnqueueAsync(new PlcWrite.ClearR(), ct);
+
+    /// <summary>셀 지정(진단·고위험)을 소터별 쓰기 큐에 투입 → 컨슈머가 C_Flag==0 확인 후 D0·D1 + C_Flag set(RMW).</summary>
+    public ValueTask EnqueueCellAssignAsync(int cellNo, int seq, CancellationToken ct = default) =>
+        _polling.EnqueueAsync(new PlcWrite.CellAssign(cellNo, seq), ct);
+
     /// <summary>셀 지정 핸드셰이크 1건 수행(백그라운드 태스크로 호출).</summary>
     public Task<HandshakeResult> ExecuteHandshakeAsync(int cellNo, CancellationToken ct = default) =>
         _handshake.ExecuteAsync(cellNo, ct);

@@ -489,3 +489,5 @@
 - [CODE-REVIEW] sprint=S-B2B-2c critical=0 major=2 minor=5 iter=1 (major=#1 무조건부 @media print가 타 페이지 Ctrl+P 백지화(앱전역 회귀), #2 인쇄모달 role/aria/focus 부재; minor 5건 todo 이연)
 
 - [CODE-REVIEW] sprint=S-S5-FLAKE critical=0 major=0 minor=3 iter=0 (verdict=Yes/merge-ready; IL레벨 동시성 검증 통과·데드락 없음·프로덕션 무접촉. minor 3건 방어적·미발현 todo 이연)
+
+- [CODE-REVIEW] sprint=S-F3a critical=0 major=2 minor=7 iter=1 (major: I-1 O4/O6 floor/cellNo/seq 상한부재→(short) 무음 오버플로 PLC 기입, I-2 AlreadyInState 멱등분기 인메모리 재조정 스킵; minor 7건 todo 이연). 2-Evaluator(기능+안전) 재검증 예정.

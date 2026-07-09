@@ -21,6 +21,16 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-F3a 코드리뷰 이연 (Minor — 비차단, 운영제어 백엔드)
+- [ ] [일관성] `OpsController`가 ILogger/IOperationLogger는 생성자 주입인데 WcsDbContext/IChuteCapacityService/ISorterGatewayRegistry/IDestinationControlService는 `[FromServices]` 메서드 주입 — MonitoringController(순수 생성자 주입)와 불일치.
+- [ ] [async] O1 `ClearChute`가 동기 `FirstOrDefault`(async 메서드 내) + `OnCleared`가 CancellationToken 없이 FindAsync/SaveChangesAsync — 전이 경로는 RequestAborted 전달하는데 불일치. `FirstOrDefaultAsync`+토큰 권장.
+- [ ] [일관성] O6가 C_Flag==1 컨슈머 스킵 가능성을 신호 안 함(O4는 pingPongGuard로 정직 보고) — `cFlagGuard`류 병렬 필드 검토.
+- [ ] [DRY] O4/O5/O6 404 문자열 중복 → 헬퍼 추출.
+- [ ] [감사] 워드쓰기·AlreadyInState pause/resume의 운영자 귀속이 operation_log(비내구·드롭가능)에만 남고 destination_event엔 없음(§3.4 경량 설계상 허용) — 큐 드롭 시 귀속 유실 인지.
+- [ ] [테스트] Conflict 분기(DbUpdateConcurrencyException→Conflict)가 SQLite에서 XminRowVersion 미증가라 사실상 미도달 — prod SQL Server rowversion에서만 동작("실 prod provider 검증" 교훈). 인지.
+- [ ] [견고성] detail/DetailJson 수기 JSON 문자열 조립(Esc는 operatorName만 커버) — 필드 추가 시 취약. System.Text.Json 직렬화 검토.
+- [ ] [기존동작 인지] `OnCleared`가 InFlightQty도 0으로(선재) — A-8로 프로덕션 호출자 생기며, 예약-미투하 piece 보유 슈트 clear 시 만재집계에서 일시 "망각". 스펙 커버·의식적 결정.
+
 ## S-S5-FLAKE 코드리뷰 이연 (Minor — 비차단·방어적·현재 미발현, Sim 하네스)
 - [ ] [대칭성] `SimServer.cs:182` `RegistersChanged += OnServerRegistersChanged` 구독에 대응 `-=` 부재(StopAsync/DisposeAsync). 현재 누수 0(서버·SimServer 동시 폐기·StartAsync 1회)이나, 향후 이중 StartAsync=이중구독/서버 수명역전=누수 함정. StopAsync에 `-=` 한 줄로 대칭화 권장(리뷰어 명시).
 - [ ] [Fail Loud] `SimServer.cs:353-369` 핸들러 try/catch 부재 + FluentModbus가 핸들러 예외를 조용히 삼켜(연결 드롭·무로그) CLAUDE.md "예외 삼키지 말 것"과 상충. 현재 provably non-throwing이라 방어용 — try/catch+`_log.LogError` 검토.

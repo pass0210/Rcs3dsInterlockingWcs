@@ -108,3 +108,24 @@ Ground truth = git HEAD/status + 실제 코드/diff 판독 + 독립 테스트 �
 - **판정: Ready to merge = Yes.** Critical 0 · Important 0 · Minor 3.
 - 리뷰어가 FluentModbus 5.3.2 IL 디컴파일로 동시성 검증: `Lock→_hrLock` 단일 순서·`GetHoldingRegisters` lock-free → **데드락 불가**; 재기입이 clear와 동일 `ModbusServer.Lock` 구간에서 원자 실행 → **일시적 R_Flag=0 창 실제 차단**; sticky off 시 lock 전 early-return → **블라스트 반경 0**; 프로덕션 무접촉; S5b 정당한 revert-contrast 가드(masking 아님), 원 S5 assertion 무변경.
 - Minor 3건(핸들러 `-=` 미대칭·핸들러 try/catch 부재(Fail Loud)·docstring "전혀" 과장) + 업그레이드 체크리스트 = 전부 방어적·현재 미발현 → tasks/todo.md 이연. fix-only 반복 불요(BLOCKING 0). 커밋 진행.
+
+---
+
+## AGGREGATION (orchestrator) — 2-Evaluator 풀 집계
+- **FUNCTIONAL: PASS** (tasks/sprint-feedback/functional.md) — 302/302 GREEN, O1~O6 계약대로, A-8 해소, pause→PAUSED/resume→NORMAL, 안전3종 Sim 반영·단일 큐 경유, destination_event operator_id, PlcGateway 코어·frontend 무접촉.
+- **SAFETY: PASS** (tasks/sprint-feedback/safety.md) — 7 안전게이트 전부 통과: 단일 큐 enqueue(직접 Modbus 0)·SAFE-3만·TgtFloor 게이트/무클리어 보존·PlcGateway diff EMPTY(S1~S6 무변경)·Sim TCP 전용·마이그레이션 0·감사 append-only(operator_id).
+- **집계 결과: APPROVED** (AND — 두 차원 모두 PASS).
+- 비차단 노트: (1) teardown ObjectDisposedException(OperationLogService.FlushBatchAsync) = 기존 observability 스트림·F3a 무관 → S-OBSERVABILITY 백로그. (2) sprint-log.md stray null byte → 텍스트 정규화 권고(추적파일).
+
+**APPROVED — S-F3a (functional ∧ safety)**
+
+---
+
+## FIX ITER 1 재검증 집계 (orchestrator) — 코드리뷰 I-1/I-2
+- 코드리뷰(Step 4.5): critical=0 major=2(I-1 O4/O6 무음 short 오버플로 PLC 기입, I-2 AlreadyInState 인메모리 재조정 스킵) minor=7(todo 이연).
+- Generator fix: I-1 = O4/O6 상한을 설정 `Wcs:OpsLimits`{20/1000/30000} + 하드 short.MaxValue 이중 상한으로 검증(초과 400·enqueue 0), I-2 = AlreadyInState 경로도 CHUTE 인메모리 재동기.
+- **FUNCTIONAL 재검증 PASS**: full-suite 305 GREEN(302+3 신규), O4/O6 초과(floor 21·70000, cellNo 1001·70000, seq 30001)→400·enqueue 0·D6 불변, I-2 divergence self-heal 실증. PlcGateway 코어 diff empty·마이그레이션 0·frontend 무접촉.
+- **SAFETY 재검증 PASS**: 7 안전게이트 유지, 상한이 config 기반(리터럴 아님)+하드 short 상한, 초과 enqueue 0, PlcGateway diff EMPTY, safe-3만, Sim 전용, 감사 append-only.
+- **집계 결과: APPROVED (functional ∧ safety, 305 GREEN)**. 커밋 진행.
+
+**APPROVED — S-F3a (fix iter 1 재검증 포함, 305 GREEN)**
