@@ -2,6 +2,13 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-CHUTESTATE-PUSH (신규 아웃바운드: WCS → 고객 `PUT /api/UpdateChuteState`, DORMANT 선적용, 백엔드) — APPROVED (2026-07-09, 1 iteration)
+
+- **아웃바운드 HTTP 계약 정합의 유일한 신뢰 증거 = "가짜 고객 서버가 수신한 실제 JSON 본문" — 인메모리 GREEN·클라 단언만으론 wire 함정을 못 잡는다**: 이 계약의 최대 함정은 **snake_case**(`chute_numbers`/`next_states`) — STJ 기본 camelCase 라 `record`에 `[property: JsonPropertyName(...)]` 를 명시하지 않으면 조용히 `chuteNumbers` 로 나가 고객이 400. 검증은 `FakeChuteStateServer`(Kestrel 동적 포트)가 **`app.Map`(전 메서드 매칭)으로 실 HTTP 메서드 기록** → `last.Method=="PUT"` positive 단언 + 수신 RawBody 파싱해 키 `chute_numbers`/`next_states` **Contains** ∧ `chuteNumbers`/`nextStates` **DoesNotContain** 이중 단언이라야 닫힌다(RcsPush 는 POST+camelCase 라 형제 미러가 오히려 함정 유입 벡터 — 계약 차이를 명시 검증). 성공/실패 판정도 body 기반(2xx && flag==1 성공 / 비2xx·`{result:"Failed"}`·flag≠1 실패)이라 status code 만 보면 flag≠1 을 성공 오판.
+- **DORMANT("host 미정 선적용") 정확성 = 크래시 0 ∧ HTTP 시도 0 ∧ 인바운드 회귀 0 을 가짜 서버 수신 0 으로 실증(3중)**: BaseUrl null 출하는 (i) 기동 `CreateClient()` 크래시 0(observer StartAsync 가 `!IsEnabled` 경고 후 구독 안 함), (ii) pause/resume 전이 발생시켜도 가짜 서버 **수신 0**(client 방어적 `IsEnabled` 재확인으로 이중 no-op), (iii) 인바운드 IF-05 200 정상, 셋을 e2e 테스트(BaseUrl=null 팩토리)로 동시 단언해야 "출하 안전"이 닫힌다. 활성화 = `Wcs:ChuteStatePush:BaseUrl` 단일값(재빌드/마이그레이션 불요) — appsettings 주석에 명기.
+- **관찰-전용 side-channel 훅의 무회귀 판정 = 코어 반환 경로 diff 가 "append only" ∧ Transitioned 지점 한정 ∧ 구독자 예외 격리**: `DestinationControlService` 에 전이 이벤트를 얹을 때 (1) diff 가 record 신설+event 필드+`chuteNo` 캡처+`OnTransition?.Invoke` 발화 **삽입뿐**(pause/resume·감사·인메모리·멱등 로직 제거 라인 0), (2) 발화가 **AlreadyInState/NotFound 조기반환 이후 Transitioned 반환 직전**(실제 전이 1건 보장 — 멱등 no-op 스퓨리어스 재푸시 0), (3) 발화를 try/catch 로 감싸 구독자 예외가 운영자 O2/O3 응답을 죽이지 않음(+ Pusher fire-and-forget 비블로킹), 셋이면 "코어 무변경"이 닫힌다. 스코프 게이트 진성은 **FULL(capacity `OnChuteStateChanged`)·O6(cell-assign PLC 경로)·AlreadyInState 무발신 → 실제 PAUSE 만 1건**을 한 테스트에 병치(음성 3종 + 양성 1)해야 "전이 종류 게이트지 목적지 필터 아님"이 역증된다.
+- **실-Kestrel/폴링 I/O 신규군은 단일 run 불신 — `--filter` 반복(≥5×)으로 결정성 확정**(계약 명시): full 1×(327 GREEN=318+9) + 신규군 5×(9/9) 로 flake 이력(S9/testhost teardown) 대비. baseline 대조는 `총 - 신규 = baseline` 산술로 확인. 신규 코드 경고 0(유일 경고 선재 NU1903), 마이그레이션 0(`git status | grep migrat` 0건 + Glob 선재 파일만).
+
 ## S-F3b (B2C "운영 제어" 프론트엔드 · F3a Ops API 소비, 프론트 전용) — APPROVED (2026-07-09, 1 iteration)
 
 - **PLC-affecting UI 검증의 안전 격리 = "전용 3포트 + provider override + 기동로그 증거"가 계약의 핵심 게이트 — 유저 현장 :5205/COM1/현장DB 동시 가동 중에도 충돌 0**: Sim3ds TCP :1512(NOT COM1/RTU) + Wcs.Api :5215(`Urls` **config 키 직접 오버라이드** — base appsettings `"Urls":0.0.0.0:5205`가 env ASPNETCORE_URLS를 눌러 5205 바인드하는 함정 회피가 필수) + 스크래치 SQLite(`Database:Provider=Sqlite`+scratchpad 파일, SeedOnStartup=true는 provider override 하에서만 안전) + Vite :5194. 안전 증거는 **기동 로그 문자열**(`Now listening on http://127.0.0.1:5215`·`provider=…Sqlite, dataSource=…scratch`·`transport=Tcp host=127.0.0.1:1512`)로 실증. API 로그 keyword 전수검사 시 "Rcs3dsInterlockingWcs" 매치는 **repo 폴더명이 파일경로에 포함**된 false-positive와 실 SqlServer 연결을 구분해야 함(경로≠연결). Release 빌드로 유저 Debug bin 파일잠금(MSB3021) 회피.
@@ -505,3 +512,5 @@
 - [CODE-REVIEW] sprint=S-F3b critical=0 major=0 minor=5 iter=0 (verdict=Yes/merge-ready; API 계약 정확일치·fail-loud 정직표시 검증. minor 5건: bound 리터럴 OPS_LIMITS 유도·ConnBadge 중복추출·pingPong 사전힌트 주석·a11y aria-describedby·Dialog 초기포커스 문서화 — todo 이연)
 
 - [CODE-REVIEW] sprint=S-F3B-FOLLOWUP critical=0 major=0 minor=4 iter=0 (verdict=Yes/merge-ready; fresh-read 가드 동시성 정확·단일 _clientLock·D4/D6 canonical 파싱·읽기실패 OFFLINE·Ready precheck 수동전용 read-only·자동경로 무접촉. minor 4건 주석/a11y todo 이연)
+
+- [CODE-REVIEW] sprint=S-CHUTESTATE-PUSH critical=0 major=2 minor=4 iter=0 (major: #1 재동기화 부재→best-effort 문서화·활성화 시 고객사 협의로 이연(dormant·API에 normal 상태 없어 bootstrap 시맨틱 미정), #2 4xx 재시도→RcsPush와 동일패턴·자가발생 불가로 이연. minor 4건 todo. fix 반복 불요)

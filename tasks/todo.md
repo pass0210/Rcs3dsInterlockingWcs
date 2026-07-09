@@ -21,6 +21,15 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-CHUTESTATE-PUSH 이연 (고객사 UpdateChuteState 아웃바운드 — dormant)
+- [ ] [활성화 결정·중요] **재동기화(reconciliation) 여부** — 현재 best-effort(라이브 PAUSED→2/RESUMED→3 전이만 전송). 재시도 소진(고객사 다운)·WCS 재시작 시 고객사 상태 뷰 divergence 가능. RcsPush는 startup bootstrap 보유. **활성화(고객사 host 제공) 시 고객사와 협의**: startup/주기 재동기화 추가할지(단 이 API는 Pause/Open만·normal 없어 "현재 PAUSED만 재전송" 등 시맨틱 협의 필요).
+- [ ] [코드리뷰 #2·정합] `ChuteStatePushClient` (및 RcsPushClient 공통) 결정적 4xx(400/401/403/404)를 재시도함 — 낭비. 4xx 종단 처리(즉시 false)·5xx/408/429·transport만 재시도로 정렬. WCS가 항상 정상 body라 자가발생 불가(비긴급).
+- [ ] [코드리뷰 #3] `ChuteStatePushClient.cs:46-47` XML doc "예외 안 던짐"이 부정확(OperationCanceledException은 전파) — "취소 시에만 throw, 그 외 false 수렴"으로 정정.
+- [ ] [코드리뷰 #4] `ChuteStatePusher.cs:146` 종료 중 in-flight push의 `_cts?.Token` ObjectDisposedException이 ERROR로 로깅(오해 소지) — 토큰 로컬 스냅샷 또는 teardown ODE benign 처리.
+- [ ] [코드리뷰 #5·DRY] `ComputeBackoffDelay`/`CombineUrl`이 ChuteStatePushClient↔RcsPushClient 바이트 중복(~15줄) — 공용 헬퍼 추출.
+- [ ] [코드리뷰 #6] `ChuteStatePusher.DisposeAsync`가 `StopAsync().GetAwaiter().GetResult()` — 형제(DestinationStatusPusher)처럼 `await`로 정렬(무해).
+- [ ] [Evaluator minor] ChuteStatePushClient DetailJson 수기 문자열 보간 → System.Text.Json 직렬화.
+
 ## S-F3B-FOLLOWUP 코드리뷰 이연 (Minor — 비차단, 주석/a11y)
 - [ ] [주석] `OpsControls.tsx:63` bare `// #2`가 절대규칙 #N 관례와 충돌(여기선 스프린트 항목번호) — `// S-F3B-FOLLOWUP #2:` 접두어로 오독 방지.
 - [ ] [a11y] `OpsControls.tsx:335,386,401` `<label htmlFor>` 도입으로 `aria-label` 중복(접근명 override) — 3개 aria-label 제거하거나 가시 라벨과 일치시킴.
