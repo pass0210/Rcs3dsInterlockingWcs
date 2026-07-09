@@ -258,6 +258,25 @@ public sealed class SimServer : IAsyncDisposable
         LogTimeline($"[테스트] R 잔류 세팅: R_CellNo={rCellNo} R_Seq={rSeq} R_Flag=1");
     }
 
+    /// <summary>
+    /// 테스트 전용: Ready 비트(D4.2)를 직접 세팅한다 — "소터 BUSY(분류/이동 중, Ready==0)"를
+    /// 분류/이동 타이밍에 의존하지 않고 결정적으로 재현(수동 O4/O6 Ready 사전점검 409 검증용).
+    /// 유휴 상태의 Sim 루프는 Ready 비트를 건드리지 않으므로(분류/이동 시퀀스에서만 조작) 세팅값이 유지된다.
+    /// SetRResidue와 동형 test seam(형제 opt-in 주입 필드들과 같은 패턴).
+    /// </summary>
+    public void SetReady(bool ready)
+    {
+        lock (_hrLock)
+        {
+            if (ready)
+                _hr[RegisterMap.Flags] = (ushort)(_hr[RegisterMap.Flags] | RegisterMap.D4.Ready);
+            else
+                _hr[RegisterMap.Flags] = (ushort)(_hr[RegisterMap.Flags] & ~RegisterMap.D4.Ready);
+            FlushToServerLocked();
+        }
+        LogTimeline($"[테스트] Ready 세팅: Ready={(ready ? 1 : 0)}");
+    }
+
     // ─── 시뮬레이터 메인 루프 ────────────────────────────────────────────────
 
     private async Task RunSimLoopAsync(CancellationToken ct)

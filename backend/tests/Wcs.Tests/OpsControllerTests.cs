@@ -223,6 +223,127 @@ public class OpsControllerTests : IAsyncLifetime
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // S-F3B-FOLLOWUP 3-B: 수동 O4/O6 Ready 사전점검(409) — Ready==0이면 거부·enqueue 0
+    //   O5 ClearR은 Ready 무관 허용(복구 도구, Q1). 자동 IF-09 정렬은 Ready==0에도 무회귀(공유 컨슈머 case).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task O4_NotReady_Returns409_NoEnqueue()
+    {
+        long sorterId = SorterId();
+
+        // 소터를 BUSY(Ready==0, 분류/이동 중)로 결정적으로 몬다(Sim test seam).
+        _factory!.Sim.SetReady(false);
+        await WaitUntilAsync(() => _factory!.SorterSnapshot() is { Ready: false, Online: true }, 4000, "소터 Ready=0");
+
+        var resp = await _client!.PostAsJsonAsync($"/api/ops/sorters/{sorterId}/tgtfloor",
+            new { floor = 2, operatorName = "홍길동" });
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);  // 409 — 사전점검 거부
+
+        // enqueue 0: PLC_WRITE/SET_TGTFLOOR 없음, Sim D6 미변경(0 유지).
+        await PollForDurationAsync(300);
+        Assert.False(HasOpLog(OperationLogCategory.PLC_WRITE, "SET_TGTFLOOR"), "409 → enqueue 0");
+        Assert.Equal(0, _factory!.Sim.ReadSnapshot().TgtFloor);
+        _out.WriteLine("[O4/3-B] Ready==0 → 409, enqueue 0, D6 미변경");
+    }
+
+    [Fact]
+    public async Task O6_NotReady_Returns409_NoEnqueue()
+    {
+        long sorterId = SorterId();
+
+        _factory!.Sim.SetReady(false);
+        await WaitUntilAsync(() => _factory!.SorterSnapshot() is { Ready: false, Online: true }, 4000, "소터 Ready=0");
+
+        var resp = await _client!.PostAsJsonAsync($"/api/ops/sorters/{sorterId}/cell-assign",
+            new { cellNo = 2, seq = 7, operatorName = "관리자" });
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+
+        await PollForDurationAsync(300);
+        Assert.False(HasOpLog(OperationLogCategory.PLC_WRITE, "CELL_ASSIGN"), "409 → enqueue 0");
+        _out.WriteLine("[O6/3-B] Ready==0 → 409, enqueue 0");
+    }
+
+    [Fact]
+    public async Task O5_ClearR_NotReady_StillAllowed()
+    {
+        long sorterId = SorterId();
+
+        // R 잔류 세팅 후 Ready=0으로 몰아도 ClearR은 복구 도구라 허용(Q1 — Ready 게이트 대상 아님).
+        _factory!.Sim.SetRResidue(rCellNo: 20, rSeq: 123);
+        _factory!.Sim.SetReady(false);
+        await WaitUntilAsync(() => _factory!.SorterSnapshot() is { Ready: false, Online: true }, 4000, "소터 Ready=0");
+
+        var resp = await _client!.PostAsJsonAsync($"/api/ops/sorters/{sorterId}/clear-r",
+            new { operatorName = "정비사" });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);  // Ready 무관 허용
+
+        await WaitUntilAsync(() =>
+        {
+            var s = _factory!.Sim.ReadSnapshot();
+            return !s.RFlag && s.RCellNo == 0 && s.RSeq == 0;
+        }, 4000, "Ready==0에도 R 영역 클리어(단일 큐 경유)");
+        _out.WriteLine("[O5/Q1] Ready==0에도 ClearR 허용 — R 영역 클리어");
+    }
+
+    [Fact]
+    public async Task O6_CellAssign_CFlagGuard_ReportsAdvisory()
+    {
+        long sorterId = SorterId();
+
+        // Sim 상태 루프 동결 — 첫 CellAssign의 C_Flag=1이 소비되지 않아 두 번째 응답에 advisory 노출.
+        // (Ready=1 유지 — 사전점검 통과. Modbus 서버는 계속 응답 → 폴이 C_Flag=1 관측.)
+        _factory!.Sim.InjectNoResponse = true;
+
+        // 1) 첫 CellAssign — cFlagGuard=false(아직 C_Flag=0). 큐가 C_Flag=1 세팅.
+        var first = await _client!.PostAsJsonAsync($"/api/ops/sorters/{sorterId}/cell-assign",
+            new { cellNo = 3, seq = 11, operatorName = "op1" });
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstBody = await first.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(firstBody.GetProperty("cFlagGuard").GetBoolean(), "첫 요청은 C_Flag=0 → advisory false");
+
+        // 폴이 C_Flag=1을 관측할 때까지 대기(사전점검·advisory 근거 = bundle.Latest).
+        await WaitUntilAsync(() => _factory!.SorterSnapshot()?.CFlag == true, 4000, "폴 C_Flag=1 관측");
+
+        // 2) 두 번째 CellAssign — 응답 cFlagGuard=true(진행 중 스킵 가능성 정직 표면화 · O4 pingPongGuard 미러).
+        var second = await _client!.PostAsJsonAsync($"/api/ops/sorters/{sorterId}/cell-assign",
+            new { cellNo = 4, seq = 12, operatorName = "op2" });
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var secondBody = await second.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(secondBody.GetProperty("cFlagGuard").GetBoolean(),
+            "C_Flag=1 상태 → cFlagGuard=true 정직 보고(3-C)");
+        _out.WriteLine("[O6/3-C] C_Flag=1 → 응답 cFlagGuard=true(정직 표면화)");
+    }
+
+    [Fact]
+    public async Task IF09_AutoAlign_WritesTgtFloor_EvenWhenReadyZero_NoRegression()
+    {
+        long sorterId = SorterId();
+        int sorterChuteNo;
+        using (var db = _factory!.CreateDbScope())
+            sorterChuteNo = db.Destinations.First(d => d.Id == sorterId).ChuteNo;
+
+        // 소터를 BUSY(Ready==0)로 몬다. 자동 IF-09 정렬은 Ready==0·TgtFloor==0에서 운영층 복귀를
+        // 선기입해야 한다(DepositDecider — Ready==0 의도적 기입). 컨슈머 fresh-read 가드는 TgtFloor만
+        // 보고 Ready를 보지 않으므로 이 자동/공유 경로는 무회귀여야 한다.
+        _factory!.Sim.SetReady(false);
+        await WaitUntilAsync(
+            () => _factory!.SorterSnapshot() is { Ready: false, Online: true, TgtFloor: 0 },
+            4000, "소터 Ready=0·TgtFloor=0");
+
+        // IF-09 도착 보고 → 3D 소터면 AlignSorterToOperationalFloor(자동, 공유 컨슈머 case) 발동.
+        var resp = await _client!.PostAsJsonAsync("/api/v1/arrival-report",
+            new { pId = 1, chuteNo = sorterChuteNo, agvNo = 1, timeStamp = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        // 운영층(2)로 정렬 쓰기가 통과 → Sim D6=2 기입(Ready==0에도 자동 정렬 무회귀).
+        await WaitUntilAsync(() => _factory!.Sim.ReadSnapshot().TgtFloor == 2, 4000, "자동 IF-09 정렬 D6=2(Ready==0)");
+        await WaitUntilAsync(() => HasOpLog(OperationLogCategory.PLC_WRITE, "SET_TGTFLOOR"),
+            4000, "PLC_WRITE/SET_TGTFLOOR(자동 경로)");
+        _out.WriteLine("[IF-09/auto] Ready==0에서도 자동 정렬 TgtFloor=2 기입 — 공유 컨슈머 case 무회귀");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // O2/O3 소터 PAUSED/RESUMED — IF-05 dispatch 게이트 차단·복원 + destination_event
     // ═══════════════════════════════════════════════════════════════════════
 

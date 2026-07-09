@@ -21,6 +21,12 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-F3B-FOLLOWUP 코드리뷰 이연 (Minor — 비차단, 주석/a11y)
+- [ ] [주석] `OpsControls.tsx:63` bare `// #2`가 절대규칙 #N 관례와 충돌(여기선 스프린트 항목번호) — `// S-F3B-FOLLOWUP #2:` 접두어로 오독 방지.
+- [ ] [a11y] `OpsControls.tsx:335,386,401` `<label htmlFor>` 도입으로 `aria-label` 중복(접근명 override) — 3개 aria-label 제거하거나 가시 라벨과 일치시킴.
+- [ ] [주석] `OpsController.cs:264` Ready 게이트가 순수 advisory·컨슈머 백스톱 없음(Q3, TgtFloor/C_Flag만 fresh-read 백스톱)임을 한 줄 명시.
+- [ ] [주석] `PlcGateway.cs:512-526` CellAssign이 D4를 2회 읽음(가드+RMW) — PLC측 D4 변화 클로버 방지 위한 의도이므로 "optimize away 금지" 주석.
+
 ## S-F3b 코드리뷰 이연 (Minor — 비차단, 운영제어 UI)
 - [ ] [DRY] `OpsControls.tsx:288-289,328-329,340-341` + desc 문자열이 bound 리터럴(1~20/1~1000/1~30000)을 하드코딩 — `OPS_LIMITS`에서 유도해 `ops.ts` 단일소스 유지.
 - [ ] [DRY] `ConnBadge`가 `OpsPage.tsx:118-137`·`SortersPage.tsx:56-70`에 동일 복제 — 공용 컴포넌트 추출(2번째 사본).

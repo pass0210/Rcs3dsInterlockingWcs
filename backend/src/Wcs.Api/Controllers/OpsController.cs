@@ -148,6 +148,11 @@ public sealed class OpsController : ControllerBase
         if (bundle is null)
             return NotFound(new { error = $"SORTER_3D destination(id={destId}) 소터 번들이 없습니다." });
 
+        // S-F3B-FOLLOWUP 3-B: 수동 경로 Ready 사전점검(409) — enqueue 직전 폴 스냅샷으로 동기 판정.
+        // Ready==0(분류/이동 중)·OFFLINE이면 거부(enqueue 안 함). 수동 O4/O6 전용(공유 컨슈머 case엔 없음).
+        if (ReadyPrecheck(bundle, destId, "OPS_SET_TGTFLOOR", op) is { } blocked)
+            return blocked;
+
         // 현재 TgtFloor 스냅샷 — 응답에 정직히 반영(핑퐁 차단 가능성을 거짓 성공으로 숨기지 않음, #2).
         var currentTgt = bundle.Latest.TgtFloor;
 
@@ -222,15 +227,60 @@ public sealed class OpsController : ControllerBase
         if (bundle is null)
             return NotFound(new { error = $"SORTER_3D destination(id={destId}) 소터 번들이 없습니다." });
 
+        // S-F3B-FOLLOWUP 3-B: 수동 경로 Ready 사전점검(409) — Ready==0(분류/이동)·OFFLINE이면 거부(enqueue 안 함).
+        if (ReadyPrecheck(bundle, destId, "OPS_CELL_ASSIGN", op) is { } blocked)
+            return blocked;
+
+        // 3-C: C_Flag advisory — enqueue 직전 폴 스냅샷 기준. true면 컨슈머가 C_Flag==1로 이 쓰기를
+        // 스킵할 수 있음(O4 pingPongGuard 미러). 최종 권위는 컨슈머의 fresh-read 가드(3-A).
+        var cFlagGuard = bundle.Latest.CFlag;
+
         await bundle.EnqueueCellAssignAsync(req.CellNo, req.Seq, HttpContext.RequestAborted);
 
         LogOpsAction("OPS_CELL_ASSIGN", destId, bundle.ChuteNo, op,
-            detail: $"{{\"op\":\"{Esc(op)}\",\"cellNo\":{req.CellNo},\"seq\":{req.Seq}}}",
+            detail: $"{{\"op\":\"{Esc(op)}\",\"cellNo\":{req.CellNo},\"seq\":{req.Seq},\"cFlagGuard\":{(cFlagGuard ? "true" : "false")}}}",
             level: OperationLogLevel.WARN);
 
-        _log.LogInformation("[Ops] CellAssign enqueue destId={DestId} cellNo={CellNo} seq={Seq} op={Op}",
-            destId, req.CellNo, req.Seq, op);
-        return Ok(new { status = "enqueued", destId, cellNo = req.CellNo, seq = req.Seq, operatorName = op });
+        _log.LogInformation("[Ops] CellAssign enqueue destId={DestId} cellNo={CellNo} seq={Seq} cFlagGuard={CFlagGuard} op={Op}",
+            destId, req.CellNo, req.Seq, cFlagGuard, op);
+        return Ok(new
+        {
+            status        = "enqueued",
+            destId,
+            cellNo        = req.CellNo,
+            seq           = req.Seq,
+            cFlagGuard,   // true면 이미 C_Flag=1(진행 중) → 컨슈머가 이 쓰기를 스킵할 수 있음(정직 표면화).
+            operatorName  = op,
+        });
+    }
+
+    // ── 공통: 수동 워드 쓰기(O4/O6) Ready 사전점검 — 절대규칙 #4(Ready==0=BUSY: 분류/이동 중) ──────
+    // 쓰기 큐는 비동기라 컨슈머-측 skip은 이미 200 응답 후라 사후 피드백이 불가 → enqueue 직전에
+    // 폴 스냅샷(bundle.Latest)으로 동기 사전점검해 흔한 not-Ready/OFFLINE을 즉시 409로 거부한다.
+    // ★ 수동 경로(OpsController) 전용 — 공유 컨슈머 case(PlcGateway)에는 넣지 않는다(자동 IF-09 정렬·
+    //   오케스트레이트 핸드셰이크는 Ready==0에 정당히 쓰므로 컨슈머에 Ready 게이트를 걸면 깨진다 — 계약 Q3).
+    //   O5 ClearR은 복구 도구라 사전점검 대상이 아니다(계약 Q1).
+    // 절대규칙 #1: 사전점검은 읽기(bundle.Latest 폴 스냅샷)만 — Modbus 직접 쓰기·신규 동기 read 표면 없음.
+    //   rapid-double(서브-폴 창) 경합은 컨슈머 fresh-read 가드(3-A)가 최종 차단한다.
+    // 반환: null=통과, non-null=409(차단 — enqueue 금지).
+    private IActionResult? ReadyPrecheck(SorterBundleHandle bundle, long destId, string action, string op)
+    {
+        var latest = bundle.Latest;
+        if (!latest.Online)
+        {
+            LogOpsAction(action, destId, bundle.ChuteNo, op,
+                detail: $"{{\"op\":\"{Esc(op)}\",\"blocked\":\"offline\"}}", level: OperationLogLevel.WARN);
+            _log.LogWarning("[Ops] {Action} 거부(OFFLINE) destId={DestId} op={Op}", action, destId, op);
+            return Conflict(new { error = "소터가 OFFLINE 상태입니다 — 수동 쓰기가 거부되었습니다.", destId });
+        }
+        if (!latest.Ready)
+        {
+            LogOpsAction(action, destId, bundle.ChuteNo, op,
+                detail: $"{{\"op\":\"{Esc(op)}\",\"blocked\":\"notReady\"}}", level: OperationLogLevel.WARN);
+            _log.LogWarning("[Ops] {Action} 거부(Ready==0, 분류/이동 중) destId={DestId} op={Op}", action, destId, op);
+            return Conflict(new { error = "소터가 Ready 상태가 아닙니다(분류/이동 중) — 수동 쓰기가 거부되었습니다.", destId });
+        }
+        return null;
     }
 
     // ── 공통: operatorName 검증(누락/공백/과길이 → 400) ──────────────────────────

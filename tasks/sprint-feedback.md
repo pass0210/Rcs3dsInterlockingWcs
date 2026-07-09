@@ -117,3 +117,20 @@ Evaluation Dimensions(계약 선언 2차원): **functional-UX ∧ safety-surfaci
 - Minor 5건(bound 리터럴 OPS_LIMITS 유도·ConnBadge 추출·pingPong 사전힌트 advisory 주석·aria-describedby/invalid·Dialog 초기포커스 문서화) todo 이연. fix 반복 불요(BLOCKING 0).
 
 **APPROVED — S-F3b (Evaluator ∧ Step 4.5 code review, 305 GREEN·백엔드 무접촉)**
+
+---
+
+## AGGREGATION (orchestrator) — 2-Evaluator 풀 (기능+안전)
+- **FUNCTIONAL: PASS** (functional.md) — 318 GREEN(312+6), 신규 테스트 진정(rapid double CellAssign→2nd 거부·D0/D1 11/101 유지, O4/O6 Ready=0→409 no-enqueue, O5 미게이트, IF-09 자동 Ready=0 쓰기 유지, S1~S6 GREEN), 구 `_latest` 가드 revert→IT3d RED 대조 확인. 브라우저(격리 :5216/:1513): 라벨 표시·Ready=0 시 O4/O6 비활성+O5 유지·409·콘솔 0에러·무회귀.
+- **SAFETY: PASS** (safety.md) — 5 게이트: PlcGateway diff 최소(가드 소스만·`_clientLock` 내 원자·rule#1 보존)·#2/#3 semantics 유지, HandshakeOrchestrator/Core/RcsController diff 0·Ready 게이트 공유 컨슈머 미포함(자동 IF-09 GREEN), Ready pre-check 수동 전용, 결정적·무 하드코딩·무 데드락, 마이그레이션 0.
+- 비차단 note: O6 cFlagGuard 토스트는 라이브 강제 불가라 자동 테스트로 커버(구조적 pingPong 미러). teardown SocketException=기존 flake.
+- **집계 결과: APPROVED (functional ∧ safety, 318 GREEN)**. 코드리뷰 진행.
+
+**APPROVED — S-F3B-FOLLOWUP (functional ∧ safety, 318 GREEN)**
+
+## Step 4.5 Code Review (orchestrator 기록)
+- **판정: Ready to merge = Yes.** Critical 0 · Important 0 · Minor 4(주석/a11y).
+- fresh-read 가드가 기존 단일 `_clientLock` 훅 내 원자·재진입/데드락 없음·D4/D6 파싱 canonical FromRegisters와 동일·guard semantics(#2/#3) 유지·읽기 실패→OFFLINE(무삼킴). Ready precheck read-only·수동 전용(O5 제외·공유 컨슈머 미포함). SimServer SetReady 테스트 전용. FE 라벨 htmlFor·Ready 게이트·정직 표시.
+- Minor 4건(OpsControls #2 주석 접두어·중복 aria-label 제거·OpsController Ready advisory 주석·PlcGateway D4 2회읽기 의도 주석) todo 이연. fix 반복 불요(BLOCKING 0).
+
+**APPROVED — S-F3B-FOLLOWUP (Evaluator 기능∧안전 ∧ Step 4.5, 318 GREEN)**

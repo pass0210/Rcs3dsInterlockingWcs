@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useId, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ArrowUpToLine, Eraser, LayoutGrid, Pause, Play } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -60,6 +60,23 @@ export function OpsControls({
   // 현재 TgtFloor(D6) — SetTgtFloor 사전 경고 근거(≠0이면 진행 중 → 핑퐁 차단 가능).
   const currentTgt = wordState?.word.tgtFloor ?? 0
 
+  // #2 가시 라벨 ↔ 입력 연결용 id(useId — 인스턴스 고유, 중복 id 회피). 기존 aria-label은 유지.
+  const floorId = useId()
+  const cellNoId = useId()
+  const seqId = useId()
+
+  // #3-D 수동 워드 쓰기(O4/O6) Ready 게이트 — Ready==0(분류/이동 중)·OFFLINE이면 차단(사수 오조작 방지).
+  //   wordState(SignalR 실시간) 우선, 부트스트랩 전이면 sorter(SorterStatus 쿼리)로 폴백.
+  //   O5 Clear-R은 복구 도구라 게이트하지 않는다(계약 Q1). 최종 권위는 백엔드 409 사전점검(3-B).
+  const sorterOnline = wordState?.word.online ?? sorter.online
+  const sorterReady = wordState?.word.ready ?? sorter.ready
+  const writeBlocked = !sorterOnline || !sorterReady
+  const writeBlockReason = !sorterOnline
+    ? '소터 OFFLINE — 수동 쓰기 불가'
+    : !sorterReady
+      ? 'Ready 아님(분류/이동 중) — 수동 쓰기 차단'
+      : ''
+
   // busy 중 Esc/백드롭 닫기 무시(진행 중 조작 보호) — 안정 onClose로 Dialog effect churn 방지.
   const busyRef = useRef(busy)
   busyRef.current = busy
@@ -108,6 +125,11 @@ export function OpsControls({
 
   // ── O4 SetTgtFloor ──────────────────────────────────────────────────────
   function requestSetTgtFloor() {
+    // #3-D: not-Ready/OFFLINE이면 FE에서 선차단(다이얼로그 미개시). 백엔드 409가 최종 권위.
+    if (writeBlocked) {
+      toast('warning', `목표층 설정 차단 — ${writeBlockReason}.`)
+      return
+    }
     const floor = Number(floorInput)
     if (floorInput.trim() === '') {
       toast('warning', '목표층을 입력하세요.')
@@ -140,7 +162,8 @@ export function OpsControls({
       run: async (op) => {
         const r = await ops.setTgtFloor(destId, floor, op)
         if (!r.ok) {
-          toast(r.status === 400 ? 'warning' : 'error', `목표층 설정 실패 — ${r.message}`)
+          // 400(범위)·409(Ready 아님)는 경고 톤(오조작 안내), 그 외(404·500·네트워크)는 오류. 성공 위장 0.
+          toast(r.status === 400 || r.status === 409 ? 'warning' : 'error', `목표층 설정 실패 — ${r.message}`)
           return
         }
         // 정직 표면화: pingPongGuard면 성공으로 위장하지 않고 스킵 가능성을 경고한다.
@@ -188,6 +211,11 @@ export function OpsControls({
 
   // ── O6 Cell-Assign (고위험 진단) ────────────────────────────────────────
   function requestCellAssign() {
+    // #3-D: not-Ready/OFFLINE이면 FE에서 선차단(다이얼로그 미개시). 백엔드 409가 최종 권위.
+    if (writeBlocked) {
+      toast('warning', `셀 지정 차단 — ${writeBlockReason}.`)
+      return
+    }
     const cellNo = Number(cellNoInput)
     const seq = Number(seqInput)
     if (cellNoInput.trim() === '' || seqInput.trim() === '') {
@@ -222,10 +250,19 @@ export function OpsControls({
       run: async (op) => {
         const r = await ops.cellAssign(destId, cellNo, seq, op)
         if (!r.ok) {
-          toast(r.status === 400 ? 'warning' : 'error', `셀 지정 실패 — ${r.message}`)
+          // 400(범위)·409(Ready 아님)는 경고 톤, 그 외는 오류. 성공 위장 0.
+          toast(r.status === 400 || r.status === 409 ? 'warning' : 'error', `셀 지정 실패 — ${r.message}`)
           return
         }
-        toast('success', `셀 지정 큐 수락됨(셀 ${cellNo} · 순번 ${seq}).`)
+        // 정직 표면화: cFlagGuard면 성공으로 위장하지 않고 스킵 가능성을 경고(O4 pingPongGuard 미러).
+        if (r.data.cFlagGuard) {
+          toast(
+            'warning',
+            `큐 수락됨 — 이미 C_Flag=1(진행 중)이라 컨슈머가 이 쓰기를 스킵할 수 있습니다.`,
+          )
+        } else {
+          toast('success', `셀 지정 큐 수락됨(셀 ${cellNo} · 순번 ${seq}).`)
+        }
         invalidate(['cells'])
       },
     })
@@ -282,8 +319,12 @@ export function OpsControls({
           title="목표층 설정 (SetTgtFloor · D6)"
           desc={`허용 범위 1~20. 현재 TgtFloor=${currentTgt}${currentTgt !== 0 ? ' (진행 중 — 핑퐁 차단될 수 있음)' : ''}.`}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={floorId} className="text-[12px] font-medium text-ink">
+              층
+            </label>
             <input
+              id={floorId}
               type="number"
               min={1}
               max={20}
@@ -294,10 +335,17 @@ export function OpsControls({
               aria-label="목표층"
               className={cn(INPUT_CLS, 'w-24')}
             />
-            <Button variant="outline" size="sm" onClick={requestSetTgtFloor}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={requestSetTgtFloor}
+              disabled={writeBlocked}
+              title={writeBlocked ? writeBlockReason : undefined}
+            >
               <ArrowUpToLine className="size-4" />
               설정
             </Button>
+            {writeBlocked && <span className="w-full text-[11px] text-warn">⚠ {writeBlockReason}</span>}
           </div>
         </ControlRow>
 
@@ -323,7 +371,11 @@ export function OpsControls({
           desc="고위험 진단 — 셀 1~1000 · 순번 1~30000. 핸드셰이크·셀 회계와 경합 가능."
         >
           <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={cellNoId} className="text-[12px] font-medium text-ink">
+              셀 번호
+            </label>
             <input
+              id={cellNoId}
               type="number"
               min={1}
               max={1000}
@@ -334,7 +386,11 @@ export function OpsControls({
               aria-label="셀 번호"
               className={cn(INPUT_CLS, 'w-28')}
             />
+            <label htmlFor={seqId} className="text-[12px] font-medium text-ink">
+              명령 순번
+            </label>
             <input
+              id={seqId}
               type="number"
               min={1}
               max={30000}
@@ -349,11 +405,14 @@ export function OpsControls({
               variant="outline"
               size="sm"
               onClick={requestCellAssign}
+              disabled={writeBlocked}
+              title={writeBlocked ? writeBlockReason : undefined}
               className="border-offline/50 text-offline hover:bg-offline/5"
             >
               <LayoutGrid className="size-4" />
               셀 지정
             </Button>
+            {writeBlocked && <span className="w-full text-[11px] text-warn">⚠ {writeBlockReason}</span>}
           </div>
         </ControlRow>
       </CardContent>

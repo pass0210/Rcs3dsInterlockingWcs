@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
 using Wcs.Core;
 using Wcs.PlcGateway;
 using Wcs.Sim3ds;
@@ -88,7 +89,7 @@ public class PlcGatewayIntegrationTests : IAsyncLifetime
 
     // ── 공통 셋업 헬퍼 ───────────────────────────────────────────────────────
 
-    private async Task StartInfraAsync()
+    private async Task StartInfraAsync(ILogger<PlcPollingService>? gwLog = null)
     {
         void LogTimeline(string line)
         {
@@ -98,7 +99,7 @@ public class PlcGatewayIntegrationTests : IAsyncLifetime
 
         _sim   = new SimServer(_simOpt, timelineLog: LogTimeline);
         _queue = new PlcWriteQueue();
-        _gw    = new PlcPollingService(_gwOpt, _queue);
+        _gw    = new PlcPollingService(_gwOpt, _queue, gwLog);
         _hs    = new HandshakeOrchestrator(_gw, _gwOpt);
 
         // 서버 먼저 기동, 이후 클라이언트 연결
@@ -281,6 +282,50 @@ public class PlcGatewayIntegrationTests : IAsyncLifetime
         _out.WriteLine($"IT-3b: SetTgtFloor(99) 스킵 확인 (TgtFloor={_gw.Latest.TgtFloor})");
     }
 
+    /// <summary>
+    /// IT-3d (S-F3B-FOLLOWUP 3-A): 급속 2연타 CellAssign → 2번째 거부(컨슈머 fresh-read 가드).
+    /// Sim 상태 루프를 동결(InjectNoResponse)해 C_Flag=1이 두 쓰기 사이에 자동 소비/클리어되지 않게 한 뒤,
+    /// 같은 소터 큐에 CellAssign 2건을 back-to-back 투입한다. 단일 컨슈머가 1건을 처리해 C_Flag=1을 세팅하고,
+    /// 2번째는 _clientLock 안 fresh FC03(D4) 읽기로 C_Flag=1을 관측 → skip(C 영역 D0/D1 미덮어씀).
+    /// 결정적: fresh-read가 폴 스냅샷(_latest, ≤PollIntervalMs stale)이 아니라 실 레지스터를 읽으므로
+    ///   폴 타이밍과 무관하게 2번째가 거부된다(구 _latest 가드는 서브-폴 창에서 2번째를 통과시켜 덮어씀).
+    /// 이중 입증: (a) GW 폴이 관측한 Sim 서버 레지스터 C 영역 = 1번째 값(11/101) 유지 + (b) 컨슈머 skip 경고 로그.
+    /// (InjectNoResponse 하에서도 Modbus 서버는 계속 응답하므로 GW 폴은 서버 레지스터를 정상 관측한다.)
+    /// </summary>
+    [Fact]
+    public async Task IT3d_RapidDoubleCellAssign_SecondRejected_ByFreshRead()
+    {
+        var capturedLog = new CapturingLogger();
+        await StartInfraAsync(capturedLog);
+
+        Assert.False(_gw!.Latest.CFlag, "초기 C_Flag=0");
+
+        // Sim 상태 루프 동결 — C_Flag=1이 두 쓰기 사이에 소비되지 않아 2번째 fresh-read가 결정적으로 관측.
+        _sim!.InjectNoResponse = true;
+
+        // 급속 2연타 — 같은 큐에 back-to-back 투입(단일 컨슈머가 직렬 처리).
+        await _gw.EnqueueAsync(new PlcWrite.CellAssign(11, 101));
+        await _gw.EnqueueAsync(new PlcWrite.CellAssign(22, 202));
+
+        // 2번째 skip 경고 로그 대기(= 2건 모두 처리됨 · 2번째 거부).
+        await WaitUntilAsync(
+            () => capturedLog.Messages.Any(m => m.Contains("CellAssign 스킵") && m.Contains("C_Flag=1")),
+            timeoutMs: 3000, msg: "2번째 CellAssign skip 로그(fresh-read)");
+
+        // GW 폴이 Sim 서버 레지스터를 관측 — C 영역은 1번째 값(11/101) 유지, C_Flag=1(2번째가 덮지 않음).
+        await WaitUntilAsync(
+            () => { var s = _gw.Latest; return s.CFlag && s.CCellNo == 11 && s.CSeq == 101; },
+            timeoutMs: 3000, msg: "C 영역 1번째 값 유지(11/101)·C_Flag=1");
+
+        var fin = _gw.Latest;
+        Assert.Equal(11, fin.CCellNo);    // 2번째(22)로 덮이지 않음
+        Assert.Equal(101, fin.CSeq);      // 2번째(202)로 덮이지 않음
+        Assert.True(fin.CFlag, "1번째가 C_Flag=1 세팅");
+        Assert.Contains(capturedLog.Messages, m => m.Contains("CellAssign 스킵"));
+
+        _out.WriteLine($"IT-3d: 2번째 거부 확인 — D0={fin.CCellNo} D1={fin.CSeq} C_Flag={fin.CFlag}");
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // IT-4 OFFLINE 전이·복구
     // ════════════════════════════════════════════════════════════════════════
@@ -430,5 +475,22 @@ public class PlcGatewayIntegrationTests : IAsyncLifetime
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    /// <summary>
+    /// 컨슈머 skip 경고 로그를 캡처하는 최소 ILogger — IT-3d fresh-read 가드 skip 이중 입증용.
+    /// 스레드 안전(쓰기 컨슈머 스레드가 Log, 테스트 스레드가 Messages 열거).
+    /// </summary>
+    private sealed class CapturingLogger : ILogger<PlcPollingService>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _messages = new();
+
+        /// <summary>기록된 로그 메시지(스레드 안전 스냅샷 열거).</summary>
+        public IEnumerable<string> Messages => _messages;
+
+        IDisposable? ILogger.BeginScope<TState>(TState state) => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => _messages.Enqueue(formatter(state, exception));
     }
 }
