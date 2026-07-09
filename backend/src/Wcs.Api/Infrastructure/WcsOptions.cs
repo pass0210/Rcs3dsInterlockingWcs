@@ -30,6 +30,13 @@ public sealed record WcsOptions
     public RcsPushOptions RcsPush { get; init; } = new();
 
     /// <summary>
+    /// 고객 슈트 상태 아웃바운드 푸시(WCS → 고객 PUT /api/UpdateChuteState) 설정.
+    /// S-CHUTESTATE-PUSH — 고객 base URL·경로·재시도·타이밍 전부 설정화(하드코딩 금지, 절대규칙 #7).
+    /// BaseUrl 미설정(호스트 미정) 시 DORMANT(no-op)로 출하 — 고객이 추후 이 한 값만 설정하면 활성.
+    /// </summary>
+    public ChuteStatePushOptions ChuteStatePush { get; init; } = new();
+
+    /// <summary>
     /// F2 실시간 모니터링(SignalR relay) 타이밍 설정(appsettings "Wcs:Monitor").
     /// 하트비트 주기 등 신규 타이밍은 전부 여기서 읽는다(하드코딩 금지, 절대규칙 #7).
     /// </summary>
@@ -153,5 +160,57 @@ public sealed record RcsPushOptions
     public int SorterObserveIntervalMs { get; init; } = 150;
 
     /// <summary>BaseUrl이 설정되어 푸시가 활성인지.</summary>
+    public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ChuteStatePushOptions — 고객 슈트 상태 아웃바운드 푸시 설정 (appsettings "Wcs:ChuteStatePush").
+//
+// S-CHUTESTATE-PUSH:
+//   운영자 O2/O3 PAUSED/RESUMED 전이 시 WCS가 PUT {BaseUrl}{Path}로
+//   {chute_numbers:[dest.ChuteNo], next_states:[2|3]} 를 고객 시스템으로 푸시한다.
+//   base URL·경로·재시도·백오프·HTTP 타임아웃을 전부 설정으로 외부화한다(하드코딩 금지·절대규칙 #7).
+//   - RcsPushOptions와 동일 의미의 지수 백오프(기본 3회 1s/2s/4s).
+//   - BaseUrl 미설정(null/공백)이면 푸시 완전 비활성(DORMANT — 경고 후 no-op). 크래시 0.
+//   - ★ RcsPush와 달리 chute_number 매핑 config 없음(Q-b LOCKED = Destination.ChuteNo 직접 1:1).
+//   - ★ 트리거가 전이 이벤트라 SorterObserveIntervalMs 같은 폴 주기도 불요.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>appsettings.json "Wcs:ChuteStatePush" 섹션 — 고객 슈트 상태 아웃바운드 푸시 설정.</summary>
+public sealed record ChuteStatePushOptions
+{
+    /// <summary>
+    /// 고객 base URL(예: "http://10.0.0.9:9000"). 엔드포인트는 Path와 결합 —
+    /// WCS는 "{BaseUrl}{Path}"로 PUT한다.
+    /// 미설정(null/공백)이면 푸시 비활성(DORMANT — 경고 로그 후 no-op).
+    /// 호스트 미정으로 지금은 null로 출하하며, 고객이 추후 제공하는 **유일한 활성화 값**이다.
+    /// </summary>
+    public string? BaseUrl { get; init; }
+
+    /// <summary>
+    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). 고객 계약(UpdateChuteState_API) 기본값.
+    /// 고객이 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값).
+    /// </summary>
+    public string Path { get; init; } = "/api/UpdateChuteState";
+
+    /// <summary>
+    /// 푸시 실패(연결 거부·타임아웃·5xx·flag≠1) 시 재시도 횟수(최초 시도 제외 — 총 시도 = 1+RetryCount).
+    /// 기본 3회.
+    /// </summary>
+    public int RetryCount { get; init; } = 3;
+
+    /// <summary>
+    /// 지수 백오프 초기 지연(ms). 시도 n회차 지연 = RetryBaseDelayMs × 2^(n-1)(상한 RetryMaxDelayMs).
+    /// 기본 1000ms(→ 1s/2s/4s). 고정 sleep 아님(설정값).
+    /// </summary>
+    public int RetryBaseDelayMs { get; init; } = 1000;
+
+    /// <summary>지수 백오프 지연 상한(ms). 기본 4000ms.</summary>
+    public int RetryMaxDelayMs { get; init; } = 4000;
+
+    /// <summary>HTTP 요청 타임아웃(ms). 기본 3000ms.</summary>
+    public int HttpTimeoutMs { get; init; } = 3000;
+
+    /// <summary>BaseUrl이 설정되어 푸시가 활성인지(미설정=DORMANT).</summary>
     public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);
 }

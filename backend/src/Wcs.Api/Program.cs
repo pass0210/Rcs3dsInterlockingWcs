@@ -196,6 +196,28 @@ builder.Services.AddSingleton<IDestinationChangeNotifier>(sp =>
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<DestinationStatusPusher>());
 
+// ── S-CHUTESTATE-PUSH: 고객 슈트 상태 아웃바운드 푸시 (WCS → 고객 PUT /api/UpdateChuteState) ──
+// RcsPush(위)의 구조적 형제. 별개 채널 — 위 IF-08 배선 무접촉(append only).
+// ① named HttpClient(IHttpClientFactory 경유 — 직접 new HttpClient() 금지). 타임아웃=설정값
+//    (Wcs:ChuteStatePush:HttpTimeoutMs). 하드코딩 0(절대규칙 #7).
+{
+    var chuteStatePush = builder.Configuration.GetSection("Wcs:ChuteStatePush").Get<ChuteStatePushOptions>()
+                         ?? new ChuteStatePushOptions();
+    builder.Services.AddHttpClient(ChuteStatePushClient.HttpClientName, c =>
+    {
+        c.Timeout = TimeSpan.FromMilliseconds(Math.Max(1, chuteStatePush.HttpTimeoutMs));
+    });
+}
+
+// ② 푸시 클라이언트(PUT 1건 전송 + 설정 경유 지수 백오프 재시도 + Fail-Loud + DORMANT no-op).
+builder.Services.AddSingleton<IChuteStatePushClient, ChuteStatePushClient>();
+
+// ③ 전이 관찰 → 푸시 파이프(DestinationControlService.OnTransition 구독 — PAUSED→2/RESUMED→3).
+//    BaseUrl 미설정이면 StartAsync가 경고 후 비활성(구독 안 함 — 크래시 0).
+builder.Services.AddSingleton<ChuteStatePusher>();
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<ChuteStatePusher>());
+
 // ── F1-CR-M1 해소: IMonitoringQueries DI 등록 (요청당 손조립 제거) ─────────────
 // MonitoringController가 생성자에서 new MonitoringQueries(...)로 조립하던 것을 폐지하고
 // AddScoped로 주입한다. 수명: WcsDbContext(scoped) + 싱글톤(레지스트리·상태서비스) → scoped 정상 해석.
