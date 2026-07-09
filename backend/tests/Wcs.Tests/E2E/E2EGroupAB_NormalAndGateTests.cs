@@ -77,8 +77,8 @@ public class E2EGroupAB_NormalAndGateTests
             // cell_assignment 활성 1건(그 소터).
             int activeAssign = await db.CellAssignments
                 .CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt == null);
-            // 핸드셰이크 콜백이 ReleaseCell을 수행하므로 활성 배정은 해제될 수 있음 — 배정이 한 셀에
-            // 들어갔음을 sorter_command.cell_id로 단언(셀 수량 ground-truth).
+            // [S-CELL-ACCUM] 배정은 오더 완료까지 지속 — ORD-003(PlannedQty=20)은 1 piece로 미완료라
+            // 활성 배정 1건 지속(매 투입 해제 아님). 셀 적재는 sorter_command.cell_id로 단언(수량 ground-truth).
             var piece = await db.Pieces.FirstAsync(p => p.PId == 21001);
             // 셀 수량 반영: 이 piece의 COMPLETED sorter_command가 그 셀에 적재됨.
             var loaded = await db.SorterCommands
@@ -110,12 +110,12 @@ public class E2EGroupAB_NormalAndGateTests
             return await db.SorterCommands.CountAsync(c => c.Status == SorterCommandStatus.COMPLETED) >= 1;
         }, 6000, "1차 COMPLETED");
 
-        // 콜백 ReleaseCell 완료 대기(다음 SelectCell이 ① 재사용 분기를 타려면 — 단, ReleaseCell은
-        // 그 셀을 비우므로 2차는 ② 빈 셀 재할당이 될 수도 있다. 핵심 단언은 "같은 셀에 2건 적재".)
+        // [S-CELL-ACCUM] 1차 핸드셰이크 클리어 대기. 배정은 오더 완료까지 지속하므로(매 투입 해제 아님)
+        // 2차는 SelectCell ① 재사용으로 **동일 셀**에 누적한다(② 빈 셀 재할당 아님). 핵심 단언은 "같은 셀 누적".
         await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false },
             4000, "1차 핸드셰이크 클리어");
 
-        // 2건: 같은 오더(TEST-BARCODE-3) — 빈 셀이 여전히 있어 같은/다른 셀 가능. qty=3.
+        // 2건: 같은 오더(TEST-BARCODE-3) — ① 배정 재사용으로 동일 셀 누적. qty=3.
         await driver.RunSingleAsync(new AgvJob(22002, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo, Qty: 3));
         await E2EWait.UntilAsync(async () =>
         {

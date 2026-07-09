@@ -74,20 +74,27 @@ public interface IArrivalRecorder
 }
 
 /// <summary>
-/// 3D Sorter 셀 선택 (IF-11 트리거 전 셀 지정).
-/// 선택 우선순위: ①활성 셀 재사용 → ②소속 빈 셀 → ③없으면 null(FULL 요소).
+/// 3D Sorter 셀 선택 (IF-11 트리거 전 셀 지정) — one-order-one-cell, no overflow (S-CELL-ACCUM).
+/// 배정 유무 분기: ①오더 활성 배정 보유 → 그 배정 셀 여유 시 재사용·전부 full이면 null(빈 셀 폴백 금지)
+///   → ②배정 없음(진짜 신규) → 빈 셀 신규 할당 → ③없으면 null(FULL 요소).
+/// 배정은 오더 완료(SortedQty==PlannedQty) 시에만 release(EfSorterCommandJournal.Finalize) — 매 투입 해제 아님.
 /// M4에서 EfCellSelector가 구현.
 /// </summary>
 public interface ICellSelector
 {
     /// <summary>
-    /// 대상 슈트에 할당할 셀 선택.
-    /// null이면 빈 셀 없음(→ 3DS FULL 경고).
+    /// 대상 소터에 barcode 오더의 셀 선택.
+    /// null이면 적재 불가(배정 셀 full — 오버플로 금지 / 빈 셀 없음 → 3DS FULL). IF-05 SorterCanAcceptBarcode와 동형.
     /// </summary>
     int? SelectCell(int chuteNo, string barcode);
 
-    /// <summary>셀 점유 해제(핸드셰이크 완료·실패 시 호출 — cell_assignment 상태 전이).</summary>
-    void ReleaseCell(int cellNo);
+    /// <summary>
+    /// OFFLINE 등 물리 적재 불가 시 방금 만든 **신규(빈) 배정만** 롤백 — 그 오더(barcode)가 cellNo 셀에
+    /// 보유한 활성 배정을 현재-기간 적재가 0일 때만 release(orphan 잔존 0). 누적 진행 중(적재≥1) 배정은
+    /// 파기하지 않는다. destination(chuteNo) 스코프 — CellNo만으로 전 소터 해제하던 회귀(A-7) 차단.
+    /// (오더 완료 시 정상 release는 EfSorterCommandJournal.Finalize가 오더 스코프로 수행 — 이 메서드 아님.)
+    /// </summary>
+    void ReleaseEmptyAssignment(int chuteNo, string barcode, int cellNo);
 }
 
 /// <summary>

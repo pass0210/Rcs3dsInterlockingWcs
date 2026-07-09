@@ -131,46 +131,75 @@ public class E2EGroupEF_DepositConcurrencyTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // E5: cell_assignment 해제 타이밍. GT: 핸드셰이크 콜백 ReleaseCell 후 배정 해제(released_at) 관찰.
-    //   현 동작 단언(콜백이 ReleaseCell → 그 셀 활성 배정이 released).
+    // E5 [S-CELL-ACCUM 정합 개정]: cell_assignment 수명 = 오더 완료까지 지속, 완료 시에만 release.
+    //   구 동작("매 투입 콜백 ReleaseCell → 활성 배정 0 수렴") 단언을 폐기하고, 확정 정책
+    //   (release-on-order-complete)을 입증한다. PlannedQty=2 오더로 지속→완료 두 단계를 관찰:
+    //     · 1번째 piece(qty=1): SortedQty=1 < PlannedQty → 오더 RUNNING·배정 **지속**(released 0).
+    //     · 2번째 piece(qty=1): SortedQty=2 == PlannedQty → 오더 COMPLETED·그 오더 배정 **release**.
+    //   두 piece 모두 **동일 셀**에 누적(① 재사용). 셀 수량·바인딩 ground-truth는 실 EF DB.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task E5_CellAssignment_ReleasedAfterHandshakeCallback()
+    public async Task E5_CellAssignment_PersistsUntilOrderComplete_ThenReleased()
     {
         var (factory, rcs) = await StartAsync();
         await using var _f = factory;
         await using var _r = rcs;
         var driver = MultiAgvDriver.ForFactory(factory);
         long destId = factory.PrimarySorter.DestinationId;
+        int  chute  = factory.PrimarySorter.ChuteNo;
 
-        await driver.RunSingleAsync(new AgvJob(25301, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo));
+        // PlannedQty=2 소터 오더(배정 없음·자연 ② 할당). 2 piece로 완료.
+        using (var db = factory.CreateDbScope())
+            E2ESeed.AddSorterOrder(db, destId, "ORD-E5-ACCUM", "E5-ACCUM-BC", plannedQty: 2);
+
+        // ── 1번째 piece: 오더 미완료 → 배정 지속(released 0) ──
+        await driver.RunSingleAsync(new AgvJob(25301, 1, "E5-ACCUM-BC", chute, Qty: 1));
         await E2EWait.UntilAsync(async () =>
         {
             using var db = factory.CreateDbScope();
-            return await db.SorterCommands.AnyAsync(c => c.Status == SorterCommandStatus.COMPLETED);
-        }, 6000, "COMPLETED");
+            return await db.OrderItems.Where(i => i.Barcode == "E5-ACCUM-BC").Select(i => i.SortedQty).FirstAsync() >= 1;
+        }, 6000, "1차 분류 확정(SortedQty>=1)");
+        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false }, 4000, "1차 클리어");
 
-        // 콜백 ReleaseCell이 그 셀 배정을 released → 활성 배정 0으로 수렴(현 동작).
+        int firstCell;
+        using (var db = factory.CreateDbScope())
+        {
+            Assert.Equal(1, E2ESeed.ActiveAssignmentsForOrder(db, "ORD-E5-ACCUM"));   // 미완료 → 배정 지속.
+            Assert.Equal(0, E2ESeed.ReleasedAssignmentsForOrder(db, "ORD-E5-ACCUM")); // 조기 release 0.
+            Assert.Equal(OrderStatus.RUNNING, db.Orders.First(o => o.OrderNo == "ORD-E5-ACCUM").Status);
+            firstCell = await db.SorterCommands.Where(c => c.Status == SorterCommandStatus.COMPLETED
+                && db.Pieces.Any(p => p.Id == c.PieceId && p.PId == 25301)).Select(c => c.CellNo).FirstAsync();
+        }
+
+        // ── 2번째 piece: 같은 셀 누적 → SortedQty=2==PlannedQty → 오더 완료 → 배정 release ──
+        await driver.RunSingleAsync(new AgvJob(25302, 1, "E5-ACCUM-BC", chute, Qty: 1));
         await E2EWait.UntilAsync(async () =>
         {
             using var db = factory.CreateDbScope();
-            return await db.CellAssignments.CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt == null) == 0;
-        }, 5000, "핸드셰이크 후 cell_assignment released");
+            return db.Orders.First(o => o.OrderNo == "ORD-E5-ACCUM").Status == OrderStatus.COMPLETED;
+        }, 6000, "오더 완료 전이(SortedQty==PlannedQty)");
 
         using (var db = factory.CreateDbScope())
         {
-            int released = await db.CellAssignments.CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt != null);
-            Assert.True(released >= 1, "배정이 released_at 기록됨(콜백 ReleaseCell)");
+            Assert.Equal(0, E2ESeed.ActiveAssignmentsForOrder(db, "ORD-E5-ACCUM"));      // 완료 → release.
+            Assert.True(E2ESeed.ReleasedAssignmentsForOrder(db, "ORD-E5-ACCUM") >= 1, "완료 오더 배정 released");
+            Assert.Equal(2, await db.OrderItems.Where(i => i.Barcode == "E5-ACCUM-BC").Select(i => i.SortedQty).FirstAsync());
+            // 두 piece 동일 셀 누적.
+            int secondCell = await db.SorterCommands.Where(c => c.Status == SorterCommandStatus.COMPLETED
+                && db.Pieces.Any(p => p.Id == c.PieceId && p.PId == 25302)).Select(c => c.CellNo).FirstAsync();
+            Assert.Equal(firstCell, secondCell);
         }
-        _out.WriteLine("[E5] 핸드셰이크 콜백 ReleaseCell → cell_assignment released(현 동작)");
+        _out.WriteLine($"[E5] 배정 오더 완료까지 지속(1차 released 0) → 완료 시 release. 두 piece 동일 셀 {firstCell} 누적.");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // E6 ⚠: 콜백 throw 시 ReleaseCell 스킵 → 셀 누수(TODO 이연·M5). 정상 경로 누수 0만 단언.
-    //   재현은 호스트종료/DI 오설정 한정 경로라 E2E에서 곤란 → finding 등재. 정상 경로 누수 0 입증.
+    // E6 [S-CELL-ACCUM 정합 개정]: "누수" 재정의. 구 동작("정상 경로 활성 배정 0 수렴")은 매 투입
+    //   해제 전제라 폐기. 새 정의: leak = **완료된 오더의 배정 잔존**. 정상 = **미완료 오더 배정 지속**.
+    //   미완료 오더(TEST-BARCODE-3·PlannedQty=20) 3 piece 연속 → 배정 1건 지속(누적, 같은 셀),
+    //   released == 완료 오더 수(0) — 조기 release·orphan 0. (콜백 throw 셀 누수는 M5 이연 finding 유지.)
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task E6_NormalPath_NoCellLeak_FindingForCallbackThrow()
+    public async Task E6_IncompleteOrder_AssignmentPersists_NoPrematureRelease()
     {
         var (factory, rcs) = await StartAsync();
         await using var _f = factory;
@@ -178,7 +207,7 @@ public class E2EGroupEF_DepositConcurrencyTests
         var driver = MultiAgvDriver.ForFactory(factory);
         long destId = factory.PrimarySorter.DestinationId;
 
-        // 정상 핸드셰이크 3건 연속 — 매 건 콜백 ReleaseCell 성공 → 누수 0.
+        // 미완료 오더 3 piece 연속(qty=1·PlannedQty=20 — 완료 안 됨). 매 건 클리어 후 다음(순차 직렬).
         for (int i = 0; i < 3; i++)
         {
             await driver.RunSingleAsync(new AgvJob(25400 + i, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo, Qty: 1));
@@ -190,13 +219,20 @@ public class E2EGroupEF_DepositConcurrencyTests
             await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false }, 4000, $"{i + 1}차 클리어");
         }
 
-        // 정상 경로: 모든 배정이 해제됨(활성 배정 0으로 수렴 — 누수 0).
-        await E2EWait.UntilAsync(async () =>
+        using (var db = factory.CreateDbScope())
         {
-            using var db = factory.CreateDbScope();
-            return await db.CellAssignments.CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt == null) == 0;
-        }, 5000, "정상 경로 셀 누수 0(활성 배정 0)");
-        _out.WriteLine("[E6 ⚠finding] 정상 경로 셀 누수 0. 콜백 throw 시 누수(M5 이연)는 호스트종료/DI오설정 한정 — finding.");
+            // 정상(미완료 오더): 배정 지속. 3 piece 모두 같은 셀 누적 → 활성 배정 정확히 1.
+            Assert.Equal(1, await db.CellAssignments.CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt == null));
+            // 완료 오더 없음 → released 0(조기 release·누수 0). orphan 0.
+            Assert.Equal(0, await db.CellAssignments.CountAsync(a => a.Cell.DestinationId == destId && a.ReleasedAt != null));
+            Assert.Equal(OrderStatus.RUNNING, db.Orders.First(o => o.OrderNo == "ORD-003").Status);
+
+            var cells = await db.SorterCommands.Where(c => c.Status == SorterCommandStatus.COMPLETED && c.Cell.DestinationId == destId)
+                .Select(c => c.CellNo).Distinct().ToListAsync();
+            Assert.Single(cells);  // 3 piece 동일 셀 누적.
+            Assert.Equal(3, await db.OrderItems.Where(i => i.Barcode == "TEST-BARCODE-3").Select(i => i.SortedQty).FirstAsync());
+        }
+        _out.WriteLine("[E6] 미완료 오더 3 piece → 배정 1건 지속·released 0(조기 release 0·orphan 0·같은 셀 누적). 완료 오더 배정 잔존=leak(없음).");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -204,9 +240,10 @@ public class E2EGroupEF_DepositConcurrencyTests
     //   각자 다른 cellId에 COMPLETED.
     //
     // ⚠ FINDING(현 동작): 한 소터 핸드셰이크는 물리적 직렬(SPEC §6 — 트레이 1개씩). 동시 IF-10은
-    //   R_Seq 교차 MISMATCH(F1b 입증) → RCS는 직전 종결 후 순차 dispatch. 또한 핸드셰이크 콜백이
-    //   ReleaseCell을 하므로 같은 오더 연속 dispatch는 동일 셀을 재사용한다(빈 셀 재할당). "서로 다른
-    //   셀"은 **서로 다른 오더가 각자 다른 셀을 사전 배정**해야 성립 → 그렇게 시드해 입증한다.
+    //   R_Seq 교차 MISMATCH(F1b 입증) → RCS는 직전 종결 후 순차 dispatch.
+    //   [S-CELL-ACCUM 정정] 배정은 오더 완료까지 지속하므로(매 투입 해제 아님) 같은 오더 연속 dispatch는
+    //   ① 배정 재사용으로 **동일 셀**에 누적한다. "서로 다른 셀"은 **서로 다른 오더가 각자 다른 셀을 사전
+    //   배정**해야 성립(각 오더 자기 셀 국한·no-overflow) → 그렇게 시드해 입증한다.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task F1_DifferentOrders_EachOwnCell_AllCompleted_DistinctCells()
@@ -514,5 +551,182 @@ public class E2EGroupEF_DepositConcurrencyTests
             Assert.All(cmds, c => Assert.Equal(c.CSeq, c.RSeq));  // 매 건 대사 일치(직렬화 입증).
             _out.WriteLine($"[F8] 한 소터 3 AGV 직렬 dispatch → {cmds.Count}건 COMPLETED·전부 R_Seq==C_Seq");
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // E7 [S-CELL-ACCUM 수용(a)]: 같은 오더 N piece → **같은 셀 누적**(오더 완료까지 배정 지속).
+    //   실 Sim 핸드셰이크로 3 piece(qty=1) 순차 dispatch. PlannedQty=5(미완료) → 배정 지속·재사용.
+    //   GT: 3건 COMPLETED 모두 **동일 CellNo**, 활성 배정 정확히 1, SortedQty=3, 셀 적재수량=3.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task E7_SameOrder_NPieces_AccumulateSameCell_UntilComplete()
+    {
+        var (factory, rcs) = await StartAsync();
+        await using var _f = factory;
+        await using var _r = rcs;
+        var driver = MultiAgvDriver.ForFactory(factory);
+        long destId = factory.PrimarySorter.DestinationId;
+        int  chute  = factory.PrimarySorter.ChuteNo;
+
+        using (var db = factory.CreateDbScope())
+            E2ESeed.AddSorterOrder(db, destId, "ORD-E7", "E7-BC", plannedQty: 5);
+
+        for (int i = 0; i < 3; i++)
+        {
+            int want = i + 1;
+            await driver.RunSingleAsync(new AgvJob(25700 + i, 1, "E7-BC", chute, Qty: 1));
+            await E2EWait.UntilAsync(async () =>
+            {
+                using var db = factory.CreateDbScope();
+                return await db.OrderItems.Where(x => x.Barcode == "E7-BC").Select(x => x.SortedQty).FirstAsync() >= want;
+            }, 7000, $"{want}차 분류 확정");
+            await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false }, 4000, $"{want}차 클리어");
+        }
+
+        using (var db = factory.CreateDbScope())
+        {
+            var pids = new[] { 25700, 25701, 25702 };
+            var cells = await db.SorterCommands
+                .Where(c => c.Status == SorterCommandStatus.COMPLETED && db.Pieces.Any(p => p.Id == c.PieceId && pids.Contains(p.PId)))
+                .Select(c => c.CellNo).Distinct().ToListAsync();
+            Assert.Single(cells);  // N piece 동일 셀 누적(one-order-one-cell).
+            Assert.Equal(1, E2ESeed.ActiveAssignmentsForOrder(db, "ORD-E7"));   // 미완료 → 배정 1건 지속.
+            Assert.Equal(3, await db.OrderItems.Where(x => x.Barcode == "E7-BC").Select(x => x.SortedQty).FirstAsync());
+            _out.WriteLine($"[E7] 같은 오더 3 piece → 동일 셀 {cells[0]} 누적·활성 배정 1·SortedQty=3");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // E8 [S-CELL-ACCUM 수용(b)]: 오더 배정 셀 Capacity 초과 → IF-05 **NG**(두 번째 셀 유출 0).
+    //   Capacity=2·PlannedQty=5. piece1·2 → 그 오더 셀 C(적재 2=Capacity). 3번째 piece IF-05 = NG.
+    //   빈 enabled 셀이 남아 있어도(오버플로 가능 지점) 두 번째 셀로 새지 않음 — 자기 셀 국한.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task E8_AssignedCellCapacityExceeded_If05Ng_NoOverflowToSecondCell()
+    {
+        var (factory, rcs) = await StartAsync();
+        await using var _f = factory;
+        await using var _r = rcs;
+        var driver = MultiAgvDriver.ForFactory(factory);
+        long destId = factory.PrimarySorter.DestinationId;
+        int  chute  = factory.PrimarySorter.ChuteNo;
+
+        using (var db = factory.CreateDbScope())
+        {
+            E2ESeed.SetAllCapacities(db, destId, 2);            // 셀 작업수량 2.
+            E2ESeed.AddSorterOrder(db, destId, "ORD-E8", "E8-BC", plannedQty: 5);
+        }
+
+        // piece1·2 → 그 오더 셀 C에 누적(2=Capacity 도달). 각 COMPLETED 대기(적재 정확).
+        for (int i = 0; i < 2; i++)
+        {
+            int want = i + 1;
+            var r = await driver.RunSingleAsync(new AgvJob(25710 + i, 1, "E8-BC", chute, Qty: 1));
+            Assert.Equal("OK", r.If05Result);
+            await E2EWait.UntilAsync(async () =>
+            {
+                using var db = factory.CreateDbScope();
+                return await db.OrderItems.Where(x => x.Barcode == "E8-BC").Select(x => x.SortedQty).FirstAsync() >= want;
+            }, 7000, $"{want}차 분류 확정");
+            await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false }, 4000, $"{want}차 클리어");
+        }
+
+        int freeBefore;
+        using (var db = factory.CreateDbScope())
+        {
+            freeBefore = E2ESeed.FreeCellCount(db, destId);
+            Assert.True(freeBefore >= 1, "오버플로 가능 지점: 빈 enabled 셀이 남아 있음");
+        }
+
+        // 3번째 piece: 오더 셀 C full(2>=2) → IF-05 NG. 빈 셀이 있어도 그리로 새지 않음(no-overflow).
+        var r3 = await driver.RunSingleAsync(new AgvJob(25712, 1, "E8-BC", chute, Qty: 1));
+        Assert.Equal("NG", r3.If05Result);
+        Assert.Null(r3.ChuteNo);
+
+        using (var db = factory.CreateDbScope())
+        {
+            // 그 오더 piece가 적재된 셀은 정확히 1개(두 번째 셀 유출 0).
+            var pids = new[] { 25710, 25711 };
+            var cells = await db.SorterCommands
+                .Where(c => c.Status == SorterCommandStatus.COMPLETED && db.Pieces.Any(p => p.Id == c.PieceId && pids.Contains(p.PId)))
+                .Select(c => c.CellNo).Distinct().ToListAsync();
+            Assert.Single(cells);
+            Assert.Equal(1, E2ESeed.ActiveAssignmentsForOrder(db, "ORD-E8"));  // 자기 셀 하나에 국한.
+            Assert.Equal(2, await db.OrderItems.Where(x => x.Barcode == "E8-BC").Select(x => x.SortedQty).FirstAsync());
+        }
+        _out.WriteLine("[E8] Capacity=2 도달 후 3번째 IF-05 NG·두 번째 셀 유출 0(빈 셀 존재해도 자기 셀 국한).");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // E9 [S-CELL-ACCUM 수용(c)]: 오더 A 완료 → 셀 release → 다른 오더 B가 그 셀 재사용,
+    //   **B 적재량 0부터 카운트**(A의 COMPLETED 미오염 — 배정-기간 스코프). 실 Sim 풀 사이클.
+    //   Capacity=2. A(PlannedQty=2) 2 piece → 완료·셀 release. B(PlannedQty=5) 1 piece → 그 셀 재사용.
+    //   B 재사용 셀은 A의 옛 적재(2)를 제외하고 1만 카운트 → 여유(1<2) → SorterCanAcceptBarcode(B)=true.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task E9_OrderComplete_CellReused_ByOtherOrder_LoadedFromZero()
+    {
+        var (factory, rcs) = await StartAsync();
+        await using var _f = factory;
+        await using var _r = rcs;
+        var driver = MultiAgvDriver.ForFactory(factory);
+        long destId = factory.PrimarySorter.DestinationId;
+        int  chute  = factory.PrimarySorter.ChuteNo;
+        var  status = factory.Services.GetRequiredService<IDestinationStatusService>();
+
+        using (var db = factory.CreateDbScope())
+        {
+            E2ESeed.SetAllCapacities(db, destId, 2);
+            E2ESeed.AddSorterOrder(db, destId, "ORD-E9-A", "E9A-BC", plannedQty: 2);
+            E2ESeed.AddSorterOrder(db, destId, "ORD-E9-B", "E9B-BC", plannedQty: 5);
+        }
+
+        // 오더 A: 2 piece(qty=1) → SortedQty=2==PlannedQty → 완료·셀 release.
+        for (int i = 0; i < 2; i++)
+        {
+            await driver.RunSingleAsync(new AgvJob(25720 + i, 1, "E9A-BC", chute, Qty: 1));
+            await E2EWait.UntilAsync(async () =>
+            {
+                using var db = factory.CreateDbScope();
+                return await db.OrderItems.Where(x => x.Barcode == "E9A-BC").Select(x => x.SortedQty).FirstAsync() >= i + 1;
+            }, 7000, $"A {i + 1}차 분류");
+            await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CFlag: false, RFlag: false }, 4000, $"A {i + 1}차 클리어");
+        }
+        await E2EWait.UntilAsync(async () =>
+        {
+            using var db = factory.CreateDbScope();
+            return db.Orders.First(o => o.OrderNo == "ORD-E9-A").Status == OrderStatus.COMPLETED;
+        }, 6000, "오더 A 완료·셀 release");
+
+        int aCell;
+        using (var db = factory.CreateDbScope())
+        {
+            Assert.Equal(0, E2ESeed.ActiveAssignmentsForOrder(db, "ORD-E9-A"));  // A 배정 release.
+            aCell = await db.SorterCommands.Where(c => c.Status == SorterCommandStatus.COMPLETED
+                && db.Pieces.Any(p => p.Id == c.PieceId && p.PId == 25720)).Select(c => c.CellNo).FirstAsync();
+        }
+
+        // 오더 B: 1 piece → SelectCell ②가 release된 셀 재사용(최저 빈 셀). 적재 0부터.
+        var rb = await driver.RunSingleAsync(new AgvJob(25725, 1, "E9B-BC", chute, Qty: 1));
+        Assert.Equal("OK", rb.If05Result);
+        await E2EWait.UntilAsync(async () =>
+        {
+            using var db = factory.CreateDbScope();
+            return await db.OrderItems.Where(x => x.Barcode == "E9B-BC").Select(x => x.SortedQty).FirstAsync() >= 1;
+        }, 7000, "B 1차 분류");
+
+        using (var db = factory.CreateDbScope())
+        {
+            int bCell = await db.SorterCommands.Where(c => c.Status == SorterCommandStatus.COMPLETED
+                && db.Pieces.Any(p => p.Id == c.PieceId && p.PId == 25725)).Select(c => c.CellNo).FirstAsync();
+            Assert.Equal(aCell, bCell);  // B가 A의 옛 셀 재사용.
+            Assert.Equal(1, await db.OrderItems.Where(x => x.Barcode == "E9B-BC").Select(x => x.SortedQty).FirstAsync());
+        }
+
+        // 핵심: B 재사용 셀 적재량은 0부터(A의 옛 COMPLETED 2 미오염). Capacity=2·B 적재 1 → 여유(1<2).
+        //   오염됐다면(A 2 + B 1 = 3 >= 2) SorterCanAcceptBarcode(B)=false가 됐을 것.
+        Assert.True(status.SorterCanAcceptBarcode(destId, "E9B-BC"),
+            "재사용 셀 적재 0부터 카운트 → B 여유(1<2)·A의 옛 적재 미오염");
+        _out.WriteLine($"[E9] 오더 A 완료→셀{aCell} release→오더 B 재사용·적재 0부터(A 옛 적재 미오염) → B 여유 OK.");
     }
 }

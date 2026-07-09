@@ -501,4 +501,5 @@
 
 - [CODE-REVIEW] sprint=S-F3a critical=0 major=2 minor=7 iter=1 (major: I-1 O4/O6 floor/cellNo/seq 상한부재→(short) 무음 오버플로 PLC 기입, I-2 AlreadyInState 멱등분기 인메모리 재조정 스킵; minor 7건 todo 이연). 2-Evaluator(기능+안전) 재검증 예정.
 
+- [CODE-REVIEW] sprint=S-CELL-ACCUM critical=0 major=2 minor=5 iter=1 (major: #2 LoadedQtyByCell hot-path 이력전량 메모리로드 성능회귀, #1 SortedQty RMW 동시충돌시 Finalize 전체롤백; fix에 동반 #3/#4/#5/#7 정리; #6 이연). 2-Evaluator(기능+정합성) 재검증 예정.
 - [CODE-REVIEW] sprint=S-F3b critical=0 major=0 minor=5 iter=0 (verdict=Yes/merge-ready; API 계약 정확일치·fail-loud 정직표시 검증. minor 5건: bound 리터럴 OPS_LIMITS 유도·ConnBadge 중복추출·pingPong 사전힌트 주석·a11y aria-describedby·Dialog 초기포커스 문서화 — todo 이연)

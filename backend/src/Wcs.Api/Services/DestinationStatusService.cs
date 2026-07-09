@@ -134,7 +134,10 @@ public sealed class DestinationStatusService : IDestinationStatusService
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
-        return HasAssignedCellWithRoom(db, destinationId, barcode);
+        // 그 오더의 활성 배정 셀 중 여유(현재수량 < Capacity, NULL/≤0=무제한) 있는 셀 보유 여부(읽기 전용).
+        // SorterCellQty 공유 — IF-10 SelectCell ①분기·SorterFull과 byte-consistent(현재수량 배정-기간 스코프).
+        return SorterCellQty.FirstAssignedCellWithRoom(
+            db, destinationId, SorterCellQty.AssignedCellsForBarcode(db, destinationId, barcode)) is not null;
     }
 
     /// <inheritdoc/>
@@ -145,48 +148,11 @@ public sealed class DestinationStatusService : IDestinationStatusService
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
 
-        // SelectCell 비-null 조건과 동형: ①그 오더 여유 배정 셀 재사용 OR ②빈 enabled 셀 할당.
-        // 한 스코프(동일 DbContext)에서 두 술어를 OR — "IF-05 OK ⟺ SelectCell 적재 가능"(§88).
-        return HasAssignedCellWithRoom(db, destinationId, barcode)
-            || HasFreeEnabledCell(db, destinationId);
+        // SelectCell 비-null 조건과 **동형**(배정 유무 분기·no-overflow) — 단일 진실 SorterCellQty 공유:
+        //   ①오더 배정 보유 → 그 배정 셀 여유만(빈 셀 폴백 금지) / ②배정 없음 → 빈 enabled 셀.
+        //   "IF-05 OK ⟺ SelectCell 적재 가능"(§88)을 크로스-엔드포인트로 보장.
+        return SorterCellQty.CanAcceptBarcode(db, destinationId, barcode);
     }
-
-    // ── piece-aware: 그 오더의 활성 배정 셀 중 여유 있는 셀 보유 여부(읽기 전용) ─────
-    // EfCellSelector ①분기와 동형: released_at IS NULL 배정 중 barcode 매칭 셀(=그 오더 보유 셀)에서
-    //   여유(현재수량 < Capacity, NULL/≤0=무제한) 있는 셀이 1개라도 있으면 true.
-    // 셀 현재수량·용량 산출은 SorterCellQty 공유 로직 — IF-10 SelectCell·SorterFull과 byte-consistent
-    //   (m4p4 교훈: IF-05 predicate ↔ SelectCell 동형 필수 — "IF-05 OK ⟹ 적재 가능" 불변식 보존).
-    private static bool HasAssignedCellWithRoom(WcsDbContext db, long destinationId, string barcode)
-    {
-        var assignedCells = db.CellAssignments
-            .Where(a => a.ReleasedAt == null
-                     && a.Cell.DestinationId == destinationId
-                     && a.Order.Items.Any(i => i.Barcode == barcode))
-            .Select(a => new { a.CellId, a.Cell.Capacity })
-            .Distinct()
-            .ToList();
-
-        if (assignedCells.Count == 0)
-            return false;  // 그 오더가 이 소터에 보유한 활성 배정 셀 없음 → 재사용 예외 불가.
-
-        var loaded = SorterCellQty.LoadedQtyByCell(
-            db, destinationId, assignedCells.Select(x => x.CellId).ToList());
-
-        foreach (var c in assignedCells)
-        {
-            int current = loaded.GetValueOrDefault(c.CellId, 0);
-            if (!SorterCellQty.IsCellAtCapacity(c.Capacity, current))
-                return true;  // 이 셀은 여유 있음 → 그 piece 누적 가능(OK).
-        }
-        return false;  // 보유 셀 전부 작업수량 도달 → 그 piece도 full(NG).
-    }
-
-    // ── 빈 enabled 셀(활성 cell_assignment 없는 셀) 존재 여부 — SelectCell ②분기와 동형 ──
-    private static bool HasFreeEnabledCell(WcsDbContext db, long destinationId) =>
-        db.Cells.Any(c =>
-            c.DestinationId == destinationId
-            && c.Enabled
-            && !db.CellAssignments.Any(a => a.CellId == c.Id && a.ReleasedAt == null));
 
     // ── 소터 목적지-단위 full(SorterFull) 산출 — 확정1 ───────────────────────────
     //
