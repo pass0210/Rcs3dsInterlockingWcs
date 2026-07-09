@@ -952,4 +952,254 @@ public class SorterCellFullnessTests
         Assert.Equal("OK", bodyB!.Result);
         _out.WriteLine("[EC-9] A full+빈셀0, B만 여유 → IF-05(A) NG·SelectCell(A) null / IF-05(B) OK·SelectCell(B)=2 (동형)");
     }
+
+    // ── 헬퍼: 명시 타임스탬프 오더/배정/적재(배정-기간 스코프 결정적 검증용) ─────────────────
+    private static long AddOrderWithAssignmentAt(
+        WcsDbContext db, long destId, string orderNo, string barcode, int cellNo,
+        DateTime assignedAt, DateTime? releasedAt)
+    {
+        var now   = DateTime.UtcNow;
+        var batch = db.WorkBatches.First();
+        var order = new WcsOrder
+        {
+            WorkBatchId = batch.Id, OrderNo = orderNo, OrderType = OrderType.GENERAL,
+            DestinationId = destId, DestAssignType = DestAssignType.UPSTREAM, DestAssignedAt = now,
+            Status = OrderStatus.RUNNING, StartedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Orders.Add(order);
+        db.SaveChanges();
+        db.OrderItems.Add(new OrderItem
+        {
+            OrderId = order.Id, Barcode = barcode, PlannedQty = 100, ReservedQty = 0, SortedQty = 0,
+            CreatedAt = now, UpdatedAt = now,
+        });
+        var cell = db.Cells.First(c => c.DestinationId == destId && c.CellNo == cellNo);
+        db.CellAssignments.Add(new CellAssignment
+        {
+            CellId = cell.Id, OrderId = order.Id, AssignedAt = assignedAt, ReleasedAt = releasedAt, CreatedAt = assignedAt,
+        });
+        db.SaveChanges();
+        return order.Id;
+    }
+
+    private static void LoadCellQtyAt(
+        WcsDbContext db, long destId, int cellNo, int qty, int pId, string barcode, DateTime cWrittenAt)
+    {
+        var cell = db.Cells.First(c => c.DestinationId == destId && c.CellNo == cellNo);
+        var piece = new Piece
+        {
+            PId = pId, IsActive = false, Barcode = barcode, Qty = qty, DepositedAt = cWrittenAt,
+            DestinationId = destId, Status = PieceStatus.LOADED, CreatedAt = cWrittenAt, UpdatedAt = cWrittenAt,
+        };
+        db.Pieces.Add(piece);
+        db.SaveChanges();
+        db.SorterCommands.Add(new SorterCommand
+        {
+            PieceId = piece.Id, CellId = cell.Id, CSeq = 1, CellNo = cellNo, CWrittenAt = cWrittenAt,
+            RSeq = 1, RCellNo = cellNo, RFlagAt = cWrittenAt, Status = SorterCommandStatus.COMPLETED, CreatedAt = cWrittenAt,
+        });
+        db.SaveChanges();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // EC-10 [S-CELL-ACCUM no-overflow + 동형 핵심]: 오더 배정 셀 full인데 **빈 enabled 셀이 남아 있어도**
+    //   그 오더는 두 번째 셀로 오버플로하지 않는다(자기 셀 국한). 구조 결함(HasAssignedCellWithRoom OR
+    //   HasFreeEnabledCell)이었다면 빈 셀 존재로 OK가 새어 오버플로했을 오버플로-가능 지점을 명시 단언.
+    //     · SorterCanAcceptBarcode(ORDX) == false  AND  SelectCell(ORDX) == null  (동형).
+    //     · 대조: 배정 없는 새 오더(TEST-BARCODE-3)는 그 빈 셀로 OK — 빈 셀은 실제 사용 가능(폴백만 금지).
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task EC10_AssignedCellFull_FreeCellsExist_NoOverflow_Isomorphic()
+    {
+        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
+        var client = factory.CreateClient();
+
+        long sorterId = factory.SorterDestinationId;
+        var status    = factory.Services.GetRequiredService<IDestinationStatusService>();
+        const int capacity = 2;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            SetAllCapacities(db, sorterId, capacity);
+            // 오더 X → cell1 배정 + full(현재=2). cell2·3은 **점유하지 않음**(빈 enabled 셀 유지).
+            AddSorterOrderWithAssignedCell(db, sorterId, "ORD-X-CONFINED", "ORDX-BC", cellNo: 1);
+            LoadCellQty(db, sorterId, cellNo: 1, qty: capacity, pId: 30001, barcode: "ORDX-BC");
+            Assert.True(FreeCellCount(db, sorterId) >= 1, "오버플로 가능 지점: 빈 enabled 셀 ≥1");
+        }
+
+        // 오더 X: 배정 셀 full + 빈 셀 존재 → no-overflow → NG·null (동형).
+        Assert.False(status.SorterCanAcceptBarcode(sorterId, "ORDX-BC"),
+            "배정 셀 full → 빈 셀로 오버플로 금지(SorterCanAcceptBarcode=false)");
+        using (var scope = factory.Services.CreateScope())
+        {
+            var selector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
+            Assert.Null(selector.SelectCell(factory.SorterChuteNo, "ORDX-BC"));  // ②빈셀 폴백 안 함.
+        }
+        var respX = await client.PostAsJsonAsync("/api/v1/destination-query",
+            new { pId = 29910, agvNo = 1, barcode = "ORDX-BC", inductionNo = 1, qty = 1, timeStamp = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, respX.StatusCode);   // 도메인 거부 = 200 + NG(400 아님).
+        var bodyX = await respX.Content.ReadFromJsonAsync<DestinationQueryResponse>();
+        Assert.Equal("NG", bodyX!.Result);
+
+        // 대조: 배정 없는 새 오더(TEST-BARCODE-3)는 그 빈 셀로 수용 가능(빈 셀은 실사용 — 폴백만 금지).
+        Assert.True(status.SorterCanAcceptBarcode(sorterId, "TEST-BARCODE-3"),
+            "배정 없는 새 오더는 빈 enabled 셀로 OK(빈 셀 자체는 사용 가능)");
+        _out.WriteLine("[EC-10] 배정 셀 full+빈셀 존재 → ORDX NG·SelectCell null(오버플로 0). 새 오더는 빈 셀 OK(대조).");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // EC-11 [S-CELL-ACCUM 배정-기간 스코프 핵심]: 재사용된 셀의 적재량은 **현재 활성 배정 기간부터** 카운트.
+    //   이전 오더 A가 그 셀에 쌓은 all-time COMPLETED 적재량이 새 오더 B의 여유 계산을 오염시키지 않음.
+    //   명시 타임스탬프로 결정적 검증(same-tick 경계 회피):
+    //     A: 배정 cell1[t0, released t0+10], COMPLETED qty=2 @ t0+1.  (셀 all-time 적재=2)
+    //     B: 배정 cell1[t0+20, active].  → B 적재량=0(A의 t0+1 < t0+20 배제) → 여유(0<Capacity=2)=OK.
+    //   B에 qty 1·1 추가(@t0+21·+22) → B 적재 1→2(오직 B 것) → Capacity 2 도달 시 NG. 오염됐다면 처음부터 NG였을 것.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task EC11_ReusedCell_LoadedScopedToCurrentAssignment_NotAllTime()
+    {
+        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
+        _ = factory.CreateClient();
+
+        long sorterId = factory.SorterDestinationId;
+        var status    = factory.Services.GetRequiredService<IDestinationStatusService>();
+        const int capacity = 2;
+        var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            SetAllCapacities(db, sorterId, capacity);
+
+            // 오더 A: cell1 배정(t0)·release(t0+10) + A의 COMPLETED 적재 2(@t0+1). 셀 all-time 적재=2.
+            AddOrderWithAssignmentAt(db, sorterId, "ORD-A11", "A11-BC", cellNo: 1,
+                assignedAt: t0, releasedAt: t0.AddSeconds(10));
+            LoadCellQtyAt(db, sorterId, cellNo: 1, qty: 2, pId: 31001, barcode: "A11-BC", cWrittenAt: t0.AddSeconds(1));
+
+            // 오더 B: cell1 재배정(t0+20, active). B 적재 0.
+            AddOrderWithAssignmentAt(db, sorterId, "ORD-B11", "B11-BC", cellNo: 1,
+                assignedAt: t0.AddSeconds(20), releasedAt: null);
+        }
+
+        // B 재사용 셀 적재량 0부터 → 여유(0<2). 오염됐다면(A의 2 합산) 2>=2로 이미 full=false였을 것.
+        Assert.True(status.SorterHasAssignedCellWithRoomForBarcode(sorterId, "B11-BC"),
+            "재사용 셀 적재 0부터 카운트(A의 옛 적재 2 미오염) → B 여유");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            LoadCellQtyAt(db, sorterId, cellNo: 1, qty: 1, pId: 31002, barcode: "B11-BC", cWrittenAt: t0.AddSeconds(21));
+        }
+        Assert.True(status.SorterHasAssignedCellWithRoomForBarcode(sorterId, "B11-BC"),
+            "B 적재 1<2 → 여전히 여유(B 것만 카운트 = 1, 오염 시 3이었을 것)");
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            LoadCellQtyAt(db, sorterId, cellNo: 1, qty: 1, pId: 31003, barcode: "B11-BC", cWrittenAt: t0.AddSeconds(22));
+        }
+        Assert.False(status.SorterHasAssignedCellWithRoomForBarcode(sorterId, "B11-BC"),
+            "B 적재 2>=Capacity 2 → 도달(B 것만 카운트 — A의 2 미합산, 아니면 4로 진작 도달)");
+        _out.WriteLine("[EC-11] 재사용 셀 적재 배정-기간 스코프 — A 옛 적재 2 배제·B 0부터 카운트(1→2에서 full).");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // EC-12 [S-CELL-ACCUM Scope 5 — OFFLINE orphan 롤백]: ReleaseEmptyAssignment는 **적재 0인 신규 배정만**
+    //   release하고, 적재≥1(누적 진행) 배정은 유지한다. (OFFLINE 시 orphan 잔존 0·누적 바인딩 조기 파기 0.)
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task EC12_ReleaseEmptyAssignment_RollsBackEmptyOrphan_KeepsLoaded()
+    {
+        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
+        _ = factory.CreateClient();
+
+        long sorterId = factory.SorterDestinationId;
+        int  chute    = factory.SorterChuteNo;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            SetAllCapacities(db, sorterId, 5);
+            // 오더 O: cell1 배정, 적재 0(빈 orphan).
+            AddSorterOrderWithAssignedCell(db, sorterId, "ORD-O12", "O12-BC", cellNo: 1);
+            // 오더 P: cell2 배정 + 적재 1(누적 진행).
+            AddSorterOrderWithAssignedCell(db, sorterId, "ORD-P12", "P12-BC", cellNo: 2);
+            LoadCellQty(db, sorterId, cellNo: 2, qty: 1, pId: 32002, barcode: "P12-BC");
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var selector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
+            selector.ReleaseEmptyAssignment(chute, "O12-BC", 1);   // 빈 orphan → release.
+            selector.ReleaseEmptyAssignment(chute, "P12-BC", 2);   // 적재≥1 → 유지.
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            Assert.Equal(0, db.CellAssignments.Count(a => a.Order.OrderNo == "ORD-O12" && a.ReleasedAt == null));  // 롤백됨.
+            Assert.Equal(1, db.CellAssignments.Count(a => a.Order.OrderNo == "ORD-P12" && a.ReleasedAt == null));  // 유지됨.
+        }
+        _out.WriteLine("[EC-12] ReleaseEmptyAssignment: 빈 신규 배정(O) 롤백·적재 진행 배정(P) 유지 — OFFLINE orphan 0.");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // EC-13 [동형 명시 스위프]: 배정-분기 전 케이스에서 SorterCanAcceptBarcode ⟺ (SelectCell != null),
+    //   같은 셀. no-overflow(배정 full → NG·null)·재사용(배정 room → 같은 셀)·신규(빈 셀 → ②)를 한 상태에서.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task EC13_If05_SelectCell_Isomorphism_Sweep()
+    {
+        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
+        _ = factory.CreateClient();
+
+        long sorterId = factory.SorterDestinationId;
+        int  chute    = factory.SorterChuteNo;
+        var status    = factory.Services.GetRequiredService<IDestinationStatusService>();
+        const int capacity = 2;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            SetAllCapacities(db, sorterId, capacity);
+            AddSorterOrderWithAssignedCell(db, sorterId, "ORD-F13", "F13-BC", cellNo: 1); // 배정-full 케이스
+            LoadCellQty(db, sorterId, cellNo: 1, qty: capacity, pId: 33001, barcode: "F13-BC");
+            AddSorterOrderWithAssignedCell(db, sorterId, "ORD-R13", "R13-BC", cellNo: 2); // 배정-room 케이스
+            LoadCellQty(db, sorterId, cellNo: 2, qty: 1, pId: 33002, barcode: "R13-BC");
+            // cell3은 빈 enabled 유지(배정 없는 새 오더 TEST-BARCODE-3용).
+        }
+
+        // 배정-full: NG ⟺ null.
+        AssertIsomorphic(factory, status, chute, sorterId, "F13-BC", expectAccept: false, expectCell: null);
+        // 배정-room: OK ⟺ 같은 셀(2).
+        AssertIsomorphic(factory, status, chute, sorterId, "R13-BC", expectAccept: true, expectCell: 2);
+        // 배정 없는 새 오더 + 빈 셀(3): OK ⟺ 비-null(② 신규 할당 = cell3). (마지막 — SelectCell 부수효과.)
+        Assert.True(status.SorterCanAcceptBarcode(sorterId, "TEST-BARCODE-3"));
+        using (var scope = factory.Services.CreateScope())
+        {
+            var selector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
+            int? picked = selector.SelectCell(chute, "TEST-BARCODE-3");
+            Assert.NotNull(picked);
+            Assert.Equal(3, picked!.Value);  // 유일한 빈 셀.
+        }
+        _out.WriteLine("[EC-13] 동형 스위프: 배정-full NG⟺null·배정-room OK⟺셀2·신규 OK⟺셀3(②).");
+    }
+
+    private static void AssertIsomorphic(
+        RcsPushWebApplicationFactory factory, IDestinationStatusService status, int chute, long sorterId,
+        string barcode, bool expectAccept, int? expectCell)
+    {
+        bool canAccept = status.SorterCanAcceptBarcode(sorterId, barcode);
+        using var scope = factory.Services.CreateScope();
+        var selector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
+        int? picked = selector.SelectCell(chute, barcode);   // ①/NG 케이스는 부수효과 없음(재사용/실패).
+        Assert.Equal(expectAccept, canAccept);
+        Assert.Equal(expectAccept, picked is not null);       // 동형: OK ⟺ 비-null.
+        Assert.Equal(expectCell, picked);
+    }
 }

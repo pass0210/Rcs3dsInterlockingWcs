@@ -129,3 +129,24 @@ Ground truth = git HEAD/status + 실제 코드/diff 판독 + 독립 테스트 �
 - **집계 결과: APPROVED (functional ∧ safety, 305 GREEN)**. 커밋 진행.
 
 **APPROVED — S-F3a (fix iter 1 재검증 포함, 305 GREEN)**
+
+---
+
+## AGGREGATION (orchestrator) — 2-Evaluator 풀 (기능+정합성)
+- **FUNCTIONAL: PASS** (functional.md) — full-suite 312 GREEN(305+7), 수용행위 (a)누적 (b)Capacity+1→NG 유출0 (c)완료→release→재사용 0부터 전부 GREEN·코드판독 일치, E5/E6 강화(은폐 0), PLC/frontend 무접촉·마이그레이션 0·Sim 전용.
+- **CORRECTNESS: PASS** (correctness.md) — 5 불변식 게이트: ①IF-05↔SelectCell 동형(오버플로 벡터 삭제·EC-13 sweep) ②loaded-qty 배정기간 스코프(UTC 일관·provider-neutral·EC-11) ③release=오더완료(원자·A-7 흡수) ④PlcGateway diff empty·#1/#3 불변·마이그레이션0 ⑤테스트 진정(신규 EC-10~13·E7~9 구코드서 RED).
+- **집계 결과: APPROVED (functional ∧ correctness, 312 GREEN)**.
+- 비차단 minor 3건 todo: (1) E2E AB A2 주석↔단언 불일치, (2) 동시 동일오더 IF-10→②중복배정 read-then-create race(직렬 dispatch 안전·후속), (3) SelectCell② 비-RUNNING 오더 무배정 셀 반환(선재).
+
+**APPROVED — S-CELL-ACCUM (functional ∧ correctness, 312 GREEN)**
+
+---
+
+## FIX ITER 1 재검증 집계 (orchestrator) — 코드리뷰 #1/#2 + cleanups
+- 코드리뷰(Step 4.5): critical=0 major=2(#2 LoadedQtyByCell hot-path 이력전량 로드 성능회귀, #1 SortedQty RMW 동시충돌 Finalize 전체롤백) minor=5(#6 등 todo 이연).
+- Generator fix: #2 = SQL 전역 하한 minFrom(bounded fetch)+셀별 정밀 하한 in-memory 유지, #1 = SortedQty ExecuteUpdate 원자 증가+재-read 완료판정(wasAlreadyLoaded 멱등 유지). cleanups #3/#4/#5/#7.
+- **FUNCTIONAL 재검증 PASS**: 312 GREEN(단일스레드 결정적·회귀0), 수용행위 (a)/(b)/(c) 전부 유지(EC-11·E9), SortedQty 완료 정확(E5 2piece→완료). PlcGateway/frontend 무접촉·마이그레이션 0·9파일.
+- **CORRECTNESS 재검증 PASS**: 5게이트 유지 — #1 ExecuteUpdate 명시 tx 원자·read-your-writes(stale 0)·멱등, #2 minFrom safe superset·셀별 정밀 하한 유지(재사용 0부터), cleanups 정상, PlcGateway diff empty.
+- **집계 결과: APPROVED (functional ∧ correctness, 312 GREEN)**. 커밋 진행.
+
+**APPROVED — S-CELL-ACCUM (fix iter 1 재검증 포함, 312 GREEN)**

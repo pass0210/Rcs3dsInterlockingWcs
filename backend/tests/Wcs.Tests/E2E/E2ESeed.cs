@@ -102,6 +102,40 @@ public static class E2ESeed
         return (order.Id, cell.Id);
     }
 
+    /// <summary>
+    /// 그 소터에 매핑된 오더(새 바코드) — **셀 배정 없음**(SelectCell ②가 자연 배정). 누적/완료/재사용 시나리오용.
+    /// PlannedQty를 작게 주면 그만큼 분류 시 오더가 완료(SortedQty==PlannedQty)되어 셀이 release된다.
+    /// </summary>
+    public static long AddSorterOrder(
+        WcsDbContext db, long sorterDestId, string orderNo, string barcode, int plannedQty)
+    {
+        var now   = DateTime.UtcNow;
+        var batch = db.WorkBatches.First();
+        var order = new WcsOrder
+        {
+            WorkBatchId = batch.Id, OrderNo = orderNo, OrderType = OrderType.GENERAL,
+            DestinationId = sorterDestId, DestAssignType = DestAssignType.UPSTREAM, DestAssignedAt = now,
+            Status = OrderStatus.RUNNING, StartedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Orders.Add(order);
+        db.SaveChanges();
+        db.OrderItems.Add(new OrderItem
+        {
+            OrderId = order.Id, Barcode = barcode, PlannedQty = plannedQty, ReservedQty = 0, SortedQty = 0,
+            CreatedAt = now, UpdatedAt = now,
+        });
+        db.SaveChanges();
+        return order.Id;
+    }
+
+    /// <summary>그 오더(orderNo)의 활성 cell_assignment(ReleasedAt IS NULL) 수.</summary>
+    public static int ActiveAssignmentsForOrder(WcsDbContext db, string orderNo) =>
+        db.CellAssignments.Count(a => a.Order.OrderNo == orderNo && a.ReleasedAt == null);
+
+    /// <summary>그 오더(orderNo)의 released cell_assignment 수.</summary>
+    public static int ReleasedAssignmentsForOrder(WcsDbContext db, string orderNo) =>
+        db.CellAssignments.Count(a => a.Order.OrderNo == orderNo && a.ReleasedAt != null);
+
     /// <summary>그 소터의 COMPLETED sorter_command 기준 셀별 적재 수량 합(piece별 1건 DISTINCT).</summary>
     public static int LoadedQtyForDestination(WcsDbContext db, long sorterDestId) =>
         db.SorterCommands

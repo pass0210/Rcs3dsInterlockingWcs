@@ -1,88 +1,98 @@
-# FUNCTIONAL 평가 — S-F3a (B2C 운영 제어 백엔드 Ops API + 런타임 전이)
+# S-CELL-ACCUM — FUNCTIONAL Evaluation
 
-> FUNCTIONAL Evaluator · 2026-07-09 · Backend/API 차원. Safety 경계는 별도 SAFETY Evaluator 소관.
-> 모든 증거는 fresh tool output(본 세션 직접 실행). Generator 요약을 신뢰하지 않고 git ground truth + 재실행으로 검증.
+## FUNCTIONAL: PASS (fix-iter 재검증 — code-review #1/#2/#3/#4/#5/#7 반영 후 최신 verdict)
 
-## FUNCTIONAL: PASS (fix-iter 재검증 — code-review I-1/I-2 반영, 305 GREEN)
+> FUNCTIONAL Evaluator · 2026-07-09 · branch `fix/cell-accumulation-binding` (base develop `c813c3a`)
+> 판정은 전부 fresh 재실행 증거. Generator 요약을 신뢰하지 않고 git ground-truth + 직접 테스트 재실행으로 확인.
+> correctness-invariant 차원(동형·오염 0·경합·절대규칙)은 별도 evaluator(correctness.md) 소관 — 여기서 중복 안 함.
 
 ---
 
-## ★ FIX-ITER 재검증 (code-review I-1/I-2 적용 후 — 최신 verdict)
+## ★ FIX-ITER 재검증 (code-review 픽스 적용 후 — 최신, delta-focused + no-regression)
 
-### 적용된 픽스 (git ground truth로 확인 — Generator 주장 아님)
+### 적용된 픽스 (git ground-truth diff로 확인 — Generator 주장 아님)
+- **#2 (LoadedQtyByCell bounded fetch)**: DB 쿼리에 전역 하한 `minFrom = activeFrom.Values.Min()` 추가
+  (`sc.CWrittenAt >= minFrom` + `cellIds.Contains`) 로 이력 전량 fetch 방지. 셀별 정밀 하한(`x.CWrittenAt >= from`,
+  piece 중복 제거)은 in-memory 유지. **의미 불변**: 모든 셀의 `from >= minFrom`이므로 DB 사전필터가 어떤 셀에도
+  필요한 행을 누락시키지 않음 → 배정-기간 스코프 결과 동일. EC-11 GREEN로 실증.
+- **#1 (Finalize SortedQty ExecuteUpdate)**: RMW+RowVersion 충돌이 Finalize 전체를 롤백시키던 증폭 제거 →
+  `_db.OrderItems.Where(Id==itemId).ExecuteUpdate(SortedQty + addQty, UpdatedAt=now)` 원자 증가(명시 tx 참여).
+  ExecuteUpdate가 추적 우회이므로 완료 판정용 **재-read**(`!OrderItems.Where(OrderId==orderId).Any(SortedQty<PlannedQty)`).
+  `wasAlreadyLoaded` 멱등 가드 보존 → 재-Finalize 중복 가산 0. 완료는 정확히 SortedQty==PlannedQty(>=)에서 전이.
+- **#3/#4/#5/#7 cleanup**: 변경 표면 여전히 9파일(Wcs.Api 5 production + tests 4). PlcGateway/Core diff 빈 출력 유지.
 
-- **I-1 — 워드 쓰기 상한 검증(silent (short) wrap 방지):**
-  - `WcsOptions.cs`: 신규 `OpsWriteLimits` 레코드 — `MaxTgtFloor`/`MaxCellNo`/`MaxCellSeq`(설정값) + 하드 타입 상한 `RegisterCeiling = short.MaxValue(32767)` 언어 상수. `EffectiveMaxX => Min(설정값, RegisterCeiling)`.
-  - `appsettings.json`: `Wcs:OpsLimits {MaxTgtFloor:20, MaxCellNo:1000, MaxCellSeq:30000}` + 주석(#7 준수 — 도메인 상한=설정값, 타입 상한=언어 상수).
-  - `OpsController.SetTgtFloor`(O4)·`CellAssign`(O6): `[FromServices] IOptions<WcsOptions>` 주입 후 `floor>EffectiveMaxTgtFloor`/`cellNo>EffectiveMaxCellNo`/`seq>EffectiveMaxCellSeq` → `400 BadRequest`. **검증이 `GetBundle`/`Enqueue*Async` 이전**이라 초과값은 enqueue 0(큐 미투입).
-- **I-2 — 멱등 전이 인메모리 재동기:** `DestinationControlService.TransitionAsync` 리팩터 — DB 쓰기는 `!alreadyInState`에서만, `ApplyPauseStateInMemory`(CHUTE)는 Transitioned·AlreadyInState **공통 경로**에서 호출. DB Status↔인메모리 IsPaused divergence를 멱등 재요청 1회로 self-heal.
-- **보호구역 재확인:** `git diff --stat backend/src/Wcs.PlcGateway/` **빈 출력**(코어 무변경 유지). 신규 migration/ModelSnapshot **0건**. `frontend/` **무변경**.
+### 재실행 결과 — FULL GREEN (single-threaded)
+- 첫 시도(기본 parallel)는 **행(hang)** — testhost CPU 8s간 +0.1s(idle). 코디네이터가 경고한 parallel
+  teardown-socket flake 재발로 귀속(fix-induced deadlock 아님). kill 후 오펀 정리.
+- **single-threaded 재실행**(scratchpad `serial.runsettings`: ParallelizeTestCollections=false·MaxParallelThreads=1;
+  repo 무수정): trx Counters `total=312 passed=312 failed=0 error=0 timeout=0 aborted=0 notExecuted=0`.
+  콘솔 `통과!  실패: 0, 통과: 312, 건너뜀: 0, 전체: 312, 기간: 1 m 7 s`. → **312 GREEN·회귀 0·skip 0**.
+- single-threaded 클린 통과 = 행의 원인이 병렬 teardown 경합이지 이번 픽스가 아님을 확정.
 
-### 회귀 0 — 전체 스위트 GREEN (foreground, block)
-
-```
-dotnet test backend/Wcs.sln
-통과!  실패: 0, 통과: 305, 건너뜀: 0, 전체: 305, 기간: 19s   (Wcs.Tests.dll net10.0)
-```
-- 305 = 이전 302 + 신규 3(bound/reconcile). 실패 0 / 건너뜀 0.
-
-### 신규 3건 결정성 + 명시 통과
-
-```
-# isolated OpsControllerTests x3 → 매회 실패 0, 통과 16, 건너뜀 0 (13 기존 + 3 신규, 결정적)
-# 신규 3건 명시:
-통과 OpsControllerTests.O4_FloorAboveBound_Returns400_NoEnqueue [456 ms]
-통과 OpsControllerTests.O2_Idempotent_ReconcilesDivergentInMemoryFlag [66 ms]
-통과 OpsControllerTests.O6_CellNoOrSeqAboveBound_Returns400_NoEnqueue [271 ms]
-     통과: 3
-```
-- **O4_FloorAboveBound**: floor=21(설정 상한 20 바로 위)·floor=70000(short.MaxValue 초과) 둘 다 400 + enqueue 0 단언(`PLC_WRITE/SET_TGTFLOOR` 부재·`STATE/OPS_SET_TGTFLOOR` 부재·Sim D6=0 유지).
-- **O6_CellNoOrSeqAboveBound**: cellNo=1001·seq=30001·cellNo=70000 각각 400 + enqueue 0(`PLC_WRITE/CELL_ASSIGN`·`STATE/OPS_CELL_ASSIGN` 부재).
-- **O2_Idempotent_ReconcilesDivergentInMemoryFlag**: DB만 PAUSED로 직접 전환(서비스 우회)해 인메모리 IsPaused=false divergence 조성 → `GetHold=None`(게이트 열림) 확인 → 멱등 pause 1회 → `outcome=AlreadyInState` + `GetHold=Paused`(self-heal) 단언.
+### 수용 행위 STILL HOLD (trx testName별 outcome 직접 확인 — 전부 Passed)
+- (a) 같은 오더→같은 셀: `E5_..._PersistsUntilOrderComplete_ThenReleased`·`E6_IncompleteOrder_AssignmentPersists_NoPrematureRelease`·`E7_SameOrder_NPieces_AccumulateSameCell_UntilComplete`
+- (b) Capacity+1→IF-05 NG·유출 0: `E8_AssignedCellCapacityExceeded_If05Ng_NoOverflowToSecondCell`·`EC10_AssignedCellFull_FreeCellsExist_NoOverflow_Isomorphic`
+- (c) 완료→release→재사용·0부터: `E9_OrderComplete_CellReused_ByOtherOrder_LoadedFromZero`·`EC11_ReusedCell_LoadedScopedToCurrentAssignment_NotAllTime`
+- 동형/orphan: `EC13_If05_SelectCell_Isomorphism_Sweep`·`EC12_ReleaseEmptyAssignment_RollsBackEmptyOrphan_KeepsLoaded`·`F1_DifferentOrders_EachOwnCell_AllCompleted_DistinctCells`
+- **EC-11 (배정-기간 스코프)**: bounded-fetch(#2) 후에도 Passed — 재사용 셀 A의 옛 적재(2) 미오염·B 0부터(t0/t0+20 명시 타임스탬프).
+- **SortedQty 완료 회계(#1)**: E5(PlannedQty=2, 2 piece→정확히 완료·release)·E9(완료→재사용) Passed — ExecuteUpdate 후 완료가 정확히 ==PlannedQty에서 전이·중복 가산 0.
 
 ### 위생 (fix-iter 재확인)
+- 빌드 0 오류. `: warning CS` grep 0건 → **신규 CS 경고 0**. 경고 10 전부 선재 NU1903(SQLitePCLRaw).
+- PlcGateway/Core diff 빈 출력, frontend 무접촉, 마이그레이션 0(스키마 무변·provider-neutral).
+- 재실행 후 `Wcs.Sim3ds.exe`/`Wcs.Api.exe`/testhost **오펀 0**(정리 확인). Sim TCP + in-memory SQLite 전용 — COM1/RTU/현장 DB 미접촉.
 
-- **빌드**: `오류 0개 / 경고 10개`. 경고 전량 `NU1903`(SQLitePCLRaw 2.1.10 advisory) — 전 프로젝트 공통 선재 부채, F3a/픽스 무관·신규 0. → 0 error / 0 new warning.
-- **고아 프로세스 0**: 재실행 후 standalone `Wcs.Api.exe`/`Wcs.Sim3ds.exe` 잔류 없음(OpsControllerTests는 in-process Sim; 별 exe 미기동). 코디네이터 경고한 외부 file-lock 재현 없음(빌드 정상 3.77s).
-- **안전 규율**: 검증 전량 Sim3ds TCP + in-memory SQLite 스크래치. COM1/RTU/현장 DB 미접근.
-
----
-
-## (초기 검증 원문 — 302 기준, 참고용 보존)
-
-### 0. 핸드오프·ground-truth 게이트
-
-- **`## IMPLEMENTATION COMPLETE — S-F3a` 마커 존재 확인.** `tasks/sprint-log.md`는 stray null byte로 git이 binary로 취급하나 `grep -a`로 마커 판독 가능. 자동 FAIL 사유(마커 부재) 아님.
-- **브랜치 = `feat/f3a-ops-backend`.** F3a 변경 = working-tree 미커밋. stale-resend 아님(diff가 계약+픽스와 일치).
-
-### 3. OpsController O1~O6 동작 — 계약 대비 [Completion #2]
-
-13개 원 [Fact] + 3 신규 = 16 통합 테스트, 실 HTTP 왕복(WebApplicationFactory + Sim3ds TCP):
-
-- **O4 SetTgtFloor**: 200 + Sim D6 반영 + `PLC_WRITE/SET_TGTFLOOR`(컨슈머 EmitWrite 전용 = 단일 큐 경유 증거) + `STATE/OPS_SET_TGTFLOOR`. 핑퐁: TgtFloor≠0 재요청 시 `pingPongGuard=true` 정직 보고 + D6 미덮임(#2). floor<1 → 400(#3). **floor>상한 → 400·enqueue 0(I-1)**.
-- **O5 ClearR**: 200 → Sim R_Flag=0·RCellNo=0·RSeq=0 + `PLC_WRITE/CLEAR_R`.
-- **O6 CellAssign**: 200 → Sim C 수신 + `PLC_WRITE/CELL_ASSIGN`. **cellNo/seq>상한 → 400·enqueue 0(I-1)**.
-- **O2/O3 소터**: pause→IF-05 NG(dispatch 게이트 PAUSED)·resume→OK 복원 + DB Status + `destination_event(PAUSED/RESUMED, operator_id)`.
-- **O2/O3 슈트**: GetHold None→Paused→None(인메모리) + DB Status. 멱등: 재요청 AlreadyInState + event 중복 0. **divergence self-heal(I-2)**.
-- **O1 clear / A-8**: FULL 슈트 → clear → None 복구 실증 + `destination_event(CLEARED, operator_id)`.
-- **edge**: operatorName 누락/공백 → 400; O4~O6 비-SORTER_3D/미등록 → 404; O1 비-CHUTE/미존재 → 404.
-- **라우트 충돌 0**: `/api/ops/*` ⊥ `/api/v1/*`·`/api/monitor/*`(동일 factory에서 IF-05와 공존 실증).
-
-### 4. 단일 큐 경유·안전 워드 3종
-
-- 워드 쓰기(O4~O6)는 `GetBundle`→`Enqueue*Async`→`_polling.EnqueueAsync(PlcWrite.*)` 위임(신규 래퍼 = 기존 레코드 재사용). `PLC_WRITE`는 컨슈머에서만 발화 → 테스트의 PLC_WRITE 단언 = 컨트롤러 직접 Modbus 호출 부재의 런타임 증거.
-
-### 5. 감사·마이그레이션 [Completion #4/#6]
-
-- clear/pause/resume → `destination_event`(operator_id) + `STATE` 경량. 워드 쓰기 → 컨슈머 `OnWrite` 자동 `PLC_WRITE` + Ops `STATE` 1행. 마이그레이션 0(기존 스키마 재사용, 경량 Q-b).
-
-### 7. 비차단 관찰(Minor — functional PASS 불변)
-
-1. **테스트 호스트 teardown 시 `System.ObjectDisposedException` (OperationLogService.FlushBatchAsync)**: 호스트 종료 중 disposed IServiceProvider 스코프 생성 → `catch(Exception)` WARN 로깅 후 배치 드롭(fail-safe by design). **F3a 미접촉 파일**·관측 스트림 한정(도메인 감사 destination_event 별도·불변)·전건 GREEN. 기존 teardown 경쟁 계열(memory "testhost-teardown-channel-race"). F3a 회귀 아님. 후속 teardown 정리 스프린트에서 flush drain 개선 여지.
-2. **`tasks/sprint-log.md` stray null byte**: git binary 취급. 마커는 `grep -a` 판독 가능하나 커밋 전 텍스트 정규화 권장.
+**FIX-ITER 결론: FUNCTIONAL PASS** — 312 GREEN, 픽스 의미 보존(EC-11·SortedQty 회계 GREEN), 회귀 0, 무접촉 게이트 불변.
 
 ---
 
-## 결론
+## (초기 검증 원문 — S-CELL-ACCUM 최초 handoff 기준, 보존)
 
-Completion Conditions #1~#8 전부 충족(functional 차원). code-review I-1(상한 검증·wrap 방지)·I-2(멱등 인메모리 재동기) 반영 후 **305/305 GREEN**·신규 3건 결정적·O1~O6 계약대로 동작·A-8 해소·operator_id 감사 결선·PlcGateway 코어 및 프론트 무변경·migration 0·빌드 0 error/0 new warning·고아 0. **FUNCTIONAL: PASS.**
+### 1. 핸드오프 마커 — OK
+`tasks/sprint-log.md:3078` `## IMPLEMENTATION COMPLETE — S-CELL-ACCUM` 존재 확인.
+
+### 2. 전체 테스트 — FULL GREEN (fresh 재실행)
+`dotnet test backend/Wcs.sln` 직접 재실행. trx Counters(fresh):
+```
+total="312" executed="312" passed="312" failed="0" error="0" timeout="0" aborted="0" inconclusive="0" notExecuted="0" warning="0"
+콘솔: 통과!  - 실패: 0, 통과: 312, 건너뜀: 0, 전체: 312, 기간: 20 s - Wcs.Tests.dll (net10.0)
+```
+- Generator 주장(305 baseline + 7 신규 = 312) **정확 일치**. 회귀 0 · skip 0 · error 0.
+- 빌드 0 오류. 경고 10건 **전부 선재 NU1903**(SQLitePCLRaw known vuln) — 신규 CS 경고 0(`: warning CS` grep 0건).
+- 참고: 첫 시도가 느렸던 원인은 IF-08 teardown 로그 홍수(`DestinationStatusPusher.Observe`→`ComputeSorter:259` ObjectDisposed)가
+  `tee` 파이프에 동기 기록돼 생긴 I/O 병목뿐 — 이 스프린트 diff 무관·선재 teardown 패턴. 파일 직접 redirect 재실행 시 20s 정상 종료.
+
+### 3. ACCUMULATION 수용 행위 — 확인(테스트 실행 GREEN + 코드 판독 일치)
+| 행위 | 테스트(전부 Passed) | 명시 Capacity 시드 |
+|---|---|---|
+| (a) N piece 같은 오더 → **같은 셀 누적**(cell 1 흩어짐 아님) | `E7_SameOrder_NPieces_AccumulateSameCell_UntilComplete`(실 Sim 3 piece·활성 배정 1·SortedQty=3·동일 CellNo Single) · `E5_...PersistsUntilOrderComplete`(2 piece 동일 셀) · `E6_IncompleteOrder_AssignmentPersists`(3 piece Single(cells)) | 경계는 E8이 커버 |
+| (a)+(b) piece 1·2 같은 셀 → **(Capacity+1)th → IF-05 NG**, 두 번째 셀 유출 0 | `E8_AssignedCellCapacityExceeded_If05Ng_NoOverflowToSecondCell`(`SetAllCapacities(2)`; 3rd `If05Result=="NG"`·`ChuteNo==null`; 그 오더 적재 셀 Single·활성 배정 1; **freeBefore≥1 단언 후에도 유출 0**) | **`SetAllCapacities(destId,2)`** |
+| (b) 빈 셀이 남아 있어도 오버플로 0(동형) | `EC10_AssignedCellFull_FreeCellsExist_NoOverflow_Isomorphic`(`SetAllCapacities(2)`·`FreeCellCount≥1` 단언·`SorterCanAcceptBarcode==false`·`SelectCell==null`·IF-05 200+NG; 대조: 배정 없는 새 오더는 빈 셀로 OK) | **capacity=2** |
+| (c) 오더 완료(SortedQty==PlannedQty) → 셀 release → 다른 오더 재사용·**적재 0부터** | `E9_OrderComplete_CellReused_ByOtherOrder_LoadedFromZero`(실 Sim; A 완료→활성 배정 0→B가 A의 옛 셀 재사용·`SorterCanAcceptBarcode(B)=true`, A 옛 COMPLETED 2 미오염) · `EC11_ReusedCell_LoadedScopedToCurrentAssignment_NotAllTime`(명시 타임스탬프 t0/t0+20으로 배정-기간 스코프 결정적 입증) | E9/EC11 **`SetAllCapacities(2)`** |
+
+- 수용 행위 판정: (a) 같은 셀 누적 · (b) Capacity+1 → NG·두 번째 셀 유출 0(빈 셀 존재해도) · (c) 완료→release→재사용·0부터 — 전부 실행 GREEN + 코드 판독 일치.
+- Capacity>0 명시 시드 요건: E8/E9/EC10/EC11/EC12/EC13 전부 `SetAllCapacities(…, N>0)` 명시. (E7만 기본 시드 `Capacity=null`(무제한)이나, "같은-셀 누적 바인딩" 검증엔 무해 — 경계는 E8이 명시 capacity=2로 커버하므로 갭 아님.)
+
+### 4. 버그-단언 테스트(E5/E6/F1/AB) 정합 개정 — 은폐 삭제/약화 0 (diff 직접 검사)
+- **E5**: `..._ReleasedAfterHandshakeCallback` → `..._PersistsUntilOrderComplete_ThenReleased` **개명·재작성**. 구 단언("매 투입 후 활성 배정 0 수렴") 폐기 → PlannedQty=2로 (미완료: 활성 1·released 0·RUNNING) → (완료: 활성 0·released≥1·COMPLETED)·두 piece 동일 셀. **강화**(삭제/약화 아님).
+- **E6**: `..._NoCellLeak_FindingForCallbackThrow` → `..._IncompleteOrder_AssignmentPersists_NoPrematureRelease`. leak 재정의(=완료 오더 배정 잔존). 미완료 오더 3 piece → 활성 배정 정확히 1·released 0·orphan 0·Single(cells)·SortedQty=3. **강화**.
+- **F1**: 본문 유지·통과, 주석/전제("콜백 ReleaseCell→빈 셀 재할당" → "배정 지속→① 재사용 동일 셀") 정정.
+- **AB(A1/A2)**: 주석 정정(배정 지속→동일 셀 누적). 단언은 `sorter_command.cell_id` ground-truth 유지.
+- 각 개정에 정책 근거를 주석/이름(`[S-CELL-ACCUM 정합 개정]`)으로 명시 — 근거 명시 요건 충족.
+
+### 5. 무접촉 / 안전 게이트 — 확인
+- **PLC-쓰기 동작 변경 0**: `git diff develop -- backend/src/Wcs.PlcGateway/ backend/src/Wcs.Core/` **빈 출력**. RcsController diff는 콜백 무조건 `ReleaseCell` 제거 + OFFLINE 경로 `ReleaseEmptyAssignment` 치환뿐 — `ExecuteHandshakeAsync`/번들 큐/SetTgtFloor 무접촉. 절대규칙 #1(단일 쓰기 큐)·#3(TgtFloor 미클리어) 불변.
+- **frontend 무접촉**: `git diff --stat develop -- frontend/` 빈 출력.
+- **마이그레이션 0건**: `git status` Migrations/ModelSnapshot 파일 0(기존 컬럼 SortedQty/Status/ClosedAt/AssignedAt/CWrittenAt 재사용, 스키마 무변). provider-neutral(LoadedQtyByCell DateTime 비교 in-memory — provider별 SQL 0).
+- **변경 표면**: 정확히 9파일(Wcs.Api 5 production + tests 4) — 계약이 명시한 손대는 지점과 일치.
+- **Sim 전용·현장 무접촉**: E2E/Push 팩토리 `Database:Provider=Sqlite`(in-memory named anchor) + `Sorters:*:Transport=Tcp`(`E2EInfrastructure.cs:163,181,215`). COM1/RTU/SqlServer 현장 DB **미접촉**.
+- **오펀 0**: 실행 후 `Wcs.Sim3ds.exe`/`Wcs.Api.exe` 0(E2E in-process Sim). 잔존 `testhost.exe`(선재 teardown-race 산물)만 있어 정리 완료.
+
+### 6. Stale-resend guard
+평가는 워크트리 아님·live 작업트리(`fix/cell-accumulation-binding`, HEAD `c813c3a`)의 미커밋 변경분에 직접 수행. 평가 전후 `git status --porcelain` 동일(9파일 M) — stale base/누락 없음.
+
+---
+
+## 결론: FUNCTIONAL PASS
+312/312 GREEN(0 fail·0 skip·0 error), 누적/no-overflow/오더완료-release/재사용(0부터)이 확정 정책대로 동작, 버그-단언 테스트(E5/E6/F1/AB) 정합 개정(은폐 삭제 0), PLC-쓰기·frontend·스키마 무접촉, Sim TCP+SQLite 전용. 기능 차원 통과.
+(APPROVED = functional AND correctness-invariant — correctness 차원은 correctness.md 별도 evaluator.)

@@ -317,9 +317,10 @@ public sealed class RcsController : ControllerBase
 
         if (bundle is null)
         {
-            // 번들 없음(OFFLINE) — 셀 즉시 해제
-            cellSelector.ReleaseCell(selectedCell);
-            _log.LogWarning("[IF-10] pId={PId} 3D 번들 없음(OFFLINE) — 핸드셰이크 생략", req.PId);
+            // 번들 없음(OFFLINE) — 핸드셰이크 불가. 방금 만든 **신규(빈) 배정만** 롤백(orphan 잔존 0).
+            //   누적 진행 중(적재≥1) 배정은 유지 → 다음 piece가 같은 셀 누적(S-CELL-ACCUM Scope 5).
+            cellSelector.ReleaseEmptyAssignment(req.ChuteNo, req.Barcode, selectedCell);
+            _log.LogWarning("[IF-10] pId={PId} 3D 번들 없음(OFFLINE) — 핸드셰이크 생략(신규 배정만 롤백)", req.PId);
             return;
         }
 
@@ -375,7 +376,6 @@ public sealed class RcsController : ControllerBase
                     using var _ = scope;
                     var journal   = scope.ServiceProvider.GetRequiredService<ISorterCommandJournal>();
                     var alarmSink = scope.ServiceProvider.GetRequiredService<IAlarmSink>();
-                    var scopedCellSelector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
 
                     if (t.IsCompletedSuccessfully)
                     {
@@ -425,7 +425,9 @@ public sealed class RcsController : ControllerBase
                             pId, selectedCell, destId));
                     }
 
-                    scopedCellSelector.ReleaseCell(selectedCell);
+                    // S-CELL-ACCUM: 매 투입 무조건 ReleaseCell 제거 — 셀 해제는 오더 완료 시점에만
+                    //   (journal.Finalize가 Success 시 SortedQty 가산 + 오더 완료면 오더 스코프 release).
+                    //   실패(MISMATCH/TIMEOUT)·미완료 오더는 배정 유지 → 다음 piece가 같은 셀 누적.
                 }
                 catch (Exception ex)
                 {
