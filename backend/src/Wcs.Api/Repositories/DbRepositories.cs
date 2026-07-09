@@ -556,9 +556,15 @@ public sealed class EfDepositRecorder : IDepositRecorder
 }
 
 /// <summary>
-/// EF Core 기반 셀 선택기.
-/// 선택 우선순위: ①활성 cell_assignment 재사용(같은 오더 + **여유 있는 셀**) → ②빈 셀 할당 → ③없으면 null.
-/// 점유 = released_at IS NULL. 여유 = 현재 투입 수량(LOADED qty 합) &lt; cell.Capacity(NULL/≤0=무제한).
+/// EF Core 기반 셀 선택기 (S-CELL-ACCUM — one-order-one-cell, no overflow).
+/// 배정 유무 분기:
+///   ①오더가 이 소터에 활성 cell_assignment 보유 → 그 배정 셀 중 **여유 있는 셀** 재사용.
+///     보유 셀이 전부 작업수량 도달이면 **null(NG)** — 빈 셀로 오버플로하지 않는다(자기 셀 국한).
+///   ②배정 없음(진짜 신규 오더) → 빈 enabled 셀 신규 할당(cell_assignment 생성).
+///   ③빈 셀 없음 → null.
+/// 점유 = released_at IS NULL. 여유 = 현재 투입 수량(배정-기간 COMPLETED qty 합) &lt; cell.Capacity(NULL/≤0=무제한).
+/// 셀 수량·용량·배정-분기 산출은 SorterCellQty 공유 — IF-05 SorterCanAcceptBarcode와 **동형**.
+/// 배정은 오더 완료(SortedQty==PlannedQty, EfSorterCommandJournal.Finalize)까지 지속 — 매 투입 해제하지 않는다.
 /// </summary>
 public sealed class EfCellSelector : ICellSelector
 {
@@ -584,40 +590,19 @@ public sealed class EfCellSelector : ICellSelector
         {
             var now = DateTime.UtcNow;
 
-            // ① 같은 오더(바코드)의 활성 assignment **중 여유 있는 셀** 재사용.
-            // MAJOR-1 수정(크로스-엔드포인트 정합): IF-05(SorterHasAssignedCellWithRoomForBarcode)는
-            //   "오더 배정 셀 중 여유 있는 셀 있으면 OK"인데, 기존 SelectCell은 FirstOrDefault로
-            //   임의(=용량 무관) 배정 셀을 골라 full 셀에 Capacity 초과 적재가 샜다.
-            //   → 여기서도 SorterCellQty 공유 로직으로 **여유 있는 배정 셀만** 재사용해 byte-consistent.
-            //   결정적 선택을 위해 CellNo 오름차순 중 여유 있는 첫 셀(IF-05 OK ⟹ 적재 가능 불변식 보존).
-            //   보유 셀이 전부 full이면 ②빈 셀 폴백 → 빈 셀도 없으면 ③null(IF-05도 그 경우 NG라 일관).
-            var assignedCells = _db.CellAssignments
-                .Where(a => a.ReleasedAt == null
-                         && a.Cell.DestinationId == dest.Id
-                         && a.Order.Items.Any(i => i.Barcode == barcode))
-                .Select(a => new { a.CellId, a.Cell.CellNo, a.Cell.Capacity })
-                .Distinct()
-                .OrderBy(x => x.CellNo)
-                .ToList();
-
+            // ① 오더가 이 소터에 활성 배정 보유 → 그 배정 셀 중 여유 있는 셀 재사용(no-overflow).
+            //   SorterCellQty 공유(byte-consistent) — CellNo 오름차순 중 여유 있는 첫 셀.
+            //   보유 셀 전부 작업수량 도달이면 null(NG) — ②로 폴백하지 않는다(오더는 자기 셀 하나에 국한).
+            //   → IF-05 SorterCanAcceptBarcode(배정 보유 → 그 셀 여유만)와 정확히 동형.
+            var assignedCells = SorterCellQty.AssignedCellsForBarcode(_db, dest.Id, barcode);
             if (assignedCells.Count > 0)
             {
-                var assignedCellIds = assignedCells.Select(x => x.CellId).ToList();
-                var loaded = SorterCellQty.LoadedQtyByCell(_db, dest.Id, assignedCellIds);
-
-                var roomCell = assignedCells
-                    .FirstOrDefault(x => !SorterCellQty.IsCellAtCapacity(
-                        x.Capacity, loaded.GetValueOrDefault(x.CellId, 0)));
-
-                if (roomCell is not null)
-                {
-                    tx.Commit();
-                    return roomCell.CellNo;  // 여유 있는 배정 셀 재사용(현재수량 < Capacity).
-                }
-                // 보유 배정 셀 전부 작업수량 도달 → ②빈 셀 폴백으로 진행.
+                var roomCell = SorterCellQty.FirstAssignedCellWithRoom(_db, dest.Id, assignedCells);
+                tx.Commit();
+                return roomCell?.CellNo;   // 여유 셀 재사용 / 전부 full이면 null(오버플로 금지).
             }
 
-            // ② 빈 셀 할당
+            // ② 배정 없음(진짜 신규) → 빈 enabled 셀 신규 할당.
             var occupiedCellIds = _db.CellAssignments
                 .Where(a => a.Cell.DestinationId == dest.Id && a.ReleasedAt == null)
                 .Select(a => a.CellId)
@@ -668,21 +653,41 @@ public sealed class EfCellSelector : ICellSelector
         }
     }
 
-    public void ReleaseCell(int cellNo)
+    // ── OFFLINE 등 물리 적재 불가 시 방금 만든 신규(빈) 배정만 롤백 (S-CELL-ACCUM Scope 5) ─────
+    // 그 오더(barcode)가 cellNo 셀에 보유한 활성 배정을, **현재-기간 적재가 0일 때만** release한다.
+    //   · ② 신규 배정(적재 0) → orphan → release(잔존 0).
+    //   · ① 누적 진행 배정(적재 ≥1) → 파기 금지(다음 piece가 같은 셀 누적).
+    // destination(chuteNo) 스코프 — CellNo만으로 전 소터를 해제하던 A-7 회귀 차단(교차 소터 해제 0).
+    public void ReleaseEmptyAssignment(int chuteNo, string barcode, int cellNo)
     {
+        var dest = _db.Destinations
+            .FirstOrDefault(d => d.ChuteNo == chuteNo
+                              && d.DestType == DestType.SORTER_3D
+                              && d.IsActive);
+        if (dest is null) return;
+
         using var tx = _db.Database.BeginTransaction();
         try
         {
-            var now = DateTime.UtcNow;
-            var assignments = _db.CellAssignments
+            var assign = _db.CellAssignments
                 .Include(a => a.Cell)
-                .Where(a => a.Cell.CellNo == cellNo && a.ReleasedAt == null)
-                .ToList();
+                .Where(a => a.ReleasedAt == null
+                         && a.Cell.DestinationId == dest.Id
+                         && a.Cell.CellNo == cellNo
+                         && a.Order.Items.Any(i => i.Barcode == barcode))
+                .OrderByDescending(a => a.AssignedAt)
+                .FirstOrDefault();
 
-            foreach (var a in assignments)
-                a.ReleasedAt = now;
+            if (assign is not null)
+            {
+                var loaded = SorterCellQty.LoadedQtyByCell(_db, dest.Id, new[] { assign.CellId });
+                if (loaded.GetValueOrDefault(assign.CellId, 0) == 0)  // 현재-기간 적재 0 = 빈 orphan.
+                {
+                    assign.ReleasedAt = DateTime.UtcNow;
+                    _db.SaveChanges();
+                }
+            }
 
-            _db.SaveChanges();
             tx.Commit();
         }
         catch
@@ -842,11 +847,17 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
             }
 
             // piece.status 전이 (CELL_ASSIGNED/DEPOSITED → LOADED/MISMATCH/TIMEOUT)
+            //   + 오더완료 release 훅(S-CELL-ACCUM): Success로 **새로** LOADED된 piece만 그 오더의
+            //     order_item.SortedQty를 가산하고, 오더 전량 분류 완료(전 항목 SortedQty>=PlannedQty)면
+            //     OrderStatus.COMPLETED 전이 + 그 오더의 활성 cell_assignment(들)을 release한다.
+            //     같은 트랜잭션(원자) — 매 투입 무조건 해제(구 콜백)를 대체. 오더 미완료 중엔 배정 지속
+            //     → 다음 piece가 같은 셀 누적. 실패(MISMATCH/TIMEOUT/Offline)는 가산·release 없음(배정 유지).
             if (cmd is not null)
             {
                 var piece = _db.Pieces.Find(cmd.PieceId);
                 if (piece is not null)
                 {
+                    bool wasAlreadyLoaded = piece.Status == PieceStatus.LOADED;  // 재-Finalize 중복 가산 가드.
                     piece.Status    = result.Outcome switch
                     {
                         HandshakeOutcome.Success      => PieceStatus.LOADED,
@@ -857,6 +868,48 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
                         _                             => PieceStatus.TIMEOUT,
                     };
                     piece.UpdatedAt = now;
+
+                    if (result.Outcome == HandshakeOutcome.Success
+                        && !wasAlreadyLoaded
+                        && piece.OrderItemId is long itemId)
+                    {
+                        int addQty = piece.Qty;
+
+                        // DB-side 원자 증가 — RMW(읽고-더하고-저장) + RowVersion 충돌이 Finalize 전체를
+                        //   롤백시키던 증폭 제거. 명시 트랜잭션(_db.Database.BeginTransaction)에 참여한다.
+                        //   (one-order-one-cell 하에선 이 SortedQty가 배정-기간 셀 적재량과 동치 — 단, 한 오더가
+                        //    여러 항목으로 한 셀을 공유하면 SortedQty는 항목별이므로 셀 적재량 == 그 오더 항목 합.)
+                        _db.OrderItems
+                            .Where(i => i.Id == itemId)
+                            .ExecuteUpdate(s => s
+                                .SetProperty(x => x.SortedQty, x => x.SortedQty + addQty)
+                                .SetProperty(x => x.UpdatedAt, now));
+
+                        // ExecuteUpdate는 추적 우회 → 완료 판정 위해 재-read(방금 원자 증가 반영·같은 tx/연결).
+                        long orderId = _db.OrderItems.Where(i => i.Id == itemId).Select(i => i.OrderId).First();
+                        // 오더 전량 분류 완료 = 그 오더의 모든 항목이 SortedQty >= PlannedQty.
+                        bool orderComplete = !_db.OrderItems
+                            .Where(i => i.OrderId == orderId)
+                            .Any(i => i.SortedQty < i.PlannedQty);
+
+                        if (orderComplete)
+                        {
+                            var order = _db.Orders.Find(orderId);
+                            if (order is not null && order.Status != OrderStatus.COMPLETED)
+                            {
+                                order.Status    = OrderStatus.COMPLETED;
+                                order.ClosedAt  = now;
+                                order.UpdatedAt = now;
+                            }
+
+                            // 오더 스코프 release — 그 오더의 활성 배정만(orderId가 destination을 함의
+                            //   → 교차 소터 해제 0, A-7 회귀 차단). 셀은 다른 오더가 재사용 가능해진다.
+                            foreach (var a in _db.CellAssignments
+                                         .Where(a => a.OrderId == orderId && a.ReleasedAt == null)
+                                         .ToList())
+                                a.ReleasedAt = now;
+                        }
+                    }
                 }
             }
 
