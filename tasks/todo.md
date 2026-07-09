@@ -21,6 +21,14 @@
 - [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
+## S-F3b 코드리뷰 이연 (Minor — 비차단, 운영제어 UI)
+- [ ] [DRY] `OpsControls.tsx:288-289,328-329,340-341` + desc 문자열이 bound 리터럴(1~20/1~1000/1~30000)을 하드코딩 — `OPS_LIMITS`에서 유도해 `ops.ts` 단일소스 유지.
+- [ ] [DRY] `ConnBadge`가 `OpsPage.tsx:118-137`·`SortersPage.tsx:56-70`에 동일 복제 — 공용 컴포넌트 추출(2번째 사본).
+- [ ] [문서] `OpsControls.tsx:61` `currentTgt`(SignalR word) 사전 핑퐁 힌트는 advisory·응답 `pingPongGuard`가 authoritative임을 한 줄 주석.
+- [ ] [a11y] bound 검증·operatorBlank가 토스트로만(입력에 `aria-describedby`/`aria-invalid` 미연결). 토스트는 aria-live라 발화되나 폴리시.
+- [ ] [문서] 재사용 `Dialog` 초기 포커스가 operator 입력(취소 아님) — 여기선 합당하나 ConfirmDialog 안전기본과 상이함을 문서화.
+- [ ] [cosmetic·Evaluator] readiness "Busy" vs WordPanel Ready=1 이중소스 표기 — 표시 일관성.
+
 ## S-CELL-ACCUM 이연 (Minor — 비차단, 셀 누적 바인딩)
 - [ ] [코드리뷰 #6][방어] `DbRepositories.Finalize`가 이미 COMPLETED된 오더에 초과 piece 도착 시 SortedQty를 PlannedQty 초과로 증가시키고 SelectCell②가 새 셀 배정 — benign(ReservedQty 게이트가 선차단)이나 무가드 경로. `order.Status==COMPLETED`면 증가 skip/로그 검토.
 - [ ] [정합성 minor·후속][동시성] 동시 동일-오더 IF-10을 한 소터에 보내면 SelectCell② read-then-create race로 **중복 활성 배정** 가능. 직렬 dispatch 전제(SPEC §6 물리 직렬)에선 미발생 — 동시 IF-10 허용 시 원자 배정 필요. 관련: [[single-sorter-concurrent-handshake-gap]].

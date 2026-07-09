@@ -31,13 +31,13 @@ interface NavItem {
 }
 
 // ── 모드별 메뉴 세트(docs/B2B-DATAGEN.md §5) ──────────────────────────────────
-//   B2C: 모니터링(F1)·3DS 워드(F2) 활성 + 운영 제어(F3 배지). 기존 항목·동작 무접촉.
+//   B2C: 모니터링(F1)·3DS 워드(F2)·운영 제어(F3b) 활성. 기존 항목·동작 무접촉.
 //   B2B: 데이터 생성(S-B2B-2b) 활성 + 로그·비교·박스·설정(B2B-3 배지 예고).
 const NAV_SETS: Record<UiMode, NavItem[]> = {
   b2c: [
     { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null, title: '실시간 모니터링', subtitle: '작업 데이터 · 로봇 이동중 · 분류 현황' },
     { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null, title: '3DS 워드값', subtitle: 'D0~D6 레지스터 실시간 관찰' },
-    { to: '#', label: '운영 제어', icon: SlidersHorizontal, enabled: false, phase: 'F3', title: '운영 제어', subtitle: '' },
+    { to: '/ops', label: '운영 제어', icon: SlidersHorizontal, enabled: true, phase: null, title: '운영 제어', subtitle: 'Pause/Resume · 워드 편집(안전 3종)' },
   ],
   b2b: [
     { to: '/data-generator', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '테스트 데이터 생성 · 업로드 · 관리' },
