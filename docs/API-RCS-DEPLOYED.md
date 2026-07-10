@@ -155,18 +155,22 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 
 ---
 
-## 6. 아웃바운드 푸시 2채널 (이 환경에선 둘 다 비활성)
+## 6. 아웃바운드 푸시 — IF-08 UpdateChuteState (이 환경에선 비활성)
 
-WCS→RCS 아웃바운드는 **서로 다른 2채널**이다. 이 테스트 배포는 인바운드 전용이라 둘 다 base URL 미설정
-→ **비활성(DORMANT)**. 각각 환경변수 한 값만 주입 후 재기동하면 활성. 인바운드(IF-05/09/10)는 무관하게 정상.
+WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 문서
+[UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md) 기반 확정 계약).
 
-| 채널 | 와이어 | 트리거 | 활성화 env |
-|---|---|---|---|
-| **IF-08** 목적지 상태(ready) | `POST {base}/api/v1/destination-status` + `{chuteNo, ready, timeStamp}` (camelCase) | 목적지 ready 전이 시(+기동 시 전 목적지 부트스트랩) | `Wcs__RcsPush__BaseUrl` |
-| **IF-08b** 슈트 상태 변경(UpdateChuteState) | `PUT {base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (snake_case, 2=Pause·3=Manual open) | 운영자 일시정지/재개(O2/O3) 실제 전이 시 | `Wcs__ChuteStatePush__BaseUrl` |
+| 항목 | 값 |
+|---|---|
+| 와이어 | `PUT {RCS base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| 의미 | `next_state` = 수용 상태 플래그: **3**(Manual open)=받을 수 있음 · **2**(Pause)=받을 수 없음(분류중·이동중·미정렬·오프라인·정지) |
+| 트리거 | 목적지 수용 상태 실제 전이 시(주기 아님 — 소터는 분류 사이클마다 2↔3 반복 가능) |
+| 활성화 env | `Wcs__ChuteStatePush__BaseUrl` (미설정 = DORMANT — **현재 이 배포 상태**) |
 
-IF-08b는 **RCS 제공 문서([UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md)) 기반 확정 계약**.
-상세(응답 형식·재시도·표기 규칙 주의)는 스펙 HTML §IF-08/§IF-08b.
+> ⚠ **현 배포 구현 주의**: 현재 바이너리는 운영자 일시정지/재개(O2/O3) 전이만 2/3으로 발신한다.
+> **수용(ready) 전이 → 2/3 매핑은 확정 계약이며 후속 스프린트에서 반영 예정** — 반영 전까지 이 채널을
+> 활성화해도 분류중/오프라인 전이는 푸시되지 않는다. (초기 설계의 `destination-status` ready 푸시
+> 와이어는 폐지 — 의미만 이 채널의 3/2로 이관. 스펙 HTML §IF-08 참조.)
 
 ---
 
