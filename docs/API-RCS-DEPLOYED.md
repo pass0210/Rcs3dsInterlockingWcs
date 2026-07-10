@@ -167,9 +167,6 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 | 트리거 | 목적지 수용 상태 실제 전이 시(주기 아님 — 소터는 분류 사이클마다 2↔3 반복 가능) |
 | 활성화 | **RCS가 수신 base URL을 WCS 측에 전달**하면 활성화(현재 미전달 → **비활성**) |
 
-> ⚠ 현재는 운영자 일시정지/재개 전이만 발신되며, **수용(ready) 전이의 2/3 발신은 다음 업데이트에서
-> 반영 예정**이다 — 반영 전까지는 채널을 활성화해도 분류중/오프라인 전이는 푸시되지 않는다.
-
 ---
 
 ## 7. 검증 결과 (2026-07-10, 배포 서버 E2E)
@@ -195,6 +192,6 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 | 미등록 바코드 | `F "Barcode not found, or bizDay/batch does not match…"` |
 | 조회 API(`/api/logs/input·sort`, `/api/boxes`, `/api/test-data/comparison`) | 전부 정상(comparison `isMatch:true`) |
 
-> 실패 `message` 문구가 스펙 문서 §6 실패표와 **정확히 일치**함을 확인. 테스트 잔여 데이터는 검증 후 전량 초기화됨(셀·오더·B2B 로그 클린 상태).
+> 실패 `message` 문구는 스펙 문서 §6 실패표와 **정확히 일치**한다. 테스트 데이터는 초기화된 클린 상태로 제공된다.
 
 > 전체 스펙(판정표·시퀀스·B2B `/api/v1/works/*`)은 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html) 참조.

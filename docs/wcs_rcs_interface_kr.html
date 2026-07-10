@@ -88,7 +88,7 @@
       <small>REST / JSON API. WCS는 <b>두 가지 운영 방식</b>으로 RCS와 연동한다 — <b>Part I · B2C</b>(실시간 3D 소터 연동: IF-05/08/09/10, WCS 목적지 판정·상태 푸시)와 <b>Part II · B2B</b>(배치 테스트데이터 방식: <code>/api/v1/works/*</code> 5종, 3DS 핸드셰이크·목적지 판정 없음). 두 방식은 <b>공유 엔드포인트가 없다</b>. 엔드포인트·인증·시간값 중 예시 표기는 협의 가능하나, B2B 와이어 계약(필드·타입·실패 message)은 확정값이다.</small>
     </h1>
     <div style="margin:14px 0;padding:12px 16px;border:1px solid #16a34a;border-left-width:5px;border-radius:6px;background:#f0fdf4;color:#14532d;font-size:14px;line-height:1.6">
-      <b>✅ 배포·검증 완료 (2026-07-10)</b> — Part I(B2C) IF-05/09/10이 Azure 테스트 VM에서 E2E 동작 확인됨.<br>
+      <b>✅ 배포·검증 완료 (2026-07-10)</b> — Part I(B2C) IF-05/09/10이 테스트 서버에서 E2E 동작 확인됨.<br>
       <b>Base URL</b>: <code>http://20.24.10.147:5205</code> (인바운드 전용 테스트 환경 — IF-08 UpdateChuteState 푸시는 RCS base URL 설정 전까지 비활성).<br>
       본 문서는 <b>전체 설계 스펙</b>(판정표·시퀀스·필드계약)이며, 아래 "제안:" 표기 엔드포인트는 위 Base URL로 <b>확정·배포</b>되었다.
     </div>
@@ -225,7 +225,6 @@
 { <span class="s">"flag"</span>: <span class="n">1</span>, <span class="s">"result"</span>: [{ <span class="s">"status"</span>: <span class="n">0</span>, <span class="s">"msg"</span>: <span class="s">""</span>, <span class="s">"chute_id"</span>: <span class="n">15</span>, <span class="s">"last_changed"</span>: <span class="n">1719999999000</span> }] }</pre>
     <div class="note"><b>표기 주의.</b> 이 채널은 RCS 계약 그대로 <b>snake_case</b>(<code>chute_numbers</code>)다 — 나머지 인터페이스(IF-05/09/10)의 camelCase와 다르다. 슈트 번호는 <code>chuteNo</code> 1:1(변환 없음). RCS base URL 미설정이면 이 채널은 <b>비활성(DORMANT)</b> — 현재 테스트 배포가 이 상태이며, base URL 한 값만 설정하면 활성된다.</div>
     <div class="note"><b>발화 빈도 주의.</b> 3D 소터는 분류 사이클마다 <code>2</code>(분류 시작)→<code>3</code>(분류 완료·정렬 복귀)이 반복 발화된다(수 초 간격 가능). RCS 문서상 상태 2/3은 세션 데이터를 지우지 않고 외부 웹훅도 호출하지 않으므로 반복 수신은 무해 전제 — RCS 측 수신 부하 확인 권장.</div>
-    <div class="note"><b>[통합 이력] 초기 설계의 <code>destination-status</code> ready 푸시.</b> 재설계 Phase 2에서 제안했던 별도 와이어(<code>POST /api/v1/destination-status</code> + <code>{chuteNo, ready, timeStamp}</code>)는 <b>RCS가 해당 수신 엔드포인트를 만들지 않는 것으로 확정(2026-07-11)되어 폐지</b> — <b>ready 의미는 그대로 이 채널의 <code>next_state 3/2</code>에 실어 보낸다</b>(true→3, false→2). RCS 수신 API는 UpdateChuteState 하나다.</div>
 
     <h3><span class="ifid">IF-09</span> 도착 보고</h3>
     <p>제안: <code>POST /api/v1/arrival-report</code>. AGV가 목적지 슈트에 도착하면 투입 직전에 1회 호출. <b>WCS가 도착을 기록</b>하고 3D 소터를 수용 준비(운영층 정렬)시킨다. RCS는 IF-08 푸시에서 그 슈트가 <code>3</code>(열림)이 되길 기다렸다가 투입하고 IF-10으로 보고한다.</p>
