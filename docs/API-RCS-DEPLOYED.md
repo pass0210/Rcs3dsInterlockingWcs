@@ -155,12 +155,18 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 
 ---
 
-## 6. IF-08 목적지 상태 푸시 (이 환경에선 비활성)
+## 6. 아웃바운드 푸시 2채널 (이 환경에선 둘 다 비활성)
 
-설계상 WCS는 목적지 상태 변화 시 `POST {RCS base}/api/v1/destination-status`로 푸시하지만, **이 테스트
-배포는 인바운드 전용**이라 `Wcs:RcsPush:BaseUrl` 미설정 → 푸시 **비활성(DORMANT)**. 인바운드(IF-05/09/10)는
-정상. 푸시 수신까지 테스트하려면 RCS 엔드포인트 URL을 WCS 환경변수 `Wcs__RcsPush__BaseUrl`로 주입 후 재기동.
-(페이로드·ready 의미 등 상세는 스펙 HTML §IF-08.)
+WCS→RCS 아웃바운드는 **서로 다른 2채널**이다. 이 테스트 배포는 인바운드 전용이라 둘 다 base URL 미설정
+→ **비활성(DORMANT)**. 각각 환경변수 한 값만 주입 후 재기동하면 활성. 인바운드(IF-05/09/10)는 무관하게 정상.
+
+| 채널 | 와이어 | 트리거 | 활성화 env |
+|---|---|---|---|
+| **IF-08** 목적지 상태(ready) | `POST {base}/api/v1/destination-status` + `{chuteNo, ready, timeStamp}` (camelCase) | 목적지 ready 전이 시(+기동 시 전 목적지 부트스트랩) | `Wcs__RcsPush__BaseUrl` |
+| **IF-08b** 슈트 상태 변경(UpdateChuteState) | `PUT {base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (snake_case, 2=Pause·3=Manual open) | 운영자 일시정지/재개(O2/O3) 실제 전이 시 | `Wcs__ChuteStatePush__BaseUrl` |
+
+IF-08b는 **RCS 제공 문서([UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md)) 기반 확정 계약**.
+상세(응답 형식·재시도·표기 규칙 주의)는 스펙 HTML §IF-08/§IF-08b.
 
 ---
 
