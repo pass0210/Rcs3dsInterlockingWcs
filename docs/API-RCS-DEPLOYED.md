@@ -1,6 +1,6 @@
-# WCS ↔ RCS API 레퍼런스 (배포 기준 · Azure VM 테스트 환경)
+# WCS ↔ RCS API 레퍼런스 (배포 기준 · 테스트 환경)
 
-> RCS 연동 개발자를 위한 **실전 API 레퍼런스**. 아래 예제·응답은 전부 배포 VM에서 실제 호출·검증한
+> RCS 연동 개발자를 위한 **실전 API 레퍼런스**. 아래 예제·응답은 전부 실제 배포 서버에서 호출·검증한
 > 값이다(2026-07-10 E2E). 설계 배경·판정표 전체는 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html) 참조.
 
 ## 0. 접속 정보
@@ -9,7 +9,7 @@
 |---|---|
 | **Base URL** | `http://20.24.10.147:5205` |
 | 프로토콜 | HTTP / JSON (사내망 전제 — 인증 없음, 단일 포트) |
-| 환경 | Azure Linux VM(Ubuntu) + Azure SQL(`Rcs3dsInterlockingWcs`) + Sim3ds(소터 시뮬레이터) |
+| 환경 | 테스트 서버 + Sim3ds(소터 시뮬레이터) |
 | 방향 | **이 테스트 환경은 인바운드 전용** — RCS→WCS(IF-05/09/10)만. WCS→RCS 푸시(IF-08)는 **비활성**(§6). |
 | 자동생성 문서 | **없음**(Swagger/Scalar/OpenAPI 미노출). 이 문서가 API 레퍼런스다. |
 
@@ -30,7 +30,7 @@ curl http://20.24.10.147:5205/health
 ```json
 {"status":"ok","db":true,"sorters":[{"chuteNo":1,"online":true,"lastPollAt":"2026-07-10T04:16:21Z"}]}
 ```
-- `db:true` = Azure SQL 연결 정상. `sorters[].online:true` = 소터(Sim3ds) 폴링 정상.
+- `db:true` = WCS 내부 DB 연결 정상. `sorters[].online:true` = 소터(Sim3ds) 폴링 정상.
 
 ---
 
@@ -144,14 +144,14 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 
 ---
 
-## 5. 테스트 데이터 (현재 Azure DB)
+## 5. 테스트 데이터 (현재 등록분)
 
 - **오더/바코드**: `0701-CELL-01` ~ `0701-CELL-20` (GENERAL, RUNNING, plannedQty=9999). 바코드 = orderNo.
 - **소터**: destId=1, chuteNo=1 (SORTER_3D).
 - **셀**: cellNo 1~20, 각 capacity=3, 각 오더 `0701-CELL-NN`에 사전 배정(enabled).
 - 예: 바코드 `0701-CELL-03` → 셀3에 적재.
 
-> 초기화가 필요하면 시드/리셋 스크립트로 재설정(운영자). 이 DB는 **테스트 전용** — 필드 DB 아님.
+> 초기화가 필요하면 WCS 운영자에게 요청(시드/리셋 스크립트로 재설정). 데이터는 **테스트 전용**.
 
 ---
 
@@ -165,16 +165,11 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 | 와이어 | `PUT {RCS base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
 | 의미 | `next_state` = 수용 상태 플래그: **3**(Manual open)=받을 수 있음 · **2**(Pause)=받을 수 없음(분류중·이동중·미정렬·오프라인·정지) |
 | 트리거 | 목적지 수용 상태 실제 전이 시(주기 아님 — 소터는 분류 사이클마다 2↔3 반복 가능) |
-| 활성화 env | `Wcs__ChuteStatePush__BaseUrl` (미설정 = DORMANT — **현재 이 배포 상태**) |
-
-> ⚠ **현 배포 구현 주의**: 현재 바이너리는 운영자 일시정지/재개(O2/O3) 전이만 2/3으로 발신한다.
-> **수용(ready) 전이 → 2/3 매핑은 확정 계약이며 후속 스프린트에서 반영 예정** — 반영 전까지 이 채널을
-> 활성화해도 분류중/오프라인 전이는 푸시되지 않는다. (초기 설계의 `destination-status` ready 푸시
-> 와이어는 폐지 — 의미만 이 채널의 3/2로 이관. 스펙 HTML §IF-08 참조.)
+| 활성화 | **RCS가 수신 base URL을 WCS 측에 전달**하면 활성화(현재 미전달 → **비활성**) |
 
 ---
 
-## 7. 검증 결과 (2026-07-10, 배포 VM E2E)
+## 7. 검증 결과 (2026-07-10, 배포 서버 E2E)
 
 **Part I · B2C (IF-05/09/10)**
 | 시나리오 | 결과 |
@@ -197,7 +192,6 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 | 미등록 바코드 | `F "Barcode not found, or bizDay/batch does not match…"` |
 | 조회 API(`/api/logs/input·sort`, `/api/boxes`, `/api/test-data/comparison`) | 전부 정상(comparison `isMatch:true`) |
 
-> 실패 `message` 문구가 스펙 문서 §6 실패표와 **정확히 일치**함을 확인. 테스트 잔여 데이터는 검증 후 전량 초기화됨(셀·오더·B2B 로그 클린 상태).
+> 실패 `message` 문구는 스펙 문서 §6 실패표와 **정확히 일치**한다. 테스트 데이터는 초기화된 클린 상태로 제공된다.
 
-> 전체 스펙(판정표·시퀀스·B2B `/api/v1/works/*`)은 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html),
-> 배포·재배포 절차는 [DEPLOY-AZURE-RCS-TEST.md](DEPLOY-AZURE-RCS-TEST.md).
+> 전체 스펙(판정표·시퀀스·B2B `/api/v1/works/*`)은 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html) 참조.
