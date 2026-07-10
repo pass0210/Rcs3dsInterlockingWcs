@@ -104,6 +104,12 @@
     <h1>WCS ↔ RCS Interface Specification
       <small>REST / JSON API. WCS integrates with RCS in <b>two operating modes</b> — <b>Part I · B2C</b> (real-time 3D-sorter integration: IF-05/08/09/10, WCS decides the destination and pushes status) and <b>Part II · B2B</b> (batch test-data method: five <code>/api/v1/works/*</code> endpoints, no 3DS handshake, no destination decision). The two modes <b>share no endpoints</b>. Endpoint/auth/timing values marked as examples are open to discussion, but the B2B wire contract (fields, types, failure messages) is fixed.</small>
     </h1>
+    <div style="margin:14px 0;padding:12px 16px;border:1px solid #16a34a;border-left-width:5px;border-radius:6px;background:#f0fdf4;color:#14532d;font-size:14px;line-height:1.6">
+      <b>✅ Deployed &amp; verified (2026-07-10)</b> — Part I (B2C) IF-05/09/10 verified end-to-end on the Azure test VM.<br>
+      <b>Base URL</b>: <code>http://20.24.10.147:5205</code> (inbound-only test env — IF-08 push disabled).<br>
+      For live integration examples (real request/response curl), monitoring and health, see the <b>deployed API reference</b> <code>docs/API-RCS-DEPLOYED.md</code>.
+      This document is the <b>full design spec</b> (decision tables, sequences, field contract); the endpoints marked "Proposed:" below are <b>finalized and deployed</b> at the Base URL above.
+    </div>
     <div class="actors">
       <span class="ac wcs">WCS — holds orders &amp; destinations (server)</span>
       <span class="ac rcs">RCS — AGV / robot controller (client)</span>
