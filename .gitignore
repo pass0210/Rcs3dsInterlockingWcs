@@ -10,3 +10,20 @@ logs/
 *.db-shm
 *.db-wal
 TestResults/
+
+# dotnet publish 산출물(배포 게시물 — DEPLOY-AZURE-RCS-TEST.md §A 참조, 소스 아님)
+publish/
+
+# ── 프론트엔드(F1) — Node 툴체인 + 빌드 산출물(소스만 커밋) ──
+frontend/node_modules/
+frontend/dist/
+# npm run build 산출물(vite build.outDir) — Wcs.Api 정적 서빙 대상, 소스 아님
+backend/src/Wcs.Api/wwwroot/
+
+# 평가 산출물(스크린샷 증거 — 커밋 안 함)
+screenshots/
+tasks/evidence/
+.claude/
+
+# Playwright MCP 세션 잔여물
+.playwright-mcp/

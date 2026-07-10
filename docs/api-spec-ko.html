@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API 명세서</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 { border-bottom: 2px solid #2c3e50; padding-bottom: 10px; color: #2c3e50; }
+        
+        /* 문서 정보 박스 스타일 */
+        .doc-info {
+            background-color: #f8f9fa;
+            border-left: 4px solid #2c3e50;
+            padding: 15px 20px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+            font-size: 0.95em;
+        }
+        .doc-info p { margin: 5px 0; }
+        .doc-info strong { color: #2c3e50; display: inline-block; width: 80px; }
+
+        .api-section {
+            margin-bottom: 50px;
+        }
+
+        h2 { margin-top: 20px; color: #34495e; border-left: 4px solid #3498db; padding-left: 10px; }
+        h3 { color: #555; margin-bottom: 10px; margin-top: 20px; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        th { background-color: #f4f6f7; color: #333; font-weight: bold; }
+        .method {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            color: white;
+            font-size: 0.9em;
+        }
+        .get { background-color: #3498db; }
+        .post { background-color: #2ecc71; }
+        .endpoint { font-family: monospace; font-size: 1.1em; background: #f9f9f9; padding: 2px 6px; border-radius: 4px; }
+        .required { color: #e74c3c; font-weight: bold; text-align: center; }
+        .not-required { color: #95a5a6; text-align: center; }
+        .length-col { text-align: center; color: #2980b9; font-weight: bold; }
+        .length-col-not { text-align: center; font-weight: bold; }
+        .nested-field { padding-left: 25px !important; color: #555; }
+        
+        /* JSON 코드 블록 스타일 */
+        pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+            font-size: 0.95em;
+            margin-top: 5px;
+            margin-bottom: 15px;
+        }
+        .example-title {
+            font-size: 0.9em;
+            font-weight: bold;
+            color: #e67e22;
+            margin-bottom: 0;
+        }
+
+        /* 크롬 PDF 인쇄 최적화 (페이지 잘림 방지) */
+        @media print {
+            body { padding: 0; }
+            /* 긴 섹션(예: 5. 실패 응답)은 한 페이지를 넘는데, page-break-inside:avoid 를
+               걸면 Chrome 이 넘치는 부분을 잘라버린다. 섹션은 자연스럽게 분할되도록 두고
+               표의 각 행(tr)과 코드블록(pre)만 쪼개지지 않게 보호한다. */
+            .api-section { margin-bottom: 30px; }
+            tr, pre {
+                page-break-inside: avoid; /* 개별 행/코드블록만 분리 방지 */
+                break-inside: avoid;
+            }
+            h2 {
+                page-break-before: always; /* 각 대제목(섹션)을 새 페이지 상단에서 시작 */
+                page-break-after: avoid;
+            }
+            /* 예외: 1번 섹션은 제목/작성정보와 같은 첫 페이지에 유지 */
+            .doc-info + .api-section h2 {
+                page-break-before: auto;
+            }
+            h3 {
+                page-break-after: avoid; /* 제목 바로 다음에서 잘리지 않게 보호 */
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>📋 시스템 연동 API 명세서</h1>
+
+    <div class="doc-info">
+        <p><strong>작성일자 :</strong> 2026년 6월 11일</p>
+        <p><strong>작 성 자 :</strong> 박상원</p>
+        <p><strong>서&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;버 :</strong> <code>http://192.168.0.150:5205</code> (온프레미스, HTTP, 단일 포트)</p>
+        <p><strong>테스트 :</strong> <code>http://20.24.10.147:5205</code> (Azure 테스트 VM — 2026-07-10 배포·검증. 본 <code>/api/v1/works/*</code> 5종 동작 확인됨)</p>
+    </div>
+
+    <div class="api-section">
+        <h2>1. 미작업 차수 요청</h2>
+        <p>미작업 상태인 데이터 목록을 조회합니다.</p>
+        <p><span class="method get">GET</span> <span class="endpoint">/api/v1/works/unprocessed</span></p>
+
+        <h3>요청 데이터 (Request)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>bizDay</td><td>String</td><td class="length-col">8</td><td class="required">Y</td><td>조회할 날짜</td><td>20260327</td>
+                </tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Request URL 예시 (Query String)</p>
+<pre><code>GET /api/v1/works/unprocessed?bizDay=20260327</code></pre>
+	</div>
+	<div class="api-section">
+        <h3>반환 데이터 (Response)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>bizDay</td><td>String</td><td class="length-col">8</td><td class="required">Y</td><td>날짜</td><td>20260327</td></tr>
+                <tr><td>batch</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>배치</td><td>001</td></tr>
+                <tr><td>items</td><td>Array</td><td class="length-col-not">-</td><td class="required">Y</td><td>미작업 데이터 목록</td><td>배열(List) 형태</td></tr>
+                <tr><td class="nested-field">↳ items[].barcode</td><td>String</td><td class="length-col">20</td><td class="required">Y</td><td>바코드</td><td>test001blk100</td></tr>
+                <tr><td class="nested-field">↳ items[].chuteNo</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>슈트번호</td><td>001</td></tr>
+                <tr><td class="nested-field">↳ items[].qty</td><td>Integer</td><td class="length-col-not">-</td><td class="required">Y</td><td>해당 항목으로 묶인 동일 품목 수량 (동일 barcode + chuteNo)</td><td>1 이상</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:0.9em; color:#777;">※ 동일 품목(같은 <code>barcode</code> + <code>chuteNo</code>)은 하나의 항목으로 묶이며, <code>qty</code>가 실제 물품 개수를 나타냅니다.</p>
+        <p class="example-title">💡 Response JSON 예시</p>
+<pre><code>[
+  {
+    "bizDay": "20260327",
+    "batch": "001",
+    "items": [
+      {
+        "barcode": "test001blk100",
+        "chuteNo": "001",
+        "qty": 3
+      },
+      {
+        "barcode": "test001blk101",
+        "chuteNo": "002",
+        "qty": 1
+      }
+    ]
+  }
+]</code></pre>
+    </div>
+
+    <div class="api-section">
+        <h2>2. 투입 데이터 송신</h2>
+        <p>작업 투입에 대한 데이터를 서버로 전송합니다.</p>
+        <p><span class="method post">POST</span> <span class="endpoint">/api/v1/works/input</span></p>
+
+        <h3>요청 데이터 (Request)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>bizDay</td><td>String</td><td class="length-col">8</td><td class="required">Y</td><td>날짜</td><td>20260327</td></tr>
+                <tr><td>batch</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>배치</td><td>001</td></tr>
+                <tr><td>inductionNo</td><td>Integer</td><td class="length-col-not">-</td><td class="required">Y</td><td>인덕션 번호</td><td>1</td></tr>
+                <tr><td>chuteNo</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>슈트 번호</td><td>001</td></tr>
+                <tr><td>pId</td><td>Integer</td><td class="length-col-not">-</td><td class="required">Y</td><td>PID</td><td>12345</td></tr>
+                <tr><td>barcode</td><td>String</td><td class="length-col">20</td><td class="required">N</td><td>바코드</td><td>test001blk100</td></tr>
+                <tr><td>status</td><td>String</td><td class="length-col">2</td><td class="required">Y</td><td>상태</td><td>OK 또는 NG</td></tr>
+                <tr><td>reason</td><td>String</td><td class="length-col">255</td><td class="not-required">N</td><td>사유</td><td>status가 NG일 경우 필수</td></tr>
+                <tr><td>inTime</td><td>String</td><td class="length-col">20</td><td class="required">Y</td><td>투입 시간</td><td>2026-03-27 14:52:04</td></tr>
+                <tr><td>qty</td><td>Integer</td><td class="length-col-not">-</td><td class="not-required">N</td><td>한 번에 투입된 동일 품목 수량</td><td>1~9999, 생략 시 기본값 1</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:0.9em; color:#777;">※ 동일 품목 N개를 묶음 투입할 때 <code>qty</code> = N 으로 한 번만 호출합니다. 생략 시 <code>qty</code>는 1(단일 품목)로 처리됩니다. 서버는 미처리 행 N개를 한 번에 처리하며, 남은 행이 N개 미만이면 아무것도 처리하지 않고 <code>status: "F"</code>를 반환합니다.</p>
+        <p class="example-title">💡 Request JSON 예시</p>
+<pre><code>{
+  "bizDay": "20260327",
+  "batch": "001",
+  "inductionNo": 1,
+  "chuteNo": "001",
+  "pId": 12345,
+  "barcode": "test001blk100",
+  "status": "OK",
+  "reason": "",
+  "inTime": "2026-03-27 14:52:04",
+  "qty": 3
+}</code></pre>
+
+        <h3>반환 데이터 (Response)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>status</td><td>String</td><td class="length-col">1</td><td class="required">Y</td><td>처리 상태</td><td>S: 성공, F: 실패</td></tr>
+                <tr><td>message</td><td>String</td><td class="length-col">100</td><td class="required">Y</td><td>처리 내용</td><td>Success 또는 Fail</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Response JSON 예시</p>
+<pre><code>{
+  "status": "S",
+  "message": "Success"
+}</code></pre>
+    </div>
+
+    <div class="api-section">
+        <h2>3. 분류 데이터 송신</h2>
+        <p>작업 분류 결과에 대한 데이터를 서버로 전송합니다.</p>
+        <p><span class="method post">POST</span> <span class="endpoint">/api/v1/works/classification</span></p>
+
+        <h3>요청 데이터 (Request)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>bizDay</td><td>String</td><td class="length-col">8</td><td class="required">Y</td><td>날짜</td><td>20260327</td></tr>
+                <tr><td>batch</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>배치</td><td>001</td></tr>
+                <tr><td>chuteNo</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>슈트번호</td><td>001</td></tr>
+                <tr><td>pId</td><td>Integer</td><td class="length-col-not">-</td><td class="required">Y</td><td>PID</td><td>12345</td></tr>
+                <tr><td>barcode</td><td>String</td><td class="length-col">20</td><td class="required">Y</td><td>바코드</td><td>test001blk100</td></tr>
+                <tr><td>status</td><td>String</td><td class="length-col">2</td><td class="required">Y</td><td>상태</td><td>OK 또는 NG</td></tr>
+                <tr><td>reason</td><td>String</td><td class="length-col">255</td><td class="not-required">N</td><td>사유</td><td>status가 NG일 경우 필수</td></tr>
+                <tr><td>sortTime</td><td>String</td><td class="length-col">20</td><td class="required">Y</td><td>분류 시간</td><td>2026-03-27 14:55:10</td></tr>
+                <tr><td>qty</td><td>Integer</td><td class="length-col-not">-</td><td class="not-required">N</td><td>한 번에 분류된 동일 품목 수량</td><td>1~9999, 생략 시 기본값 1</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:0.9em; color:#777;">※ 동일 품목 N개를 묶음 분류할 때 <code>qty</code> = N 으로 한 번만 호출합니다. 생략 시 <code>qty</code>는 1(단일 품목)로 처리됩니다. 서버는 미분류 행 N개를 한 번에 처리하며, 남은 행이 N개 미만이면 아무것도 처리하지 않고 <code>status: "F"</code>를 반환합니다.</p>
+        <p class="example-title">💡 Request JSON 예시</p>
+<pre><code>{
+  "bizDay": "20260327",
+  "batch": "001",
+  "chuteNo": "001",
+  "pId": 12345,
+  "barcode": "test001blk100",
+  "status": "OK",
+  "reason": "",
+  "sortTime": "2026-03-27 14:55:10",
+  "qty": 3
+}</code></pre>
+
+        <h3>반환 데이터 (Response)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>status</td><td>String</td><td class="length-col">1</td><td class="required">Y</td><td>처리 상태</td><td>S: 성공, F: 실패</td></tr>
+                <tr><td>message</td><td>String</td><td class="length-col">100</td><td class="required">Y</td><td>처리 내용</td><td>Success 또는 Fail</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Response JSON 예시</p>
+<pre><code>{
+  "status": "S",
+  "message": "Success"
+}</code></pre>
+    </div>
+
+    <div class="api-section">
+        <h2>4. 전체 작업 결과 전송</h2>
+        <p>작업을 모두 마친 후 전체 작업 결과 데이터를 서버로 일괄 전송합니다.</p>
+        <p><span class="method post">POST</span> <span class="endpoint">/api/v1/works/results</span></p>
+
+        <h3>요청 데이터 (Request)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>bizDay</td><td>String</td><td class="length-col">8</td><td class="required">Y</td><td>날짜</td><td>20260327</td></tr>
+                <tr><td>batch</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>배치</td><td>001</td></tr>
+                <tr><td>items</td><td>Array</td><td class="length-col-not">-</td><td class="required">Y</td><td>작업 결과 데이터 목록</td><td>배열(List) 형태</td></tr>
+                <tr><td class="nested-field">↳ items[].barcode</td><td>String</td><td class="length-col">20</td><td class="required">Y</td><td>바코드</td><td>test001blk100</td></tr>
+                <tr><td class="nested-field">↳ items[].chuteNo</td><td>String</td><td class="length-col">3</td><td class="required">Y</td><td>슈트번호</td><td>001</td></tr>
+                <tr><td class="nested-field">↳ items[].qty</td><td>Integer</td><td class="length-col-not">-</td><td class="not-required">N</td><td>해당 항목으로 묶인 동일 결과 품목 수량</td><td>1~9999, 생략 시 기본값 1</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:0.9em; color:#777;">※ 동일 결과 품목(같은 <code>barcode</code> + <code>chuteNo</code>) N개를 묶어 전송할 때 <code>qty</code> = N 으로 한 번만 호출합니다. 생략 시 <code>qty</code>는 1(단일 품목)로 처리됩니다. 서버는 항목당 N개의 <code>WorkResult</code> 행을 생성합니다.</p>
+        <p class="example-title">💡 Request JSON 예시 (그룹화된 배열 형태)</p>
+<pre><code>[
+  {
+    "bizDay": "20260327",
+    "batch": "001",
+    "items": [
+      {
+        "barcode": "test001blk100",
+        "chuteNo": "001",
+        "qty": 3
+      },
+      {
+        "barcode": "test001blk101",
+        "chuteNo": "002"
+      }
+    ]
+  }
+]</code></pre>
+
+        <h3>반환 데이터 (Response)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>status</td><td>String</td><td class="length-col">1</td><td class="required">Y</td><td>처리 상태</td><td>S: 성공, F: 실패</td></tr>
+                <tr><td>message</td><td>String</td><td class="length-col">100</td><td class="required">Y</td><td>처리 내용</td><td>Success 또는 Fail</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Response JSON 예시</p>
+<pre><code>{
+  "status": "S",
+  "message": "Success"
+}</code></pre>
+    </div>
+
+    <div class="api-section">
+        <h2>5. 박스 데이터 수신</h2>
+        <p>박스 분류 기계가 전송하는 박스 단위 마감 데이터(박스번호, 슈트, 내품 바코드 목록)를 수신·저장합니다. Results 와 달리 바코드 등록 여부를 검증하지 않고 단순 저장합니다.</p>
+        <p style="font-size:0.9em; color:#777;">※ <strong>RCS 측에서 박스 마감(패킹 완료) 기능 구현이 가능하다면, 구현 후 박스 마감 시 본 엔드포인트로 박스 데이터를 전송해 주시기 바랍니다.</strong> 현재 구현이 어렵다면 본 엔드포인트는 사용하지 않아도 무방하며, 나머지 4개 엔드포인트 동작에는 영향이 없습니다.</p>
+        <p><span class="method post">POST</span> <span class="endpoint">/api/v1/works/box</span></p>
+
+        <h3>전송 데이터 (Request)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>bizDay</td><td>String</td><td class="length-col">8~10</td><td class="required">Y</td><td>업무일자</td><td>"20260624" 또는 "2026-06-24"</td></tr>
+                <tr><td>batch</td><td>String</td><td class="length-col">1~10</td><td class="required">Y</td><td>배치번호</td><td>"001"</td></tr>
+                <tr><td>boxNo</td><td>String</td><td class="length-col">1~50</td><td class="required">Y</td><td>박스번호</td><td>"BOX-001". (bizDay,batch) 내 유일해야 함</td></tr>
+                <tr><td>chuteNo</td><td>String</td><td class="length-col">1~10</td><td class="required">Y</td><td>슈트번호</td><td>"3" 또는 "003". 서버가 3자리 zero-pad 적용</td></tr>
+                <tr><td>items</td><td>Array</td><td class="length-col-not">-</td><td class="required">Y</td><td>내품 목록</td><td>최소 1개 필수</td></tr>
+                <tr><td class="nested-field">↳ items[].barcode</td><td>String</td><td class="length-col">1~100</td><td class="required">Y</td><td>내품 바코드</td><td>영문자·숫자·하이픈·언더스코어</td></tr>
+                <tr><td class="nested-field">↳ items[].qty</td><td>Integer</td><td class="length-col-not">-</td><td class="not-required">N</td><td>해당 바코드의 수량</td><td>1~9999, 생략 시 기본값 1</td></tr>
+                <tr><td>endTime</td><td>String</td><td class="length-col">1~50</td><td class="not-required">N</td><td>박스 마감 시간</td><td>"2026-06-24 10:00:00"</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Request JSON 예시</p>
+<pre><code>{
+  "bizDay": "20260624",
+  "batch": "001",
+  "boxNo": "BOX-001",
+  "chuteNo": "3",
+  "items": [
+    { "barcode": "BC-001", "qty": 2 },
+    { "barcode": "BC-002", "qty": 1 }
+  ],
+  "endTime": "2026-06-24 10:00:00"
+}</code></pre>
+
+        <h3>반환 데이터 (Response)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>필드명</th><th>타입</th><th class="length-col">길이</th><th style="text-align:center;">필수여부</th><th>설명</th><th>비고</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>status</td><td>String</td><td class="length-col">1</td><td class="required">Y</td><td>처리 상태</td><td>S: 성공, F: 실패</td></tr>
+                <tr><td>message</td><td>String</td><td class="length-col">100</td><td class="required">Y</td><td>처리 내용</td><td>Success 또는 Fail</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 Response JSON 예시</p>
+<pre><code>{
+  "status": "S",
+  "message": "Success"
+}</code></pre>
+    </div>
+
+    <div class="api-section">
+        <h2>6. 실패 응답 (<code>status: "F"</code>)</h2>
+        <p>실패 시 모든 엔드포인트는 <code>{"status": "F", "message": "..."}</code> 를 반환합니다. 클라이언트는 HTTP 상태 코드가 아니라 항상 <code>status</code> 필드로 분기해야 합니다. 아래는 서버가 반환할 수 있는 모든 실패 <code>message</code> 를 엔드포인트별 + 공통 검증/시스템 오류로 정리한 것입니다.</p>
+        <p style="font-size:0.9em; color:#777;">※ <code>status: "F"</code>(서버 응답)와 <code>status: "NG"</code>(요청 본문, RCS가 실패 물품에 대해 보냄)는 다릅니다. "F"는 서버가 호출을 거부/실패한 것이고, "NG"는 정상 수신되어 로그에 기록되는 실패 물품으로 서버는 이를 <em>수락</em>하고 "S"를 반환합니다.</p>
+
+        <h3>공통 — 요청 검증 (HTTP 400)</h3>
+        <p>모든 POST 엔드포인트에 적용. 가장 먼저 실패한 필드의 메시지가 반환됩니다.</p>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>bizDay 가 YYYYMMDD / YYYY-MM-DD 형식 아님</td><td>BizDay must be in YYYYMMDD or YYYY-MM-DD format.</td></tr>
+                <tr><td>status 가 OK/NG 아님 (input, classification)</td><td>Status must be 'OK' or 'NG'.</td></tr>
+                <tr><td>barcode 에 허용되지 않은 문자</td><td>Barcode may only contain letters, digits, hyphen, and underscore.</td></tr>
+                <tr><td>qty 범위 초과 (input, classification, results)</td><td>The field Qty must be between 1 and 9999.</td></tr>
+                <tr><td>results items 배열이 비어 있음</td><td>Items must contain at least one entry.</td></tr>
+                <tr><td>필수 필드 누락 / 타입 불일치</td><td>The {Field} field is required. (DataAnnotations 기본)</td></tr>
+                <tr><td>본문 파싱 불가 / 기타</td><td>Invalid request body.</td></tr>
+            </tbody>
+        </table>
+
+        <h3>1. 미작업 조회 — <code>GET /api/v1/works/unprocessed</code></h3>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>bizDay 쿼리 파라미터 누락</td><td>bizDay parameter is required.</td></tr>
+            </tbody>
+        </table>
+        <p style="font-size:0.9em; color:#777;">※ 미작업 데이터가 없는 것은 실패가 <strong>아닙니다</strong> — 빈 배열 <code>[]</code> 과 HTTP 200 을 반환합니다.</p>
+
+        <h3>2. 투입 — <code>POST /api/v1/works/input</code></h3>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>바코드 미등록, 또는 bizDay/batch 불일치</td><td>Barcode not found, or bizDay/batch does not match the registered data.</td></tr>
+                <tr><td>미처리 행이 qty 보다 적음</td><td>Not enough unprocessed rows: requested {N}, available {M}.</td></tr>
+            </tbody>
+        </table>
+
+        <h3>3. 분류 — <code>POST /api/v1/works/classification</code></h3>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>바코드 미등록, 또는 bizDay/batch 불일치</td><td>Barcode not found, or bizDay/batch does not match the registered data.</td></tr>
+                <tr><td>요청 슈트가 바코드의 슈트와 불일치</td><td>Chute mismatch: barcode {barcode} expected chute(s) [{list}], received {chuteNo}.</td></tr>
+                <tr><td>해당 바코드+슈트의 모든 행이 이미 분류됨</td><td>Barcode {barcode} in chute {chuteNo} has already been fully classified.</td></tr>
+                <tr><td>미분류 행이 qty 보다 적음</td><td>Not enough unprocessed rows: requested {N}, available {M}.</td></tr>
+            </tbody>
+        </table>
+
+        <h3>4. 결과 전송 — <code>POST /api/v1/works/results</code></h3>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>요청 배열이 비어 있음 / null</td><td>No data to process.</td></tr>
+                <tr><td>모든 item 의 barcode 가 비어 INSERT 할 것이 없음</td><td>No valid data to process.</td></tr>
+                <tr><td>바코드 미등록 / bizDay·batch 불일치 (하나라도)</td><td>Barcode '{barcode}' not found, or bizDay/batch does not match the registered data.</td></tr>
+            </tbody>
+        </table>
+
+        <h3>5. 박스 수신 — <code>POST /api/v1/works/box</code></h3>
+        <table>
+            <thead><tr><th>조건</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>동일 (bizDay,batch,boxNo) 재전송</td><td>Box already exists for the given bizDay/batch/boxNo.</td></tr>
+                <tr><td>items 가 빈 배열</td><td>Items must contain at least one entry.</td></tr>
+                <tr><td>qty 범위 초과 (0 이하)</td><td>The field Qty must be between 1 and 9999.</td></tr>
+                <tr><td>달력상 잘못된 날짜 (예: 20261332)</td><td>Invalid date: {value}</td></tr>
+            </tbody>
+        </table>
+
+        <h3>공통 시스템 오류 (모든 엔드포인트)</h3>
+        <table>
+            <thead><tr><th>조건</th><th>HTTP</th><th>message</th></tr></thead>
+            <tbody>
+                <tr><td>레이트리밋 초과 (IP당 분당 300)</td><td>429</td><td>Too many requests. Please try again later.</td></tr>
+                <tr><td>달력상 잘못된 날짜 (예: 20261332)</td><td>400</td><td>Invalid date: {value}</td></tr>
+                <tr><td>미처리 서버 오류</td><td>500</td><td>Internal server error. (TraceId: {id})</td></tr>
+            </tbody>
+        </table>
+        <p class="example-title">💡 실패 응답 JSON 예시</p>
+<pre><code>{
+  "status": "F",
+  "message": "Barcode not found, or bizDay/batch does not match the registered data."
+}</code></pre>
+    </div>
+
+</body>
+</html>

@@ -1,203 +1,161 @@
-# Sprint Contract — S-FOLDER-ORG (src 폴더 구조 정리 / 순수 파일 이동)
+# Sprint Contract — S-CHUTESTATE-PUSH (신규 아웃바운드: WCS → 고객 `PUT /api/UpdateChuteState` · 호스트 미정 · DORMANT 선적용)
 
-> 작성: Planner Subagent · 2026-06-25 · 사용자 확정 3건 반영
-> 성격: **순수 구조 정리 스프린트 — 동작 보존(behavior-preserving) 리팩터링.**
-> 핵심 산출물 = "어느 파일을 어디로 옮길지"의 매핑 표. 코드 본문/네임스페이스/로직 변경은 0.
-> 사용자 확인 대기 (Phase 1 게이트).
+> Planner Subagent · 2026-07-09
+> 발원: 고객이 `PUT /api/UpdateChuteState` API 스펙(`docs/UpdateChuteState_API_EN.md`)을 제공. WCS가 슈트/소터 상태(Pause / Manual-open)를
+> 고객 시스템으로 **아웃바운드 푸시**한다. **HOST(BaseUrl)는 고객이 추후 제공** — 지금은 **완전히 구현하되 BaseUrl 미설정 시 DORMANT(no-op)**로 출하한다.
+> 이는 기존 **RcsPush(IF-08 WCS→RCS 푸시)** 패턴의 구조적 형제(sibling)다.
+>
+> **소비/신설 대상(예상):**
+> - (신설) `backend/src/Wcs.Api/Services/ChuteStatePushClient.cs` — 아웃바운드 PUT 클라이언트(RcsPushClient 미러).
+> - (신설) `backend/src/Wcs.Api/Services/ChuteStatePusher.cs`(또는 동등 observer) — pause/resume 전이 관찰 → 클라이언트 호출.
+> - (수정) `backend/src/Wcs.Api/Infrastructure/WcsOptions.cs` — `ChuteStatePushOptions` + `Wcs:ChuteStatePush` 섹션.
+> - (수정) `backend/src/Wcs.Api/appsettings.json` — `Wcs:ChuteStatePush`(BaseUrl:null).
+> - (수정) `backend/src/Wcs.Api/Program.cs` — named HttpClient + 클라이언트 + observer DI 배선(append).
+> - (관찰 훅) `backend/src/Wcs.Api/Services/DestinationControlService.cs` — pause/resume 전이 이벤트/훅 관찰(코어 동작 무변경).
+> - (신설) `backend/tests/Wcs.Tests/ChuteStatePushTests.cs` — 가짜 고객 서버 대상 검증(RcsPushTests 미러).
+>
+> **스택 PR 교훈(MEMORY):** 이 브랜치는 **develop(또는 최신 통합 브랜치)에서 분기**한다. 스택 브랜치로 병합 금지·병합 후 base 실재 검증.
+
+---
+
+## ✓ Confirmed decisions (LOCKED — 사수 게이트 응답 2026-07-09. 착수 전제·변경 금지)
+
+> 아래 3건은 **사수가 확정한 계약**이다. 추론·기본값이 아니라 **LOCK**이다. Generator/Evaluator는 이 결정을 전제로 동작한다.
+
+- **Q-a (trigger → next_state) — LOCKED.** PAUSE(`DestinationControlService` **PAUSED** 전이, O2) → **`next_state = 2`**(Pause chute). RESUME(**RESUMED** 전이, O3) → **`next_state = 3`**(Manual-open). **둘 다 이 API로 푸시**한다.
+
+- **Q-b (chute_numbers) — LOCKED.** **WCS `Destination.ChuteNo`를 그대로(1:1) 사용**한다 — 목적지의 `ChuteNo`를 `chute_numbers` 값으로 전송(`chute_numbers:[dest.ChuteNo]`). **`ChuteNoMap` config는 도입하지 않는다**(사수가 직접 1:1 선택 — 매핑 테이블 불요, 더 단순). 기존 RcsPush도 `Destination.ChuteNo`를 키로 보내므로 일관. (향후 다른 external ID가 필요한 고객이 생기면 그때 별도 변경 — 지금은 1:1.)
+
+- **Q-c (scope) — LOCKED.** 운영자 **O2/O3 PAUSED/RESUMED 전이만**, **CHUTE·SORTER_3D 목적지 둘 다**. **FULL(만재)·O6(cell-assign) 제외.** (FULL=capacity 자동 상태이지 pause 아님. O6=소터 셀 진단 PLC 쓰기이지 슈트 open/close 아님 — Manual-open=3은 RESUME에 대응.) RcsPush의 복합 `ready` 전이도 별개 채널(무접촉).
 
 ---
 
 ## Goal
 
-`src/**` 전체를 **역할별 폴더로 정리**한다. Wcs.Api는 MVC 레이어(Controllers/Services/Repositories/Dtos/Infrastructure)로 그룹핑하고,
-실익이 있는 다른 프로젝트(PlcGateway의 Modbus 어댑터군)도 폴더로 그룹핑한다.
-**평면 네임스페이스를 유지** — 모든 파일의 네임스페이스 선언은 기존 그대로(`Wcs.Api`, `Wcs.PlcGateway`, …),
-따라서 이번 작업은 **순수 파일 이동(`git mv`)** 이며 네임스페이스·using·코드 본문은 **단 1줄도 바뀌지 않는다**.
-빌드·테스트·런타임 동작은 이동 전후 완전히 동일해야 한다.
-
-비-goal(명시적 제외): 네임스페이스 재구성, using 정리, 코드 리팩터링, 로직 변경, 테스트 단언 변경,
-Modbus 레지스터맵/핸드셰이크/판정 로직 의미 변경, EF 마이그레이션/스냅샷/디자인타임 변경, `.sln` 구조 변경, 신규 파일 생성, 파일 분할.
+고객 제공 `PUT /api/UpdateChuteState` 계약대로 **WCS→고객 아웃바운드 상태 푸시**를 완전 구현하되, **BaseUrl(호스트) 미설정 시 완전 비활성(no-op)**으로 출하한다("host 제외 미리 적용"). 활성화는 **고객이 호스트를 주면 `Wcs:ChuteStatePush:BaseUrl` 한 값만 설정**하면 되며 코드/재빌드/마이그레이션이 필요 없다. 기존 RcsPush(IF-08) 패턴의 구조적 형제로 만들어 폴링·재시도·Fail-Loud·dormant 규약을 재사용한다.
 
 ---
 
-## 사전 조사 결과 (Generator는 이 사실에 의존해도 됨 — Planner가 직접 확인)
+## Implementation Scope (Generator가 구현할 것 — WHAT)
 
-1. **모든 7개 csproj가 SDK-style 암묵 글로빙**이다 (`<Project Sdk="Microsoft.NET.Sdk[.Web]">`).
-   어떤 csproj에도 `<Compile Include>` / `<Compile Remove>` 항목이 **없다**.
-   → **하위 폴더로 파일을 옮겨도 csproj 편집이 전혀 필요 없다.** SDK가 `**/*.cs`를 자동 포함한다.
-   (`obj/`,`bin/`은 SDK가 자동 제외 — 이동 대상 아님.)
-2. **`.sln`(Wcs.sln)은 `.csproj` 경로만 참조**하고, `.csproj` 파일들은 **이동하지 않는다**(프로젝트 루트 유지).
-   → `.sln` 편집 불필요. 솔루션 폴더 구조(NestedProjects)도 무변경.
-3. **`Directory.Build.props` / `.editorconfig` 없음** — 경로 기반으로 파일을 글로빙/제외하는 설정이 솔루션에 존재하지 않는다.
-4. **`Program.cs`(top-level statements) + `ProgramPartial.cs`(`public partial class Program {}`)는 프로젝트 루트 유지(확정).**
-   - top-level statements는 컴파일 단위 하나에만 존재 가능(CS8803). 위치는 컴파일 동작에 영향 없으나 루트 유지가 사용자 확정.
-   - `Program.cs`는 파일-스코프 네임스페이스가 없고(top-level), 내부에 `SorterRegistryFactory`/`SorterConfig`/`SorterTimingOverride`/`TimingOptions`/`PlcPollingHostedAdapter` 클래스가 **같은 파일에 동거**한다. 이 클래스들을 별도 파일로 쪼개는 것은 "파일 분할"이며 **본 스프린트 범위 밖**(순수 이동만). `Program.cs`는 통째로 루트 유지.
-5. **네임스페이스 invariant 확인됨**(이동 후 grep이 이동 전과 동일해야 함):
-   - Wcs.Api: `RcsController.cs`만 `namespace Wcs.Api.Controllers;`, 나머지 12개 전부 `namespace Wcs.Api;` (Program/ProgramPartial은 파일-스코프 네임스페이스 없음 — top-level/partial).
-   - Wcs.PlcGateway: 6개 전부 `namespace Wcs.PlcGateway;`
-   - 폴더는 디렉터리일 뿐 — 네임스페이스는 폴더와 무관하게 기존 선언을 그대로 둔다(C# 평면 네임스페이스 허용).
+### SC-1. 설정 섹션 신설 — `Wcs:ChuteStatePush`(RcsPush 미러, 전부 appsettings·하드코딩 0 절대규칙 #7)
+- `WcsOptions`에 `ChuteStatePushOptions ChuteStatePush` 추가 + `Wcs:ChuteStatePush` 섹션. 필드:
+  - `BaseUrl` (string?, **기본 null → 푸시 DISABLED**). 고객이 추후 제공하는 **유일한 활성화 값**.
+  - `Path` (string, 기본 `"/api/UpdateChuteState"`). BaseUrl에 이어붙임(외부화 기본값 — todo의 RcsPushOptions.Path 문서화 권고 동일 적용).
+  - `RetryCount`(기본 3), `RetryBaseDelayMs`(기본 1000), `RetryMaxDelayMs`(기본 4000), `HttpTimeoutMs`(기본 3000) — RcsPush와 동일 의미의 지수 백오프.
+  - `IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl)` (RcsPush 동형).
+  - **`ChuteNoMap` 없음(Q-b LOCKED = 직접 1:1).** `chute_numbers`는 `Destination.ChuteNo`를 그대로 쓴다 — 매핑 config/딕셔너리/오프셋 도입 금지.
+- appsettings.json에 `Wcs:ChuteStatePush` 블록 추가. **BaseUrl 은 커밋 시 null 유지**(고객이 추후 설정). `_comment_`로 "BaseUrl 설정 시 활성, 미설정 시 dormant — 고객이 호스트 제공 시 이 한 값만 설정하면 활성" 명기.
+- IOptions 지연 소비(즉시 평가 키 아님) — 테스트가 `ConfigureAppConfiguration`으로 BaseUrl 주입 가능해야 함(2026-06-30 교훈: 즉시 평가 config 키만 UseSetting 필요, IOptions 키는 ConfigureAppConfiguration OK).
 
----
+### SC-2. 아웃바운드 클라이언트 신설 — `IChuteStatePushClient` / `ChuteStatePushClient`(RcsPushClient 미러)
+- **IHttpClientFactory 경유 named client**(직접 `new HttpClient()` 금지 — RcsPush 동일). 타임아웃 = `HttpTimeoutMs`(설정값).
+- **HTTP 메서드 = PUT**(RcsPush는 POST — 여기선 계약이 PUT). `PutAsJsonAsync` 또는 동등.
+- **요청 body 형상(계약 정확 준수):** `{ "chute_numbers": [<int>...], "next_states": [<int>...] }` — 두 배열 **동일 길이·인덱스 정렬**. **wire 는 snake_case** — STJ 기본 camelCase에 의존하지 말고 `[JsonPropertyName("chute_numbers")]`·`[JsonPropertyName("next_states")]` 명시(RcsPush의 camelCase 관례와 **다름** — 이 계약의 함정).
+  - 한 전이당 길이-1 배열(단건)로 전송(트리거가 전이당 1건). 배치(다건)는 계약상 허용이나 이번 스코프는 단건 — 배열 구조는 계약대로 유지.
+- **성공/실패 판정:**
+  - 성공 = **2xx + `flag == 1`**(스펙: flag:1=처리 성공). 응답 `result[]`(status/msg/chute_id/last_changed, snake_case)는 파싱해 로깅에 활용(부수).
+  - 실패 = 비2xx(400 missing-params 포함) **또는** body `{ "result": "Failed" }` **또는** flag != 1 → **재시도(설정 경유 지수 백오프)**. 소진 후 **false 반환 + 명시 ERROR 로깅(Fail-Loud, 예외 삼킴 금지)**. 절대 조용히 드롭 금지.
+- **DORMANT no-op:** `IsEnabled==false`(BaseUrl null)면 **HTTP 시도 0**·즉시 false(미발신). RcsPushClient의 방어적 IsEnabled 체크 미러.
+- operation_log 부수 기록(성공/실패 전수) — RcsPush의 `IF08_PUSH` 카테고리 미러(예: `CHUTESTATE_PUSH`), 실패는 WARN.
 
-## Implementation Scope (WHAT / WHERE) — 프로젝트별 파일→폴더 매핑 표
+### SC-3. 트리거 관찰(observer) 신설 — pause/resume 전이 → 클라이언트 호출
+- **관찰 대상:** 운영자 O2 PAUSE(→DestStatus.PAUSED)·O3 RESUME(→DestStatus.NORMAL) 전이. 발원은 `DestinationControlService.TransitionAsync`(CHUTE·SORTER 공통, 커밋 후).
+- **매핑(LOCKED):** PAUSED 전이 → `next_state=2`, NORMAL(RESUMED) 전이 → `next_state=3`(Q-a). `chute_numbers` = **`dest.ChuteNo` 그대로(1:1, Q-b)** — 즉 PAUSED면 `{chute_numbers:[dest.ChuteNo], next_states:[2]}`, RESUMED면 `[..., next_states:[3]]`. 매핑 테이블 없음(unmapped 개념 없음 — 모든 목적지가 ChuteNo를 가짐). "무엇을 푸시하는가"의 게이트는 **전이 종류(PAUSED/RESUMED만)** 지 목적지 필터가 아니다(FULL/O6는 이 훅으로 안 들어옴).
+- **관찰 방식(HOW는 Generator 결정, 단 코어 무변경 필수):**
+  - **권장:** `DestinationControlService`에 **경량 전이 이벤트/notifier**(예: `event Action<long destId, DestStatus target, DestType> OnTransition`)를 추가해 실제 전이(Transitioned) 시 발화 → observer가 구독. CHUTE·SORTER를 **한 훅으로 균일** 처리하고, pause/resume 판정 로직·DB·인메모리 반영은 **한 줄도 바꾸지 않는다**(이벤트 발화만 append — 관찰 전용).
+  - (대안) `ChuteCapacityService.OnChuteStateChanged`(CHUTE만) + 소터 상태 폴 관찰 — RcsPush 방식이나 capacity/ready와 pause를 혼동하기 쉬워 **비권장**(이 API는 복합 ready가 아니라 명시 PAUSED/RESUMED 전이).
+- **관찰-전용 원칙(하드):** pause/resume 코어 동작(전이·감사·인메모리 반영·멱등)을 **바꾸지 않는다**. RcsPush가 게이트웨이를 안 건드리고 관찰만 하듯, 이 observer도 전이 로직을 변경하지 않는다.
+- **AlreadyInState(멱등 no-op) 전이는 푸시하지 않는다**(실제 상태 변화가 아님 — 스퓨리어스 재푸시 방지). 실제 `Transitioned`만 푸시.
+- **Fail-Loud + 비블로킹:** 푸시 실패가 pause/resume HTTP 응답(운영자 O2/O3)을 막지 않는다(fire-and-forget + 내부 재시도). 관찰 루프 예외는 삼키지 않되 코어를 죽이지 않음(RcsPush observe 루프 미러).
 
-> 규칙(전 항목 공통):
-> - **반드시 `git mv <현재경로> <목표경로>`** 를 사용한다(rename 이력 보존 + git rename 감지). 일반 mv+add 금지.
-> - 목표 폴더가 없으면 `git mv`가 자동 생성. (필요 시 Generator가 mkdir 후 `git mv` 해도 무방하나 git이 add/delete가 아닌 rename으로 감지되어야 함.)
-> - **파일 본문은 0줄 변경**. 네임스페이스·using·주석·로직 손대지 않는다.
-> - **csproj/.sln 편집 0** (SDK 글로빙 확인됨 — 사전조사 #1,#2).
-> - 파일명 자체는 변경하지 않는다(폴더만 바뀜).
+### SC-4. DI 배선 — `Program.cs`(append, 기존 배선 무접촉)
+- named HttpClient(`ChuteStatePushClient.HttpClientName`, 타임아웃=설정) + `IChuteStatePushClient` 싱글톤 + observer(IHostedService 또는 이벤트 구독) 등록. RcsPush 등록 블록(Program.cs:175-197) 미러.
+- BaseUrl null이면 observer가 기동 시 경고 로깅 후 비활성(RcsPush StartAsync의 "미설정 → 경고 후 no-op" 미러) — **크래시 0**.
 
-### ① Wcs.Api — MVC 레이어 (사용자 확정, 그대로 적용) — **이동 대상**
-
-현재 모든 `.cs`가 `src/Wcs.Api/` 평면에 있음(RcsController만 이미 Controllers/). 아래로 그룹핑:
-
-| 현재 경로 | 목표 경로 | 비고 |
-|---|---|---|
-| `src/Wcs.Api/Controllers/RcsController.cs` | `src/Wcs.Api/Controllers/RcsController.cs` | **이미 위치 정확 — 이동 없음(유지)** |
-| `src/Wcs.Api/DestinationStatusService.cs` | `src/Wcs.Api/Services/DestinationStatusService.cs` | Services/ |
-| `src/Wcs.Api/DestinationStatusPusher.cs` | `src/Wcs.Api/Services/DestinationStatusPusher.cs` | Services/ |
-| `src/Wcs.Api/ChuteCapacityService.cs` | `src/Wcs.Api/Services/ChuteCapacityService.cs` | Services/ |
-| `src/Wcs.Api/SorterCellQty.cs` | `src/Wcs.Api/Services/SorterCellQty.cs` | Services/ |
-| `src/Wcs.Api/RcsPushClient.cs` | `src/Wcs.Api/Services/RcsPushClient.cs` | Services/ |
-| `src/Wcs.Api/Repositories.cs` | `src/Wcs.Api/Repositories/Repositories.cs` | Repositories/ (인터페이스) |
-| `src/Wcs.Api/DbRepositories.cs` | `src/Wcs.Api/Repositories/DbRepositories.cs` | Repositories/ (EF 구현) |
-| `src/Wcs.Api/Dtos.cs` | `src/Wcs.Api/Dtos/Dtos.cs` | Dtos/ |
-| `src/Wcs.Api/SorterGatewayRegistry.cs` | `src/Wcs.Api/Infrastructure/SorterGatewayRegistry.cs` | Infrastructure/ |
-| `src/Wcs.Api/WcsTeardownGuard.cs` | `src/Wcs.Api/Infrastructure/WcsTeardownGuard.cs` | Infrastructure/ |
-| `src/Wcs.Api/WcsOptions.cs` | `src/Wcs.Api/Infrastructure/WcsOptions.cs` | Infrastructure/ |
-| `src/Wcs.Api/Program.cs` | `src/Wcs.Api/Program.cs` | **루트 유지(확정)** |
-| `src/Wcs.Api/ProgramPartial.cs` | `src/Wcs.Api/ProgramPartial.cs` | **루트 유지(확정)** |
-
-이동 파일 수: **11개** (RcsController·Program·ProgramPartial은 제자리 유지).
-
-### ② Wcs.PlcGateway — Modbus 어댑터 그룹핑 (실익 있음, 사용자 제시 방향) — **이동 대상**
-
-| 현재 경로 | 목표 경로 | 비고 |
-|---|---|---|
-| `src/Wcs.PlcGateway/IModbusMaster.cs` | `src/Wcs.PlcGateway/Modbus/IModbusMaster.cs` | Modbus/ |
-| `src/Wcs.PlcGateway/ModbusMasterFactory.cs` | `src/Wcs.PlcGateway/Modbus/ModbusMasterFactory.cs` | Modbus/ |
-| `src/Wcs.PlcGateway/ModbusTcpMaster.cs` | `src/Wcs.PlcGateway/Modbus/ModbusTcpMaster.cs` | Modbus/ |
-| `src/Wcs.PlcGateway/ModbusRtuMaster.cs` | `src/Wcs.PlcGateway/Modbus/ModbusRtuMaster.cs` | Modbus/ |
-| `src/Wcs.PlcGateway/PlcGateway.cs` | `src/Wcs.PlcGateway/PlcGateway.cs` | **루트 유지** (폴링/큐 코어) |
-| `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` | `src/Wcs.PlcGateway/HandshakeOrchestrator.cs` | **루트 유지** (핸드셰이크 코어) |
-
-이동 파일 수: **4개** (Modbus 어댑터 4종을 `Modbus/`로). PlcGateway·HandshakeOrchestrator는 게이트웨이 코어로 루트 유지.
-
-### ③ Wcs.Core — **폴더 없음 / 유지 권장** (이동 0)
-
-2파일(`DepositDecider.cs`, `Models.cs`). 응집도 높고 폴더 실익 미미 → **무변경 권장**(사용자 확정 3: "2~3파일 프로젝트는 최소화/유지").
-판정 엔진 순수 함수 핵심 — 위치 변경 무의미.
-
-### ④ Wcs.Data — **폴더 없음 / 유지 권장** (이동 0)
-
-3파일(`WcsDbContext.cs`, `Entities.cs`, `DbSeeder.cs`). EF 디자인타임 민감(마이그레이션 두 프로젝트가 `WcsDbContext`를 ProjectReference로 모델 참조) →
-파일 이동 자체는 디자인타임에 무해하나(타입은 폴더 무관) **실익 < 위험**. **무변경 권장**.
-
-### ⑤ Wcs.Sim3ds — **폴더 없음 / 유지 권장** (이동 0)
-
-2파일(`Program.cs`, `SimServer.cs`). 시뮬레이터 — 폴더 실익 없음. **무변경 권장**.
-
-### ⑥ Wcs.Migrations.Sqlite / Wcs.Migrations.SqlServer — **무변경(확정)** (이동 0)
-
-이미 `Migrations/` 구조 + EF 디자인타임 팩토리(`*DesignTimeFactory.cs`)·스냅샷·`<RootNamespace>` 민감.
-사용자 확정 3: **무변경 권장**. 어떤 파일도 옮기지 않는다.
-
-### ⑦ tests/Wcs.Tests — **범위 밖** (사용자 요청은 src 한정)
-
-이동 0. 단 Completion에서 "테스트가 이동된 타입을 여전히 발견(컴파일·실행)"을 검증해야 함.
+### SC-5. 테스트 신설 — `ChuteStatePushTests.cs`(RcsPushTests + FakeRcsServer 미러)
+- **가짜 고객 서버**(FakeRcsServer 미러 — Kestrel 동적 포트, `PUT /api/UpdateChuteState` 수신·기록, 거부 모드 토글) 구축. **인메모리 GREEN을 근거로 삼지 말고 "가짜 서버가 수신한 실제 JSON 본문"으로 입증**(RcsPushTests 메타교훈).
+- 검증 시나리오는 아래 §Verification Scenarios(Backend/API) 참조.
 
 ---
 
-## 절대 무변경 (위반 시 즉시 FAIL)
+## Absolute Rules Compliance (CLAUDE.md)
 
-- **코드 본문·네임스페이스 선언·using 지시문·주석·로직·테스트 단언** — 0줄 변경.
-  (이동 파일의 `git diff -M` 내용 hunk는 비어 있어야 한다 — rename only.)
-- **Modbus 레지스터맵·핸드셰이크·판정 로직의 의미** — 0 변경(파일 위치만 바뀜).
-- **EF 마이그레이션/스냅샷/디자인타임 팩토리** — Migrations 두 프로젝트 전체 무변경. `WcsDbContext`/`Entities`도 무변경 권장(Data 유지).
-- **csproj · .sln · appsettings · 패키지 참조** — 0 변경(사전조사로 불필요 확인됨).
-- **CLAUDE.md 절대규칙(PLC 단일 큐, TgtFloor 가드, Ready 의미 등)** — 코드 의미 무변경이므로 자동 보존.
+- **#1 (PLC 단일 큐):** **무관·무접촉.** 이 스프린트는 **아웃바운드 HTTP**이지 PLC 쓰기가 아니다. Modbus/게이트웨이/쓰기 큐 0 변경. (O6 매핑을 스코프에서 제외한 이유이기도 — PLC 쓰기 경로를 건드리지 않음.)
+- **#7 (하드코딩 금지):** BaseUrl·Path·재시도·백오프·타임아웃·chute_number 매핑 **전부 appsettings**. URL/타이밍/매핑 리터럴 0(Path 기본 리터럴은 외부화된 기본값 — override 가능·규칙 위반 아님).
+- **#6 (필드명):** 이 API 필드는 **고객 계약**(`chute_numbers`/`next_states`/`flag`/`result`/`chute_id`/`last_changed`, snake_case) — WCS 내부 RCS 계약 필드(`chuteNo` 등)와 무관. 계약 필드명 정확 준수.
+- **예외 삼킴 금지:** 푸시 최종 실패는 명시 ERROR 로깅 + false 반환(Fail-Loud). 연결 실패를 성공으로 위장 금지.
+- **#2/#3/#4/#5/#8:** 전부 **무관**(PLC/TgtFloor/Ready/판정엔진 무접촉). `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator` diff 0.
 
 ---
 
-## Evaluation Criteria (가중치)
+## Evaluation Criteria (Evaluator 판정 기준 + 가중치)
 
-| # | 기준 | 가중치 | 판정 방법 |
-|---|---|---|---|
-| ① | **동작 보존** | ★★★ | `dotnet build` 경고 0·오류 0 · `dotnet test` 전체 GREEN(이동 전 통과 수와 동일) · 테스트 호스트 exit 0(teardown hang 0) · 회귀 0 |
-| ② | **순수 이동 입증** | ★★★ | `git status --find-renames`(또는 `git diff -M --stat`)가 **rename(R)만** 표시, add/delete 아님 · 이동 파일 내용 diff 0(rename hunk 비어 있음) · 네임스페이스 선언 grep이 이동 전후 **완전 동일** |
-| ③ | **MVC 레이어 정확성** | ★★ | Wcs.Api 11개 파일이 약속된 폴더(Services/Repositories/Dtos/Infrastructure)에 정확히 배치 · Controllers/RcsController 유지 · Program/ProgramPartial 루트 유지 · PlcGateway Modbus 4종이 `Modbus/`에 |
-| ④ | **csproj/솔루션 무결성** | ★★ | csproj·.sln **편집 0**으로도 빌드/테스트 발견 정상(SDK 글로빙 검증) · 빌드 산출물 동일 |
-| ⑤ | **문서/참조 정합** | ★ (문서, 비차단) | CLAUDE.md "솔루션 구조"가 새 폴더와 **모순되면** 정정. (현 "솔루션 구조"는 프로젝트별 역할만 기술하고 내부 폴더는 언급 안 함 → 모순 없음. 선택적 보강만, 동작 아님) |
+- **[30%] DORMANT 정확성(하드 — "host 제외 미리 적용"의 핵심):** BaseUrl 미설정 시 (i) 기동 크래시 0, (ii) **HTTP 시도 0**(가짜 서버 수신 0), (iii) 인바운드/pause·resume/기존 RcsPush 정상(회귀 0). 가짜 서버 대상 fresh 증거로 입증.
+- **[30%] 계약 정합(고객 API):** 요청 body `{chute_numbers, next_states}` **snake_case·인덱스 정렬·동일 길이**, PUT 메서드, PAUSE→2·RESUME→3 매핑, 200+flag==1 성공/400·`{result:"Failed"}`·flag≠1 실패 처리, 재시도(설정 경유 지수 백오프)·Fail-Loud. **가짜 서버가 수신한 실제 JSON 본문**으로 입증(인메모리 GREEN 불가).
+- **[20%] 관찰-전용·회귀 0(하드 관심):** pause/resume 코어(전이·감사·인메모리·멱등) 동작 무변경(관찰 훅만 append), `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator`·기존 RcsPush 파이프 무접촉, 전체 스위트 baseline + 신규 전건 GREEN.
+- **[15%] Craft·아키텍처(RcsPush 형제성):** IHttpClientFactory 경유·관심사 분리(클라이언트=1건 전송+재시도 / observer=전이 감지+`ChuteNo` 직송), config 외부화, operation_log 부수 기록, 전이 종류 게이트(PAUSED/RESUMED만·FULL/O6 제외), dormant no-op 명료.
+- **[5%] 결정성·인프라 정합:** 가짜 서버 대상 테스트 비-flaky(반복 GREEN), 하드코딩 타이밍/URL 0, RcsPushTests 프리미티브(FakeServer·WaitUntilExact·stable-count) 재사용.
 
 ---
 
 ## Completion Conditions (Evaluator PASS 최소 조건 — 전부 충족)
 
-1. `dotnet build` → **경고 0 / 오류 0**.
-2. `dotnet test` → **전체 GREEN** (이동 직전 통과 테스트 수와 동일, 0 회귀) · 테스트 프로세스 **exit 0**(hang/crash 0 — lessons/todo의 teardown 채널 경쟁 회귀 없음).
-3. `git status --find-renames`(또는 `git status` + `git diff -M`)에 **신규(??)/삭제(D) 단독 항목이 없고 rename(R)만** — 즉 모든 이동이 rename으로 감지.
-4. 이동된 모든 파일의 **내용 diff가 0**: `git diff -M` 에서 이동 파일에 `+`/`-` 본문 라인이 나오면 FAIL(rename hunk만 허용).
-5. **네임스페이스 선언 grep 불변**: 이동 전후 `^namespace` grep 결과(파일별 선언 문자열)가 동일.
-   - 이동 전 기준값(사전조사 #5): Wcs.Api = 11×`namespace Wcs.Api;`(이동) + 1×`namespace Wcs.Api.Controllers;`(RcsController, 유지) + Program/ProgramPartial 2개(네임스페이스 없음) / PlcGateway = 6×`namespace Wcs.PlcGateway;`.
-6. **EF 디자인타임 무영향**: Migrations 두 프로젝트 컴파일 성공. (선택 강검증: 인프라 가능 시 `dotnet ef migrations list` 또는 `dotnet ef dbcontext info`가 이동 전과 동일 결과.)
-7. Migrations 두 프로젝트 + Core/Data/Sim3ds(유지 권장 프로젝트)는 **git status에 어떤 변경도 없어야** 함(무변경 확약).
+1. **전체 스위트 GREEN:** `dotnet test backend/Wcs.sln` = **착수 시 clean run으로 확정한 baseline(직전 기록 ~312건 부근) + 신규 ChuteStatePush 테스트** 전건 GREEN. 단일 run 신뢰 금지(실-Sim I/O 테스트 부하 flake 이력 — 관련군 반복 또는 ≥5회로 결정성 확인).
+2. **신규 테스트(스펙 입증 — 가짜 고객 서버 수신 본문 기반):**
+   - **CS-PUSH-1** PAUSE 전이 → 가짜 서버가 `{"chute_numbers":[dest.ChuteNo],"next_states":[2]}`(snake_case·정렬·ChuteNo 직송) 정확히 1건 수신. CHUTE·SORTER_3D 목적지 둘 다 대상임을 커버.
+   - **CS-PUSH-2** RESUME 전이 → `{"chute_numbers":[dest.ChuteNo],"next_states":[3]}` 정확히 1건 수신.
+   - **CS-PUSH-3** scope 게이트: FULL(만재/capacity) 상태 변화·O6 CellAssign은 **이 API 발신 0건**(PAUSED/RESUMED 전이만 푸시 — Q-c LOCKED). AlreadyInState 멱등 pause도 재푸시 0건(실제 전이만).
+   - **CS-PUSH-4** 성공 응답 처리: 200 `{flag:1, result:[...]}` → 성공(재시도 없음).
+   - **CS-PUSH-5** 실패 처리: 비2xx / `{result:"Failed"}` / flag≠1 → 재시도(설정 백오프) 후 소진 → **false + ERROR 로깅**, 조용한 드롭 0. 복구 후 다음 전이 정상 도달.
+   - **CS-PUSH-6 (DORMANT·핵심)** BaseUrl null → 기동 크래시 0 · pause/resume 발생시켜도 **가짜 서버 수신 0건**(HTTP 시도 0) · 인바운드/기존 RcsPush 정상.
+   - **CS-PUSH-7 (payload 정합)** body 키가 정확히 `chute_numbers`·`next_states`(camelCase 아님), 두 배열 동일 길이·인덱스 정렬. PUT 메서드.
+3. **하드코딩 0 · 마이그레이션 0:** URL/타이밍 리터럴 없음(전부 appsettings). `chute_numbers`는 `Destination.ChuteNo` 직송(1:1) — 매핑 config·DB 테이블 **모두 미신설**. 스키마 무변경 → **마이그레이션 0**(신규 마이그레이션 파일이 생기면 계약 위반).
+4. **관찰-전용 증거:** `git diff -- backend/src/Wcs.Api/Services/DestinationControlService.cs`가 **전이 이벤트 발화 append에 국한**(pause/resume 판정·DB·인메모리·멱등 로직 무변경). `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator`·기존 RcsPush(`RcsPushClient`·`DestinationStatusPusher`) diff 0.
+5. **활성화 경로 문서화:** 고객이 호스트 제공 시 설정할 **단 하나의 값 = `Wcs:ChuteStatePush:BaseUrl`**(그 외 추가 설정 불요 — chute_numbers는 ChuteNo 직송)임을 appsettings 주석/PR 설명에 명기. BaseUrl은 커밋 시 **null 유지**(고객 미제공).
+6. **Sim/offline-safe:** 검증은 가짜 고객 서버(in-process Kestrel 동적 포트) + in-memory SQLite(기존 테스트 팩토리) — **실 고객 호스트·실 3DS PLC(COM1/RTU)·현장 DB 미접근**. 푸시 비활성/실패가 WCS 핵심 흐름(인바운드·pause/resume·PLC)을 막지 않음.
 
 ---
 
-## Parallel Modules (optional)
+## Scope OUT (이 계약에 흡수 금지)
 
-N/A (단일 정리 작업). 프로젝트별 폴더 이동은 논리적으로 독립적이나 규모가 작고(이동 15파일) 순차 `git mv` + 단일 빌드/테스트가 더 안전 — 병렬화 실익 없음. 기본 1 Generator.
-
-## Evaluation Dimensions (optional)
-
-functional only (동작 보존 + 순수성 입증). 보안/성능 표면 변화 0(코드 의미 무변경) → 단일 차원 검토. 기본 1 Evaluator.
-
----
-
-## Detected Project Type: **Backend/API**
-
-(프로젝트 신호: 서버측 컨트롤러 `Controllers/RcsController.cs` + ASP.NET Core 진입점 `Program.cs` 존재, 브라우저 향 UI 트리(HTML 셸/클라이언트 렌더 뷰) 부재. 사용자 표현이 아닌 repo 구조로 판별.)
+- **기존 RcsPush(IF-08 WCS→RCS `ready` 푸시) 변경** — 별개 채널. 무접촉(관찰 훅 공유 시에도 RcsPush 파이프 로직 무변경).
+- **FULL(만재)·capacity·복합 ready 를 UpdateChuteState로 푸시** — Q-c 기본 제외(override 시에만).
+- **O6 CellAssign(수동 셀지정)·PLC 쓰기 경로 연동** — 슈트 open/close 상태가 아님. 무접촉(절대규칙 #1 보존).
+- **인바운드 엔드포인트 신설** — 이 API는 WCS가 **호출하는** 아웃바운드. WCS에 새 컨트롤러/라우트 추가 없음.
+- **chute_number 매핑(config·DB·오프셋 일체)** — Q-b LOCKED = `Destination.ChuteNo` 직접 1:1. 매핑 계층 도입 금지(향후 다른 external ID 고객 발생 시 별도 스프린트).
+- **배치(다건) 최적화·전이 코얼레싱** — 계약 배열 구조는 유지하되 이번엔 전이당 단건. 배치는 후속.
+- **프론트/모니터링 UI(설정·상태 표면)** — 요청 없음(dormant 백엔드 전용). UI 추가 없음.
 
 ---
 
-## Verification Scenarios (Backend/API — 본 스프린트 표면 = 파일 이동 + 빌드/테스트 보존 + 순수성 입증)
+## Multi-Instance / Project Type / Verification
 
-> 본 스프린트는 HTTP 엔드포인트 동작을 **변경하지 않는다**(순수 이동). 따라서 엔드포인트 행위 검증의 목적은
-> "이동 후에도 동일하게 동작/컴파일됨" 입증이다. 시나리오는 이동 표면(빌드·테스트·git 순수성·디자인타임)에 맞춰 N=8로 결정.
+- **Parallel Modules:** N/A (단일 응집 변경 — Options ↔ Client ↔ Observer ↔ DI ↔ Tests가 한 흐름으로 결선. 병렬 분할 이득 없음). 순차 단일 Generator.
+- **Evaluation Dimensions:** **functional only** — PLC/안전 경로(절대규칙 #1) 무접촉인 순수 아웃바운드 HTTP라 별도 safety 차원 불요. 단 Evaluator는 "관찰-전용·회귀 0"을 functional 기준 [20%] 하드 관심으로 포함 검증(코어 diff 대조).
 
-### Backend/API 슬롯
+- **Detected Project Type:** **Backend/API** — 변경 표면 = 서버측 아웃바운드 HTTP 클라이언트 + observer + DI 배선 + config(모두 `backend/src/Wcs.Api`). 브라우저 진입점/클라이언트 렌더 트리 **무접촉**(프론트 UI 없음). 서버 라우트/서비스 계층만. Web/UI 슬롯 없음.
 
-**(a) 이번 스프린트가 건드린 엔드포인트 목록 (method + path)** — *행위 무변경, 코드 위치만 이동*:
-- IF-05 계열(투입 가부), IF-09(도착 보고), IF-10(핸드셰이크) — 전부 `Controllers/RcsController.cs` 내. **라우트/시그니처 무변경, 핸들러 파일도 무변경(RcsController 유지)**.
-  핸들러가 의존하는 Services/Repositories/Dtos/Infrastructure 타입들의 **파일이 이동**할 뿐 → 컴파일·DI 해석이 이동 후에도 동일해야 함.
-- 정확한 라우트 문자열은 Generator/Evaluator가 `Controllers/RcsController.cs`에서 확인(본 스프린트는 라우트를 바꾸지 않으므로 "이동 전 == 이동 후"가 검증 포인트).
+- **Verification Scenarios (Backend/API):**
 
-**(b) 엔드포인트별 happy path (기대 입력 → 기대 출력 shape)** — *이동 전후 불변*:
-- 기존 통합 테스트(`tests/Wcs.Tests`의 WebApplicationFactory 기반 IF-05/09/10 시나리오 + Sim3ds 연동)가 **이동 전과 동일하게 GREEN**. 응답 shape(필드 `pId,agvNo,barcode,inductionNo,chuteNo,qty,timeStamp` 등)·상태코드 불변.
-- DI 컨테이너 구성(`Program.cs`의 AddScoped/AddSingleton/AddHostedService 배선)이 이동된 타입(`DestinationStatusService`,`RcsPushClient`,`SorterRegistryFactory` 등)을 여전히 해석 → 앱 부팅 성공(WebApplicationFactory 기동).
+  - **이 스프린트가 건드리는 엔드포인트/표면(method + path):**
+    - **아웃바운드(신규 소비 — WCS가 호출):** `PUT {Wcs:ChuteStatePush:BaseUrl}{Path=/api/UpdateChuteState}` (고객 API). **신규 인바운드 WCS 엔드포인트 없음.**
+    - **트리거(기존·무변경, 푸시 발원):** `POST /api/ops/destinations/{destId}/pause`(→ next_state 2), `POST /api/ops/destinations/{destId}/resume`(→ next_state 3). 이들은 관찰 대상일 뿐 시그니처/동작 무변경.
+    - **검증 대역:** 가짜 고객 서버(in-process Kestrel, `PUT /api/UpdateChuteState` 수신·기록·거부토글) — FakeRcsServer 미러.
 
-**(c) 엔드포인트별 관련 에러 케이스 (적용되는 것만 — 패딩 금지)** — *이동 전후 불변*:
-- 기존 테스트에 존재하는 검증실패 400 · FULL/PAUSED NG · OFFLINE 결과 경로가 **이동 후에도 동일 결과**. (본 스프린트는 새 에러 케이스를 도입하지 않음 — 기존 테스트의 통과/실패 분포가 0 변화.)
+  - **Happy path (입력 → 기대 출력 형상):**
+    - 목적지 **PAUSE**(O2 또는 DestControlService.PauseAsync) → 가짜 서버가 **`{"chute_numbers":[dest.ChuteNo],"next_states":[2]}`** (snake_case·동일 길이·인덱스 정렬·ChuteNo 직송, PUT) 정확히 1건 수신 → WCS가 200 `{flag:1,result:[...]}`를 성공으로 처리(재시도 0). CHUTE·SORTER_3D 둘 다 대상.
+    - 목적지 **RESUME** → **`{"chute_numbers":[dest.ChuteNo],"next_states":[3]}`** 1건 수신 → 200 성공.
+    - AlreadyInState(멱등 재-pause) → 추가 수신 0(실제 전이만 푸시).
 
-### 구조-정리 전용 추가 시나리오 (이 스프린트의 본질 표면)
+  - **관련 에러/경계 케이스(해당하는 것만 — 패딩 금지):**
+    - **DORMANT (BaseUrl null):** pause/resume 발생 → 가짜 서버 **수신 0**(HTTP 시도 0)·기동 크래시 0·인바운드 정상. (이 API의 400 missing-params는 WCS가 항상 두 배열을 함께 보내므로 정상 경로엔 미발생 — 방어적 처리만 유지.)
+    - **처리 실패(고객 500/비2xx 또는 `{result:"Failed"}` 또는 flag≠1):** 재시도(설정 지수 백오프) → 소진 시 **false + ERROR 로깅**(Fail-Loud), 조용한 드롭 0. 이후 복구되면 다음 전이 정상 도달.
+    - **scope 게이트:** FULL(만재)·O6 CellAssign 상태 변화 → **무발신**(수신 0) — PAUSED/RESUMED 전이만 푸시(Q-c LOCKED).
+    - **취소/종료:** 호스트 종료 시 재시도 루프 취소 전파(미발신 유지) — RcsPushClient 취소 처리 미러.
 
-1. **빌드 무결성**: clean 후 `dotnet build` → 경고 0/오류 0. (csproj 미편집으로도 성공 = SDK 글로빙 검증.)
-2. **테스트 보존**: `dotnet test` 전체 GREEN, 통과 수 = 이동 전 통과 수, 프로세스 exit 0(teardown hang 0).
-3. **git rename 순수성**: `git diff -M --stat` / `git status --find-renames` 가 이동 파일을 전부 rename(R100 등)으로 표시, 내용 hunk 0.
-4. **네임스페이스 불변**: 이동 전후 `^namespace` grep 결과 동일(사전조사 #5 기준값과 일치).
-5. **Wcs.Api MVC 배치 확인**: 11개 이동 파일이 Services/Repositories/Dtos/Infrastructure에 정확 배치, Controllers/Program/ProgramPartial 위치 정확.
-6. **PlcGateway Modbus 배치 확인**: 4종 어댑터가 `Modbus/`에, PlcGateway/HandshakeOrchestrator 루트 유지.
-7. **EF 디자인타임 무영향**: Migrations 두 프로젝트 컴파일 성공 + (인프라 가능 시) `dotnet ef` 메타 조회가 이동 전과 동일. Migrations/Core/Data/Sim3ds git status 무변경.
-8. **테스트 프로젝트의 타입 발견**: `tests/Wcs.Tests`가 이동된 `Wcs.Api.*` 타입(DTO·Service·Registry 등)을 여전히 참조·컴파일·실행(평면 네임스페이스 유지로 using 변경 불필요).
+  - **관찰(하드):** `WebApplicationFactory<Program>` + 가짜 고객 서버(동적 포트) + in-memory SQLite 로 실행. **가짜 서버가 수신한 실제 JSON 본문**(키/값/배열 정렬)·HTTP 메서드(PUT)·재시도 횟수·operation_log(`CHUTESTATE_PUSH` 성공/실패)로 입증. 인메모리 상태 단언만으로 PASS 금지. **실 고객 호스트·실 PLC·현장 DB 미접근**(기동 설정 증거).
 
----
+  - **회귀 관찰:** 기존 RcsPush(IF-08 VS-PUSH 스위트)·pause/resume(O2/O3 Ops)·인바운드 IF-05/09/10·b2b·모니터링(F1/F2) 무손상. baseline 카운트 유지. `DestinationControlService` 코어 동작(전이·감사·멱등) 무변경 확인.
 
-## 미확정/질문 (확정 3건은 재질문 안 함)
-
-- **(확인 요청, 비차단)** Wcs.Api `Services/` 그룹에 `SorterCellQty.cs`·`RcsPushClient.cs`를 포함했다(둘 다 서비스성 코드). 사용자 명시 목록 "DestinationStatusService·DestinationStatusPusher·ChuteCapacityService·SorterCellQty·RcsPushClient" 5개를 Services로 지정 → 그대로 반영. 이견 없으면 진행.
-- **(제안, 비차단)** Core(2)·Data(3)·Sim3ds(2)는 폴더 실익 < 도입 비용으로 **무변경 권장**. 사용자가 "전체 src honoring"을 원하면 이 셋도 그룹핑 가능하나, 무의미한 폴더 강제 금지 원칙(확정 3)에 따라 유지를 기본값으로 둠. 강제 그룹핑 원하면 알려줄 것.
-
----
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 8 (endpoints-touched, happy-path-per-endpoint, error-cases-per-endpoint, build-integrity, test-preservation, git-rename-purity, namespace-invariance, type-discovery — MVC/Modbus 배치·EF-디자인타임 보강 포함). All slots filled: yes.
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 4 (endpoints touched [method+path], happy path per endpoint, relevant error cases per endpoint, hard observation+regression). All slots filled: yes (Backend/API populated with outbound target + trigger endpoints + fake-server happy [PAUSE→2 / RESUME→3, ChuteNo 1:1] / dormant / failure / scope-gate [FULL·O6 무발신] cases + fresh-body observation and regression; Web/UI slots correctly absent — no browser surface in this sprint). Customer-contract gate CLOSED — Q-a/Q-b/Q-c LOCKED by 사수 2026-07-09 (no open questions remain).

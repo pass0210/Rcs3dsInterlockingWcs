@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <!-- M5: Windows Service 호스팅 (builder.Host.UseWindowsService) -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.5" />
+    <!-- M5-P2 / S-OBSERVABILITY: Serilog 구조화 로깅(콘솔 + 롤링 파일). 레벨·싱크·경로·롤링은
+         전부 appsettings "Serilog" 섹션에서 읽는다(하드코딩 금지·절대규칙 #7). 안정버전. -->
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.4" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <!-- S-B2B-2a: test-data 엑셀 업로드 파싱(신/구양식 자동판별). 원본 BowooTestBatchSystem_v2 검증 라이브러리. -->
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Wcs.Core\Wcs.Core.csproj" />
+    <ProjectReference Include="..\Wcs.PlcGateway\Wcs.PlcGateway.csproj" />
+    <!-- M4: Wcs.Data 참조 복원 — EF Core 리포지토리 구현 -->
+    <ProjectReference Include="..\Wcs.Data\Wcs.Data.csproj" />
+    <!-- M4 BLOCKING FIX: provider별 독립 마이그레이션 어셈블리 — 런타임 로드 필요 -->
+    <ProjectReference Include="..\Wcs.Migrations.Sqlite\Wcs.Migrations.Sqlite.csproj" />
+    <ProjectReference Include="..\Wcs.Migrations.SqlServer\Wcs.Migrations.SqlServer.csproj" />
+  </ItemGroup>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
