@@ -106,7 +106,7 @@
     </h1>
     <div style="margin:14px 0;padding:12px 16px;border:1px solid #16a34a;border-left-width:5px;border-radius:6px;background:#f0fdf4;color:#14532d;font-size:14px;line-height:1.6">
       <b>✅ Deployed &amp; verified (2026-07-10)</b> — Part I (B2C) IF-05/09/10 verified end-to-end on the Azure test VM.<br>
-      <b>Base URL</b>: <code>http://20.24.10.147:5205</code> (inbound-only test env — IF-08 push disabled).<br>
+      <b>Base URL</b>: <code>http://20.24.10.147:5205</code> (inbound-only test env — the IF-08 UpdateChuteState push stays disabled until the RCS base URL is configured).<br>
       For live integration examples (real request/response curl), monitoring and health, see the <b>deployed API reference</b> <code>docs/API-RCS-DEPLOYED.md</code>.
       This document is the <b>full design spec</b> (decision tables, sequences, field contract); the endpoints marked "Proposed:" below are <b>finalized and deployed</b> at the Base URL above.
     </div>
@@ -139,7 +139,7 @@
       <tr><td>3DS integration</td><td><b>Yes</b> — Modbus handshake (IF-06/11/12) · floor alignment · PLC registers</td><td><b>None</b> — no sorter handshake / IF-08 push / floor concept at all</td></tr>
       <tr><td>Direction</td><td>IF-05/09/10 RCS→WCS · IF-08 WCS→RCS push</td><td>All RCS→WCS (<code>unprocessed</code> is GET, the rest POST)</td></tr>
       <tr><td>Response shape</td><td><code>{result, chuteNo}</code> / <code>{result:"OK"}</code></td><td><code>ApiResponse {status:"S"|"F", message}</code> — except <code>unprocessed</code>/<code>results</code>, which are raw/top-level arrays</td></tr>
-      <tr><td>Status axis</td><td><code>ready</code> (bool)</td><td>request <code>status</code> OK/NG (work good/bad) · response <code>status</code> S/F (processing success) — <b>do not conflate</b></td></tr>
+      <tr><td>Status axis</td><td><code>next_states</code> (2=Pause · 3=Open — IF-08 push)</td><td>request <code>status</code> OK/NG (work good/bad) · response <code>status</code> S/F (processing success) — <b>do not conflate</b></td></tr>
     </table>
     <div class="note">This document is split into <b>Part I · B2C</b> (real-time 3D-sorter integration, §1–§8) and <b>Part II · B2B</b> (batch test-data method).</div>
   </section>
@@ -147,18 +147,18 @@
   <div class="part b2c" id="b2c">
     <div class="lbl">Part I · B2C</div>
     <div class="ttl">Real-time 3D-sorter integration</div>
-    <div class="sub">Per-piece processing immediately on the induction scan. RCS calls destination query, arrival report and deposit report (IF-05/09/10); WCS pushes destination status (IF-08) on every change. WCS performs the destination decision and the 3DS Modbus handshake internally. (§1–§8 below)</div>
+    <div class="sub">Per-piece processing immediately on the induction scan. RCS calls destination query, arrival report and deposit report (IF-05/09/10); WCS pushes each destination's receivability (IF-08 UpdateChuteState — <code>3</code>=can receive · <code>2</code>=cannot) on every change. WCS performs the destination decision and the 3DS Modbus handshake internally. (§1–§8 below)</div>
   </div>
 
   <section id="s1">
     <h2><span class="n">1</span> Overview &amp; Roles</h2>
     <p>WCS holds the orders and destination assignments. RCS controls the AGVs/robots. At an induction (infeed) point a robot <b>receives the item(s) onto its tray</b>, asks WCS for the destination, drives to that destination (a chute), and <b>tilts the entire tray quantity at once</b> (full tilt — no partial deposit).</p>
     <ul>
-      <li><b>Two directions.</b> IF-05, IF-09 and IF-10 are RCS→WCS requests (WCS responds). <b>IF-08 is a WCS→RCS push</b> — WCS notifies RCS of each destination's status (a plain chute or a 3D-sorter chute) whenever it changes.</li>
-      <li><b>Arrival notification.</b> When the AGV reaches the chute, RCS sends an <b>arrival report (IF-09)</b>. RCS deposits once the destination is <code>ready</code> in the IF-08 status. (How WCS prepares the 3D sorter internally is not RCS's concern.)</li>
+      <li><b>Two directions.</b> IF-05, IF-09 and IF-10 are RCS→WCS requests (WCS responds). <b>IF-08 (UpdateChuteState) is a WCS→RCS push</b> — WCS notifies RCS whenever a destination's receivability changes (<code>3</code>=can receive, <code>2</code>=cannot).</li>
+      <li><b>Arrival notification.</b> When the AGV reaches the chute, RCS sends an <b>arrival report (IF-09)</b>. WCS records the arrival and prepares the 3D sorter to receive (operating-floor alignment); RCS deposits once that chute turns <code>3</code> (open) in the IF-08 push. (How WCS prepares the 3D sorter internally is not RCS's concern.)</li>
       <li><b>Real-time, continuous.</b> No batch start/stop. Each item is handled as it arrives at induction.</li>
       <li><b>Destination = <code>chuteNo</code>.</b> The destination is addressed by a chute number.</li>
-      <li><b>RCS decides deposit locally.</b> Instead of polling for permission, RCS keeps the latest destination status (from IF-08 pushes) and deposits when that destination is <code>ready</code> — otherwise it waits for the next update.</li>
+      <li><b>RCS decides deposit locally.</b> Instead of polling for permission, RCS keeps each <code>chuteNo</code>'s latest receivability (<code>2/3</code>) from the IF-08 (UpdateChuteState) pushes and <b>deposits when the destination is <code>3</code> (open)</b> — otherwise it waits for the next push. (Whether to move at all is IF-05's <code>OK/NG</code>.)</li>
     </ul>
   </section>
 
@@ -167,7 +167,7 @@
     <table>
       <tr><th style="width:150px">Item</th><th>Detail</th></tr>
       <tr><td>Protocol</td><td>REST over HTTP(S), <code>Content-Type: application/json</code></td></tr>
-      <tr><td>Direction</td><td><b>IF-05 / IF-09 / IF-10</b>: RCS = client, WCS responds. <b>IF-08</b>: WCS = client (pushes status to an RCS endpoint), RCS responds <code>OK</code>.</td></tr>
+      <tr><td>Direction</td><td><b>IF-05 / IF-09 / IF-10</b>: RCS = client, WCS responds. <b>IF-08 (UpdateChuteState)</b>: WCS = client (pushes to an RCS endpoint), RCS responds <code>{flag, result[]}</code>.</td></tr>
       <tr><td>Method</td><td><code>POST</code> for all interfaces (JSON body)</td></tr>
       <tr><td>Encoding</td><td>UTF-8 JSON</td></tr>
       <tr><td>Timeout</td><td><code>3 s</code> request timeout (example — to be agreed)</td></tr>
@@ -184,10 +184,10 @@
       <tr><td><code>agvNo</code></td><td>integer</td><td>Robot (AGV) number</td></tr>
       <tr><td><code>barcode</code></td><td>string</td><td>Item barcode (from the induction scan)</td></tr>
       <tr><td><code>inductionNo</code></td><td>integer</td><td>Induction (infeed) point number</td></tr>
-      <tr><td><code>chuteNo</code></td><td>integer</td><td>Destination number — chute number. <b>Also the key of the IF-08 status push</b> (a destination is a plain chute or a 3D-sorter chute)</td></tr>
+      <tr><td><code>chuteNo</code></td><td>integer</td><td>Destination number — chute number (a destination is a plain chute or a 3D-sorter chute; maps 1:1 to <code>chute_numbers</code> in the IF-08 push)</td></tr>
       <tr><td><code>qty</code></td><td>integer</td><td>Quantity loaded on the tray (same item; may be &gt; 1)</td></tr>
       <tr><td><code>timeStamp</code></td><td>string</td><td>Event time — <b>local time</b> format (e.g. <code>2026-06-08 14:30:00</code>)</td></tr>
-      <tr><td><code>ready</code></td><td>bool</td><td>IF-08 status per <code>chuteNo</code> — the <b>only</b> flag sent to RCS. <code>true</code> = the destination can receive now; <code>false</code> = it cannot. For a <b>plain chute</b>: <code>ready = not full &amp;&amp; not paused</code>. For a <b>3D-sorter chute</b>: <code>ready = online &amp;&amp; aligned (operating floor) &amp;&amp; not sorting (Ready=1)</code> — it looks at <b>operating status only</b>. A sorter's <b>cell full / paused are NOT included in push <code>ready</code></b> (even when full/paused, if the operating status is OK then push <code>ready=true</code>); those two are blocked in <b>IF-05 dispatch</b>, not in the push. WCS folds everything into one boolean</td></tr>
+      <tr><td><code>chute_numbers</code> / <code>next_states</code></td><td>int[] / int[]</td><td><b>IF-08 (UpdateChuteState) only</b> — <b>snake_case</b> per the RCS contract. Index-aligned pairs (<code>chute_numbers[i]</code> ↔ <code>next_states[i]</code>). <code>next_state</code> is the receivability flag: <code>3</code> (Manual open) = can receive · <code>2</code> (Pause) = cannot. See §IF-08 for the formula</td></tr>
     </table>
   </section>
 
@@ -196,8 +196,7 @@
     <table>
       <tr><th style="width:70px">IF</th><th style="width:200px">Name</th><th style="width:140px">Direction</th><th>Summary</th></tr>
       <tr><td><code>IF-05</code></td><td>Destination Query</td><td><span class="tag">RCS → WCS</span></td><td>Destination &amp; quantity decision (piece tracking starts)</td></tr>
-      <tr><td><code>IF-08</code></td><td>Destination Status (push)</td><td><span class="tag" style="background:var(--wcs-soft,#FEEAD9);color:#9A3412">WCS → RCS</span></td><td>WCS pushes each destination's status (chute or sorter) on every change; RCS decides deposit by destination readiness</td></tr>
-      <tr><td><code>IF-08b</code></td><td>Chute State Change — UpdateChuteState (push · fixed contract)</td><td><span class="tag" style="background:var(--wcs-soft,#FEEAD9);color:#9A3412">WCS → RCS</span></td><td>On operator pause/resume (O2/O3) transitions WCS pushes <code>PUT /api/UpdateChuteState</code> (2=Pause · 3=Manual open) — per the RCS-provided document</td></tr>
+      <tr><td><code>IF-08</code></td><td>Destination Receivability — UpdateChuteState (push · <b>fixed contract</b>)</td><td><span class="tag" style="background:var(--wcs-soft,#FEEAD9);color:#9A3412">WCS → RCS</span></td><td>Whenever a destination's receivability changes WCS pushes <code>PUT /api/UpdateChuteState</code> (<code>3</code>=can receive · <code>2</code>=cannot) — per the RCS-provided document. RCS deposits when <code>3</code></td></tr>
       <tr><td><code>IF-09</code></td><td>Arrival Report</td><td><span class="tag">RCS → WCS</span></td><td>AGV arrived at the chute (WCS records it / prepares the sorter)</td></tr>
       <tr><td><code>IF-10</code></td><td>Deposit Report</td><td><span class="tag">RCS → WCS</span></td><td>Report the tilt</td></tr>
     </table>
@@ -223,39 +222,31 @@
 { <span class="s">"result"</span>: <span class="s">"NG"</span>, <span class="s">"chuteNo"</span>: <span class="n">null</span> }</pre>
     <p>On <span class="pill go">OK</span> the RCS drives the AGV to <code>chuteNo</code>. On <span class="pill ng">NG</span> the AGV waits and the call is retried later (see Reason Codes).</p>
 
-    <h3><span class="ifid">IF-08</span> Destination Status (push · WCS → RCS)</h3>
-    <p>Proposed: <code>POST {RCS base}/api/v1/destination-status</code> — endpoint <b>hosted by RCS</b>, WCS is the caller. <b>WCS pushes a destination's status whenever it changes</b> (state-change driven, not periodic). A destination is a plain chute or a 3D-sorter chute — <b>RCS treats them the same</b>. RCS keeps the latest status per <code>chuteNo</code> and, when its AGV is at that chute, deposits as soon as it is <code>ready</code> — otherwise it waits for the next push.</p>
-    <table>
-      <tr><th style="width:230px">Request (WCS → RCS)</th><th>Response (RCS → WCS)</th></tr>
-      <tr><td><code>chuteNo</code>, <code>ready</code>, <code>timeStamp</code></td><td><code>result</code> (OK)</td></tr>
-    </table>
-<pre><span class="c">// request (WCS → RCS · on status change)</span>
-{ <span class="s">"chuteNo"</span>: <span class="n">15</span>, <span class="s">"ready"</span>: <span class="n">true</span>, <span class="s">"timeStamp"</span>: <span class="s">"2026-06-22 14:30:00"</span> }
-
-<span class="c">// response (RCS → WCS)</span>
-{ <span class="s">"result"</span>: <span class="s">"OK"</span> }</pre>
-    <p><code>ready=true</code> = the destination can receive now (OK); <code>ready=false</code> = it cannot (NG). A <b>plain chute</b> is <code>ready=false</code> when <b>full</b> or <b>paused</b> (which WCS manages). A <b>3D-sorter chute</b>'s <code>ready=false</code> is for <b>operating-status reasons only</b> — <b>sorting / moving / not aligned / offline</b>. The sorter's <b>cell full / paused do NOT make push <code>ready</code> false</b> (even when full/paused, if the operating status is OK then <code>ready=true</code>); those two are blocked at IF-05 dispatch. RCS deposits when <code>ready=true</code>; otherwise it holds and waits for the next push.</p>
-
-    <h3><span class="ifid">IF-08b</span> Chute State Change — UpdateChuteState (push · WCS → RCS · fixed contract)</h3>
-    <p><b>A second outbound channel, separate from IF-08 (ready push).</b> This is a <b>fixed wire contract</b> (not a proposal) based on the receiving-API document provided by RCS (<code>docs/UpdateChuteState_API_EN.md</code>). Whenever an operator <b>pauses (PAUSED)</b> or <b>resumes (RESUMED)</b> a destination in WCS, WCS pushes to RCS — applied uniformly to plain chutes and 3D-sorter chutes. (IF-08 is the always-on "can it receive (<code>ready</code>)" state channel; IF-08b is the "an operator paused/resumed it" control-event channel — different purpose and meaning.)</p>
+    <h3><span class="ifid">IF-08</span> Destination Receivability — UpdateChuteState (push · WCS → RCS · <b>fixed contract</b>)</h3>
+    <p>A <b>fixed wire contract</b> based on the receiving-API document provided by RCS (<code>docs/UpdateChuteState_API_EN.md</code>). This is the <b>only</b> WCS → RCS outbound channel. <b>Whenever a destination's receivability (the original "ready" meaning) changes</b>, WCS folds it into <code>next_state</code> and pushes — <code>3</code> (Manual open) = can receive, <code>2</code> (Pause) = cannot. Applied uniformly to plain chutes and 3D-sorter chutes.</p>
     <table>
       <tr><th style="width:230px">Item</th><th>Value</th></tr>
       <tr><td>Endpoint</td><td><code>PUT {RCS base}/api/UpdateChuteState</code> — hosted by RCS, WCS is the caller</td></tr>
       <tr><td>Request (WCS → RCS)</td><td><code>chute_numbers</code>: int[] · <code>next_states</code>: int[] — <b>snake_case</b>, index-aligned (<code>chute_numbers[i]</code> ↔ <code>next_states[i]</code>). WCS sends <b>one entry</b> (length 1) per transition</td></tr>
-      <tr><td>State values</td><td><code>2</code> = Pause chute · <code>3</code> = Manual open (= resume)</td></tr>
+      <tr><td>State mapping</td><td><code>3</code> = Manual open = <b>can receive</b> · <code>2</code> = Pause chute = <b>cannot receive</b>. <b>3D sorter</b>: <code>3</code> ⇔ online &amp;&amp; aligned (operating floor) &amp;&amp; not sorting (Ready=1) &amp;&amp; not paused — sorting / moving / not aligned / offline / paused → <code>2</code>. (Cell <b>full is NOT reflected in the push</b> — blocked at IF-05 dispatch.) <b>Plain chute</b>: <code>3</code> ⇔ not full &amp;&amp; not paused</td></tr>
       <tr><td>Response (RCS → WCS)</td><td><code>{flag: 1, result: [{status, msg, chute_id, last_changed}]}</code> / 400 on error</td></tr>
-      <tr><td>Trigger</td><td>Operator pause/resume (O2/O3) — <b>only on an actual transition</b> (idempotent repeats are not sent). Not periodic</td></tr>
-      <tr><td>Retry</td><td>Exponential backoff (configured, default 3× 1s/2s/4s) — non-blocking (never delays the operator's response)</td></tr>
+      <tr><td>Trigger</td><td><b>Only on an actual receivability transition</b> (operator pause/resume included — no send when the value is unchanged). Not periodic. On startup WCS pushes every destination's current state once (bootstrap)</td></tr>
+      <tr><td>Retry</td><td>Exponential backoff (configured, default 3× 1s/2s/4s) — non-blocking</td></tr>
     </table>
-<pre><span class="c">// request (WCS → RCS · when chute 15 is paused)</span>
+<pre><span class="c">// request (WCS → RCS · sorter chute 15 starts sorting, can no longer receive)</span>
 { <span class="s">"chute_numbers"</span>: [<span class="n">15</span>], <span class="s">"next_states"</span>: [<span class="n">2</span>] }
+
+<span class="c">// request (WCS → RCS · sorting done, receivable again)</span>
+{ <span class="s">"chute_numbers"</span>: [<span class="n">15</span>], <span class="s">"next_states"</span>: [<span class="n">3</span>] }
 
 <span class="c">// response (RCS → WCS)</span>
 { <span class="s">"flag"</span>: <span class="n">1</span>, <span class="s">"result"</span>: [{ <span class="s">"status"</span>: <span class="n">0</span>, <span class="s">"msg"</span>: <span class="s">""</span>, <span class="s">"chute_id"</span>: <span class="n">15</span>, <span class="s">"last_changed"</span>: <span class="n">1719999999000</span> }] }</pre>
-    <div class="note"><b>Caution — the two pushes use different casing.</b> IF-08 (ready) is <b>camelCase</b> (<code>chuteNo</code>); IF-08b (UpdateChuteState) follows the RCS contract in <b>snake_case</b> (<code>chute_numbers</code>). Chute numbers map 1:1 to <code>chuteNo</code> (no translation). If the RCS base URL is not configured, this channel is <b>inactive (DORMANT)</b> — the current test deployment ships in this state; setting that single base-URL value activates it.</div>
+    <div class="note"><b>Casing caution.</b> This channel follows the RCS contract in <b>snake_case</b> (<code>chute_numbers</code>) — unlike the camelCase of the other interfaces (IF-05/09/10). Chute numbers map 1:1 to <code>chuteNo</code> (no translation). If the RCS base URL is not configured, this channel is <b>inactive (DORMANT)</b> — the current test deployment ships in this state; setting that single base-URL value activates it.</div>
+    <div class="note"><b>Push frequency caution.</b> A 3D sorter toggles <code>2</code> (sorting starts) → <code>3</code> (sorting done, aligned back) on every sorting cycle — possibly seconds apart. Per the RCS document, states 2/3 neither clear session data nor call external webhooks, so repeated receipt is assumed harmless — confirm receive load with RCS.</div>
+    <div class="note"><b>[Consolidation history] The original <code>destination-status</code> ready push.</b> The separate wire proposed in redesign Phase 2 (<code>POST /api/v1/destination-status</code> + <code>{chuteNo, ready, timeStamp}</code>) was <b>retired on 2026-07-11 — RCS confirmed it will not host that endpoint</b>. <b>The ready semantics are carried unchanged on this channel's <code>next_state</code> 3/2</b> (true→3, false→2). UpdateChuteState is the only RCS receiving API.</div>
 
     <h3><span class="ifid">IF-09</span> Arrival Report</h3>
-    <p>Proposed: <code>POST /api/v1/arrival-report</code>. Sent once when the AGV reaches the destination chute, before depositing. <b>WCS records the arrival</b> and prepares the destination to receive. RCS then waits for that destination to turn <code>ready</code> in the IF-08 status push and deposits.</p>
+    <p>Proposed: <code>POST /api/v1/arrival-report</code>. Sent once when the AGV reaches the destination chute, before depositing. <b>WCS records the arrival</b> and prepares the 3D sorter to receive (operating-floor alignment). RCS then waits for that chute to turn <code>3</code> (open) in the IF-08 push, deposits, and reports via IF-10.</p>
     <table>
       <tr><th style="width:140px">Request</th><th>Response</th></tr>
       <tr><td><code>pId</code>, <code>chuteNo</code>, <code>agvNo</code>, <code>timeStamp</code></td><td><code>result</code> (OK)</td></tr>
@@ -282,39 +273,38 @@
 
   <section id="s6">
     <h2><span class="n">6</span> Reason Codes</h2>
-    <div class="note"><b>IF-05 reasons are internal to WCS</b> — recorded in the WCS piece log and <b>not</b> returned to RCS (RCS sees only <code>result</code>). IF-08 is no longer a permission query but a <b>status push</b>; the table below shows how RCS interprets the pushed destination status.</div>
+    <div class="note"><b>IF-05 reasons are internal to WCS</b> — recorded in the WCS piece log and <b>not</b> returned to RCS (RCS sees only <code>result</code>). The table below shows what RCS receives and does for each internal reason.</div>
     <h3>IF-05 — Destination Query</h3>
     <table>
       <tr><th style="width:230px">WCS reason (internal)</th><th style="width:120px">RCS sees</th><th>RCS action</th></tr>
       <tr><td><code>NORMAL</code></td><td><span class="pill go">OK</span></td><td>Move AGV to <code>chuteNo</code></td></tr>
-      <tr><td><code>BUSY</code> (sorting / moving)</td><td><span class="pill go">OK</span></td><td>Still move to <code>chuteNo</code> — the sorter is busy now but frees up shortly; deposit when it turns <code>ready</code> in the IF-08 status</td></tr>
-      <tr><td><code>FULL / PAUSED</code> (by destination type)</td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span> / <span class="pill go">OK</span></td><td>Depends on the destination type. <b>Plain chute</b>: even when full/paused, <b>IF-05 returns OK</b> (send and wait — readiness is delivered separately by the IF-08 push). <b>3D sorter</b>: <code>PAUSED</code> → NG (blocked without exception); if it cannot receive by cell (<code>SorterCanAcceptBarcode</code>) → NG (FULL); <b>OFFLINE is not considered in IF-05</b> (if a cell exists, OK even when offline — wait for push <code>ready</code> after arrival). That is, the IF-05 decision is by paused + cell room, not by <code>ready</code> (operating status)</td></tr>
+      <tr><td><code>BUSY</code> (sorting / moving)</td><td><span class="pill go">OK</span></td><td>Still move to <code>chuteNo</code> — the sorter is busy now but frees up shortly; deposit when the chute turns <code>3</code> (open) in the IF-08 push after arrival</td></tr>
+      <tr><td><code>FULL / PAUSED</code> (by destination type)</td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span> / <span class="pill go">OK</span></td><td>Depends on the destination type. <b>Plain chute</b>: even when full/paused, <b>IF-05 returns OK</b> (send and wait — receivability is delivered separately by the IF-08 push <code>2/3</code>). <b>3D sorter</b>: <code>PAUSED</code> → NG (blocked without exception); if it cannot receive by cell (<code>SorterCanAcceptBarcode</code>) → NG (FULL); <b>OFFLINE is not considered in IF-05</b> (if a cell exists, OK even when offline — wait for IF-08 <code>3</code> after arrival). That is, the IF-05 decision is by paused + cell room, not by operating status</td></tr>
       <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span></td><td>Hold AGV (full quantity does not fit one destination yet)</td></tr>
       <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">wait</span></td><td>Hold AGV — no destination (OFFLINE = destination unreachable; alternate / hold)</td></tr>
     </table>
-    <div class="note"><b>Footnote — the two OFFLINEs in the table above are different situations.</b> The OFFLINE in the <code>FULL / PAUSED</code> row is the <b>sorter's operating status</b> (poll timeout / socket drop); IF-05 dispatch does not consider it, so it is OK when a cell exists (wait for push <code>ready</code> after arrival). The OFFLINE in the <code>COMPLETED / NO_DEST / OFFLINE</code> row is <b>when the destination itself cannot be determined</b> (connection lost / no destination), which is NG.</div>
-    <h3>IF-08 — Destination Status (how RCS interprets the push)</h3>
+    <div class="note"><b>Footnote — the two OFFLINEs in the table above are different situations.</b> The OFFLINE in the <code>FULL / PAUSED</code> row is the <b>sorter's operating status</b> (poll timeout / socket drop); IF-05 dispatch does not consider it, so it is OK when a cell exists (wait for IF-08 <code>3</code> after arrival). The OFFLINE in the <code>COMPLETED / NO_DEST / OFFLINE</code> row is <b>when the destination itself cannot be determined</b> (connection lost / no destination), which is NG.</div>
+    <h3>IF-08 — UpdateChuteState (how RCS interprets the push)</h3>
     <table>
       <tr><th style="width:300px">Pushed status</th><th>RCS action</th></tr>
-      <tr><td><code>ready=true</code> (OK)</td><td><span class="pill ok">deposit</span> Proceed to tilt</td></tr>
-      <tr><td><code>ready=false</code> (NG)</td><td><span class="pill wait">wait</span> The destination can't receive now. A plain chute is full / paused; a <b>sorter is for operating-status reasons only — sorting / moving / not aligned / offline</b> (a sorter's cell full / paused are not reflected in push <code>ready</code>, so they are not a reason here) — deposit on a later push when it turns <code>ready=true</code></td></tr>
-      <tr><td>Sorter operating status BUSY/OFFLINE<br>(sorting / moving / not aligned / offline)</td><td><span class="pill ng">wait</span> The sorter can't receive now operationally — hold until push <code>ready=true</code> after it aligns / returns / recovers online. (A sorter's cell <b>full / paused do NOT make push <code>ready</code> false</b> and are blocked at IF-05 dispatch.)</td></tr>
+      <tr><td><code>next_state = 3</code> (Manual open = can receive)</td><td><span class="pill ok">deposit</span> Mark the chute open (<code>status 1</code>). If its AGV is already at that chute, proceed to tilt</td></tr>
+      <tr><td><code>next_state = 2</code> (Pause chute = cannot receive)</td><td><span class="pill wait">wait</span> Mark the chute closed (<code>status 0</code>). The reason is folded — <b>sorter</b>: sorting / moving / not aligned / offline / operator pause (cell full is not reflected here — blocked at IF-05) / <b>plain chute</b>: full / paused. Deposit on a later <code>3</code> push</td></tr>
     </table>
   </section>
 
   <section id="s7">
     <h2><span class="n">7</span> End-to-End Flow</h2>
     <div class="flow">
-      <span class="st">① Destination Query</span><span class="ar">→</span>
+      <span class="st">① Destination Query (IF-05)</span><span class="ar">→</span>
       <span class="st">② Arrival report (IF-09)</span><span class="ar">→</span>
-      <span class="st">③ Wait for <code>ready</code> (IF-08 status push)</span><span class="ar">→</span>
-      <span class="st">④ Deposit Report</span>
+      <span class="st">③ Wait for open (<code>3</code>) (IF-08 push)</span><span class="ar">→</span>
+      <span class="st">④ Deposit + Deposit Report (IF-10)</span>
     </div>
     <ol>
-      <li><b>① Destination Query</b> — At the scan, RCS calls <code>IF-05</code>. On OK, RCS drives the AGV to <code>chuteNo</code>; on NG, the AGV waits.</li>
-      <li><b>② Arrival report (IF-09)</b> — On reaching the chute, RCS calls <code>IF-09</code>. WCS records the arrival and prepares the sorter to receive.</li>
-      <li><b>③ Ready (IF-08 push)</b> — RCS keeps receiving destination status from WCS. It deposits as soon as that chute is <code>ready=true</code>; otherwise it waits for the next push.</li>
-      <li><b>④ Deposit Report</b> — RCS tilts the full <code>qty</code> at the destination and calls <code>IF-10</code> to report it.</li>
+      <li><b>① Destination Query (IF-05)</b> — At the scan, RCS calls <code>IF-05</code>. On OK, RCS drives the AGV to <code>chuteNo</code>; on NG, the AGV waits. (Move gating happens here — WCS decides by paused + cell room.)</li>
+      <li><b>② Arrival report (IF-09)</b> — On reaching the chute, RCS calls <code>IF-09</code>. WCS records the arrival and prepares the 3D sorter to receive (operating-floor alignment).</li>
+      <li><b>③ Wait for open (IF-08 push)</b> — RCS keeps receiving each <code>chuteNo</code>'s receivability (<code>2/3</code>) via IF-08 (UpdateChuteState). It deposits as soon as that chute is <code>3</code> (open); otherwise it waits for the next push.</li>
+      <li><b>④ Deposit + Deposit Report (IF-10)</b> — RCS tilts the full <code>qty</code> at the destination and calls <code>IF-10</code> to report it. WCS performs the 3DS handshake (cell assignment) internally.</li>
     </ol>
   </section>
 
@@ -322,7 +312,7 @@
     <h2><span class="n">8</span> Timing &amp; Retry <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(example — to be agreed)</span></h2>
     <table>
       <tr><th style="width:240px">Item</th><th style="width:120px">Value</th><th>Note</th></tr>
-      <tr><td>IF-08 status push</td><td>on change</td><td>WCS pushes when a destination's state changes (no fixed interval; optional heartbeat — to be agreed)</td></tr>
+      <tr><td>IF-08 UpdateChuteState push</td><td>on transition</td><td>WCS pushes <b>only when a destination's receivability (<code>2/3</code>) actually changes</b> (no fixed interval — a sorter may toggle every sorting cycle). Retries with exponential backoff on failure (default 3× 1s/2s/4s)</td></tr>
       <tr><td>API request timeout</td><td><code>3 s</code></td><td>RCS → WCS response limit</td></tr>
     </table>
   </section>
