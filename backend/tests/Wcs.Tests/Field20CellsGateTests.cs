@@ -167,7 +167,7 @@ public class Field20CellsGateTests
     [Fact]
     public async Task T1_SelectCell_NeverReturnsDisabledCells_16to20()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -226,7 +226,7 @@ public class Field20CellsGateTests
     [Fact]
     public async Task T2_If05_Cells01And15_Ok_Cell16_Ng()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -272,7 +272,7 @@ public class Field20CellsGateTests
     [Fact]
     public async Task T3_All15EnabledCellsFull_SorterFull_And_If05_Ng()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 

@@ -55,8 +55,17 @@ public sealed class FakeChuteStateServer : IAsyncDisposable
     private readonly ConcurrentQueue<ReceivedPut> _received = new();
     private volatile ChuteStateRespMode _mode = ChuteStateRespMode.Success;
 
-    /// <summary>수신 1건 — HTTP 메서드 + 파싱된 배열 + 원문.</summary>
-    public sealed record ReceivedPut(string Method, int[] ChuteNumbers, int[] NextStates, string RawBody);
+    /// <summary>
+    /// 수신 1건 — HTTP 메서드 + 파싱된 배열 + 원문 + 성공응답 여부(Accepted).
+    /// Accepted=서버가 성공(flag:1)으로 응답한 시도(=수용가능 delivery). 거부(503)·실패(400/flag0)
+    /// 시도도 기록되되 Accepted=false(재시도 횟수 관측용 — CS-PUSH-5). 하위 소비의 CountFor/LastFor는
+    /// Accepted만 센다(폐지 전 FakeRcsServer의 "수신=성공 delivery" 시맨틱 보존).
+    /// </summary>
+    public sealed record ReceivedPut(string Method, int[] ChuteNumbers, int[] NextStates, string RawBody, bool Accepted)
+    {
+        /// <summary>편의: next_state==3 이면 수용가능(ready). 다운스트림 push 관측과 호환.</summary>
+        public bool Ready => NextStates.FirstOrDefault() == 3;
+    }
 
     public string BaseUrl { get; }
 
@@ -95,10 +104,11 @@ public sealed class FakeChuteStateServer : IAsyncDisposable
             }
             catch { /* 파싱 실패도 원문은 기록(디버깅) */ }
 
-            // 매 시도 기록(성공/거부 무관) — 재시도 횟수 관측용.
-            self!.Record(new ReceivedPut(method, chutes, states, raw));
+            // 매 시도 기록(성공/거부 무관) — 재시도 횟수 관측용. Accepted=성공응답(flag:1) 여부.
+            var mode = self!.Mode;
+            self.Record(new ReceivedPut(method, chutes, states, raw, Accepted: mode == ChuteStateRespMode.Success));
 
-            switch (self.Mode)
+            switch (mode)
             {
                 case ChuteStateRespMode.Reject503:
                     ctx.Response.StatusCode = 503;
@@ -139,17 +149,23 @@ public sealed class FakeChuteStateServer : IAsyncDisposable
     public ChuteStateRespMode Mode => _mode;
     public void SetMode(ChuteStateRespMode m) => _mode = m;
 
+    /// <summary>거부(503) 모드 진입 — 미도달 시뮬레이션(폐지 전 FakeRcsServer 호환 편의).</summary>
+    public void StartRejecting() => SetMode(ChuteStateRespMode.Reject503);
+
+    /// <summary>정상(Success) 모드 복귀 — 복구 시뮬레이션(폐지 전 FakeRcsServer 호환 편의).</summary>
+    public void StopRejecting() => SetMode(ChuteStateRespMode.Success);
+
     private void Record(ReceivedPut put) => _received.Enqueue(put);
 
-    /// <summary>전체 수신(순서 보존).</summary>
+    /// <summary>전체 수신 시도(순서 보존 — 거부·실패 포함. 재시도 횟수 관측용).</summary>
     public IReadOnlyList<ReceivedPut> All => _received.ToArray();
 
-    /// <summary>특정 chuteNo 수신 건수(모든 시도 포함).</summary>
-    public int CountFor(int chuteNo) => _received.Count(p => p.ChuteNumbers.Contains(chuteNo));
+    /// <summary>특정 chuteNo 성공 delivery 건수(Accepted만 — 폐지 전 "수신=성공" 시맨틱).</summary>
+    public int CountFor(int chuteNo) => _received.Count(p => p.Accepted && p.ChuteNumbers.Contains(chuteNo));
 
-    /// <summary>특정 chuteNo 마지막 수신.</summary>
+    /// <summary>특정 chuteNo 마지막 성공 delivery(Accepted만).</summary>
     public ReceivedPut? LastFor(int chuteNo) =>
-        _received.Where(p => p.ChuteNumbers.Contains(chuteNo)).LastOrDefault();
+        _received.Where(p => p.Accepted && p.ChuteNumbers.Contains(chuteNo)).LastOrDefault();
 
     public async ValueTask DisposeAsync()
     {
@@ -161,10 +177,10 @@ public sealed class FakeChuteStateServer : IAsyncDisposable
 // ── 관찰용 WebApplicationFactory (RcsPushWebApplicationFactory 미러) ──────────
 
 /// <summary>
-/// ChuteState 푸시 검증용 팩토리.
-/// Wcs:ChuteStatePush:BaseUrl을 가짜 고객 서버로 설정(활성)하고, RcsPush는 BaseUrl 미설정으로
-/// DORMANT 유지(무간섭). 전이는 IDestinationControlService.PauseAsync/ResumeAsync로 유도.
-/// ChuteStatePusher를 IHostedService로 재등록해 실제 관찰·푸시가 살아있게 한다.
+/// UpdateChuteState 푸시 검증용 팩토리(운영자 전이 경로 중심).
+/// Wcs:ChuteStatePush:BaseUrl을 가짜 RCS 수신 서버로 설정(활성)한다. 전이는
+/// IDestinationControlService.PauseAsync/ResumeAsync로 유도.
+/// 통합 발신 소스 DestinationStatusPusher를 IHostedService로 재등록해 실제 관찰·발신이 살아있게 한다.
 /// </summary>
 public sealed class ChuteStatePushWebApplicationFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
@@ -211,16 +227,17 @@ public sealed class ChuteStatePushWebApplicationFactory : WebApplicationFactory<
         builder.UseSetting("Database:Provider", "Sqlite");
 
         // ── ChuteStatePush 설정 주입(IOptions 지연 소비 키 — ConfigureAppConfiguration OK) ──
-        // RcsPush:BaseUrl은 미설정(base appsettings=null) → DORMANT 유지(무간섭).
+        // 확정 와이어 단일 채널 — BaseUrl 설정 시 DestinationStatusPusher 활성(검증 대상).
         builder.ConfigureAppConfiguration((_, cfg) =>
         {
             var dict = new Dictionary<string, string?>
             {
-                ["Wcs:ChuteStatePush:BaseUrl"]          = _chuteBaseUrl,
-                ["Wcs:ChuteStatePush:RetryCount"]       = _retryCount.ToString(),
-                ["Wcs:ChuteStatePush:RetryBaseDelayMs"] = _retryBaseDelayMs.ToString(),
-                ["Wcs:ChuteStatePush:RetryMaxDelayMs"]  = (_retryBaseDelayMs * 4).ToString(),
-                ["Wcs:ChuteStatePush:HttpTimeoutMs"]    = "2000",
+                ["Wcs:ChuteStatePush:BaseUrl"]                 = _chuteBaseUrl,
+                ["Wcs:ChuteStatePush:RetryCount"]              = _retryCount.ToString(),
+                ["Wcs:ChuteStatePush:RetryBaseDelayMs"]        = _retryBaseDelayMs.ToString(),
+                ["Wcs:ChuteStatePush:RetryMaxDelayMs"]         = (_retryBaseDelayMs * 4).ToString(),
+                ["Wcs:ChuteStatePush:HttpTimeoutMs"]           = "2000",
+                ["Wcs:ChuteStatePush:SorterObserveIntervalMs"] = "30",
             };
             cfg.AddInMemoryCollection(dict);
         });
@@ -285,10 +302,10 @@ public sealed class ChuteStatePushWebApplicationFactory : WebApplicationFactory<
             services.AddSingleton<ISorterGatewayRegistry>(nop);
             services.AddSingleton<IHostedService>(nop);
 
-            // ChuteStatePusher IHostedService 재등록(관찰·푸시 활성 유지 — 검증 대상).
-            // RcsPush(DestinationStatusPusher)는 재등록하지 않음(BaseUrl null → 무간섭).
+            // 통합 발신 소스(DestinationStatusPusher) IHostedService 재등록 — 관찰·발신 활성(검증 대상).
+            // 슈트 capacity·소터 관찰·운영자 전이 세 변화원을 수렴해 UpdateChuteState로 발신.
             services.AddSingleton<IHostedService>(sp =>
-                sp.GetRequiredService<ChuteStatePusher>());
+                sp.GetRequiredService<DestinationStatusPusher>());
         });
     }
 
@@ -446,8 +463,15 @@ public class ChuteStatePushClientTests
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 관찰(observer) 통합 검증 (CS-PUSH-1/2/3/6) — 실제 PAUSED/RESUMED 전이 →
-// ChuteStatePusher → 클라이언트 → 가짜 고객 서버 수신 본문으로 end-to-end 입증.
+// 관찰(observer) 통합 검증 — 실제 PAUSED/RESUMED 전이 → DestinationStatusPusher(통합 단일 소스)
+// → 클라이언트 → 가짜 RCS 수신 본문으로 end-to-end 입증(운영자 전이 합성·단일소스 중심).
+//
+//   CS-PUSH-1  PAUSE(CHUTE) 전이(부트 3 → PAUSE) → next_states:[2] +1건
+//   CS-PUSH-2  RESUME(CHUTE, 시드 PAUSED) 전이(부트 2 → RESUME) → next_states:[3] +1건
+//   CS-PUSH-3  [핵심 VS-3/VS-7] 운영상태 OK 소터를 PAUSE → 발신값 2(paused 접힘 — 3 아님).
+//              단일 소스라 정지 중 관찰 타이머가 계속 돌아도 모순 3 발신 0(no-flood). RESUME → 3.
+//   CS-PUSH-3b AlreadyInState(멱등) → 발신 0.
+//   CS-PUSH-6  DORMANT: BaseUrl null → 크래시 0·수신 0·인바운드 정상.
 // ════════════════════════════════════════════════════════════════════════════
 
 public class ChuteStatePushObserverTests
@@ -488,7 +512,19 @@ public class ChuteStatePushObserverTests
         return (d.Id, d.ChuteNo);
     }
 
-    // ── CS-PUSH-1: PAUSE(CHUTE) 전이 → {chute_numbers:[ChuteNo], next_states:[2]} 1건 ──
+    // 소터를 운영상태(online·정렬·Ready=1)로 만든다 — Compute().Ready 폴링으로 정착 대기.
+    private static async Task AlignSorterAsync(ChuteStatePushWebApplicationFactory f)
+    {
+        f.FakeMaster.SetReady(true);
+        f.FakeMaster.SetCurFloor(2);
+        f.FakeMaster.SetTgtFloor(0);
+        var status = f.Services.GetRequiredService<IDestinationStatusService>();
+        await WaitUntilAsync(
+            () => status.Compute(f.SorterDestinationId, Wcs.Data.DestType.SORTER_3D).Ready,
+            6000, "소터 운영 ready 정착");
+    }
+
+    // ── CS-PUSH-1: PAUSE(CHUTE) 전이 → next_states:[2] (부트스트랩 3 → 전이 후 2) ──
     [Fact]
     public async Task CS_PUSH_1_Pause_Chute_Pushes_State2()
     {
@@ -497,46 +533,30 @@ public class ChuteStatePushObserverTests
         _ = factory.CreateClient();
 
         var (destId, chuteNo) = ChuteDest(factory, 1);   // 시드 NORMAL 슈트.
-        var control = factory.Services.GetRequiredService<IDestinationControlService>();
 
+        // 부트스트랩: NORMAL·비만재 → accept=true → next_state 3.
+        await WaitUntilAsync(() => srv.CountFor(chuteNo) >= 1, 6000, "부트스트랩 수신");
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo), 1, stableCount: 5, timeoutMs: 4000, "부트스트랩 안정");
+        Assert.Equal(new[] { 3 }, srv.LastFor(chuteNo)!.NextStates);
+        int baseline = srv.CountFor(chuteNo);
+
+        var control = factory.Services.GetRequiredService<IDestinationControlService>();
         var res = await control.PauseAsync(destId, "op-test");
         Assert.Equal(DestControlOutcome.Transitioned, res.Outcome);
 
-        await WaitUntilAsync(() => srv.CountFor(chuteNo) >= 1, 5000, "PAUSE 푸시 수신");
-        await WaitUntilExactAsync(() => srv.CountFor(chuteNo), 1, stableCount: 5, timeoutMs: 3000, "전이당 1건(중복 0)");
+        // PAUSE → accept=false → next_state 2 (전이당 정확히 1건 — 슈트 콜백+OnTransition 동시 관찰에도 단일).
+        await WaitUntilAsync(() => srv.CountFor(chuteNo) >= baseline + 1, 5000, "PAUSE 발신");
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo), baseline + 1, stableCount: 5, timeoutMs: 3000,
+            "전이당 1건(중복 0·단일소스)");
 
         var last = srv.LastFor(chuteNo)!;
         Assert.Equal("PUT", last.Method);
         Assert.Equal(new[] { chuteNo }, last.ChuteNumbers);
         Assert.Equal(new[] { 2 },       last.NextStates);
-        _out.WriteLine($"[CS-PUSH-1] CHUTE PAUSE → chute_numbers=[{chuteNo}] next_states=[2] 1건");
+        _out.WriteLine($"[CS-PUSH-1] CHUTE PAUSE → chute_numbers=[{chuteNo}] next_states=[2] (부트3+전이2, 총 {srv.CountFor(chuteNo)}건)");
     }
 
-    // ── CS-PUSH-1b: PAUSE(SORTER_3D) 전이도 동일하게 푸시 ──────────────────────
-    [Fact]
-    public async Task CS_PUSH_1b_Pause_Sorter_Pushes_State2()
-    {
-        await using var srv     = await FakeChuteStateServer.StartAsync();
-        await using var factory = new ChuteStatePushWebApplicationFactory(srv.BaseUrl);
-        _ = factory.CreateClient();
-
-        int sorterChute = factory.SorterChuteNo;
-        var control = factory.Services.GetRequiredService<IDestinationControlService>();
-
-        var res = await control.PauseAsync(factory.SorterDestinationId, "op-test");
-        Assert.Equal(DestControlOutcome.Transitioned, res.Outcome);
-        Assert.Equal(Wcs.Data.DestType.SORTER_3D, res.DestType);
-
-        await WaitUntilAsync(() => srv.CountFor(sorterChute) >= 1, 5000, "소터 PAUSE 푸시 수신");
-        await WaitUntilExactAsync(() => srv.CountFor(sorterChute), 1, stableCount: 5, timeoutMs: 3000, "소터 전이당 1건");
-
-        var last = srv.LastFor(sorterChute)!;
-        Assert.Equal(new[] { sorterChute }, last.ChuteNumbers);
-        Assert.Equal(new[] { 2 },           last.NextStates);
-        _out.WriteLine($"[CS-PUSH-1b] SORTER PAUSE → chute_numbers=[{sorterChute}] next_states=[2] 1건");
-    }
-
-    // ── CS-PUSH-2: RESUME 전이 → next_states:[3] 1건 ─────────────────────────
+    // ── CS-PUSH-2: RESUME(CHUTE, 시드 PAUSED) → next_states:[3] (부트 2 → 전이 후 3) ──
     [Fact]
     public async Task CS_PUSH_2_Resume_Pushes_State3()
     {
@@ -544,7 +564,7 @@ public class ChuteStatePushObserverTests
         await using var factory = new ChuteStatePushWebApplicationFactory(srv.BaseUrl);
         _ = factory.CreateClient();
 
-        // 시드 chuteNo 6 = PAUSED. RESUME → NORMAL 전이 → next_state 3.
+        // 시드 chuteNo 6 = PAUSED → 부트스트랩 accept=false → next_state 2. RESUME → NORMAL → next_state 3.
         long destId6;
         int  chuteNo6 = 6;
         using (var scope = factory.Services.CreateScope())
@@ -552,69 +572,106 @@ public class ChuteStatePushObserverTests
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
             destId6 = db.Destinations.First(d => d.ChuteNo == 6 && d.DestType == Wcs.Data.DestType.CHUTE).Id;
         }
-        var control = factory.Services.GetRequiredService<IDestinationControlService>();
 
+        await WaitUntilAsync(() => srv.CountFor(chuteNo6) >= 1, 6000, "부트스트랩 수신");
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo6), 1, stableCount: 5, timeoutMs: 4000, "부트스트랩 안정");
+        Assert.Equal(new[] { 2 }, srv.LastFor(chuteNo6)!.NextStates);   // PAUSED 부트 = 수용불가.
+        int baseline = srv.CountFor(chuteNo6);
+
+        var control = factory.Services.GetRequiredService<IDestinationControlService>();
         var res = await control.ResumeAsync(destId6, "op-test");
         Assert.Equal(DestControlOutcome.Transitioned, res.Outcome);
 
-        await WaitUntilAsync(() => srv.CountFor(chuteNo6) >= 1, 5000, "RESUME 푸시 수신");
-        await WaitUntilExactAsync(() => srv.CountFor(chuteNo6), 1, stableCount: 5, timeoutMs: 3000, "RESUME 전이당 1건");
+        await WaitUntilAsync(() => srv.CountFor(chuteNo6) >= baseline + 1, 5000, "RESUME 발신");
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo6), baseline + 1, stableCount: 5, timeoutMs: 3000,
+            "RESUME 전이당 1건");
 
         var last = srv.LastFor(chuteNo6)!;
         Assert.Equal(new[] { chuteNo6 }, last.ChuteNumbers);
         Assert.Equal(new[] { 3 },        last.NextStates);
-        _out.WriteLine($"[CS-PUSH-2] RESUME → chute_numbers=[{chuteNo6}] next_states=[3] 1건");
+        _out.WriteLine($"[CS-PUSH-2] RESUME → chute_numbers=[{chuteNo6}] next_states=[3] (부트2+전이3)");
     }
 
-    // ── CS-PUSH-3: scope 게이트 — FULL·O6·AlreadyInState 무발신, 실제 pause만 발신 ──
+    // ════════════════════════════════════════════════════════════════════════
+    // CS-PUSH-3 [핵심 VS-3/VS-7]: 운영상태 OK 소터를 운영자 PAUSE → 발신값 2(합성 ready∧!paused).
+    //   폐지 전 두 소스로 갈렸던 값(운영 ready=3 vs pause=2)이 단일 소스로 정합돼 2 하나만 발신됨을 입증.
+    //   단일 소스라 정지 중 관찰 타이머가 계속 돌아도 모순 3 발신 0(no-flood). RESUME → 3 복귀.
+    // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task CS_PUSH_3_ScopeGate_Full_O6_Idempotent_NoPush_RealPause_Pushes()
+    public async Task CS_PUSH_3_Sorter_OperationalReady_PausedFoldsToState2_SingleSource_NoContradiction()
     {
         await using var srv     = await FakeChuteStateServer.StartAsync();
         await using var factory = new ChuteStatePushWebApplicationFactory(srv.BaseUrl);
-        var httpClient = factory.CreateClient();
+        _ = factory.CreateClient();
 
-        var (dest1Id, _) = ChuteDest(factory, 1);
-        var (dest2Id, chute2) = ChuteDest(factory, 2);
+        int  sorterChute = factory.SorterChuteNo;
+        long sorterId    = factory.SorterDestinationId;
+        var  status      = factory.Services.GetRequiredService<IDestinationStatusService>();
+        var  control     = factory.Services.GetRequiredService<IDestinationControlService>();
+
+        // 운영상태 정렬 → accept=true → next_state 3 발신(부트 2[미정렬] → 정렬 3).
+        await AlignSorterAsync(factory);
+        await WaitUntilAsync(() => srv.LastFor(sorterChute) is { NextStates: [3] }, 6000, "정렬 → next_state 3");
+        int baseAligned = srv.CountFor(sorterChute);
+        await WaitUntilExactAsync(() => srv.CountFor(sorterChute), baseAligned, stableCount: 6, timeoutMs: 4000, "정렬 안정");
+
+        // 운영자 PAUSE — 운영상태는 여전히 OK(Compute().Ready=true)지만 accept=ready∧!paused=false → next_state 2.
+        var res = await control.PauseAsync(sorterId, "op-test");
+        Assert.Equal(DestControlOutcome.Transitioned, res.Outcome);
+        Assert.Equal(Wcs.Data.DestType.SORTER_3D, res.DestType);
+
+        // 산출 ground-truth: 운영상태 ready=true 유지, paused=true — 그러나 발신 합성은 2.
+        var rPaused = status.Compute(sorterId, Wcs.Data.DestType.SORTER_3D);
+        Assert.True(rPaused.Ready,  "운영상태 ready=true(paused는 Compute().Ready에 미반영)");
+        Assert.True(rPaused.Paused, "Paused=true(산출 유지)");
+
+        await WaitUntilAsync(() => srv.LastFor(sorterChute) is { NextStates: [2] }, 5000,
+            "PAUSE → next_state 2(paused 접힘 — 3 아님)");
+        int baseAfterPause = srv.CountFor(sorterChute);
+
+        // 단일 소스·no-contradiction: 정지 중 관찰 타이머가 계속 돌아도(운영상태 ready) 모순 3 발신 0.
+        await WaitUntilExactAsync(() => srv.CountFor(sorterChute), baseAfterPause, stableCount: 10, timeoutMs: 5000,
+            "정지 중 모순 3 발신 0(단일 소스·no-flood)");
+        Assert.Equal(new[] { 2 }, srv.LastFor(sorterChute)!.NextStates);
+
+        // RESUME → accept=true 복귀 → next_state 3.
+        var resume = await control.ResumeAsync(sorterId, "op-test");
+        Assert.Equal(DestControlOutcome.Transitioned, resume.Outcome);
+        await WaitUntilAsync(() => srv.LastFor(sorterChute) is { NextStates: [3] }, 5000, "RESUME → next_state 3");
+        Assert.Equal(new[] { 3 }, srv.LastFor(sorterChute)!.NextStates);
+        _out.WriteLine("[CS-PUSH-3] 운영상태 OK 소터 PAUSE → 발신 2(paused 접힘·단일소스), RESUME → 3");
+    }
+
+    // ── CS-PUSH-3b: AlreadyInState(멱등) → 발신 0(값 불변 = 미발신) ────────────
+    [Fact]
+    public async Task CS_PUSH_3b_AlreadyInState_Idempotent_NoPush()
+    {
+        await using var srv     = await FakeChuteStateServer.StartAsync();
+        await using var factory = new ChuteStatePushWebApplicationFactory(srv.BaseUrl);
+        _ = factory.CreateClient();
+
+        // 시드 chuteNo 6 = PAUSED. 부트스트랩(2) 정착 후 다시 PAUSE → AlreadyInState → 발신 증가 0.
         long destId6;
+        int  chuteNo6 = 6;
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
             destId6 = db.Destinations.First(d => d.ChuteNo == 6 && d.DestType == Wcs.Data.DestType.CHUTE).Id;
         }
-        var control  = factory.Services.GetRequiredService<IDestinationControlService>();
-        var capacity = factory.Services.GetRequiredService<IChuteCapacityService>();
 
-        // (1) FULL(capacity) 상태 변화 → OnChuteStateChanged만 발화(OnTransition 아님) → 발신 0.
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db     = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
-            var detail = db.ChuteDetails.First(cd => cd.DestinationId == dest1Id);
-            capacity.OnReserved(dest1Id, detail.WorkFullQty);   // 만재 진입(FULL)
-        }
+        await WaitUntilAsync(() => srv.CountFor(chuteNo6) >= 1, 6000, "부트스트랩 수신");
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo6), 1, stableCount: 6, timeoutMs: 4000, "부트스트랩 안정");
+        int baseline = srv.CountFor(chuteNo6);
 
-        // (2) O6 CellAssign(소터 PLC 쓰기 경로) — DestinationControlService 무접촉 → 발신 0.
-        var o6 = await httpClient.PostAsJsonAsync(
-            $"/api/ops/sorters/{factory.SorterDestinationId}/cell-assign",
-            new { cellNo = 1, seq = 1, operatorName = "op-test" });
-        _out.WriteLine($"[CS-PUSH-3] O6 cell-assign status={(int)o6.StatusCode}(발신과 무관)");
-
-        // (3) AlreadyInState(멱등) — chuteNo 6은 이미 PAUSED. PauseAsync → AlreadyInState → 발신 0.
+        var control = factory.Services.GetRequiredService<IDestinationControlService>();
         var idem = await control.PauseAsync(destId6, "op-test");
         Assert.Equal(DestControlOutcome.AlreadyInState, idem.Outcome);
 
-        // 위 3종 이후에도 가짜 서버 수신 0건(전이 종류 게이트).
-        await Task.Delay(500);
-        Assert.Empty(srv.All);
-        _out.WriteLine($"[CS-PUSH-3] FULL·O6·AlreadyInState 후 수신 {srv.All.Count}건(무발신)");
-
-        // (4) 실제 PAUSE 전이(chuteNo 2, NORMAL→PAUSED) → 정확히 1건(pusher 생존·게이트 진성 확인).
-        var real = await control.PauseAsync(dest2Id, "op-test");
-        Assert.Equal(DestControlOutcome.Transitioned, real.Outcome);
-        await WaitUntilAsync(() => srv.CountFor(chute2) >= 1, 5000, "실제 PAUSE 푸시 수신");
-        await WaitUntilExactAsync(() => srv.All.Count, 1, stableCount: 5, timeoutMs: 3000, "총 1건(scope 게이트 진성)");
-        Assert.Equal(new[] { 2 }, srv.LastFor(chute2)!.NextStates);
-        _out.WriteLine($"[CS-PUSH-3] 실제 PAUSE → 총 {srv.All.Count}건(chuteNo 2, next_state 2)");
+        // 값 불변(이미 2 알림) → 발신 증가 0(스퓨리어스 재푸시 0).
+        await WaitUntilExactAsync(() => srv.CountFor(chuteNo6), baseline, stableCount: 8, timeoutMs: 4000,
+            "AlreadyInState → 발신 0");
+        Assert.Equal(new[] { 2 }, srv.LastFor(chuteNo6)!.NextStates);
+        _out.WriteLine($"[CS-PUSH-3b] AlreadyInState 후 발신 증가 0(총 {srv.CountFor(chuteNo6)}건=부트)");
     }
 
     // ── CS-PUSH-6: DORMANT — BaseUrl null → 크래시 0·수신 0·인바운드 정상 ─────
@@ -628,7 +685,7 @@ public class ChuteStatePushObserverTests
         var (dest1Id, _) = ChuteDest(factory, 1);
         var control = factory.Services.GetRequiredService<IDestinationControlService>();
 
-        // pause/resume 전이를 발생시켜도(DORMANT) 아무것도 발신되지 않음.
+        // pause/resume 전이를 발생시켜도(DORMANT) 아무것도 발신되지 않음(부트스트랩도 미기동).
         await control.PauseAsync(dest1Id, "op-test");
         await control.ResumeAsync(dest1Id, "op-test");
         await control.PauseAsync(factory.SorterDestinationId, "op-test");
