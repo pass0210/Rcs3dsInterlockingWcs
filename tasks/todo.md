@@ -128,3 +128,7 @@
 ## S-B2B-1 후속(Evaluator 재검증 — 비차단)
 - [ ] [S-B2B-1][pre-existing flake·별도 이관] 핸드셰이크 S5 타이밍 테스트군(`HandshakeResidueTests.S5_ResidueClearNotReflected_TerminalTimeout_NoCWritten`·`S5RSeqMismatchTests.S5_RSeqMismatch_*`)이 전체 스위트/핸드셰이크군 병렬 실행 시 저빈도(~1/8~1/10) flake. **B2B 무관 확정**: B2B 0개 로드한 핸드셰이크군 단독 필터에서도 재현·단일 테스트 격리 시 8/8 GREEN. 실 Sim 소켓/타이밍 경합(s9-flake-under-e2e-load·e2e-parallel-load-surfaces-integration-flakes 동류). S9(ScenarioTests) 안정화 패턴(WaitUntilStableCount / 안정-관찰)을 이 두 테스트에도 적용 검토. 수정 대상=테스트 전용·production 0.
 - [ ] [S-B2B-1][#1 잔여 SQL Server 500 갭] `ResultItem.ChuteNo`(→`work_result.chute_no nvarchar(20)`)·`BoxRequest.EndTime`(→`box.end_time nvarchar(50)`)에 `[StringLength(20)]`/`[StringLength(50)]` 미부여 → 과길이 입력이 SQL Server truncation 500(SQLite 더블 은폐). FIX ITER 2가 닫은 barcode/batch/boxNo와 동일 클래스. StringLength 2건 + 과길이 400 테스트 2건 추가로 원천 완전 해소 권고.
+
+## S-B2C-DATAGEN 후속(Evaluator minor — 비차단)
+- [ ] [S-B2C-DATAGEN] 프론트 테스트 러너(vitest/jest) 미구성 — 다이얼로그 체이닝(초기화→force 재요청) 회귀 테스트를 자동화할 수단이 없음. iter-1 BLOCKING(React 배칭에 의한 force 다이얼로그 silent close)이 정적검사·xUnit 어디에도 안 잡혔음. 프레임워크 도입 시 B2cDataGenPage onConfirm→requestForceReset 체이닝 케이스를 최우선 등재.
+- [ ] [S-B2C-DATAGEN] B2B 모드에서 /b2c/test-data 직접 URL 진입 시 배너 제목이 b2b NAV 항목("데이터 생성")으로 표시 — Layout 배너가 현재 uiMode NAV_SETS 에서 title 을 찾는 구조. 정상 nav 경로에선 미발생(cosmetic).
