@@ -41,7 +41,7 @@ public readonly record struct DestControlResult(DestControlOutcome Outcome, Dest
 
 /// <summary>
 /// 목적지 런타임 전이 알림(관찰 전용 side-channel) — 실제 PAUSED/RESUMED 전이(Transitioned) 시 발화.
-/// ChuteStatePusher(S-CHUTESTATE-PUSH)가 구독해 고객 UpdateChuteState로 푸시한다.
+/// DestinationStatusPusher(S-IF08-READY-PUSH)가 구독해 UpdateChuteState로 수용상태를 발신한다.
 /// AlreadyInState(멱등 no-op)에서는 발화하지 않는다(실제 상태 변화만).
 /// ChuteNo를 함께 실어 관찰자가 별도 DB 조회 없이 chute_numbers를 직송(1:1)할 수 있게 한다.
 /// </summary>
@@ -171,8 +171,8 @@ public sealed class DestinationControlService : IDestinationControlService
         _log.LogInformation("[DestControl] destId={Id} {Target} 전이 완료(op={Op}, type={Type})",
             destinationId, target, operatorId, destType);
 
-        // ── 관찰 전용 side-channel 발화(S-CHUTESTATE-PUSH) — 실제 Transitioned에서만 ──
-        // AlreadyInState는 위에서 이미 반환됐으므로 여기 도달 = 실제 전이 1건. 구독자(ChuteStatePusher)는
+        // ── 관찰 전용 side-channel 발화(S-IF08-READY-PUSH) — 실제 Transitioned에서만 ──
+        // AlreadyInState는 위에서 이미 반환됐으므로 여기 도달 = 실제 전이 1건. 구독자(DestinationStatusPusher)는
         // fire-and-forget으로 처리해 운영자 O2/O3 응답을 막지 않는다. 구독자 예외가 코어(이 반환)를 죽이지
         // 않도록 이벤트 발화 자체를 방어적으로 감싼다(관찰 훅이 pause/resume 결과를 바꾸지 않음).
         try

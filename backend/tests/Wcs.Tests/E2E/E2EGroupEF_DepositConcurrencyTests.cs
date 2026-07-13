@@ -25,10 +25,10 @@ public class E2EGroupEF_DepositConcurrencyTests
     private readonly ITestOutputHelper _out;
     public E2EGroupEF_DepositConcurrencyTests(ITestOutputHelper output) => _out = output;
 
-    private async Task<(E2EWebApplicationFactory factory, FakeRcsServer rcs)> StartAsync(
+    private async Task<(E2EWebApplicationFactory factory, FakeChuteStateServer rcs)> StartAsync(
         int[]? extraSorters = null)
     {
-        var rcs = await FakeRcsServer.StartAsync();
+        var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(
             rcsBaseUrl: rcs.BaseUrl, extraSorterChuteNos: extraSorters, initialCurFloor: 2);
         await factory.StartSimsAsync();
@@ -448,7 +448,7 @@ public class E2EGroupEF_DepositConcurrencyTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // F6: push 전이 동시 관찰 → 전이당 1건. GT: FakeRcsServer.CountFor 전이당 정확히 1(16스레드 동시).
+    // F6: push 전이 동시 관찰 → 전이당 1건. GT: FakeChuteStateServer.CountFor 전이당 정확히 1(16스레드 동시).
     //   소터 ready 전이(미정렬→정렬)를 운영층 정렬로 유발하고, 동시 관찰에도 전이당 1건 멱등.
     //   (기존 VS9a·PUSH4 패턴 — 실 Sim 정렬 전이로 재현.)
     // ════════════════════════════════════════════════════════════════════════
@@ -456,7 +456,7 @@ public class E2EGroupEF_DepositConcurrencyTests
     public async Task F6_PushTransition_ConcurrentObserve_ExactlyOnePerTransition()
     {
         // 미정렬(층1)로 시작 → 부트스트랩 push ready=false. 그 후 정렬 유발 → ready=true 전이 1건.
-        var rcs = await FakeRcsServer.StartAsync();
+        var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(rcsBaseUrl: rcs.BaseUrl, initialCurFloor: 1);
         await factory.StartSimsAsync();
         await using var _f = factory;

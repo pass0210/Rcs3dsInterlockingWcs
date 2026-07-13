@@ -24,10 +24,10 @@ public class E2EGroupCD_AlignHandshakeTests
     private readonly ITestOutputHelper _out;
     public E2EGroupCD_AlignHandshakeTests(ITestOutputHelper output) => _out = output;
 
-    private async Task<(E2EWebApplicationFactory factory, FakeRcsServer rcs)> StartAsync(
+    private async Task<(E2EWebApplicationFactory factory, FakeChuteStateServer rcs)> StartAsync(
         int initialCurFloor = 2, int rFlagTimeoutMs = 3000)
     {
-        var rcs = await FakeRcsServer.StartAsync();
+        var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(
             rcsBaseUrl: rcs.BaseUrl, initialCurFloor: initialCurFloor, rFlagTimeoutMs: rFlagTimeoutMs);
         await factory.StartSimsAsync();

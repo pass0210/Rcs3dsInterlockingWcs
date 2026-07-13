@@ -13,7 +13,7 @@ namespace Wcs.Api;
 //   목적지별 full / paused / online / ready 를 한 함수로 접는다.
 //   ① IF-05 dispatch 게이트가 이를 소비 — 단 소터는 ready(운영상태)가 아니라
 //      Paused + SorterCanAcceptBarcode(셀 기준)만 본다(RcsController.cs IF-05).
-//   ② Phase 2 아웃바운드 푸시(WCS→RCS destination-status)가 ready(운영상태)를 소비.
+//   ② 아웃바운드 수용상태 푸시(WCS→RCS UpdateChuteState)가 ready(운영상태)를 소비.
 //
 //   - 일반 슈트(CHUTE): ready = 만재 아님 && 정지 아님(비활성 포함).
 //   - 3D 소터 슈트(SORTER_3D): ready = **운영상태만** = online && CurFloor==운영층 && Ready==1.

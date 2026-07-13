@@ -24,9 +24,9 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
     private readonly ITestOutputHelper _out;
     public E2EGroupGHI_FailureBoundaryOrderTests(ITestOutputHelper output) => _out = output;
 
-    private async Task<(E2EWebApplicationFactory factory, FakeRcsServer rcs)> StartAsync(int initialCurFloor = 2)
+    private async Task<(E2EWebApplicationFactory factory, FakeChuteStateServer rcs)> StartAsync(int initialCurFloor = 2)
     {
-        var rcs = await FakeRcsServer.StartAsync();
+        var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(rcsBaseUrl: rcs.BaseUrl, initialCurFloor: initialCurFloor);
         await factory.StartSimsAsync();
         _ = factory.CreateClient();
@@ -113,11 +113,11 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // G5: PAUSED push 영향 없음·IF-05만. GT: 소터 PAUSED → push ready=true 유지(운영상태) BUT IF-05 NG.
-    //   (기존 EC3 — 크로스 엔드포인트 분리. 다중 AGV E2E 맥락 재현.)
+    // G5: PAUSED 발신 합성·IF-05 정합. GT: 소터 PAUSED → 발신 next_state 2(paused 접힘) AND IF-05 NG.
+    //   발신(ready∧!paused)과 IF-05 dispatch(r.Paused) 둘 다 paused를 반영 → 양쪽 정합. 다중 AGV E2E 재현.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task G5_Paused_PushReadyUnaffected_But_If05Ng()
+    public async Task G5_Paused_PushState2_And_If05Ng()
     {
         var (factory, rcs) = await StartAsync(initialCurFloor: 2);
         await using var _f = factory;
@@ -126,11 +126,11 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
         int chute = factory.PrimarySorter.ChuteNo;
         long destId = factory.PrimarySorter.DestinationId;
 
-        // 부트스트랩 ready=true(정렬·online).
-        await E2EWait.UntilAsync(() => rcs.LastFor(chute) is { Ready: true }, 8000, "부트스트랩 ready=true");
+        // 부트스트랩: 정렬·online → 발신 next_state 3.
+        await E2EWait.UntilAsync(() => rcs.LastFor(chute) is { Ready: true }, 8000, "부트스트랩 next_state 3");
         int baseline = rcs.CountFor(chute);
 
-        // 소터 PAUSED 설정.
+        // 소터 PAUSED 설정(직접 DB — 관찰 타이머가 재평가로 감지).
         using (var db = factory.CreateDbScope())
         {
             var dest = await db.Destinations.FirstAsync(d => d.Id == destId);
@@ -138,15 +138,15 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
             await db.SaveChangesAsync();
         }
 
-        // push ready는 운영상태만 보므로 PAUSED여도 true 유지 → 전이 0(폭주 0).
-        await E2EWait.UntilExactAsync(() => rcs.CountFor(chute), baseline, stableCount: 8, timeoutMs: 4000,
-            "PAUSED → push 무발화(운영상태 불변)");
-        Assert.True(rcs.LastFor(chute)!.Ready, "PAUSED여도 push ready=true(운영상태)");
+        // 발신 합성 = ready ∧ !paused → PAUSED면 next_state 2로 전이(운영상태 ready여도 paused 접힘).
+        await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= baseline + 1 && rcs.LastFor(chute)!.Ready == false,
+            6000, "PAUSED → push next_state 2");
+        Assert.False(rcs.LastFor(chute)!.Ready, "PAUSED → 발신 2(paused 접힘)");
 
-        // 그러나 IF-05 dispatch는 r.Paused 소비 → NG.
+        // IF-05 dispatch도 r.Paused 소비 → NG(발신·dispatch 양쪽 정합).
         var r = await driver.RunSingleAsync(new AgvJob(27101, 1, "TEST-BARCODE-3", chute, DoArrival: false, DoDeposit: false));
         Assert.Equal("NG", r.If05Result);
-        _out.WriteLine("[G5] 소터 PAUSED → push ready=true 유지(운영상태) BUT IF-05 NG(r.Paused) — 크로스 분리");
+        _out.WriteLine("[G5] 소터 PAUSED → 발신 next_state 2(paused 접힘) AND IF-05 NG(r.Paused) — 양쪽 정합");
     }
 
     // ════════════════════════════════════════════════════════════════════════

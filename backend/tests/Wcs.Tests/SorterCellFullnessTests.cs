@@ -203,7 +203,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task HP1_Sorter_AssignedCellHasRoom_If05_Ok_Normal()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -251,7 +251,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task HP2_Sorter_NewOrder_FreeCellAvailable_If05_Ok()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -288,7 +288,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC1_Sorter_AssignedCellAtCapacity_If05_Ng_Full()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -350,7 +350,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC2_Sorter_NewOrder_NoFreeCell_If05_Ng_Full()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -409,7 +409,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC3_Sorter_Paused_If05_Ng_Unchanged()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -451,7 +451,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC4_Sorter_CapacityNull_Unlimited_NoQtyFull()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -497,7 +497,7 @@ public class SorterCellFullnessTests
     [InlineData(6, "NG")]   // Capacity+1=6 > 5 → 초과 → NG
     public async Task EC6_Sorter_CellBoundary_Equality(int currentQty, string expected)
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -540,7 +540,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task HP5_Sorter_SomeAssignedCellHasRoom_PushReadyTrue()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -590,7 +590,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC7_Sorter_CellFullnessTransition_NoPush_OperationalReadyUnchanged()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -663,7 +663,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC5_Sorter_ConcurrentLoadAssign_AtomicCompute_NoContradiction()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -821,7 +821,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC8_SelectCell_PicksRoomCell_NotFullCell_If05OkImpliesLoadable()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -895,7 +895,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC9_OtherOrderRoomCell_DoesNotMakeThisPieceOk()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -1011,7 +1011,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC10_AssignedCellFull_FreeCellsExist_NoOverflow_Isomorphic()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -1060,7 +1060,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC11_ReusedCell_LoadedScopedToCurrentAssignment_NotAllTime()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -1113,7 +1113,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC12_ReleaseEmptyAssignment_RollsBackEmptyOrphan_KeepsLoaded()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -1154,7 +1154,7 @@ public class SorterCellFullnessTests
     [Fact]
     public async Task EC13_If05_SelectCell_Isomorphism_Sweep()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 

@@ -7,25 +7,24 @@ using Wcs.Data;
 namespace Wcs.Api;
 
 // ════════════════════════════════════════════════════════════════════════════
-// ChuteStatePushClient — 고객 슈트 상태 아웃바운드 푸시 클라이언트 (WCS → 고객)
+// ChuteStatePushClient — 목적지 수용상태 아웃바운드 푸시 클라이언트 (WCS → RCS)
 //
-// S-CHUTESTATE-PUSH (신규 아웃바운드 — RcsPushClient의 구조적 형제):
-//   운영자 PAUSED/RESUMED 전이 시 PUT {ChuteStatePush:BaseUrl}{Path}로
-//   {chute_numbers:[...], next_states:[...]}(snake_case)를 고객 시스템으로 푸시.
+// S-IF08-READY-PUSH (확정 와이어 단일 채널):
+//   목적지 수용상태 전이 시 PUT {ChuteStatePush:BaseUrl}{Path}로
+//   {chute_numbers:[...], next_states:[...]}(snake_case)를 RCS로 푸시(3=수용가능/2=불가).
 //   - IHttpClientFactory 경유(직접 new HttpClient() 금지 — 소켓 고갈·DNS 갱신 방지).
-//   - HTTP 메서드 = PUT(고객 계약 — RcsPush의 POST와 다름).
+//   - HTTP 메서드 = PUT(RCS 계약 UpdateChuteState).
 //   - 재시도: 설정값 경유 지수 백오프(고정 sleep 금지). 소진 후 false 반환(실패 명시).
 //   - 예외 삼킴 금지(Fail-Loud): 최종 실패는 명시 ERROR 로깅 + bool 반환으로 호출자에 전달.
 //   - BaseUrl 미설정(DORMANT) 시 HTTP 시도 0·즉시 false(미발신).
 //
-// 이 클라이언트는 "1건 전송 + 재시도"만 책임진다. "전이 감지·전이당 트리거"는
-// ChuteStatePusher가 책임(관심사 분리 — RcsPushClient/DestinationStatusPusher와 동형).
+// 이 클라이언트는 "1건 전송 + 재시도"만 책임진다. "전이 감지·전이당 트리거·복구 재푸시"는
+// DestinationStatusPusher가 책임(관심사 분리).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>
 /// UpdateChuteState 푸시 페이로드 — {chute_numbers, next_states}.
-/// ★ 와이어는 snake_case(고객 계약) — STJ 기본 camelCase에 의존하지 말고 [JsonPropertyName] 명시.
-///   (RcsPush의 camelCase 관례와 다름 — 이 계약의 함정.)
+/// ★ 와이어는 snake_case(RCS 계약) — STJ 기본 camelCase에 의존하지 말고 [JsonPropertyName] 명시.
 /// 두 배열은 동일 길이·인덱스 정렬(chute_numbers[i] ↔ next_states[i]). 전이당 길이-1 단건.
 /// </summary>
 public sealed record ChuteStatePushPayload(
