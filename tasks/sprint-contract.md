@@ -1,161 +1,206 @@
-# Sprint Contract — S-CHUTESTATE-PUSH (신규 아웃바운드: WCS → 고객 `PUT /api/UpdateChuteState` · 호스트 미정 · DORMANT 선적용)
+# Sprint Contract — S-IF08-READY-PUSH
 
-> Planner Subagent · 2026-07-09
-> 발원: 고객이 `PUT /api/UpdateChuteState` API 스펙(`docs/UpdateChuteState_API_EN.md`)을 제공. WCS가 슈트/소터 상태(Pause / Manual-open)를
-> 고객 시스템으로 **아웃바운드 푸시**한다. **HOST(BaseUrl)는 고객이 추후 제공** — 지금은 **완전히 구현하되 BaseUrl 미설정 시 DORMANT(no-op)**로 출하한다.
-> 이는 기존 **RcsPush(IF-08 WCS→RCS 푸시)** 패턴의 구조적 형제(sibling)다.
->
-> **소비/신설 대상(예상):**
-> - (신설) `backend/src/Wcs.Api/Services/ChuteStatePushClient.cs` — 아웃바운드 PUT 클라이언트(RcsPushClient 미러).
-> - (신설) `backend/src/Wcs.Api/Services/ChuteStatePusher.cs`(또는 동등 observer) — pause/resume 전이 관찰 → 클라이언트 호출.
-> - (수정) `backend/src/Wcs.Api/Infrastructure/WcsOptions.cs` — `ChuteStatePushOptions` + `Wcs:ChuteStatePush` 섹션.
-> - (수정) `backend/src/Wcs.Api/appsettings.json` — `Wcs:ChuteStatePush`(BaseUrl:null).
-> - (수정) `backend/src/Wcs.Api/Program.cs` — named HttpClient + 클라이언트 + observer DI 배선(append).
-> - (관찰 훅) `backend/src/Wcs.Api/Services/DestinationControlService.cs` — pause/resume 전이 이벤트/훅 관찰(코어 동작 무변경).
-> - (신설) `backend/tests/Wcs.Tests/ChuteStatePushTests.cs` — 가짜 고객 서버 대상 검증(RcsPushTests 미러).
->
-> **스택 PR 교훈(MEMORY):** 이 브랜치는 **develop(또는 최신 통합 브랜치)에서 분기**한다. 스택 브랜치로 병합 금지·병합 후 base 실재 검증.
-
----
-
-## ✓ Confirmed decisions (LOCKED — 사수 게이트 응답 2026-07-09. 착수 전제·변경 금지)
-
-> 아래 3건은 **사수가 확정한 계약**이다. 추론·기본값이 아니라 **LOCK**이다. Generator/Evaluator는 이 결정을 전제로 동작한다.
-
-- **Q-a (trigger → next_state) — LOCKED.** PAUSE(`DestinationControlService` **PAUSED** 전이, O2) → **`next_state = 2`**(Pause chute). RESUME(**RESUMED** 전이, O3) → **`next_state = 3`**(Manual-open). **둘 다 이 API로 푸시**한다.
-
-- **Q-b (chute_numbers) — LOCKED.** **WCS `Destination.ChuteNo`를 그대로(1:1) 사용**한다 — 목적지의 `ChuteNo`를 `chute_numbers` 값으로 전송(`chute_numbers:[dest.ChuteNo]`). **`ChuteNoMap` config는 도입하지 않는다**(사수가 직접 1:1 선택 — 매핑 테이블 불요, 더 단순). 기존 RcsPush도 `Destination.ChuteNo`를 키로 보내므로 일관. (향후 다른 external ID가 필요한 고객이 생기면 그때 별도 변경 — 지금은 1:1.)
-
-- **Q-c (scope) — LOCKED.** 운영자 **O2/O3 PAUSED/RESUMED 전이만**, **CHUTE·SORTER_3D 목적지 둘 다**. **FULL(만재)·O6(cell-assign) 제외.** (FULL=capacity 자동 상태이지 pause 아님. O6=소터 셀 진단 PLC 쓰기이지 슈트 open/close 아님 — Manual-open=3은 RESUME에 대응.) RcsPush의 복합 `ready` 전이도 별개 채널(무접촉).
+> Planner Subagent · 2026-07-13
+> 계약 정본: `docs/wcs_rcs_interface_kr.html` §IF-08 (PR #55~58 병합됨). 이 스프린트는 계약을
+> 재정의하지 않는다 — **코드를 그 계약에 맞추는** 것이다. 배경(RCS 수신 API는 `UpdateChuteState`
+> 하나뿐 · destination-status 와이어 폐지 · ready 의미는 `next_state` 3/2로 운반)은 2026-07-11 확정된
+> 사실이며 재논의 대상이 아니다.
 
 ---
 
 ## Goal
 
-고객 제공 `PUT /api/UpdateChuteState` 계약대로 **WCS→고객 아웃바운드 상태 푸시**를 완전 구현하되, **BaseUrl(호스트) 미설정 시 완전 비활성(no-op)**으로 출하한다("host 제외 미리 적용"). 활성화는 **고객이 호스트를 주면 `Wcs:ChuteStatePush:BaseUrl` 한 값만 설정**하면 되며 코드/재빌드/마이그레이션이 필요 없다. 기존 RcsPush(IF-08) 패턴의 구조적 형제로 만들어 폴링·재시도·Fail-Loud·dormant 규약을 재사용한다.
+WCS의 아웃바운드 "목적지 수용 상태 알림"을 확정 계약(단일 와이어 `UpdateChuteState`)에 정합시킨다.
+
+- 폐지된 `destination-status` 와이어(`POST {RCS}/api/v1/destination-status` + `{chuteNo, ready, timeStamp}`)로
+  ready 전이를 발신하던 경로를, 확정 와이어 `PUT {RCS}/api/UpdateChuteState` +
+  `{chute_numbers:[n], next_states:[2|3]}`로 재배선한다. `3`=받을 수 있음 / `2`=받을 수 없음.
+- 현재 **두 개**로 갈라진 발신 소스(`DestinationStatusPusher`의 ready 전이 발신 +
+  `ChuteStatePusher`의 운영자 pause/resume 발신)를 목적지당 **단일 발신 소스**로 통합해, 같은
+  `chuteNo`에 이중/모순 발신(한쪽 `3`·다른 쪽 `2`)이 물리적으로 불가능하게 만든다.
+- 발신 상태 합성을 계약대로 바꾼다: 소터의 수용상태 = **운영 ready ∧ 비정지**, 슈트 = 비만재 ∧ 비정지.
+  **셀 만재는 발신에 반영하지 않는다**(IF-05 dispatch 차단만 유지).
+- 폐지 와이어의 코드·설정 잔재를 **전부 제거**한다(0 잔재).
+
+이 스프린트는 순수 `Wcs.Api` 서비스 계층 재배선이다. PLC 레지스터·핸드셰이크·`Wcs.PlcGateway`·
+`Wcs.Core` 판정 로직은 무접촉이다.
 
 ---
 
 ## Implementation Scope (Generator가 구현할 것 — WHAT)
 
-### SC-1. 설정 섹션 신설 — `Wcs:ChuteStatePush`(RcsPush 미러, 전부 appsettings·하드코딩 0 절대규칙 #7)
-- `WcsOptions`에 `ChuteStatePushOptions ChuteStatePush` 추가 + `Wcs:ChuteStatePush` 섹션. 필드:
-  - `BaseUrl` (string?, **기본 null → 푸시 DISABLED**). 고객이 추후 제공하는 **유일한 활성화 값**.
-  - `Path` (string, 기본 `"/api/UpdateChuteState"`). BaseUrl에 이어붙임(외부화 기본값 — todo의 RcsPushOptions.Path 문서화 권고 동일 적용).
-  - `RetryCount`(기본 3), `RetryBaseDelayMs`(기본 1000), `RetryMaxDelayMs`(기본 4000), `HttpTimeoutMs`(기본 3000) — RcsPush와 동일 의미의 지수 백오프.
-  - `IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl)` (RcsPush 동형).
-  - **`ChuteNoMap` 없음(Q-b LOCKED = 직접 1:1).** `chute_numbers`는 `Destination.ChuteNo`를 그대로 쓴다 — 매핑 config/딕셔너리/오프셋 도입 금지.
-- appsettings.json에 `Wcs:ChuteStatePush` 블록 추가. **BaseUrl 은 커밋 시 null 유지**(고객이 추후 설정). `_comment_`로 "BaseUrl 설정 시 활성, 미설정 시 dormant — 고객이 호스트 제공 시 이 한 값만 설정하면 활성" 명기.
-- IOptions 지연 소비(즉시 평가 키 아님) — 테스트가 `ConfigureAppConfiguration`으로 BaseUrl 주입 가능해야 함(2026-06-30 교훈: 즉시 평가 config 키만 UseSetting 필요, IOptions 키는 ConfigureAppConfiguration OK).
+> 기술 상세(어떻게 통합할지, 어느 클래스로 흡수할지)는 Generator 재량. 아래는 계약이 요구하는 WHAT만.
 
-### SC-2. 아웃바운드 클라이언트 신설 — `IChuteStatePushClient` / `ChuteStatePushClient`(RcsPushClient 미러)
-- **IHttpClientFactory 경유 named client**(직접 `new HttpClient()` 금지 — RcsPush 동일). 타임아웃 = `HttpTimeoutMs`(설정값).
-- **HTTP 메서드 = PUT**(RcsPush는 POST — 여기선 계약이 PUT). `PutAsJsonAsync` 또는 동등.
-- **요청 body 형상(계약 정확 준수):** `{ "chute_numbers": [<int>...], "next_states": [<int>...] }` — 두 배열 **동일 길이·인덱스 정렬**. **wire 는 snake_case** — STJ 기본 camelCase에 의존하지 말고 `[JsonPropertyName("chute_numbers")]`·`[JsonPropertyName("next_states")]` 명시(RcsPush의 camelCase 관례와 **다름** — 이 계약의 함정).
-  - 한 전이당 길이-1 배열(단건)로 전송(트리거가 전이당 1건). 배치(다건)는 계약상 허용이나 이번 스코프는 단건 — 배열 구조는 계약대로 유지.
-- **성공/실패 판정:**
-  - 성공 = **2xx + `flag == 1`**(스펙: flag:1=처리 성공). 응답 `result[]`(status/msg/chute_id/last_changed, snake_case)는 파싱해 로깅에 활용(부수).
-  - 실패 = 비2xx(400 missing-params 포함) **또는** body `{ "result": "Failed" }` **또는** flag != 1 → **재시도(설정 경유 지수 백오프)**. 소진 후 **false 반환 + 명시 ERROR 로깅(Fail-Loud, 예외 삼킴 금지)**. 절대 조용히 드롭 금지.
-- **DORMANT no-op:** `IsEnabled==false`(BaseUrl null)면 **HTTP 시도 0**·즉시 false(미발신). RcsPushClient의 방어적 IsEnabled 체크 미러.
-- operation_log 부수 기록(성공/실패 전수) — RcsPush의 `IF08_PUSH` 카테고리 미러(예: `CHUTESTATE_PUSH`), 실패는 WARN.
+### SC-1. ready 전이 발신 재배선 (폐지 와이어 → 확정 와이어)
+현재 `DestinationStatusPusher`가 폐지된 `IRcsPushClient`(destination-status 와이어)로 ready 불리언을
+발신한다. 이를 확정 `UpdateChuteState` 와이어로 발신하도록 재배선한다. 발신 값은 ready 불리언이 아니라
+`next_state`(수용가능 `3` / 불가 `2`)로 접어 보낸다.
 
-### SC-3. 트리거 관찰(observer) 신설 — pause/resume 전이 → 클라이언트 호출
-- **관찰 대상:** 운영자 O2 PAUSE(→DestStatus.PAUSED)·O3 RESUME(→DestStatus.NORMAL) 전이. 발원은 `DestinationControlService.TransitionAsync`(CHUTE·SORTER 공통, 커밋 후).
-- **매핑(LOCKED):** PAUSED 전이 → `next_state=2`, NORMAL(RESUMED) 전이 → `next_state=3`(Q-a). `chute_numbers` = **`dest.ChuteNo` 그대로(1:1, Q-b)** — 즉 PAUSED면 `{chute_numbers:[dest.ChuteNo], next_states:[2]}`, RESUMED면 `[..., next_states:[3]]`. 매핑 테이블 없음(unmapped 개념 없음 — 모든 목적지가 ChuteNo를 가짐). "무엇을 푸시하는가"의 게이트는 **전이 종류(PAUSED/RESUMED만)** 지 목적지 필터가 아니다(FULL/O6는 이 훅으로 안 들어옴).
-- **관찰 방식(HOW는 Generator 결정, 단 코어 무변경 필수):**
-  - **권장:** `DestinationControlService`에 **경량 전이 이벤트/notifier**(예: `event Action<long destId, DestStatus target, DestType> OnTransition`)를 추가해 실제 전이(Transitioned) 시 발화 → observer가 구독. CHUTE·SORTER를 **한 훅으로 균일** 처리하고, pause/resume 판정 로직·DB·인메모리 반영은 **한 줄도 바꾸지 않는다**(이벤트 발화만 append — 관찰 전용).
-  - (대안) `ChuteCapacityService.OnChuteStateChanged`(CHUTE만) + 소터 상태 폴 관찰 — RcsPush 방식이나 capacity/ready와 pause를 혼동하기 쉬워 **비권장**(이 API는 복합 ready가 아니라 명시 PAUSED/RESUMED 전이).
-- **관찰-전용 원칙(하드):** pause/resume 코어 동작(전이·감사·인메모리 반영·멱등)을 **바꾸지 않는다**. RcsPush가 게이트웨이를 안 건드리고 관찰만 하듯, 이 observer도 전이 로직을 변경하지 않는다.
-- **AlreadyInState(멱등 no-op) 전이는 푸시하지 않는다**(실제 상태 변화가 아님 — 스퓨리어스 재푸시 방지). 실제 `Transitioned`만 푸시.
-- **Fail-Loud + 비블로킹:** 푸시 실패가 pause/resume HTTP 응답(운영자 O2/O3)을 막지 않는다(fire-and-forget + 내부 재시도). 관찰 루프 예외는 삼키지 않되 코어를 죽이지 않음(RcsPush observe 루프 미러).
+### SC-2. 발신 상태 합성 변경 (계약 매핑 정합)
+목적지당 "발신할 수용상태"를 계약대로 합성한다:
+- **소터:** `next_state=3` ⇔ 온라인 ∧ 운영층 정렬 ∧ 비분류(Ready=1) ∧ **비정지**. 하나라도 아니면 `2`
+  (분류중·이동중·미정렬·오프라인·운영자정지 → `2`). 즉 발신 수용상태 = **운영 ready ∧ !paused**
+  (현재 `DestinationStatusService.Compute().Ready`(운영 ready)는 paused를 제외하고 있으므로, 발신
+  합성에서 paused를 다시 접어 넣어야 한다).
+- **슈트:** `next_state=3` ⇔ 비만재 ∧ 비정지. 아니면 `2`.
+- **셀 만재(SorterFull)는 발신 합성에서 제외.** 만재여도 운영상태 OK ∧ 비정지면 `3`을 유지한다
+  (만재는 IF-05 dispatch에서만 차단 — 2단계 게이트 분리 현행 유지).
 
-### SC-4. DI 배선 — `Program.cs`(append, 기존 배선 무접촉)
-- named HttpClient(`ChuteStatePushClient.HttpClientName`, 타임아웃=설정) + `IChuteStatePushClient` 싱글톤 + observer(IHostedService 또는 이벤트 구독) 등록. RcsPush 등록 블록(Program.cs:175-197) 미러.
-- BaseUrl null이면 observer가 기동 시 경고 로깅 후 비활성(RcsPush StartAsync의 "미설정 → 경고 후 no-op" 미러) — **크래시 0**.
+### SC-3. 두 발신 소스를 단일 소스로 통합
+`DestinationStatusPusher`(ready 전이)와 `ChuteStatePusher`(운영자 pause/resume 전이)를 목적지당 단일
+발신 소스로 통합한다. 통합 방식(둘 중 하나로 흡수 / 새 단일 서비스)은 Generator 재량이되:
+- 같은 `chuteNo`에 대해 이중·모순 발신이 발생하지 않아야 한다.
+- 전이 감지·전이당 정확히 1회·복구 재푸시의 동시성 멱등(중복 0·누락 0)이 보존되어야 한다.
+- 관심사 분리(전이 감지 → 1건 전송+재시도)가 유지되어야 한다.
 
-### SC-5. 테스트 신설 — `ChuteStatePushTests.cs`(RcsPushTests + FakeRcsServer 미러)
-- **가짜 고객 서버**(FakeRcsServer 미러 — Kestrel 동적 포트, `PUT /api/UpdateChuteState` 수신·기록, 거부 모드 토글) 구축. **인메모리 GREEN을 근거로 삼지 말고 "가짜 서버가 수신한 실제 JSON 본문"으로 입증**(RcsPushTests 메타교훈).
-- 검증 시나리오는 아래 §Verification Scenarios(Backend/API) 참조.
+### SC-4. 폐지 와이어 완전 제거
+- `RcsPushClient` + `IRcsPushClient` + `DestinationStatusPushPayload` 제거.
+- `WcsOptions` 내 `RcsPushOptions` 제거, `appsettings.json`의 `Wcs:RcsPush` 섹션 제거.
+- `Program.cs`의 해당 DI 배선(named HttpClient `RcsPush` · `IRcsPushClient` · `DestinationStatusPusher`
+  중 폐지 대상) 정리.
+- 프로덕션 코드·설정에 `destination-status`·`RcsPush*`·`IRcsPushClient`·`DestinationStatusPushPayload`
+  심볼/문자열이 0건 남게 한다.
+
+### SC-5. 관찰 주기 설정 이전
+폐지되는 `RcsPushOptions`의 `SorterObserveIntervalMs`(소터 스냅샷 관찰 주기 — 분류 사이클 ready 전이
+감지에 필수)를 존치되는 push 설정 섹션으로 이전한다. 운영자 pause/resume 이벤트만으로는 소터 분류
+사이클(3↔2) 전이를 감지할 수 없으므로 스냅샷 관찰은 반드시 유지된다. 관찰 주기는 설정값(하드코딩 금지).
+
+### SC-6. 트리거 정합
+- 수용상태가 **실제로 전이할 때만** 발신(운영자 pause/resume 포함 — 값이 같으면 미발신). 고정 주기 아님.
+- 기동 시 전 활성 목적지(슈트+소터)의 현재 수용상태를 목적지당 1회 부트스트랩 발신.
+
+### SC-7. 재시도 유지
+존치되는 push 클라이언트(`ChuteStatePushClient`)의 지수 백오프 재시도(설정값, 기본 3회 1s/2s/4s)를
+유지한다. 재시도·백오프·타임아웃·관찰 주기 전부 설정값(하드코딩 0 — 절대규칙 #7).
+
+### SC-8. 테스트 스위트 재작성·정합 (0 회귀 필수)
+- 폐지 와이어를 검증하던 테스트(`RcsPushTests` 및 `DestinationStatusPusher` 경로)를 존치 와이어(가짜
+  `UpdateChuteState` 수신 서버 — `FakeChuteStateServer` 재사용) 기준으로 재작성한다.
+- `ChuteStatePushTests`를 확장해 합성(ready∧!paused)·단일소스·부트스트랩·소터 분류 사이클 전이를 포함한다.
+- **공유 표면 정합(스코프 포함 — 이걸 놓치면 스위트 컴파일/실행 붕괴):**
+  - `RcsPushTests.cs`의 `RcsPushWebApplicationFactory`는 `SorterCellFullnessTests`·`Field20CellsGateTests`·
+    `SorterPushOperationalTests`가 **공유**하는 픽스처다. 폐지 심볼 제거 후에도 이 다운스트림 스위트가
+    컴파일·GREEN 유지되도록 픽스처를 이전/치환한다.
+  - `backend/tests/Wcs.Tests/E2E/E2EInfrastructure.cs`가 `Wcs:RcsPush:*` 키·`DestinationStatusPusher`를
+    배선한다. 존치 와이어 기준으로 갱신한다.
 
 ---
 
 ## Absolute Rules Compliance (CLAUDE.md)
 
-- **#1 (PLC 단일 큐):** **무관·무접촉.** 이 스프린트는 **아웃바운드 HTTP**이지 PLC 쓰기가 아니다. Modbus/게이트웨이/쓰기 큐 0 변경. (O6 매핑을 스코프에서 제외한 이유이기도 — PLC 쓰기 경로를 건드리지 않음.)
-- **#7 (하드코딩 금지):** BaseUrl·Path·재시도·백오프·타임아웃·chute_number 매핑 **전부 appsettings**. URL/타이밍/매핑 리터럴 0(Path 기본 리터럴은 외부화된 기본값 — override 가능·규칙 위반 아님).
-- **#6 (필드명):** 이 API 필드는 **고객 계약**(`chute_numbers`/`next_states`/`flag`/`result`/`chute_id`/`last_changed`, snake_case) — WCS 내부 RCS 계약 필드(`chuteNo` 등)와 무관. 계약 필드명 정확 준수.
-- **예외 삼킴 금지:** 푸시 최종 실패는 명시 ERROR 로깅 + false 반환(Fail-Loud). 연결 실패를 성공으로 위장 금지.
-- **#2/#3/#4/#5/#8:** 전부 **무관**(PLC/TgtFloor/Ready/판정엔진 무접촉). `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator` diff 0.
+- **#1 (PLC 단일 큐):** 무접촉 — 아웃바운드 HTTP 재배선이지 PLC 쓰기가 아니다. Modbus/게이트웨이/쓰기큐 0 변경.
+- **#7 (하드코딩 금지):** BaseUrl·Path·재시도·백오프·타임아웃·관찰 주기 전부 appsettings. URL/타이밍 리터럴 0.
+- **#6 (필드명):** 이 와이어 필드는 **RCS 계약**(`chute_numbers`/`next_states`, snake_case) — WCS 내부
+  camelCase(`chuteNo` 등)와 다르다. 계약 필드명 정확 준수(camelCase 직렬화 의존 금지).
+- **예외 삼킴 금지:** 푸시 최종 실패는 명시 로깅 + false 반환(Fail-Loud). 연결 실패를 성공 위장 금지.
+- **#2/#3/#4/#5/#8:** 전부 무관(PLC/TgtFloor/Ready/판정엔진 무접촉). `Wcs.Core`·`Wcs.PlcGateway`·
+  `HandshakeOrchestrator` diff 0.
 
 ---
 
-## Evaluation Criteria (Evaluator 판정 기준 + 가중치)
+## Evaluation Criteria (Backend/API — 가중치)
 
-- **[30%] DORMANT 정확성(하드 — "host 제외 미리 적용"의 핵심):** BaseUrl 미설정 시 (i) 기동 크래시 0, (ii) **HTTP 시도 0**(가짜 서버 수신 0), (iii) 인바운드/pause·resume/기존 RcsPush 정상(회귀 0). 가짜 서버 대상 fresh 증거로 입증.
-- **[30%] 계약 정합(고객 API):** 요청 body `{chute_numbers, next_states}` **snake_case·인덱스 정렬·동일 길이**, PUT 메서드, PAUSE→2·RESUME→3 매핑, 200+flag==1 성공/400·`{result:"Failed"}`·flag≠1 실패 처리, 재시도(설정 경유 지수 백오프)·Fail-Loud. **가짜 서버가 수신한 실제 JSON 본문**으로 입증(인메모리 GREEN 불가).
-- **[20%] 관찰-전용·회귀 0(하드 관심):** pause/resume 코어(전이·감사·인메모리·멱등) 동작 무변경(관찰 훅만 append), `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator`·기존 RcsPush 파이프 무접촉, 전체 스위트 baseline + 신규 전건 GREEN.
-- **[15%] Craft·아키텍처(RcsPush 형제성):** IHttpClientFactory 경유·관심사 분리(클라이언트=1건 전송+재시도 / observer=전이 감지+`ChuteNo` 직송), config 외부화, operation_log 부수 기록, 전이 종류 게이트(PAUSED/RESUMED만·FULL/O6 제외), dormant no-op 명료.
-- **[5%] 결정성·인프라 정합:** 가짜 서버 대상 테스트 비-flaky(반복 GREEN), 하드코딩 타이밍/URL 0, RcsPushTests 프리미티브(FakeServer·WaitUntilExact·stable-count) 재사용.
+1. **API 계약 정합성 (★★★)** — 발신 와이어가 계약 정본(§IF-08)과 바이트 수준 일치: `PUT`, snake_case
+   `chute_numbers`/`next_states`, 인덱스 정렬 단건 배열, 값 ∈ {2,3}, 상태 매핑(3/2)이 계약대로. 소터
+   합성 = 운영 ready ∧ !paused, 슈트 = !full ∧ !paused, 셀 만재 미반영.
+2. **아키텍처 (★★★)** — 목적지당 단일 발신 소스(이중/모순 발신 구조적 불가). 전이당 1회·복구 재푸시의
+   동시성 멱등(중복 0·누락 0) 보존. 관심사 분리(전이 감지 vs 1건 전송) 유지.
+3. **Craft (★★)** — 하드코딩 0(전 타이밍 설정값). 폐지 와이어 잔재 0(grep-clean). DORMANT(BaseUrl
+   미설정) 시 크래시 0·발신 0. 예외 삼킴 0(Fail-Loud). teardown 경쟁 방어 유지.
+4. **Functionality (★★)** — 계약의 트리거·합성·부트스트랩·재시도가 실제 동작으로 재현. IF-05 dispatch
+   (셀 만재 차단 포함) 회귀 0.
 
 ---
 
 ## Completion Conditions (Evaluator PASS 최소 조건 — 전부 충족)
 
-1. **전체 스위트 GREEN:** `dotnet test backend/Wcs.sln` = **착수 시 clean run으로 확정한 baseline(직전 기록 ~312건 부근) + 신규 ChuteStatePush 테스트** 전건 GREEN. 단일 run 신뢰 금지(실-Sim I/O 테스트 부하 flake 이력 — 관련군 반복 또는 ≥5회로 결정성 확인).
-2. **신규 테스트(스펙 입증 — 가짜 고객 서버 수신 본문 기반):**
-   - **CS-PUSH-1** PAUSE 전이 → 가짜 서버가 `{"chute_numbers":[dest.ChuteNo],"next_states":[2]}`(snake_case·정렬·ChuteNo 직송) 정확히 1건 수신. CHUTE·SORTER_3D 목적지 둘 다 대상임을 커버.
-   - **CS-PUSH-2** RESUME 전이 → `{"chute_numbers":[dest.ChuteNo],"next_states":[3]}` 정확히 1건 수신.
-   - **CS-PUSH-3** scope 게이트: FULL(만재/capacity) 상태 변화·O6 CellAssign은 **이 API 발신 0건**(PAUSED/RESUMED 전이만 푸시 — Q-c LOCKED). AlreadyInState 멱등 pause도 재푸시 0건(실제 전이만).
-   - **CS-PUSH-4** 성공 응답 처리: 200 `{flag:1, result:[...]}` → 성공(재시도 없음).
-   - **CS-PUSH-5** 실패 처리: 비2xx / `{result:"Failed"}` / flag≠1 → 재시도(설정 백오프) 후 소진 → **false + ERROR 로깅**, 조용한 드롭 0. 복구 후 다음 전이 정상 도달.
-   - **CS-PUSH-6 (DORMANT·핵심)** BaseUrl null → 기동 크래시 0 · pause/resume 발생시켜도 **가짜 서버 수신 0건**(HTTP 시도 0) · 인바운드/기존 RcsPush 정상.
-   - **CS-PUSH-7 (payload 정합)** body 키가 정확히 `chute_numbers`·`next_states`(camelCase 아님), 두 배열 동일 길이·인덱스 정렬. PUT 메서드.
-3. **하드코딩 0 · 마이그레이션 0:** URL/타이밍 리터럴 없음(전부 appsettings). `chute_numbers`는 `Destination.ChuteNo` 직송(1:1) — 매핑 config·DB 테이블 **모두 미신설**. 스키마 무변경 → **마이그레이션 0**(신규 마이그레이션 파일이 생기면 계약 위반).
-4. **관찰-전용 증거:** `git diff -- backend/src/Wcs.Api/Services/DestinationControlService.cs`가 **전이 이벤트 발화 append에 국한**(pause/resume 판정·DB·인메모리·멱등 로직 무변경). `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator`·기존 RcsPush(`RcsPushClient`·`DestinationStatusPusher`) diff 0.
-5. **활성화 경로 문서화:** 고객이 호스트 제공 시 설정할 **단 하나의 값 = `Wcs:ChuteStatePush:BaseUrl`**(그 외 추가 설정 불요 — chute_numbers는 ChuteNo 직송)임을 appsettings 주석/PR 설명에 명기. BaseUrl은 커밋 시 **null 유지**(고객 미제공).
-6. **Sim/offline-safe:** 검증은 가짜 고객 서버(in-process Kestrel 동적 포트) + in-memory SQLite(기존 테스트 팩토리) — **실 고객 호스트·실 3DS PLC(COM1/RTU)·현장 DB 미접근**. 푸시 비활성/실패가 WCS 핵심 흐름(인바운드·pause/resume·PLC)을 막지 않음.
+1. 아래 §Verification Scenarios **전부**가 자동 xUnit(가짜 `UpdateChuteState` 수신 서버 + Sim3ds(TCP) +
+   SQLite)로 재현되어 PASS. 인메모리 단언만으로 PASS 금지 — "가짜 RCS 서버가 실제 수신한 JSON 본문"으로 입증.
+2. `dotnet test backend/Wcs.sln` 전체 스위트가 **독립 실행**에서 GREEN(0 회귀). Evaluator가 처음부터 재실행.
+   단일 run 신뢰 금지(실-Sim I/O 테스트 부하 flake 이력 — 관련군 반복 또는 ≥5회로 결정성 확인).
+3. 폐지 와이어 grep-clean: 프로덕션 코드·`appsettings.json`에 `destination-status`·`RcsPush*`·
+   `IRcsPushClient`·`DestinationStatusPushPayload` 0건(grep 증거).
+4. `dotnet build backend/Wcs.sln` 경고/에러 0(프로젝트 설정 기준). 정적 검사 결과를 sprint-feedback.md에 기록.
+5. 스키마 무변경 → **마이그레이션 0**(신규 마이그레이션 파일 생성 시 계약 위반).
+6. 실 PLC/COM1·현장 DB 미접촉(검증은 Sim3ds TCP + in-memory SQLite로만).
 
 ---
 
 ## Scope OUT (이 계약에 흡수 금지)
 
-- **기존 RcsPush(IF-08 WCS→RCS `ready` 푸시) 변경** — 별개 채널. 무접촉(관찰 훅 공유 시에도 RcsPush 파이프 로직 무변경).
-- **FULL(만재)·capacity·복합 ready 를 UpdateChuteState로 푸시** — Q-c 기본 제외(override 시에만).
-- **O6 CellAssign(수동 셀지정)·PLC 쓰기 경로 연동** — 슈트 open/close 상태가 아님. 무접촉(절대규칙 #1 보존).
-- **인바운드 엔드포인트 신설** — 이 API는 WCS가 **호출하는** 아웃바운드. WCS에 새 컨트롤러/라우트 추가 없음.
-- **chute_number 매핑(config·DB·오프셋 일체)** — Q-b LOCKED = `Destination.ChuteNo` 직접 1:1. 매핑 계층 도입 금지(향후 다른 external ID 고객 발생 시 별도 스프린트).
-- **배치(다건) 최적화·전이 코얼레싱** — 계약 배열 구조는 유지하되 이번엔 전이당 단건. 배치는 후속.
-- **프론트/모니터링 UI(설정·상태 표면)** — 요청 없음(dormant 백엔드 전용). UI 추가 없음.
+- **PLC 레지스터/핸드셰이크/`Wcs.PlcGateway` 변경** — 무접촉(절대규칙 #1 보존).
+- **IF-05/09/10 인바운드 계약·판정 로직 변경** — 무접촉(회귀만 방지). `Wcs.Core` diff 0.
+- **셀 만재를 발신에 반영** — 계약상 만재는 IF-05 dispatch만 차단(발신 미반영). 현행 유지.
+- **배치(다건) 발신·전이 코얼레싱** — 계약 배열 구조는 유지하되 전이당 단건. 배치는 후속.
+- **프론트/모니터링 UI** — 요청 없음. 이 스프린트는 백엔드 서비스 계층 전용.
+- **신규 인바운드 WCS 엔드포인트** — 이 와이어는 WCS가 **호출하는** 아웃바운드.
 
 ---
 
-## Multi-Instance / Project Type / Verification
+## Parallel Modules
 
-- **Parallel Modules:** N/A (단일 응집 변경 — Options ↔ Client ↔ Observer ↔ DI ↔ Tests가 한 흐름으로 결선. 병렬 분할 이득 없음). 순차 단일 Generator.
-- **Evaluation Dimensions:** **functional only** — PLC/안전 경로(절대규칙 #1) 무접촉인 순수 아웃바운드 HTTP라 별도 safety 차원 불요. 단 Evaluator는 "관찰-전용·회귀 0"을 functional 기준 [20%] 하드 관심으로 포함 검증(코어 diff 대조).
+N/A (단일 모듈). 두 pusher·존치 클라이언트·옵션·DI·테스트가 상호 의존하고 파일을 공유하므로
+경계-청정 분할 불가. 기본 1 Generator.
 
-- **Detected Project Type:** **Backend/API** — 변경 표면 = 서버측 아웃바운드 HTTP 클라이언트 + observer + DI 배선 + config(모두 `backend/src/Wcs.Api`). 브라우저 진입점/클라이언트 렌더 트리 **무접촉**(프론트 UI 없음). 서버 라우트/서비스 계층만. Web/UI 슬롯 없음.
+## Evaluation Dimensions
 
-- **Verification Scenarios (Backend/API):**
+functional only. 신규 보안/성능 민감 표면 없음(내부 아웃바운드 HTTP 재배선). 동시성 정합(단일소스·
+이중발신 금지)은 별도 전문 dimension이 아니라 기능 정합의 일부로 검증. 기본 1 Evaluator.
 
-  - **이 스프린트가 건드리는 엔드포인트/표면(method + path):**
-    - **아웃바운드(신규 소비 — WCS가 호출):** `PUT {Wcs:ChuteStatePush:BaseUrl}{Path=/api/UpdateChuteState}` (고객 API). **신규 인바운드 WCS 엔드포인트 없음.**
-    - **트리거(기존·무변경, 푸시 발원):** `POST /api/ops/destinations/{destId}/pause`(→ next_state 2), `POST /api/ops/destinations/{destId}/resume`(→ next_state 3). 이들은 관찰 대상일 뿐 시그니처/동작 무변경.
-    - **검증 대역:** 가짜 고객 서버(in-process Kestrel, `PUT /api/UpdateChuteState` 수신·기록·거부토글) — FakeRcsServer 미러.
+---
 
-  - **Happy path (입력 → 기대 출력 형상):**
-    - 목적지 **PAUSE**(O2 또는 DestControlService.PauseAsync) → 가짜 서버가 **`{"chute_numbers":[dest.ChuteNo],"next_states":[2]}`** (snake_case·동일 길이·인덱스 정렬·ChuteNo 직송, PUT) 정확히 1건 수신 → WCS가 200 `{flag:1,result:[...]}`를 성공으로 처리(재시도 0). CHUTE·SORTER_3D 둘 다 대상.
-    - 목적지 **RESUME** → **`{"chute_numbers":[dest.ChuteNo],"next_states":[3]}`** 1건 수신 → 200 성공.
-    - AlreadyInState(멱등 재-pause) → 추가 수신 0(실제 전이만 푸시).
+## Detected Project Type: Backend/API
 
-  - **관련 에러/경계 케이스(해당하는 것만 — 패딩 금지):**
-    - **DORMANT (BaseUrl null):** pause/resume 발생 → 가짜 서버 **수신 0**(HTTP 시도 0)·기동 크래시 0·인바운드 정상. (이 API의 400 missing-params는 WCS가 항상 두 배열을 함께 보내므로 정상 경로엔 미발생 — 방어적 처리만 유지.)
-    - **처리 실패(고객 500/비2xx 또는 `{result:"Failed"}` 또는 flag≠1):** 재시도(설정 지수 백오프) → 소진 시 **false + ERROR 로깅**(Fail-Loud), 조용한 드롭 0. 이후 복구되면 다음 전이 정상 도달.
-    - **scope 게이트:** FULL(만재)·O6 CellAssign 상태 변화 → **무발신**(수신 0) — PAUSED/RESUMED 전이만 푸시(Q-c LOCKED).
-    - **취소/종료:** 호스트 종료 시 재시도 루프 취소 전파(미발신 유지) — RcsPushClient 취소 처리 미러.
+> 리포 구조 신호: `backend/src/Wcs.Api`에 ASP.NET Core Controller + 서버 진입점(`Program.cs`)이 있고,
+> `frontend/`에 React SPA(브라우저 진입점)도 함께 존재한다 — 리포 전체로는 Full-stack 신호다. 그러나
+> **이 스프린트의 변경 표면은 `Wcs.Api` 백엔드 서비스 계층(HostedService·아웃바운드 HTTP 클라이언트·옵션·
+> DI) + xUnit 테스트로 한정**되며 프론트엔드 파일·브라우저 진입점·HTTP 엔드포인트 라우팅을 일절 건드리지
+> 않는다. 발신 채널 상대역은 협력사 RCS(외부 시스템)이지 이 리포의 프론트엔드가 아니다. 따라서 검증 타입은
+> **Backend/API**로 확정한다(자동 xUnit 대 가짜 RCS 수신 서버 — 이 리포의 동종 아웃바운드 push 스프린트
+> RcsPush Phase 2·ChuteStatePush·SorterPushOperational이 확립한 패턴). 브라우저 검증은 이 스프린트에
+> 검증할 프론트엔드 델타가 없어 N/A.
 
-  - **관찰(하드):** `WebApplicationFactory<Program>` + 가짜 고객 서버(동적 포트) + in-memory SQLite 로 실행. **가짜 서버가 수신한 실제 JSON 본문**(키/값/배열 정렬)·HTTP 메서드(PUT)·재시도 횟수·operation_log(`CHUTESTATE_PUSH` 성공/실패)로 입증. 인메모리 상태 단언만으로 PASS 금지. **실 고객 호스트·실 PLC·현장 DB 미접근**(기동 설정 증거).
+---
 
-  - **회귀 관찰:** 기존 RcsPush(IF-08 VS-PUSH 스위트)·pause/resume(O2/O3 Ops)·인바운드 IF-05/09/10·b2b·모니터링(F1/F2) 무손상. baseline 카운트 유지. `DestinationControlService` 코어 동작(전이·감사·멱등) 무변경 확인.
+## Verification Scenarios (Backend/API — 필수)
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 4 (endpoints touched [method+path], happy path per endpoint, relevant error cases per endpoint, hard observation+regression). All slots filled: yes (Backend/API populated with outbound target + trigger endpoints + fake-server happy [PAUSE→2 / RESUME→3, ChuteNo 1:1] / dormant / failure / scope-gate [FULL·O6 무발신] cases + fresh-body observation and regression; Web/UI slots correctly absent — no browser surface in this sprint). Customer-contract gate CLOSED — Q-a/Q-b/Q-c LOCKED by 사수 2026-07-09 (no open questions remain).
+### 이 스프린트가 건드리는 엔드포인트 / 와이어 (method + path)
+
+- **아웃바운드(WCS = 클라이언트 · 재배선 대상):** `PUT {RCS base}/api/UpdateChuteState`
+  — body `{chute_numbers:[n], next_states:[2|3]}` (snake_case, 전이당 단건). 이 스프린트가 재배선하는
+  유일한 아웃바운드 채널. (폐지 제거 대상: `POST {RCS}/api/v1/destination-status`.)
+- **인바운드(무변경 · 회귀 방지):** `POST /api/v1/destination-query`(IF-05) — 발신과 상태 서비스를 공유
+  (`DestinationStatusService`)하므로 회귀 없음을 확인. `POST /api/ops/destinations/{id}/pause|resume`
+  (운영자 전이 발원지) — 전이가 통합 발신으로 이어짐을 확인.
+- **검증 대역:** 가짜 RCS 수신 서버(in-process Kestrel 동적 포트, `PUT /api/UpdateChuteState` 수신·기록·
+  거부토글) — 기존 `FakeChuteStateServer` 재사용.
+
+### Happy path (입력 → 기대 출력 형태)
+
+- **VS-1 소터 분류 사이클(전이당 1건·순서):** 소터 수용상태 `3`→`2`→`3` 전이 시 가짜 서버가
+  `{[chuteNo],[2]}` → `{[chuteNo],[3]}`를 그 순서로 각 1건 수신. 값이 안 바뀌는 폴에서는 **미발신**
+  (폴마다 폭주 0).
+- **VS-2 기동 부트스트랩:** 기동 시 전 활성 목적지(슈트+소터)의 현재 수용상태가 목적지당 정확히 1회 발신됨.
+- **VS-3 운영자 pause 합성(핵심):** 소터가 운영상태 OK(온라인·정렬·Ready=1)여도 운영자 PAUSED면 발신값
+  `2`(합성 `ready ∧ !paused` 검증), RESUME 시 `3`. 폐지 전 두 소스로 갈렸던 값이 단일 소스로 정합됨.
+- **VS-4 슈트 만재/정지:** 슈트 만재 또는 정지 전이 → `2`, 해소 → `3`.
+- **VS-5 소터 셀 만재 무영향(핵심):** 소터 셀이 만재(SorterFull)여도 운영상태 OK ∧ 비정지면 발신값 `3`
+  유지(만재로 `2` 발신 없음). 동시에 IF-05 dispatch는 그 piece를 여전히 차단(회귀 0) — 2단계 게이트 분리.
+- **VS-9 와이어 형태 정합:** 메서드 `PUT`, 키가 정확히 `chute_numbers`·`next_states`(camelCase 아님),
+  두 배열 동일 길이·인덱스 정렬·길이 1, 값 ∈ {2,3}. 성공 응답 판정(2xx ∧ `flag==1`)이 기존과 동형.
+
+### 관련 오류·경계·회귀 케이스 (골라 채움 — 패딩 아님)
+
+- **VS-6 DORMANT(BaseUrl 미설정):** RCS base URL 미설정 시 발신 0·크래시 0, 전이 여러 번 발생시켜도 수신 0,
+  인바운드 IF-05 정상(200). (현재 테스트 배포 상태 = DORMANT.)
+- **VS-7 단일 소스·이중/모순 발신 금지(핵심):** 같은 `chuteNo`에 운영자 pause 전이와 ready 전이가 겹쳐
+  발생해도 중복·모순 발신 없음. 최종 발신값이 최종 합성 상태와 일치(중복 0·누락 0 멱등).
+- **VS-8 폐지 와이어 완전 제거:** 프로덕션 코드·`appsettings.json`에 `destination-status`·`RcsPush*`·
+  `IRcsPushClient`·`DestinationStatusPushPayload` 심볼/설정 0건(grep 증거).
+- **VS-11 재시도·복구(RCS 미도달):** RCS가 비2xx/실패 응답 → 지수 백오프 재시도(설정 3회) 후 명시 실패
+  (Fail-Loud, 조용한 드롭 0) → 복구 후 최신 수용상태가 RCS에 도달.
+- **VS-10 전체 스위트 GREEN(0 회귀):** 공유 픽스처(`RcsPushWebApplicationFactory` 소비 스위트) + E2E
+  하네스 정합 후, `dotnet test backend/Wcs.sln` 전체가 독립 실행에서 GREEN.
+
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints touched [method+path], happy path per endpoint, relevant error/edge/regression cases per endpoint). All slots filled: yes — endpoints(아웃바운드 UpdateChuteState 재배선 + 무변경 인바운드 IF-05/pause·resume + 가짜 RCS 대역) · happy(VS-1 분류사이클 / VS-2 부트스트랩 / VS-3 pause 합성 / VS-4 슈트 full·pause / VS-5 셀만재 무영향 / VS-9 와이어 형태) · error·regression(VS-6 DORMANT / VS-7 단일소스 이중발신 금지 / VS-8 폐지와이어 제거 / VS-11 재시도·복구 / VS-10 전체 GREEN). Web/UI 슬롯은 이 스프린트에 프론트 표면이 없어 정당하게 부재. 배경 계약(destination-status 폐지·next_state 3/2 운반)은 2026-07-11 확정 — open question 없음.

@@ -1,89 +1,114 @@
-# Sprint Feedback — S-CHUTESTATE-PUSH (신규 아웃바운드: WCS → 고객 `PUT /api/UpdateChuteState` · DORMANT 선적용)
+# Sprint Feedback — S-IF08-READY-PUSH (아웃바운드 수용상태 발신 재배선: 폐지 destination-status → 확정 `PUT /api/UpdateChuteState`, 단일 발신 소스 통합)
 
-**APPROVED** — Evaluator, 2026-07-09 (1 iteration to pass).
+**APPROVED** — Evaluator, 2026-07-13 (1 iteration to pass).
 
-브랜치 `feat/chutestate-push`(HEAD == develop, 전 작업 미커밋 working tree — orchestrator 가 승인 후 커밋). Backend/API 단일 차원(functional only, 계약 선언). Evaluator 는 코드를 고치지 않음. Ground truth = git diff/status + 코드 판독 + **독립 재실행 dotnet test**(full 1× + 신규군 5× 반복) + **가짜 고객 서버가 수신한 실제 JSON 본문**. Generator 요약(327 GREEN 등)은 신뢰하지 않고 전부 독립 재현.
+브랜치 `feat/if08-ready-push`. 스프린트 변경분은 전부 **미커밋 working tree**(HEAD=`2ba2c9d`, docs 병합 커밋 — orchestrator 가 승인 후 커밋). 재핸드오프 아님(HEAD 에 이 스프린트 커밋 없음 · working tree 에만 존재). Backend/API 단일 차원(functional only, 계약 선언). Evaluator 는 코드를 고치지 않음.
+Ground truth = git diff/status + 코드 직접 판독 + **독립 재실행 dotnet test**(full 1× + push군 5× + E2E군 5×) + **가짜 RCS 수신 서버(FakeChuteStateServer)가 실제 수신한 JSON 본문**. Generator 요약(327 GREEN 등)은 신뢰하지 않고 전부 독립 재현.
 
-핸드오프 확인: `tasks/sprint-log.md` L3213 에 `## IMPLEMENTATION COMPLETE — S-CHUTESTATE-PUSH` 마커 존재(파일 mixed-encoding — `grep -a` 로 확인) → 활성화 정당.
+핸드오프 확인: `tasks/sprint-log.md` L3257 에 `## IMPLEMENTATION COMPLETE — S-IF08-READY-PUSH (Generator, 2026-07-13)` 마커 존재(파일 UTF-8 — L15 의 stale S-B2B-3b 마커가 아니라 파일 최말단의 IF08 마커가 정본) → 활성화 정당.
 
 ---
 
-## [정적] 빌드/테스트 — 독립 재실행 fresh evidence
+## [정적] 빌드 / 테스트 — 독립 재실행 fresh evidence
 
-- `dotnet test backend/Wcs.sln`(full): **`통과!  - 실패: 0, 통과: 327, 건너뜀: 0, 전체: 327` (20s, exit 0)**. baseline 318 + 신규 ChuteStatePush 9 = 327. 회귀 0·skip 0.
-- **결정성(계약 Completion #1 — 실-Kestrel/폴링 I/O flake 이력 대비 ≥반복 필수)**: 신규군 `--filter FullyQualifiedName~ChuteStatePush` **5회 연속 = 9/9 GREEN**(각 4~5s). flake 0.
-- **빌드 경고**: 신규 코드 경고 0. 유일 경고 = 선재 NU1903(`SQLitePCLRaw.lib.e_sqlite3` 취약성 advisory) — 이번 스프린트 도입분 아님(feedback-archive 기 확인). 오류 0.
+- `dotnet build backend/Wcs.sln`: **오류 0**. 경고 전부 선재 **NU1903**(`SQLitePCLRaw.lib.e_sqlite3` 2.1.10 취약성 advisory) × 5 프로젝트(Wcs.Api/Data/Migrations.Sqlite/Migrations.SqlServer/Tests). 신규 경고 0. (MSBuild 요약 라인 "경고 10개" = restore/build 단계 중복 계수 — 근원은 동일 NU1903 하나. 계약 Completion #4 가 NU1903 을 선재 advisory 로 명시 제외.)
+- `dotnet test backend/Wcs.sln`(full, 독립 재실행): **`통과! 실패:0 통과:327 건너뜀:0 전체:327` (18s, exit 0)**. 회귀 0·skip 0.
+- **결정성(계약 Completion #2 — 실-Kestrel/폴링 I/O flake 이력[S9·testhost teardown] 대비 ≥5회 반복 필수)**:
+  - push 군 `--filter FullyQualifiedName~Push|SorterCellFullness|Field20Cells` **5회 연속 = 52/52 GREEN**(각 8s). (계약 언급 42 의 상위집합 — SorterCellFullness+Field20+전 Push 클래스 포함.)
+  - E2E 군 `--filter FullyQualifiedName~E2E` **5회 연속 = 50/50 GREEN**(각 14~18s).
+  - flake 0. 단일 run 신뢰 회피 규칙 준수.
 
-## [30%] DORMANT 정확성 (하드 — "host 제외 미리 적용"의 핵심) — PASS
+## [Completion #3 / VS-8] 폐지 와이어 grep-clean — PASS
 
-- **appsettings 커밋값 = `"BaseUrl": null`** (git diff 확인). `_comment_ChuteStatePush` 에 "BaseUrl 한 값만 설정하면 활성, 미설정 시 DORMANT" 명기.
-- **CS_PUSH_6c(client)**: `BuildClient(baseUrl:null)` → `IsEnabled==false`·`PushAsync`→false·`srv.All` **Empty(HTTP 시도 0)**.
-- **CS_PUSH_6(observer/e2e)**: `ChuteStatePushWebApplicationFactory(chuteBaseUrl:null)` 기동 **크래시 0**(`CreateClient()` 성공) → pause/resume/소터 pause 3회 발생시켜도 가짜 서버 **수신 0** + 인바운드 IF-05(`POST /api/v1/destination-query`) **200**(회귀 0). `ChuteStatePusher.StartAsync` 가 `!IsEnabled` 시 경고 후 구독 안 함(코드 확인).
+- 프로덕션(`backend/src`): `destination-status|RcsPush|IRcsPushClient|DestinationStatusPushPayload|RcsPushOptions` **0건**.
+- `appsettings.json`: 폐지 심볼 0건. `SorterObserveIntervalMs` 는 `Wcs:ChuteStatePush` 섹션으로 **이전됨**(SC-5) — 유일 매치.
+- 테스트(`backend/tests`) 정밀 grep(`\bIRcsPushClient\b|\bDestinationStatusPushPayload\b|\bRcsPushOptions\b|\bRcsPushClient\b|destination-status`): **0건**. 잔존 매치는 전부 `DestinationStatusPusher`(SC-3 통합 단일 소스 — 존치 심볼, 폐지 아님). 픽스처명 `RcsPushWebApplicationFactory`·파일명 `RcsPushTests.cs` 는 SC-8 이 명시 존치를 요구한 산물(폐지 심볼 아님). "gone everywhere" 확정.
+- 삭제 확인(git status): `RcsPushClient.cs` (D), `ChuteStatePusher.cs` (D).
 
-## [30%] 계약 정합 (고객 API) — 가짜 서버 수신 본문으로 입증 — PASS
+## [Completion #5] 마이그레이션 0 · [Completion #6] 인프라 격리 — PASS
 
-- **PUT 메서드(POST 아님)**: `FakeChuteStateServer` 가 `app.Map`(전 메서드 매칭)으로 실 메서드 기록 → CS_PUSH_7/CS_PUSH_1 이 `last.Method == "PUT"` positive 단언. 클라이언트는 `PutAsJsonAsync`.
-- **snake_case `{chute_numbers, next_states}` via [JsonPropertyName]**: `ChuteStatePushPayload` record 가 `[property: JsonPropertyName("chute_numbers")]`·`[property: JsonPropertyName("next_states")]` 명시(STJ 기본 camelCase 미의존). CS_PUSH_7 이 수신 RawBody 파싱 → 키 정확히 2개 `chute_numbers`·`next_states` 포함 + `chuteNumbers`·`nextStates`(camelCase) **DoesNotContain**(계약 함정 방어).
-- **인덱스 정렬·동일 길이**: 전이당 길이-1 단건 배열. CS_PUSH_7 이 `ChuteNumbers.Length == NextStates.Length` 단언.
-- **성공 = 2xx && flag==1**: `IsSuccessStatusCode && IsSuccessBody`(flag==1). CS_PUSH_4: 200 `{flag:1}` → true·재시도 0(`srv.All.Count==1`).
-- **실패 = 비2xx / `{result:"Failed"}` / flag≠1 → 재시도+백오프+Fail-Loud**: CS_PUSH_5 — (a) 503 → 재시도 소진(총 3회 = 1+RetryCount2 전부 서버 도달, 조용한 드롭 0)→false, (b) `{result:"Failed"}`(400)→false, (c) 200 `{flag:0}`→false, (d) 복구→true. `ComputeBackoffDelay` 지수 백오프(설정값 경유)·소진 시 `LogError`(Fail-Loud)+operation_log WARN·false 반환. 매 시도 `LogWarning`(조용한 실패 0).
+- `git status`: migration/snapshot 파일 변경 **0건**. 스키마 무접촉.
+- 무접촉 재확인: `Wcs.PlcGateway`·`Wcs.Core`·`Wcs.Data` diff **0**(git status 에 해당 경로 변경 없음 — 절대규칙 #1/#2/#3/#4/#5, SC scope-OUT 준수).
+- 검증 인프라: FakeChuteStateServer(Kestrel `127.0.0.1:0` 동적 포트) + E2E Sim3ds(`GetFreePort()` 동적 TCP `127.0.0.1`) + in-memory SQLite(named, per-factory Guid). **COM1/RTU·실 PLC·원격/현장 DB 무접촉 확인**(고정 :1502/:5205 미사용 — 전부 동적/loopback).
 
-## [20%] 관찰-전용 · 회귀 0 (하드) — PASS
+---
 
-- **`git diff backend/src/Wcs.Api/Services/DestinationControlService.cs` = 순수 additive**: (1) `DestinationTransition` record struct 신설, (2) 인터페이스+구현에 `event Action<DestinationTransition>? OnTransition`, (3) 스코프 안에서 `chuteNo = dest.ChuteNo` 캡처, (4) **Transitioned 반환 직전**(AlreadyInState/NotFound 는 이미 조기 반환) `OnTransition?.Invoke(...)` 를 try/catch 로 감싼 발화. pause/resume 코어(전이·감사·인메모리·멱등) 로직 **무변경**(제거 라인 0). 이벤트는 DB 커밋(스코프 종료)·"전이 완료" 로그 **이후** 발화 → destination_event 정합 불변.
-- **구독자 예외 격리**: `OnTransition` 발화가 try/catch 로 감싸져 구독자 예외가 코어 반환(운영자 O2/O3 응답)을 죽이지 않음. Pusher 도 fire-and-forget(`_ = PushSafeAsync`)로 비블로킹.
-- **무접촉 확인**(git status): `Wcs.Core`·`Wcs.PlcGateway`·`HandshakeOrchestrator`·기존 RcsPush(`RcsPushClient`·`DestinationStatusPusher`) diff **0**(수정 목록에 부재).
-- **스코프 게이트 진성(FULL/O6 무발신)**: CS_PUSH_3 — (1) FULL(capacity `OnReserved`)→`OnChuteStateChanged`만 발화(OnTransition 아님)→발신 0, (2) O6 `cell-assign`(소터 PLC 쓰기 경로, DestControlService 무접촉)→발신 0, (3) AlreadyInState(멱등 재-pause)→`DestControlOutcome.AlreadyInState`·발신 0. 3종 후 `srv.All` Empty → 이어 실제 PAUSE(chuteNo 2)→정확히 1건(pusher 생존·게이트 진성). FULL·O6 는 절대규칙 #1(PLC 큐) 무접촉으로도 스코프 밖.
+## [★★★ API 계약 정합성] — PASS
 
-## [15%] Craft · 아키텍처 (RcsPush 형제성) — PASS
+- **와이어 형태(VS-9)**: 가짜 수신 서버가 기록한 실제 요청으로 입증 — `last.Method=="PUT"`(positive), RawBody 키 `chute_numbers`/`next_states` **Contains** ∧ `chuteNumbers`/`nextStates`/`chuteNo`/`ready`/`timeStamp` **DoesNotContain**(camelCase·폐지키 함정 차단), 두 배열 동일 길이·인덱스 정렬·길이 1, 값 ∈ {2,3}. (RcsPushTests.PUSH6_7 + ChuteStatePushClientTests.CS_PUSH_7.)
+- **상태 매핑(SC-2)**: `NextStateOpen=3`(accept)/`NextStatePause=2` 상수 LOCKED. accept 합성 = `Compute().Ready && !Compute().Paused` — 코드 직접 확인(DestinationStatusPusher.ComputeAccept).
+  - 슈트: `Compute().Ready = !full && !paused` → accept = !full && !paused(만재·정지 반영).
+  - 소터: `Compute().Ready = decision.Ready`(online·정렬·Ready==1, SorterFull·paused 제외) → accept = 운영 ready && !paused. **paused 재접힘 + SorterFull 제외** 확인.
+- **성공/실패 판정**: 2xx && `flag==1` 성공 / `{result:"Failed"}`·flag≠1·비2xx 실패(status code 만 보지 않음). ChuteStatePushClient.IsSuccessBody 코드 확인 + CS_PUSH_4/5 실증.
 
-- **IHttpClientFactory 경유 named client**(`CreateClient(HttpClientName)`, 직접 `new HttpClient()` 0). 타임아웃=`HttpTimeoutMs` 설정값(Program.cs `AddHttpClient` 배선).
-- **관심사 분리**: `ChuteStatePushClient`=1건 전송+재시도+Fail-Loud+operation_log / `ChuteStatePusher`=전이 감지+`ChuteNo` 직송 매핑. RcsPush(`RcsPushClient`/`DestinationStatusPusher`) 구조 미러.
-- **매핑 LOCKED(Q-a/Q-b)**: `DestStatus.PAUSED→2`·`DestStatus.NORMAL→3`, `chute_numbers=[t.ChuteNo]` 직송(이벤트가 실어 옴 — DB 조회/매핑 테이블 0). CS_PUSH_1(CHUTE)·CS_PUSH_1b(SORTER) `next_states:[2]`, CS_PUSH_2 `[3]` 로 실증. CHUTE·SORTER_3D 균일 훅(DestType 필터 없음).
-- **config 외부화(#7)**: `ChuteStatePushOptions`(BaseUrl·Path·RetryCount·RetryBaseDelayMs·RetryMaxDelayMs·HttpTimeoutMs·`IsEnabled`) — RcsPush 동형. **`ChuteNoMap` 필드 부재**(Q-b LOCKED = 1:1 직송). URL/타이밍 하드코딩 리터럴 0.
-- **DI 배선 append-only**(Program.cs): RcsPush 블록 이후에만 추가(기존 배선 무접촉).
+## [★★★ 아키텍처 — 단일 발신 소스·동시성 멱등] — PASS (코드 직접 검사)
 
-## [5%] 결정성 · 인프라 정합 — PASS
+- **단일 소스(SC-3/VS-7)**: 변화원 3종(슈트 capacity 콜백 ① · 소터 스냅샷 관찰 타이머 ② · 운영자 `OnTransition` ③)이 전부 `Observe → PumpAsync` 단일 경로로 수렴. 발신값은 항상 단일 술어 `ComputeAccept`(현재 DB Status 직접 read) 산출 — 갈라진 두 소스(구 DestinationStatusPusher ready + ChuteStatePusher pause) 는 `ChuteStatePusher.cs` **삭제**로 소멸. 같은 chuteNo 에 한쪽 3·다른 쪽 2 모순 발신이 **구조적으로 불가**.
+  - 실증: PUSH4(16스레드 동시 통지 → 정확히 1건) · SorterPushOperational VS-9a(N스레드 동시 관찰 → 1건) · CS_PUSH_3(정지 중 관찰 타이머 계속 돌아도 모순 3 발신 0 — stableCount 10회 관측).
+- **전이당 1회 멱등(중복 0·누락 0)**: `PumpAsync` per-dest `Gate` 락에서 `PushInFlight` 클레임 + `Acked==Computed` 값기반 억제 → I/O 는 락 밖 → 완료 후 락에서 `Acked` 갱신 + 재평가. 동시 클레임은 락 직렬화로 1개만 성공(나머지 즉시 반환). 성공만 `Acked` 갱신, 실패 시 `Acked` 불변 → 다음 관찰이 재푸시(복구). **비원자 check-then-act 없음** — 클레임·판정·Acked 갱신 전부 동일 락 안.
+- **관심사 분리**: 전이 감지(DestinationStatusPusher) ↔ 1건 전송+지수 백오프 재시도+Fail-Loud(ChuteStatePushClient) 분리 유지.
+- **teardown 경쟁 방어**: `StopAsync` `Interlocked.Exchange(_stopped)` 1회 실행 · CTS `CancelAsync` ObjectDisposedException catch · observe task await 예외 흡수. `PumpAsync` OperationCanceledException catch(PushInFlight 리셋) · `_cts?.Token ?? None`. 픽스처 `_fakeWriteQueue.Writer.TryComplete()` before DisposeAsync(testhost teardown 패턴 준수).
 
-- 가짜 서버 대상 테스트 5× 반복 GREEN(비-flaky). FakeChuteStateServer(Kestrel 동적 포트)·`WaitUntilExactAsync`(stable-count)·in-memory SQLite = RcsPushTests 프리미티브 재사용. **실 고객 호스트·실 3DS PLC(COM1/RTU)·현장 DB 미접근**(in-process Kestrel + Sqlite Mode=Memory).
+## [★★ Craft] — PASS
 
-## 마이그레이션 0 (계약 §Completion 3·4 하드)
+- 하드코딩 0: BaseUrl·Path·RetryCount·RetryBaseDelayMs·RetryMaxDelayMs·HttpTimeoutMs·SorterObserveIntervalMs 전부 `ChuteStatePushOptions`(appsettings). URL/타이밍 리터럴 0(절대규칙 #7). 백오프 shift overflow 가드(`Min(attempt-1,30)`) 존재.
+- DORMANT: `BaseUrl` null → `IsEnabled=false` → StartAsync 경고 후 전체 비활성(구독 안 함·관찰 타이머 미기동·HTTP 0·크래시 0). 클라이언트도 방어적 재확인 false.
+- Fail-Loud: 재시도 소진 시 명시 ERROR 로깅 + false 반환 + operation_log WARN 부수 기록. 성공 위장 0.
 
-- `git status --porcelain | grep migrat` = **0건**. Glob `**/Migrations/*.cs` = 선재 파일만(0630/0708 — 이번 스프린트 신규 0). 스키마 무변경(매핑 config/DB 테이블 미신설).
+## [★★ Functionality] — PASS
 
-## Completion Conditions (계약 §Completion 1~6) — 전부 충족
+- IF-05 dispatch 회귀 0: 소터 2단계 게이트 분리 보존 — push ready(운영상태)는 SorterFull/Paused 무반영, IF-05 는 `SorterCanAcceptBarcode`+`r.Paused` 소비. SorterCellFullness EC-1/EC-2/EC-3(만재·PAUSED → IF-05 NG) + SorterPushOperational VS7 실증.
 
-1. 전체 스위트 GREEN(327, 실패 0·skip 0) + 신규군 5× 결정성 ✅
-2. 신규 테스트 7시나리오 9건(CS-PUSH-1/1b/2/3/4/5/6/6c/7) 가짜 서버 수신 본문 기반 ✅
-3. 하드코딩 0(전부 appsettings)·마이그레이션 0·ChuteNoMap 미신설 ✅
-4. 관찰-전용(DestControlService additive·코어 무변경·Core/PlcGateway/Handshake/RcsPush diff 0) ✅
-5. 활성화 경로 문서화(BaseUrl 단일값·appsettings 주석·커밋 시 null 유지) ✅
-6. Sim/offline-safe(in-process Kestrel + in-memory SQLite, 실 호스트/PLC/현장DB 미접근) ✅
+---
 
-## Wire contract 정합 (docs/UpdateChuteState_API_EN.md) — 전부 충족
+## Verification Scenarios — VS-1 ~ VS-11 (전부 자동 xUnit · 가짜 수신 본문 입증)
 
-PUT ✅ / body snake_case `{chute_numbers:int[], next_states:int[]}` via [JsonPropertyName] ✅ / index-aligned 동일 길이 ✅ / success 2xx && flag==1 ✅ / failure 비2xx·`{result:"Failed"}`·flag≠1 → retry+backoff+fail-loud(무 silent) ✅ / 캡처 body 검사(CS_PUSH_7) ✅.
+| VS | 내용 | 커버 테스트(가짜 수신 본문 단언) | 판정 |
+|----|------|-------------------------------|------|
+| VS-1 | 소터 분류 사이클 2→3→2 전이당 1건·무변화 폭주 0 | RcsPushTests.PUSH2_3 (부트1+전이2=3건, stableCount 6) | **PASS** |
+| VS-2 | 기동 부트스트랩 전 활성 목적지 1회 | RcsPushTests.PUSH6_7 (슈트5+PAUSED1+소터1=7건, 무변화 안정) | **PASS** |
+| VS-3 | 운영자 pause 합성(운영 ready여도 paused→2) | ChuteStatePushObserverTests.CS_PUSH_3 + SorterPushOperational VS-5 (`Compute().Ready=true`∧`Paused=true`이나 발신 2) | **PASS** |
+| VS-4 | 슈트 만재/정지→2, 해소→3 | RcsPushTests.PUSH1 (3→2→3) + CS_PUSH_1/CS_PUSH_2 | **PASS** |
+| VS-5 | 소터 셀 만재 무영향(발신 3 유지)+IF-05 여전히 차단 | 발신측 SorterPushOperational VS-9b/VS-4(만재 전이 push 0·last=3) · IF-05측 SorterCellFullness EC-1/EC-2 + VS-7(만재 NG) | **PASS** |
+| VS-6 | DORMANT: 발신 0·크래시 0·인바운드 정상 | RcsPushTests.PUSH8 + CS_PUSH_6/CS_PUSH_6c (전이 다수에도 수신 0, IF-05 200) | **PASS** |
+| VS-7 | 단일 소스·이중/모순 발신 금지 | RcsPushTests.PUSH4(동시16→1) + CS_PUSH_3(no-contradiction) + VS-9a | **PASS** |
+| VS-8 | 폐지 와이어 완전 제거(grep) | 프로덕션+appsettings+테스트 정밀 grep 0건 | **PASS** |
+| VS-9 | 와이어 형태(PUT·snake_case·인덱스정렬·{2,3}) | RcsPushTests.PUSH6_7 + CS_PUSH_7 (RawBody 파싱 이중 단언) | **PASS** |
+| VS-10 | 전체 스위트 GREEN(0 회귀) 독립 실행 | full 327/327 + push 52×5 + E2E 50×5 GREEN | **PASS** |
+| VS-11 | RCS 미도달→재시도(설정3)→복구 후 최신값 도달(Fail-Loud) | RcsPushTests.PUSH5(503 중 성공 0→복구 재푸시 최신 2) + CS_PUSH_5(503/Failed/flag0→false, 복구 true) | **PASS** |
 
-## LOCKED semantics 정합 — 전부 충족
+**모든 Completion Condition(1~6) 충족. 11개 VS 전부 PASS. 동시성 정합(단일소스·전이당1회·teardown) 코드 직접 검사 통과.**
 
-PAUSED→[2] ✅ / RESUMED→[3] ✅ / chute_numbers=[dest.ChuteNo] DIRECT(매핑 0) ✅ / scope O2/O3 only, FULL·O6 무발신(CS_PUSH_3 증명) ✅ / DORMANT BaseUrl null 시 HTTP 0(CS_PUSH_6/6c 증명) ✅.
+---
 
 ## Repeat detection
 
-- 스택 PR 금지(develop 분기·HEAD==develop 확인)·Sim/현장 DB 무접촉·가짜 서버 수신 본문 입증(인메모리 GREEN 불신)·≥반복 결정성 = 기존 교훈(MEMORY) 준수. 반복 결함 0 → 신규 lessons 승격 불요.
+- 이 스프린트는 feedback-archive S-CHUTESTATE-PUSH 가 확립한 교훈(가짜 수신 서버 본문 = 유일 신뢰 증거 · snake_case JsonPropertyName 캡처 이중단언 · DORMANT 3중 실증 · 관찰-전용 additive 코어 무변경 · 실-Kestrel/폴링 ≥5× 결정성 · 스택 PR 금지/현장 DB 무접촉)을 **정확히 계승·적용**했다. 반복된 **결함**은 0 → lessons.md 승격 불요(반복 교훈은 반복된 실패에 한함).
 
-## Minor (비차단 — 다음 스프린트 Generator 참고)
+## Minor (비블로킹 — 다음 sprint Generator 참고, APPROVED 불변)
 
-- `ChuteStatePushClient.DetailJson` 이 payload 를 수동 문자열 보간으로 조립(operation_log detail) — 소규모라 무해하나 STJ 직렬화로 통일 여지(cosmetic·비차단).
+- **소터는 관찰 타이머(SorterObserveIntervalMs)로 실패 후 자동 재푸시가 보장되나, 슈트는 주기 관찰이 없어 push 최종 실패 후 재푸시가 "다음 capacity 이벤트/운영자 전이"에 의존**한다(주기적 reconcile 부재). 이는 계약 정합(SC-6 전이-트리거 · SC-7 클라 레벨 3회 재시도 · VS-11 이 subsequent 전이로 복구 입증 · 주기 reconcile/coalescing 은 명시 scope-OUT)이며 결함 아님. 다만 RCS 장기 다운 중 슈트 상태가 다음 슈트 이벤트까지 stale 로 남을 수 있으므로, 후속 배치/주기 reconcile 스프린트에서 슈트 주기 재푸시(또는 부트스트랩성 재동기) 도입을 고려할 것.
+- S-CHUTESTATE-PUSH Step 4.5 에서 이연된 항목(활성화 시 재동기화 협의 · `DetailJson` 수동 보간 STJ 통일 등)은 이 스프린트가 재도입하지 않았고 여전히 이연 상태 — 활성화(고객사 host 제공) 시점에 함께 처리.
 
-→ **결론: functional 단일 차원 PASS, 계약 Completion 1~6 + wire/LOCKED 전부 충족. APPROVED.**
+→ **결론: functional 단일 차원 PASS, 계약 Completion 1~6 + VS-1~11 + 와이어/동시성 전부 충족. APPROVED.**
 
-**APPROVED — S-CHUTESTATE-PUSH**
+**APPROVED — S-IF08-READY-PUSH**
 
-## Step 4.5 Code Review (orchestrator 기록)
-- **판정: With fixes → 이연 처리로 merge-ready.** Critical 0 · Important 2 · Minor 4.
-- 강점: scoped DbContext 미포획(ChuteNo 값캡처)·fire-and-forget async Task+전구간 try/catch(unobserved 0)·코어 전이 이중보호·IsSuccessBody가 RcsPush보다 견고(flag==1 AND result!=Failed)·snake_case JsonPropertyName 캡처검증·HttpClient timeout vs shutdown cancel 구분·이벤트 구독 leak-free.
-- **#1 재동기화 부재 = 의도적 best-effort로 확정(이연)**: 이 API는 Pause(2)/Open(3)만·normal 상태 부재라 startup bootstrap 시맨틱 미정. dormant(BaseUrl null)라 현재 영향 0. **활성화(고객사 host 제공) 시 재동기화 필요 여부를 고객사와 협의해 별도 결정**. → todo.
-- #2 4xx 재시도(RcsPush 동일패턴·정상 body라 자가발생 불가)·minor 4건(#3 주석·#4 _cts 종료 race 로그·#5 backoff/url DRY·#6 DisposeAsync await) → todo 이연. fix 반복 불요(BLOCKING 0).
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-13)
 
-**APPROVED — S-CHUTESTATE-PUSH (Evaluator ∧ Step 4.5, 327 GREEN, dormant)**
+**판정: Ready to merge = Yes. Critical/BLOCKING 0.**
+
+강점: 계약 바이트 정합([JsonPropertyName] snake_case 강제·단일 Compute 호출 합성·IsSuccessBody 엄격 판정),
+단일 발신 소스가 "운 좋게"가 아니라 구조적으로 건전(per-dest Gate + PushInFlight claim + 성공 후
+Acked≠Computed 재수렴 루프 — 모순 발신 불가·최종상태 유실 창 없음), Fail-Loud 보존, 테스트가 실수신
+JSON으로 입증(WaitUntilExact 결정성 폴링·bare sleep 없음).
+
+### Minor (비블로킹 — 다음 sprint Generator 참고)
+1. **[Important→후속] 슈트 복구 하트비트 부재** — DestinationStatusPusher.cs:242-244(관찰 루프 소터
+   전용)+:361-366. 슈트 FULL 전이 push가 RCS 장애로 재시도 소진되면, 만재라 후속 용량 이벤트도 없어
+   RCS가 "받을 수 있음"으로 무기한 오인 가능. 선재 동작(Phase 2 이월)·계약 VS-11 허용 — 병합 비차단.
+   후속: 관찰 루프에 "Acked≠Computed인 슈트 재평가"(chute Compute=인메모리 GetHold라 비용 ~0) 확장.
+2. Program.cs:198 `IDestinationChangeNotifier` DI 등록이 사장(이벤트 구독으로 대체됨·선재) — 제거 후보.
+3. 구 `Wcs:RcsPush` 키가 남은 수기 appsettings는 조용히 무시됨(진단 없음) — 양 와이어 DORMANT 출하라 수용.
+4. StartAsync에서 `_cts` 생성(:161)이 부트스트랩 루프(:153-158) 뒤 — 부트스트랩 발신이 CancellationToken.None로
+   나감(영향 극소). `_cts` 생성을 부트스트랩 앞으로 재배치 후보.
