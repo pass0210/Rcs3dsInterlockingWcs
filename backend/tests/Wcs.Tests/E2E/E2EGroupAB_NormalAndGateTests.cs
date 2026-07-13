@@ -27,10 +27,10 @@ public class E2EGroupAB_NormalAndGateTests
     public E2EGroupAB_NormalAndGateTests(ITestOutputHelper output) => _out = output;
 
     // ── 공용 셋업: 실 Sim 기동 + 호스트 + 소터 Online 대기 ──────────────────────
-    private async Task<(E2EWebApplicationFactory factory, FakeRcsServer rcs)> StartAsync(
+    private async Task<(E2EWebApplicationFactory factory, FakeChuteStateServer rcs)> StartAsync(
         int initialCurFloor = 2, int[]? extraSorters = null)
     {
-        var rcs = await FakeRcsServer.StartAsync();
+        var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(
             rcsBaseUrl: rcs.BaseUrl, extraSorterChuteNos: extraSorters, initialCurFloor: initialCurFloor);
         await factory.StartSimsAsync();

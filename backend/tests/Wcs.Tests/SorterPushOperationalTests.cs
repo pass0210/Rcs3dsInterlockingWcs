@@ -12,25 +12,28 @@ using Xunit.Abstractions;
 namespace Wcs.Tests;
 
 // ════════════════════════════════════════════════════════════════════════════
-// S-소터push운영상태 — 소터 IF-08 push ready를 운영상태로 좁힌 결과 검증.
+// S-IF08-READY-PUSH — 소터 수용상태 발신(UpdateChuteState next_state 3/2) 합성 검증.
 //
-// 확정 모델(2단계 게이트 분리):
-//   - push ready(IF-08) = decision.Ready = online && CurFloor==운영층 && Ready==1 (운영상태만).
-//     ★ SorterFull·PAUSED는 push ready에 영향 없음(만재·정지여도 운영상태 OK면 push ready=true).
+// 확정 모델(발신 합성 SC-2 + 2단계 게이트 분리):
+//   - 발신 accept = Compute().Ready ∧ !Compute().Paused → next_state 3(수용가능)/2(불가).
+//     · Compute().Ready(운영상태) = online && CurFloor==운영층 && Ready==1 (paused·SorterFull 제외).
+//     · ★ 셀 만재(SorterFull)는 발신 제외(만재여도 운영상태 OK ∧ 비정지면 발신 3).
+//     · ★ PAUSED는 발신에 **접힘**(운영상태 OK여도 paused면 발신 2 — paused를 다시 접어 넣음).
 //   - IF-05 dispatch = r.Paused + SorterCanAcceptBarcode(셀 기준). r.Ready(운영상태) 미소비.
 //
 // ground-truth: 실 DB seed(인메모리 SQLite) + 게이트웨이 snapshot(FakeMaster 레지스터) +
-//   가짜 RCS 수신 본문(FakeRcsServer push payload). 인메모리 카운터 단독 금지(메타교훈).
+//   가짜 RCS 수신 본문(FakeChuteStateServer PUT payload — next_state). 인메모리 카운터 단독 금지(메타교훈).
+//   (편의: 수신 .Ready == next_state==3.)
 //
 // 시나리오(계약 §Verification Scenarios):
-//   VS-1 online·정렬·Ready=1 → push ready=true
-//   VS-2 busy(Ready==0 / 미정렬) → push ready=false (두 하위 케이스)
-//   VS-3 offline → push ready=false
-//   VS-4 [핵심회귀] 셀 만재(SorterFull=true)인데 운영상태 OK → push ready=true (Full 산출은 유지)
-//   VS-5 [핵심회귀] PAUSED인데 운영상태 OK → push ready=true (Paused 산출은 유지)
+//   VS-1 online·정렬·Ready=1 → 발신 3
+//   VS-2 busy(Ready==0 / 미정렬) → 발신 2 (두 하위 케이스)
+//   VS-3 offline → 발신 2
+//   VS-4 [핵심] 셀 만재(SorterFull=true)인데 운영상태 OK ∧ 비정지 → 발신 3 (Full 산출은 유지·발신 제외)
+//   VS-5 [핵심] PAUSED면 운영상태 OK여도 발신 2 (paused 접힘 — 발신 합성 ready∧!paused)
 //   VS-7 IF-05 소터 3축: (a)셀 있으면 offline이어도 OK (b)paused면 NG (c)만재(셀없음)면 NG
-//   VS-9 push 멱등 + 만재/paused 전이 무발화: (a)운영상태 전이를 N스레드 동시관찰해도 1건
-//        (b)만재·paused 전이만으로는 소터 push 0건(무발화·no-flood)
+//   VS-9 발신 멱등 + 만재/paused 취급: (a)운영상태 전이를 N스레드 동시관찰해도 1건
+//        (b)만재 전이는 발신 0(제외)·paused 전이는 발신 1(next_state 2) — 대비
 // ════════════════════════════════════════════════════════════════════════════
 
 public class SorterPushOperationalTests
@@ -135,7 +138,7 @@ public class SorterPushOperationalTests
     [Fact]
     public async Task VS1_Sorter_OnlineAlignedReady_PushReadyTrue()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -166,7 +169,7 @@ public class SorterPushOperationalTests
     [InlineData("misalign")]  // (b) CurFloor≠운영층(미정렬)
     public async Task VS2_Sorter_Busy_PushReadyFalse(string mode)
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -205,7 +208,7 @@ public class SorterPushOperationalTests
     [Fact]
     public async Task VS3_Sorter_Offline_PushReadyFalse()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -240,7 +243,7 @@ public class SorterPushOperationalTests
     [Fact]
     public async Task VS4_Sorter_CellFull_OperationalReady_PushReadyTrue()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -270,13 +273,14 @@ public class SorterPushOperationalTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-5 [핵심회귀]: PAUSED인데 운영상태 OK → push ready=true.
-    //   Compute().Paused=true(산출 유지) AND Compute().Ready=true(paused가 push에 무영향).
+    // VS-5 [핵심 — 발신 합성]: PAUSED면 운영상태 OK여도 발신값 2(paused 접힘 — SC-2).
+    //   Compute().Ready=true(운영상태 산출 유지·paused 미반영) AND Compute().Paused=true 이지만,
+    //   발신 합성 accept=Ready∧!Paused=false → next_state 2. paused를 다시 접어 넣음을 입증.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task VS5_Sorter_Paused_OperationalReady_PushReadyTrue()
+    public async Task VS5_Sorter_Paused_FoldsToNextState2_EvenWhenOperationalReady()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -285,8 +289,10 @@ public class SorterPushOperationalTests
         var  status      = factory.Services.GetRequiredService<IDestinationStatusService>();
 
         await AlignSorterAsync(factory);
+        // 정렬 → 발신 next_state 3(수용가능) 도달.
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "정렬 후 push next_state 3");
 
-        // PAUSED ground-truth: destination.Status=PAUSED.
+        // PAUSED ground-truth: destination.Status=PAUSED(직접 DB — 관찰 타이머가 재평가로 감지).
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
@@ -297,12 +303,13 @@ public class SorterPushOperationalTests
         await WaitUntilAsync(() => status.Compute(sorterId, DestType.SORTER_3D).Paused, 5000, "Paused=true ground-truth");
         var r = status.Compute(sorterId, DestType.SORTER_3D);
         Assert.True(r.Paused, "PAUSED → Paused=true(산출 유지)");
-        Assert.True(r.Ready,  "paused여도 운영상태 OK → push ready=true(핵심 회귀)");
+        Assert.True(r.Ready,  "운영상태 ready=true(paused는 Compute().Ready에 미반영)");
         Assert.Equal(DenyReason.None, r.Reason);
 
-        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "paused여도 push ready=true 수신");
-        Assert.True(rcs.LastFor(sorterChute)!.Ready);
-        _out.WriteLine("[VS-5] PAUSED인데 운영상태 OK → push ready=true (Paused 산출은 유지)");
+        // 발신 합성 = Ready ∧ !Paused → paused면 next_state 2(핵심: paused 접힘).
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: false }, 6000, "PAUSED → push next_state 2");
+        Assert.False(rcs.LastFor(sorterChute)!.Ready, "PAUSED → 발신 2(운영상태 ready여도 paused 접힘)");
+        _out.WriteLine("[VS-5] PAUSED인데 운영상태 OK → 발신 next_state 2(paused 접힘 — 발신 합성 ready∧!paused)");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -313,7 +320,7 @@ public class SorterPushOperationalTests
     [Fact]
     public async Task VS7_If05_Sorter_ThreeAxis_UnaffectedByOperationalReady()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         var client = factory.CreateClient();
 
@@ -384,7 +391,7 @@ public class SorterPushOperationalTests
     [Fact]
     public async Task VS9a_Sorter_OperationalTransition_ConcurrentObserve_ExactlyOncePush()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -419,13 +426,13 @@ public class SorterPushOperationalTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-9(b): 만재·paused 전이만으로는 소터 push 0건(무발화·no-flood).
-    //   운영상태 불변(정렬·online·Ready=1)인 채 SorterFull·PAUSED를 토글해도 push ready 불변 → 전이 0.
+    // VS-9(b) [핵심 — 만재 제외·paused 접음의 대비]: 만재 전이만으로는 소터 push 0건(SorterFull 발신 제외),
+    //   그러나 paused 전이는 발신에 접혀 next_state 2 1건. 셀 만재와 정지의 발신 취급 차이를 대비 입증.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task VS9b_Sorter_FullAndPausedTransition_NoPush()
+    public async Task VS9b_Sorter_FullNoPush_ButPausedPushesState2()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
@@ -433,21 +440,24 @@ public class SorterPushOperationalTests
         int  sorterChute = factory.SorterChuteNo;
         var  status      = factory.Services.GetRequiredService<IDestinationStatusService>();
 
-        // 운영상태 정렬 → push ready=true 1건(부트스트랩 false + 전이 true = 2건).
+        // 운영상태 정렬 → next_state 3 발신(부트스트랩 2 + 전이 3 = 2건).
         await AlignSorterAsync(factory);
-        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "정렬 → ready=true");
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "정렬 → next_state 3");
         int baseReady = rcs.CountFor(sorterChute);
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 6, timeoutMs: 4000, "ready=true 안정");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 6, timeoutMs: 4000, "3 안정");
 
-        // 만재 전이(빈셀→만재) — 운영상태 불변이므로 push 0건.
+        // 만재 전이(빈셀→만재) — SorterFull은 발신 합성에서 제외 → push 0건(값 불변).
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
             MakeSorterFull(db, sorterId);
         }
         await WaitUntilAsync(() => status.Compute(sorterId, DestType.SORTER_3D).Full, 5000, "SorterFull=true");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 10, timeoutMs: 5000,
+            "만재 전이만으로는 소터 push 0건(SorterFull 발신 제외·no-flood)");
+        Assert.True(rcs.LastFor(sorterChute)!.Ready, "만재 중에도 마지막 발신 = 3(SorterFull 미반영)");
 
-        // paused 전이 — 역시 운영상태 불변이므로 push 0건.
+        // paused 전이 — paused는 발신 합성에 접힘(ready∧!paused) → next_state 2 1건.
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
@@ -455,17 +465,16 @@ public class SorterPushOperationalTests
             db.SaveChanges();
         }
         await WaitUntilAsync(() => status.Compute(sorterId, DestType.SORTER_3D).Paused, 5000, "Paused=true");
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: false }, 6000, "PAUSED → push next_state 2");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady + 1, stableCount: 8, timeoutMs: 5000,
+            "paused 전이 = 정확히 1건(만재 0 + paused 1)");
+        Assert.False(rcs.LastFor(sorterChute)!.Ready, "PAUSED → 발신 2(paused 접힘)");
 
-        // 관찰 주기 다수에도 push 무발화(만재·paused 전이는 push에 무영향).
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseReady, stableCount: 10, timeoutMs: 5000,
-            "만재·paused 전이만으로는 소터 push 0건(무발화·no-flood)");
-        Assert.True(rcs.LastFor(sorterChute)!.Ready, "마지막 푸시는 여전히 ready=true(만재·paused가 false로 안 바꿈)");
-
-        // 산출 ground-truth: Full=true·Paused=true이지만 운영상태 OK → Ready=true.
+        // 산출 ground-truth: Full=true·Paused=true이지만 운영상태 Compute().Ready=true(둘 다 산출 유지).
         var r = status.Compute(sorterId, DestType.SORTER_3D);
         Assert.True(r.Full);
         Assert.True(r.Paused);
-        Assert.True(r.Ready, "만재+paused여도 운영상태 OK → ready=true");
-        _out.WriteLine($"[VS-9b] 만재·paused 전이 중 소터 push 0건(총 {rcs.CountFor(sorterChute)}건) — 무발화");
+        Assert.True(r.Ready, "만재+paused여도 운영상태 Compute().Ready=true(산출 유지)");
+        _out.WriteLine($"[VS-9b] 만재 전이 push 0(제외)·paused 전이 push 1(next_state 2) — 총 {rcs.CountFor(sorterChute)}건");
     }
 }

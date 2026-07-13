@@ -24,15 +24,10 @@ public sealed record WcsOptions
     public int MaxQtyPerRequest { get; init; } = 100000;
 
     /// <summary>
-    /// IF-08 아웃바운드 푸시(WCS→RCS destination-status) 설정.
-    /// Phase 2 — RCS base URL·재시도·타이밍 전부 설정화(하드코딩 금지, 절대규칙 #7).
-    /// </summary>
-    public RcsPushOptions RcsPush { get; init; } = new();
-
-    /// <summary>
-    /// 고객 슈트 상태 아웃바운드 푸시(WCS → 고객 PUT /api/UpdateChuteState) 설정.
-    /// S-CHUTESTATE-PUSH — 고객 base URL·경로·재시도·타이밍 전부 설정화(하드코딩 금지, 절대규칙 #7).
-    /// BaseUrl 미설정(호스트 미정) 시 DORMANT(no-op)로 출하 — 고객이 추후 이 한 값만 설정하면 활성.
+    /// 목적지 수용상태 아웃바운드 푸시(WCS → RCS PUT /api/UpdateChuteState) 설정.
+    /// S-IF08-READY-PUSH — 확정 와이어(UpdateChuteState) 단일 채널. base URL·경로·재시도·타이밍·
+    /// 소터 관찰 주기 전부 설정화(하드코딩 금지, 절대규칙 #7).
+    /// BaseUrl 미설정(호스트 미정) 시 DORMANT(no-op)로 출하 — RCS가 추후 이 한 값만 설정하면 활성.
     /// </summary>
     public ChuteStatePushOptions ChuteStatePush { get; init; } = new();
 
@@ -108,88 +103,35 @@ public sealed record MonitorOptions
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// RcsPushOptions — IF-08 아웃바운드 푸시 설정 (appsettings "Wcs:RcsPush" 섹션).
+// ChuteStatePushOptions — 목적지 수용상태 아웃바운드 푸시 설정 (appsettings "Wcs:ChuteStatePush").
 //
-// RCS↔WCS 재설계 Phase 2:
-//   목적지(슈트/소터) ready 전이 시 WCS가 POST {BaseUrl}/api/v1/destination-status 로 푸시.
-//   base URL·재시도 횟수·백오프·간격·HTTP 타임아웃을 전부 설정으로 외부화한다.
-//   - 사용자 확정2: 기본 3회 지수 백오프(1s/2s/4s). 고정 sleep·하드코딩 금지.
-//   - 사용자 확정4: BaseUrl 미설정 시 푸시 비활성(경고 후 no-op) — 크래시 X.
-// ════════════════════════════════════════════════════════════════════════════
-
-/// <summary>appsettings.json "Wcs:RcsPush" 섹션 — IF-08 아웃바운드 푸시 설정.</summary>
-public sealed record RcsPushOptions
-{
-    /// <summary>
-    /// RCS base URL(예: "http://10.0.0.5:8080"). 엔드포인트는 RCS가 제공 —
-    /// WCS는 "{BaseUrl}/api/v1/destination-status"로 POST한다.
-    /// 미설정(null/공백)이면 푸시 비활성(경고 로그 후 no-op — 사용자 확정4).
-    /// 운영 배포에선 필수 설정.
-    /// </summary>
-    public string? BaseUrl { get; init; }
-
-    /// <summary>
-    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). 스펙 IF-08 정의.
-    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지).
-    /// </summary>
-    public string Path { get; init; } = "/api/v1/destination-status";
-
-    /// <summary>
-    /// 푸시 실패(연결 거부·타임아웃·5xx) 시 재시도 횟수(최초 시도 제외 — 총 시도 = 1+RetryCount).
-    /// 사용자 확정2: 기본 3회.
-    /// </summary>
-    public int RetryCount { get; init; } = 3;
-
-    /// <summary>
-    /// 지수 백오프 초기 지연(ms). 시도 n회차 지연 = RetryBaseDelayMs × 2^(n-1)(상한 RetryMaxDelayMs).
-    /// 사용자 확정2: 기본 1000ms(→ 1s/2s/4s). 고정 sleep 아님(설정값).
-    /// </summary>
-    public int RetryBaseDelayMs { get; init; } = 1000;
-
-    /// <summary>지수 백오프 지연 상한(ms). 기본 4000ms.</summary>
-    public int RetryMaxDelayMs { get; init; } = 4000;
-
-    /// <summary>HTTP 요청 타임아웃(ms). 기본 3000ms.</summary>
-    public int HttpTimeoutMs { get; init; } = 3000;
-
-    /// <summary>
-    /// 소터 ready 전이 감지를 위한 스냅샷 관찰 주기(ms).
-    /// 게이트웨이 폴링 스냅샷(bundle.Latest)을 이 주기로 diff해 ready 전이를 감지한다
-    /// (게이트웨이 본문 무변경 — Latest 관찰만, Scope D (a)). 폴 간격과 동급 권장.
-    /// </summary>
-    public int SorterObserveIntervalMs { get; init; } = 150;
-
-    /// <summary>BaseUrl이 설정되어 푸시가 활성인지.</summary>
-    public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// ChuteStatePushOptions — 고객 슈트 상태 아웃바운드 푸시 설정 (appsettings "Wcs:ChuteStatePush").
-//
-// S-CHUTESTATE-PUSH:
-//   운영자 O2/O3 PAUSED/RESUMED 전이 시 WCS가 PUT {BaseUrl}{Path}로
-//   {chute_numbers:[dest.ChuteNo], next_states:[2|3]} 를 고객 시스템으로 푸시한다.
-//   base URL·경로·재시도·백오프·HTTP 타임아웃을 전부 설정으로 외부화한다(하드코딩 금지·절대규칙 #7).
-//   - RcsPushOptions와 동일 의미의 지수 백오프(기본 3회 1s/2s/4s).
+// S-IF08-READY-PUSH (확정 와이어 단일 채널):
+//   목적지(슈트+소터) 수용상태 전이 시 WCS가 PUT {BaseUrl}{Path}로
+//   {chute_numbers:[dest.ChuteNo], next_states:[2|3]} 를 RCS로 푸시한다(3=수용가능/2=불가).
+//   전이원: 운영자 PAUSED/RESUMED · 슈트 만재/비움 · 소터 분류 사이클(스냅샷 관찰).
+//   base URL·경로·재시도·백오프·HTTP 타임아웃·소터 관찰 주기를 전부 설정으로 외부화한다
+//   (하드코딩 금지·절대규칙 #7).
+//   - 지수 백오프(기본 3회 1s/2s/4s).
 //   - BaseUrl 미설정(null/공백)이면 푸시 완전 비활성(DORMANT — 경고 후 no-op). 크래시 0.
-//   - ★ RcsPush와 달리 chute_number 매핑 config 없음(Q-b LOCKED = Destination.ChuteNo 직접 1:1).
-//   - ★ 트리거가 전이 이벤트라 SorterObserveIntervalMs 같은 폴 주기도 불요.
+//   - chute_number 매핑 config 없음(Q-b LOCKED = Destination.ChuteNo 직접 1:1).
+//   - SorterObserveIntervalMs: 소터 분류 사이클(3↔2) 전이는 명시 이벤트가 없어 스냅샷 관찰이 유일한
+//     감지 수단이므로 반드시 유지(폐지된 목적지-상태 와이어 옵션에서 이전).
 // ════════════════════════════════════════════════════════════════════════════
 
-/// <summary>appsettings.json "Wcs:ChuteStatePush" 섹션 — 고객 슈트 상태 아웃바운드 푸시 설정.</summary>
+/// <summary>appsettings.json "Wcs:ChuteStatePush" 섹션 — 목적지 수용상태 아웃바운드 푸시 설정.</summary>
 public sealed record ChuteStatePushOptions
 {
     /// <summary>
-    /// 고객 base URL(예: "http://10.0.0.9:9000"). 엔드포인트는 Path와 결합 —
+    /// RCS base URL(예: "http://10.0.0.9:9000"). 엔드포인트는 Path와 결합 —
     /// WCS는 "{BaseUrl}{Path}"로 PUT한다.
     /// 미설정(null/공백)이면 푸시 비활성(DORMANT — 경고 로그 후 no-op).
-    /// 호스트 미정으로 지금은 null로 출하하며, 고객이 추후 제공하는 **유일한 활성화 값**이다.
+    /// 호스트 미정으로 지금은 null로 출하하며, RCS가 추후 제공하는 **유일한 활성화 값**이다.
     /// </summary>
     public string? BaseUrl { get; init; }
 
     /// <summary>
-    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). 고객 계약(UpdateChuteState_API) 기본값.
-    /// 고객이 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값).
+    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). RCS 계약(UpdateChuteState) 기본값.
+    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값).
     /// </summary>
     public string Path { get; init; } = "/api/UpdateChuteState";
 
@@ -210,6 +152,14 @@ public sealed record ChuteStatePushOptions
 
     /// <summary>HTTP 요청 타임아웃(ms). 기본 3000ms.</summary>
     public int HttpTimeoutMs { get; init; } = 3000;
+
+    /// <summary>
+    /// 소터 수용상태 전이 감지를 위한 스냅샷 관찰 주기(ms). 폐지된 목적지-상태 와이어 옵션에서 이전.
+    /// 소터 분류 사이클(Ready 1↔0)·정렬 전이는 명시 이벤트가 없으므로 게이트웨이 폴링 스냅샷
+    /// (bundle.Latest)을 이 주기로 diff해 수용상태 전이를 감지한다(게이트웨이 본문 무변경 — Latest
+    /// 관찰만). 폴 간격과 동급 권장. 하드코딩 금지(절대규칙 #7).
+    /// </summary>
+    public int SorterObserveIntervalMs { get; init; } = 150;
 
     /// <summary>BaseUrl이 설정되어 푸시가 활성인지(미설정=DORMANT).</summary>
     public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);

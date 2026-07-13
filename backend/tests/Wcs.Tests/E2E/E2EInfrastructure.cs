@@ -20,12 +20,12 @@ namespace Wcs.Tests.E2E;
 //
 // 계약 §3.1 + §9 재사용 갭 해소:
 //   기존 SimWebApplicationFactory(ScenarioTests)는 실 Sim + 실 핸드셰이크를 제공하나
-//   푸시(IF-08)는 비활성이고, RcsPushWebApplicationFactory(RcsPushTests)는 fake 번들이라
+//   발신(IF-08)은 비활성이고, RcsPushWebApplicationFactory(RcsPushTests)는 fake 번들이라
 //   핸드셰이크 ground-truth가 없다. 이 팩토리는 둘의 능력을 합친다:
 //     ① 실 Sim3ds N대(동적 포트) — 실 Modbus TCP 핸드셰이크·정렬·고장주입(SimServer).
 //     ② production SorterRegistryFactory 그대로 — DB 주도 소터 판별 + 소터별 번들 N대.
 //        (Fake/Nop 레지스트리 교체 안 함 — 진짜 핸드셰이크 ground-truth.)
-//     ③ Wcs:RcsPush:BaseUrl → FakeRcsServer 결선 — DestinationStatusPusher 활성(실 push 수신).
+//     ③ Wcs:ChuteStatePush:BaseUrl → FakeChuteStateServer 결선 — DestinationStatusPusher 활성(실 발신 수신).
 //     ④ 실 EF DB(named in-memory SQLite, 인스턴스별 Guid) — sorter_command·cell_assignment·
 //        piece·alarm·셀수량 ground-truth.
 //
@@ -58,7 +58,7 @@ public sealed class SorterSimSlot
 public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     private readonly int[]    _extraSorterChuteNos;   // 시드 chuteNo=30 외에 추가할 SORTER_3D chuteNo들
-    private readonly string?  _rcsBaseUrl;            // FakeRcs base URL(푸시 수신). null이면 푸시 비활성.
+    private readonly string?  _rcsBaseUrl;            // 가짜 RCS base URL(발신 수신). null이면 발신 비활성(DORMANT).
     private readonly int      _initialCurFloor;       // Sim 초기 CurFloor(2=즉시 정렬 / 1=미정렬)
     private readonly int      _rFlagTimeoutMs;
     private readonly int      _sorterObserveIntervalMs;
@@ -186,15 +186,15 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 dict[$"Sorters:{i}:WriteTimeoutMs"]       = "500";
             }
 
-            // RcsPush — FakeRcs로 결선(푸시 활성). null이면 비활성(BaseUrl 미설정).
+            // ChuteStatePush(확정 와이어 UpdateChuteState) — 가짜 RCS로 결선(발신 활성). null이면 DORMANT.
             if (_rcsBaseUrl is not null)
             {
-                dict["Wcs:RcsPush:BaseUrl"]                 = _rcsBaseUrl;
-                dict["Wcs:RcsPush:RetryCount"]              = "3";
-                dict["Wcs:RcsPush:RetryBaseDelayMs"]        = "30";
-                dict["Wcs:RcsPush:RetryMaxDelayMs"]         = "120";
-                dict["Wcs:RcsPush:HttpTimeoutMs"]           = "2000";
-                dict["Wcs:RcsPush:SorterObserveIntervalMs"] = _sorterObserveIntervalMs.ToString();
+                dict["Wcs:ChuteStatePush:BaseUrl"]                 = _rcsBaseUrl;
+                dict["Wcs:ChuteStatePush:RetryCount"]              = "3";
+                dict["Wcs:ChuteStatePush:RetryBaseDelayMs"]        = "30";
+                dict["Wcs:ChuteStatePush:RetryMaxDelayMs"]         = "120";
+                dict["Wcs:ChuteStatePush:HttpTimeoutMs"]           = "2000";
+                dict["Wcs:ChuteStatePush:SorterObserveIntervalMs"] = _sorterObserveIntervalMs.ToString();
             }
 
             cfg.AddInMemoryCollection(dict);

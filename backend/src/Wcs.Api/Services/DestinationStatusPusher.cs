@@ -6,46 +6,65 @@ using Wcs.Data;
 namespace Wcs.Api;
 
 // ════════════════════════════════════════════════════════════════════════════
-// DestinationStatusPusher — IF-08 전이 감지 + 전이당 1회 푸시 파이프 (Scope C·D·F·G)
+// DestinationStatusPusher — 목적지 수용상태 전이 감지 + 전이당 1회 푸시 (S-IF08-READY-PUSH)
 //
-// RCS↔WCS 재설계 Phase 2:
-//   목적지(슈트 + 3D 소터) ready가 전이(true↔false)할 때만 RcsPushClient로 1회 푸시.
-//   ready 산출은 Phase 1 DestinationStatusService.Compute 재사용(새 판정 0 — Scope B).
+// 확정 와이어(UpdateChuteState) 단일 채널로 통합된 **목적지당 단일 발신 소스**:
+//   목적지(슈트 + 3D 소터)의 "수용상태"가 전이할 때만 IChuteStatePushClient로 1회 푸시.
+//   페이로드 = {chute_numbers:[ChuteNo], next_states:[3|2]} (snake_case, 전이당 단건).
+//     · 3 = 받을 수 있음 / 2 = 받을 수 없음.
 //
-//   변화원 둘이 공통 푸시 경로(ObserveAsync)로 수렴:
-//     ① 슈트 ChuteCapacityService 상태 변화 — OnChuteChanged 콜백(IF-05 예약/IF-10 투입/비움).
-//     ② 소터 폴링 스냅샷 변화 — 관찰 타이머가 주기적으로 bundle.Latest를 diff
-//        (게이트웨이 본문 무변경 — Latest 관찰만, Scope D (a)).
+//   ★ 수용상태 합성(계약 SC-2) — DestinationStatusService.Compute를 재사용(새 판정 0):
+//     accept = Compute().Ready ∧ !Compute().Paused.
+//       - 슈트(CHUTE): Compute().Ready = 비만재 ∧ 비정지 이므로 accept = 비만재 ∧ 비정지(만재·정지가 발신에 반영).
+//       - 소터(SORTER_3D): Compute().Ready = 운영 ready(online·정렬·Ready=1, paused·SorterFull 제외)이므로
+//         accept = 운영 ready ∧ !paused. 즉 paused를 다시 접어 넣고 **셀 만재(SorterFull)는 제외**한다
+//         (만재는 IF-05 dispatch에서만 차단 — 2단계 게이트 분리).
+//     `Ready ∧ !Paused`는 슈트에도 정합하다(슈트의 Ready가 이미 !paused를 포함하므로 !Paused를 추가로
+//      AND해도 동일) — 슈트/소터를 하나의 술어로 균일 발신한다.
 //
-//   전이 추적: chuteNo별 "직전 Computed ready"와 "RCS에 마지막으로 성공 알린 Acked ready"를
-//   분리 보관(사용자 확정3). 푸시는 Computed != Acked일 때만 발생. 성공 시 Acked=Computed,
-//   실패 시 Acked 불변(미알림 유지 → 다음 관찰/복구 시 재푸시).
+//   변화원 셋이 공통 발신 경로(Observe→PumpAsync)로 수렴(단일 소스 — 이중/모순 발신 구조적 불가):
+//     ① 슈트 ChuteCapacityService 상태 변화 — OnChuteStateChanged 콜백(IF-05 예약/IF-10 투입/비움/정지).
+//     ② 소터 폴링 스냅샷 변화 — 관찰 타이머가 주기적으로 bundle.Latest를 diff(게이트웨이 본문 무변경).
+//        소터 분류 사이클(Ready 1↔0)·정렬·오프라인 전이는 명시 이벤트가 없어 스냅샷 관찰이 유일 감지 수단.
+//     ③ 운영자 PAUSED/RESUMED 전이 — DestinationControlService.OnTransition(실제 전이에서만 발화).
+//        슈트·소터 모두 동일 훅으로 균일 처리 — 같은 chuteNo에 대해 accept 하나로 접혀 발신되므로
+//        (한쪽 3·다른 쪽 2 같은) 모순 발신이 물리적으로 불가능하다.
 //
-//   동시성(Scope F·P3 교훈): 변화원 둘 + 재시도가 동시에 같은 destination을 갱신해도
-//   per-destination 락 + in-flight 플래그로 "전이당 정확히 1회"(중복 0·누락 0)를 보장한다.
-//   비원자 check-then-act 금지(P3 OFFLINE 전이당-1건 멱등 교훈).
+//   전이 추적: chuteNo별 "직전 Computed accept"와 "RCS에 마지막으로 성공 알린 Acked accept"를
+//   분리 보관. 푸시는 Computed != Acked일 때만 발생(값이 같은 관찰은 미발신 — 폴마다 폭주 0).
+//   성공 시 Acked=Computed, 실패 시 Acked 불변(미알림 유지 → 다음 관찰/복구 시 재푸시).
 //
-//   부트스트랩(확정5): 기동 시 BaseUrl 설정되어 있으면 전 목적지 현재 ready 1회 스냅샷 푸시
-//   후 이후 전이만. BaseUrl 미설정(확정4)이면 경고 후 전체 비활성(no-op).
+//   동시성: 변화원 셋 + 재시도가 동시에 같은 destination을 갱신해도 per-destination 락 + in-flight
+//   플래그로 "전이당 정확히 1회"(중복 0·누락 0)를 보장한다(비원자 check-then-act 금지).
+//
+//   관심사 분리: 이 서비스는 "전이 감지 → 1건 발신 요청"만 책임진다. "PUT 1건 전송 + 지수 백오프
+//   재시도 + Fail-Loud"는 IChuteStatePushClient가 책임(ChuteStatePushClient).
+//
+//   부트스트랩: 기동 시 BaseUrl 설정되어 있으면 전 목적지 현재 수용상태를 목적지당 1회 발신 후
+//   이후 전이만. BaseUrl 미설정(DORMANT)이면 경고 후 전체 비활성(구독 안 함·HTTP 시도 0·크래시 0).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>
 /// 슈트 capacity 변화를 Pusher에 통지하는 콜백 인터페이스.
-/// ChuteCapacityService(슈트 변화원)가 ready 경계를 넘길 수 있는 이벤트마다 호출.
-/// Pusher가 Compute로 재산출해 전이만 푸시(무변화면 0건 — 폴마다 폭주 금지).
+/// ChuteCapacityService(슈트 변화원)가 수용상태 경계를 넘길 수 있는 이벤트마다 호출.
+/// Pusher가 Compute로 재산출해 전이만 발신(무변화면 0건 — 폴마다 폭주 금지).
 /// </summary>
 public interface IDestinationChangeNotifier
 {
-    /// <summary>슈트 destination의 상태가 바뀌었을 수 있음 — 재평가·전이 시 푸시.</summary>
+    /// <summary>슈트 destination의 상태가 바뀌었을 수 있음 — 재평가·전이 시 발신.</summary>
     void NotifyChuteChanged(long destinationId);
 }
 
 /// <summary>
-/// IF-08 전이 감지·푸시 파이프 — IHostedService.
-/// 슈트 콜백 + 소터 스냅샷 관찰 타이머 두 변화원을 공통 ObserveAsync로 수렴.
+/// 목적지 수용상태 전이 감지·발신 파이프(목적지당 단일 소스) — IHostedService.
+/// 슈트 콜백 + 소터 스냅샷 관찰 타이머 + 운영자 전이 이벤트 세 변화원을 공통 Observe로 수렴.
 /// </summary>
 public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHostedService, IAsyncDisposable
 {
+    // 계약 상태값(UpdateChuteState next_state) — LOCKED.
+    private const int NextStateOpen  = 3;   // 수용 가능(accept)  → Manual-open
+    private const int NextStatePause = 2;   // 수용 불가          → Pause
+
     // ── destination별 전이 추적 상태 ─────────────────────────────────────────
     private sealed class DestState
     {
@@ -53,25 +72,26 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         public required int  ChuteNo       { get; init; }
         public required DestType DestType   { get; init; }
 
-        /// <summary>per-destination 직렬화 락 — 관찰·푸시 결정·Acked 갱신을 원자화(P3 교훈).</summary>
+        /// <summary>per-destination 직렬화 락 — 관찰·발신 결정·Acked 갱신을 원자화.</summary>
         public readonly object Gate = new();
 
-        /// <summary>마지막으로 Compute가 산출한 ready(전이 비교 기준).</summary>
+        /// <summary>마지막으로 Compute가 산출한 수용상태(accept — 전이 비교 기준).</summary>
         public bool Computed;
 
-        /// <summary>마지막으로 RCS에 성공적으로 알린 ready. null=아직 한 번도 안 보냄.</summary>
+        /// <summary>마지막으로 RCS에 성공적으로 알린 accept. null=아직 한 번도 안 보냄.</summary>
         public bool? Acked;
 
-        /// <summary>현재 이 destination에 대한 푸시 루프가 진행 중인지(in-flight — 중복 발화 차단).</summary>
+        /// <summary>현재 이 destination에 대한 발신 루프가 진행 중인지(in-flight — 중복 발화 차단).</summary>
         public bool PushInFlight;
     }
 
-    private readonly IRcsPushClient            _push;
-    private readonly IDestinationStatusService _status;
-    private readonly ISorterGatewayRegistry    _sorterRegistry;
-    private readonly ChuteCapacityService      _chuteCapacity;
-    private readonly IServiceScopeFactory      _scopeFactory;
-    private readonly RcsPushOptions            _opt;
+    private readonly IChuteStatePushClient      _push;
+    private readonly IDestinationStatusService  _status;
+    private readonly ISorterGatewayRegistry     _sorterRegistry;
+    private readonly ChuteCapacityService       _chuteCapacity;
+    private readonly IDestinationControlService _control;
+    private readonly IServiceScopeFactory       _scopeFactory;
+    private readonly ChuteStatePushOptions      _opt;
     private readonly ILogger<DestinationStatusPusher> _log;
 
     // destination.id → 전이 추적 상태(기동 시 DB로 구성, 이후 불변 키셋).
@@ -81,27 +101,29 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
     private CancellationTokenSource? _cts;
     private Task?                    _observeTask;
 
-    // 슈트 변화원 구독 여부(StopAsync에서 해제 — 멱등).
+    // 변화원 구독 여부(StopAsync에서 해제 — 멱등).
     private bool _subscribed;
 
     // 멱등 StopAsync 플래그(Interlocked) — 이중 호출 시 본문 1회만 실행.
     private int _stopped;
 
     public DestinationStatusPusher(
-        IRcsPushClient            push,
-        IDestinationStatusService status,
-        ISorterGatewayRegistry    sorterRegistry,
-        ChuteCapacityService      chuteCapacity,
-        IServiceScopeFactory      scopeFactory,
-        IOptions<WcsOptions>      options,
+        IChuteStatePushClient      push,
+        IDestinationStatusService  status,
+        ISorterGatewayRegistry     sorterRegistry,
+        ChuteCapacityService       chuteCapacity,
+        IDestinationControlService control,
+        IServiceScopeFactory       scopeFactory,
+        IOptions<WcsOptions>       options,
         ILogger<DestinationStatusPusher> log)
     {
         _push           = push;
         _status         = status;
         _sorterRegistry = sorterRegistry;
         _chuteCapacity  = chuteCapacity;
+        _control        = control;
         _scopeFactory   = scopeFactory;
-        _opt            = options.Value.RcsPush;
+        _opt            = options.Value.ChuteStatePush;
         _log            = log;
     }
 
@@ -109,31 +131,30 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        // 사용자 확정4: BaseUrl 미설정 → 경고 후 전체 비활성(전이 추적·관찰 타이머 미기동).
+        // DORMANT: BaseUrl 미설정 → 경고 후 전체 비활성(전이 추적·관찰 타이머·구독 미기동).
         if (!_push.IsEnabled)
         {
             _log.LogWarning(
-                "[IF-08푸시] RCS base URL 미설정(Wcs:RcsPush:BaseUrl) — 아웃바운드 푸시 비활성. " +
-                "운영 배포 시 필수 설정. 인바운드(IF-05/09/10)는 정상 동작.");
+                "[IF-08푸시] RCS base URL 미설정(Wcs:ChuteStatePush:BaseUrl) — 아웃바운드 수용상태 푸시 DORMANT(비활성). " +
+                "운영 배포 시 이 한 값만 설정하면 활성. pause/resume·인바운드(IF-05/09/10)는 정상 동작.");
             return;
         }
 
         // ── 전 목적지(슈트+소터) 전이 추적 상태 구성 ────────────────────────────
         await BuildStatesFromDbAsync(cancellationToken).ConfigureAwait(false);
 
-        // ── 변화원 ① 슈트 콜백 구독(ChuteCapacityService 이벤트) ─────────────────
-        // 부트스트랩 푸시 전에 구독해 기동 직후 발생하는 슈트 전이도 포착.
-        _chuteCapacity.OnChuteStateChanged += NotifyChuteChanged;
+        // ── 변화원 ①·③ 구독(부트스트랩 발신 전에 구독해 기동 직후 전이도 포착) ────
+        _chuteCapacity.OnChuteStateChanged += NotifyChuteChanged;   // ① 슈트 capacity 변화
+        _control.OnTransition             += OnControlTransition;   // ③ 운영자 PAUSED/RESUMED 전이
         _subscribed = true;
 
-        // ── 부트스트랩(확정5): 기동 시 전 목적지 현재 ready 1회 스냅샷 푸시 ───────
-        // 각 destination의 현재 Compute 산출을 초기 전이로 간주(Acked=null → 무조건 1회 푸시).
-        // 이후엔 ObserveAsync 전이만.
+        // ── 부트스트랩: 기동 시 전 목적지 현재 수용상태 1회 발신 ──────────────────
+        // 각 destination의 현재 accept를 초기 전이로 간주(Acked=null → 무조건 1회 발신). 이후엔 전이만.
         foreach (var st in _states.Values)
         {
-            var ready = _status.Compute(st.DestinationId, st.DestType).Ready;
-            lock (st.Gate) { st.Computed = ready; }
-            _ = PumpAsync(st);  // 비동기 푸시 루프 시작(전이당 1회·복구 재푸시 포함).
+            var accept = ComputeAccept(st);
+            lock (st.Gate) { st.Computed = accept; }
+            _ = PumpAsync(st);
         }
 
         // ── 소터 스냅샷 관찰 타이머 시작(변화원 ② — Latest diff) ─────────────────
@@ -141,7 +162,7 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         _observeTask = Task.Run(() => RunSorterObserveLoopAsync(_cts.Token));
 
         _log.LogInformation(
-            "[IF-08푸시] 활성 — 목적지 {Count}개 전이 추적 시작(기동 스냅샷 푸시 + 소터 관찰 주기 {Ms}ms)",
+            "[IF-08푸시] 활성 — 목적지 {Count}개 전이 추적 시작(기동 스냅샷 발신 + 소터 관찰 주기 {Ms}ms + 운영자 전이 구독)",
             _states.Count, _opt.SorterObserveIntervalMs);
     }
 
@@ -151,10 +172,11 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         // Interlocked로 본문을 1회만 실행(disposed CTS 재접근 방지 — PlcPollingService 동형).
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
 
-        // 슈트 변화원 구독 해제 — 종료 후 콜백 유입 차단.
+        // 변화원 구독 해제 — 종료 후 콜백/이벤트 유입 차단.
         if (_subscribed)
         {
             _chuteCapacity.OnChuteStateChanged -= NotifyChuteChanged;
+            _control.OnTransition             -= OnControlTransition;
             _subscribed = false;
         }
 
@@ -190,11 +212,24 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         Observe(st);
     }
 
+    // ── 변화원 ③ 운영자 PAUSED/RESUMED 전이 ────────────────────────────────────
+    //
+    // DestinationControlService에서 동기 발화된다(운영자 O2/O3 요청 스레드). 절대 블로킹하지 않는다 —
+    // Observe→PumpAsync가 fire-and-forget(클라이언트 내부 재시도). Compute가 DB Status를 직접 읽으므로
+    // Target 값을 별도로 소비하지 않고 재평가만 트리거한다(슈트·소터 동일 경로).
+    private void OnControlTransition(DestinationTransition t)
+    {
+        if (!_push.IsEnabled) return;
+        if (!_states.TryGetValue(t.DestinationId, out var st)) return;
+
+        Observe(st);
+    }
+
     // ── 변화원 ② 소터 스냅샷 관찰 루프 ────────────────────────────────────────
     //
-    // 게이트웨이 폴링 스냅샷(bundle.Latest)을 주기적으로 관찰해 ready 전이를 감지한다.
-    // 게이트웨이 본문은 무변경(Latest 읽기만 — Scope D (a)). ready 전이가 없으면 푸시 0건
-    // (Observe가 Computed==Acked면 푸시 안 함 — 폴마다 폭주 금지).
+    // 게이트웨이 폴링 스냅샷(bundle.Latest)을 주기적으로 관찰해 수용상태 전이를 감지한다.
+    // 게이트웨이 본문은 무변경(Latest 읽기만). 전이가 없으면 발신 0건
+    // (Observe가 Computed==Acked면 발신 안 함 — 폴마다 폭주 금지).
     private async Task RunSorterObserveLoopAsync(CancellationToken ct)
     {
         int intervalMs = Math.Max(1, _opt.SorterObserveIntervalMs);
@@ -214,7 +249,7 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             catch (Exception ex)
             {
                 // 관찰 루프 예외가 루프를 죽이지 않도록 흡수(로깅은 유지 — Fail-Loud).
-                // 다음 주기에 재시도(이벤트 영구 손실 방지 — P3 핸들러 교훈과 동형).
+                // 다음 주기에 재시도(이벤트 영구 손실 방지).
                 try { _log.LogError(ex, "[IF-08푸시] 소터 관찰 루프 예외 — 다음 주기 재시도"); }
                 catch { /* teardown 중 로거 disposed */ }
             }
@@ -223,45 +258,53 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
 
     // ── 공통 전이 감지 진입점 ─────────────────────────────────────────────────
     //
-    // 변화원 둘(슈트 콜백·소터 관찰)이 모두 이 경로로 수렴.
-    // Compute로 현재 ready 재산출 → per-dest 락에서 Computed 갱신 → 전이면 푸시 루프 기동.
+    // 변화원 셋(슈트 콜백·소터 관찰·운영자 전이)이 모두 이 경로로 수렴.
+    // Compute로 현재 accept 재산출 → per-dest 락에서 Computed 갱신 → 전이면 발신 루프 기동.
     private void Observe(DestState st)
     {
-        bool ready;
+        bool accept;
         try
         {
-            ready = _status.Compute(st.DestinationId, st.DestType).Ready;
+            accept = ComputeAccept(st);
         }
         catch (Exception ex)
         {
             // Compute 예외(예: 일시적 DB/스냅샷 이상)는 관찰 1회를 건너뛴다(다음 관찰에서 재평가).
-            try { _log.LogError(ex, "[IF-08푸시] ready 산출 예외 destId={DestId} — 관찰 1회 건너뜀", st.DestinationId); }
+            try { _log.LogError(ex, "[IF-08푸시] 수용상태 산출 예외 destId={DestId} — 관찰 1회 건너뜀", st.DestinationId); }
             catch { }
             return;
         }
 
         lock (st.Gate)
         {
-            st.Computed = ready;
+            st.Computed = accept;
         }
         _ = PumpAsync(st);
     }
 
-    // ── 전이당 1회 푸시 루프 (동시성 멱등 핵심 — P3 교훈) ───────────────────────
+    // ── 수용상태 합성(계약 SC-2): accept = Ready ∧ !Paused ─────────────────────
+    //   슈트: Ready=비만재∧비정지 → accept=비만재∧비정지(만재·정지 반영).
+    //   소터: Ready=운영 ready(paused·SorterFull 제외) → accept=운영 ready∧!paused(SorterFull 제외·paused 접음).
+    private bool ComputeAccept(DestState st)
+    {
+        var r = _status.Compute(st.DestinationId, st.DestType);
+        return r.Ready && !r.Paused;
+    }
+
+    // ── 전이당 1회 발신 루프 (동시성 멱등 핵심) ─────────────────────────────────
     //
     // per-destination 락 + PushInFlight 플래그로 "전이당 정확히 1회"를 원자 보장:
     //   - 진입 시 락에서 (Computed != Acked) && !PushInFlight 일 때만 in-flight 클레임.
-    //     두 변화원이 동시에 같은 전이를 봐도 클레임은 한 쪽만 성공(중복 0).
+    //     세 변화원이 동시에 같은 전이를 봐도 클레임은 한 쪽만 성공(중복 0).
     //   - 클레임 실패(이미 in-flight)면 즉시 반환 — 진행 중 루프가 완료 후 재평가하므로 누락 0.
-    //   - 푸시는 락 밖에서(I/O — 락 보유 중 await 금지). 성공 시 Acked=target, 실패 시 Acked 불변.
-    //   - 완료 후 락에서 재평가: Computed != Acked면(푸시 중 새 값 도착 OR 실패로 stale) 루프 계속.
-    //     → 실패 시 Acked가 Computed와 달라 다음 클레임이 재시도(복구 재푸시·확정3).
+    //   - 발신은 락 밖에서(I/O — 락 보유 중 await 금지). 성공 시 Acked=target, 실패 시 Acked 불변.
+    //   - 완료 후 락에서 재평가: Computed != Acked면(발신 중 새 값 도착 OR 실패로 stale) 루프 계속.
+    //     → 실패 시 Acked가 Computed와 달라 다음 클레임이 재시도(복구 재푸시).
     private async Task PumpAsync(DestState st)
     {
         while (true)
         {
             bool target;
-            string ts;
 
             // ① 클레임 — 락에서 전이 여부 판정 + in-flight 원자 설정.
             lock (st.Gate)
@@ -270,21 +313,22 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
                     return;  // 진행 중 루프가 완료 후 재평가 → 누락 없음.
 
                 if (st.Acked.HasValue && st.Acked.Value == st.Computed)
-                    return;  // 전이 없음(현재값을 이미 성공 알림) — 푸시 안 함(폭주 금지).
+                    return;  // 전이 없음(현재값을 이미 성공 알림) — 발신 안 함(폭주 금지).
 
                 // 전이 클레임 — 이 시점의 Computed를 목표값으로 고정.
                 st.PushInFlight = true;
                 target = st.Computed;
             }
 
-            ts = FormatTimeStamp(DateTimeOffset.Now);
+            int nextState = target ? NextStateOpen : NextStatePause;
             bool ok;
             try
             {
-                // ② 푸시(락 밖 I/O — 재시도 포함). CTS로 종료 시 취소 전파.
+                // ② 발신(락 밖 I/O — 재시도 포함). CTS로 종료 시 취소 전파.
+                //    전이당 길이-1 단건 배열(계약 구조 유지 · chute_numbers[i] ↔ next_states[i]).
                 var token = _cts?.Token ?? CancellationToken.None;
                 ok = await _push.PushAsync(
-                    new DestinationStatusPushPayload(st.ChuteNo, target, ts), token)
+                    new ChuteStatePushPayload(new[] { st.ChuteNo }, new[] { nextState }), token)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -296,7 +340,7 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             catch (Exception ex)
             {
                 // PushAsync는 내부에서 false로 수렴하지만, 방어적으로 미관찰 예외 0 보장.
-                try { _log.LogError(ex, "[IF-08푸시] 푸시 루프 예외 destId={DestId}", st.DestinationId); }
+                try { _log.LogError(ex, "[IF-08푸시] 발신 루프 예외 destId={DestId}", st.DestinationId); }
                 catch { }
                 ok = false;
             }
@@ -305,22 +349,22 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             lock (st.Gate)
             {
                 if (ok)
-                    st.Acked = target;   // 성공 — 이 값으로 RCS 동기화 완료(확정3: 성공만 Acked 갱신).
+                    st.Acked = target;   // 성공 — 이 값으로 RCS 동기화 완료(성공만 Acked 갱신).
                 // 실패면 Acked 불변 — 미알림 상태 유지(다음 관찰/복구 시 재푸시).
 
                 st.PushInFlight = false;
 
-                // 재평가: Computed가 Acked와 다르면(푸시 중 새 전이 OR 실패로 stale) 계속.
+                // 재평가: Computed가 Acked와 다르면(발신 중 새 전이 OR 실패로 stale) 계속.
                 if (st.Acked.HasValue && st.Acked.Value == st.Computed)
                     return;  // 동기화 완료 — 루프 종료.
 
                 // 실패 직후 즉시 재루프하면 백오프 없이 바쁜 재시도가 될 수 있다.
-                // 실패 시(ok==false)는 다음 "관찰"(슈트 콜백·소터 관찰 주기)이 재푸시를 유도하도록
-                // 루프를 종료한다 — Computed가 Acked와 다른 상태로 남아 다음 Observe→Pump가 재시도.
+                // 실패 시(ok==false)는 다음 "관찰"(슈트 콜백·소터 관찰 주기·운영자 전이)이 재푸시를
+                // 유도하도록 루프를 종료한다 — Computed가 Acked와 다른 상태로 남아 다음 Observe→Pump가 재시도.
                 // (성공했는데 Computed가 또 바뀐 경우만 즉시 재루프 — 그건 진짜 새 전이.)
                 if (!ok)
                     return;
-                // ok==true && Computed!=Acked → 푸시 중 새 전이 발생, 즉시 다음 전이 푸시(continue while).
+                // ok==true && Computed!=Acked → 발신 중 새 전이 발생, 즉시 다음 전이 발신(continue while).
             }
         }
     }
@@ -349,8 +393,4 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             };
         }
     }
-
-    // ── 와이어 시간 포맷(기존 와이어 포맷과 일관 — "yyyy-MM-dd HH:mm:ss") ───────
-    private static string FormatTimeStamp(DateTimeOffset at) =>
-        at.ToString("yyyy-MM-dd HH:mm:ss");
 }

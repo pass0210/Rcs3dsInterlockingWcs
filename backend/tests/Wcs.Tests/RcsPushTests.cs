@@ -1,17 +1,13 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading;
-using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Wcs.Api;
 using Wcs.Core;
 using Wcs.Data;
@@ -22,123 +18,32 @@ using Xunit.Abstractions;
 namespace Wcs.Tests;
 
 // ════════════════════════════════════════════════════════════════════════════
-// RCS↔WCS 재설계 Phase 2 — IF-08 아웃바운드 푸시 검증
+// S-IF08-READY-PUSH — 목적지 수용상태 아웃바운드 푸시 검증(확정 와이어 UpdateChuteState)
 //
-// 가짜 RCS 수신 HTTP 서버(FakeRcsServer)로 WCS가 보낸 destination-status 푸시를
-// 실제로 수신·카운트·payload 검증한다. 인메모리 GREEN을 PASS 근거로 삼지 않고
-// "가짜 RCS가 수신한 실제 JSON 본문"으로 입증(메타교훈 — 전용 시나리오).
+// 가짜 RCS 수신 HTTP 서버(FakeChuteStateServer — ChuteStatePushTests에 정의, PUT /api/UpdateChuteState
+// 수신)로 WCS가 보낸 수용상태 발신을 실제로 수신·카운트·payload 검증한다. 인메모리 GREEN을 PASS
+// 근거로 삼지 않고 "가짜 RCS가 수신한 실제 JSON 본문"으로 입증(메타교훈).
+//
+// 발신 합성(SC-2): next_state 3 = 수용가능(accept) / 2 = 불가.
+//   accept = Compute().Ready ∧ !Compute().Paused (슈트=비만재∧비정지 / 소터=운영 ready∧!paused,
+//   셀 만재 SorterFull 제외).
 //
 // 검증 시나리오(계약 §Verification Scenarios):
-//   VS-PUSH-1 슈트 ready 전이(true→false→true) → 전이당 정확히 1건 수신
-//   VS-PUSH-2 소터 ready 전이(false→true→false) → 전이당 정확히 1건 + 폴마다 폭주 0
-//   VS-PUSH-3 무변화 → 푸시 0건(폭주 방지·핵심)
-//   VS-PUSH-4 동시 전이 → 전이당 1회 멱등(중복 0·누락 0)
-//   VS-PUSH-5 RCS 미도달 → 재시도 → 복구 후 푸시 도달(최신값 유지)
-//   VS-PUSH-6 초기 스냅샷 푸시(부트스트랩 — 기동 시 전 목적지 1회)
-//   VS-PUSH-7 payload 정합({chuteNo, ready, timeStamp} — 개별 full/paused/online 키 부재)
-//   VS-PUSH-8 BaseUrl 미설정 → 푸시 비활성(크래시 X·수신 0)
+//   PUSH6_7  VS-2/VS-9  부트스트랩(전 목적지 1회) + 와이어 형태(PUT·snake_case·단건 배열·{2,3})
+//   PUSH1    VS-4       슈트 수용상태 전이(3→2→3) → 전이당 1건
+//   PUSH2_3  VS-1       소터 분류 사이클(2→3→2) → 전이당 1건 + 무변화 폴 폭주 0
+//   PUSH4    VS-7       동시 전이 → 전이당 1회 멱등(중복 0·누락 0)
+//   PUSH5    VS-11      RCS 미도달 → 재시도 → 복구 후 최신값 도달(Fail-Loud)
+//   PUSH8    VS-6       BaseUrl 미설정(DORMANT) → 발신 0·크래시 0·인바운드 정상
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── 가짜 RCS 수신 서버 ────────────────────────────────────────────────────────
+// ── 푸시 검증용 WebApplicationFactory (공유 픽스처) ───────────────────────────
 
 /// <summary>
-/// 가짜 RCS 수신 HTTP 서버 — POST /api/v1/destination-status 수신·기록.
-/// Kestrel(동적 포트)로 in-process 기동. 거부 모드 토글로 미도달/복구 시뮬레이션.
-/// </summary>
-public sealed class FakeRcsServer : IAsyncDisposable
-{
-    private readonly WebApplication _app;
-    private readonly ConcurrentQueue<ReceivedPush> _received = new();
-
-    // true면 503 반환(미도달 시뮬레이션). false면 정상 {result:"OK"}.
-    private volatile bool _rejecting;
-
-    public sealed record ReceivedPush(int ChuteNo, bool Ready, string? TimeStamp, string RawBody);
-
-    public string BaseUrl { get; }
-
-    private FakeRcsServer(WebApplication app, string baseUrl)
-    {
-        _app    = app;
-        BaseUrl = baseUrl;
-    }
-
-    /// <summary>가짜 RCS 서버 기동(동적 포트).</summary>
-    public static async Task<FakeRcsServer> StartAsync()
-    {
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls("http://127.0.0.1:0");  // 동적 포트
-        builder.Logging.ClearProviders();
-        var app = builder.Build();
-
-        FakeRcsServer? self = null;
-
-        app.MapPost("/api/v1/destination-status", async (HttpContext ctx) =>
-        {
-            using var reader = new StreamReader(ctx.Request.Body);
-            var raw = await reader.ReadToEndAsync();
-
-            if (self!.Rejecting)
-            {
-                ctx.Response.StatusCode = 503;
-                await ctx.Response.WriteAsync("rejecting");
-                return;
-            }
-
-            // payload 파싱 — camelCase 와이어
-            using var doc = JsonDocument.Parse(raw);
-            var root = doc.RootElement;
-            int  chuteNo = root.GetProperty("chuteNo").GetInt32();
-            bool ready   = root.GetProperty("ready").GetBoolean();
-            string? ts   = root.TryGetProperty("timeStamp", out var tsEl) ? tsEl.GetString() : null;
-
-            self.Record(new ReceivedPush(chuteNo, ready, ts, raw));
-
-            ctx.Response.StatusCode = 200;
-            await ctx.Response.WriteAsJsonAsync(new { result = "OK" });
-        });
-
-        await app.StartAsync();
-
-        // 실제 바인딩된 주소 조회
-        var server  = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>();
-        var feature = server.Features.Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()!;
-        var address = feature.Addresses.First();
-
-        self = new FakeRcsServer(app, address);
-        return self;
-    }
-
-    public bool Rejecting => _rejecting;
-    public void StartRejecting() => _rejecting = true;
-    public void StopRejecting()  => _rejecting = false;
-
-    private void Record(ReceivedPush push) => _received.Enqueue(push);
-
-    /// <summary>전체 수신 푸시(순서 보존).</summary>
-    public IReadOnlyList<ReceivedPush> All => _received.ToArray();
-
-    /// <summary>특정 chuteNo 수신 건수.</summary>
-    public int CountFor(int chuteNo) => _received.Count(p => p.ChuteNo == chuteNo);
-
-    /// <summary>특정 chuteNo의 마지막 수신.</summary>
-    public ReceivedPush? LastFor(int chuteNo) =>
-        _received.Where(p => p.ChuteNo == chuteNo).LastOrDefault();
-
-    public async ValueTask DisposeAsync()
-    {
-        try { await _app.StopAsync(TimeSpan.FromSeconds(3)); } catch { }
-        await _app.DisposeAsync();
-    }
-}
-
-// ── 푸시 검증용 WebApplicationFactory ────────────────────────────────────────
-
-/// <summary>
-/// IF-08 푸시 검증용 팩토리.
-/// FakeModbusWebApplicationFactory와 달리 DestinationStatusPusher를 **활성** 유지하고
-/// Wcs:RcsPush:BaseUrl을 가짜 RCS로 설정한다(생성자 인자).
-/// 소터 ready 전이는 FakeMaster 레지스터 조작 → 폴링 스냅샷 변화로 유도.
+/// 목적지 수용상태 푸시 검증용 팩토리(공유 픽스처 — SorterCellFullnessTests·Field20CellsGateTests·
+/// SorterPushOperationalTests가 재사용). 통합 발신 소스 DestinationStatusPusher를 **활성** 유지하고
+/// Wcs:ChuteStatePush:BaseUrl을 가짜 RCS로 설정한다(생성자 인자).
+/// 소터 수용상태 전이는 FakeMaster 레지스터 조작 → 폴링 스냅샷 변화로 유도.
 /// </summary>
 public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
@@ -192,17 +97,17 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
         // DbContext connection은 아래 ConfigureServices가 named in-memory(anchor)로 재등록.
         builder.UseSetting("Database:Provider", "Sqlite");
 
-        // ── RcsPush 설정 주입(BaseUrl·재시도 — 하드코딩 0, 설정 경유) ───────────────
+        // ── ChuteStatePush 설정 주입(확정 와이어 — BaseUrl·재시도·소터 관찰주기, 하드코딩 0) ────
         builder.ConfigureAppConfiguration((_, cfg) =>
         {
             var dict = new Dictionary<string, string?>
             {
-                ["Wcs:RcsPush:BaseUrl"]                 = _rcsBaseUrl,
-                ["Wcs:RcsPush:RetryCount"]              = _retryCount.ToString(),
-                ["Wcs:RcsPush:RetryBaseDelayMs"]        = _retryBaseDelayMs.ToString(),
-                ["Wcs:RcsPush:RetryMaxDelayMs"]         = (_retryBaseDelayMs * 4).ToString(),
-                ["Wcs:RcsPush:HttpTimeoutMs"]           = "2000",
-                ["Wcs:RcsPush:SorterObserveIntervalMs"] = "30",
+                ["Wcs:ChuteStatePush:BaseUrl"]                 = _rcsBaseUrl,
+                ["Wcs:ChuteStatePush:RetryCount"]              = _retryCount.ToString(),
+                ["Wcs:ChuteStatePush:RetryBaseDelayMs"]        = _retryBaseDelayMs.ToString(),
+                ["Wcs:ChuteStatePush:RetryMaxDelayMs"]         = (_retryBaseDelayMs * 4).ToString(),
+                ["Wcs:ChuteStatePush:HttpTimeoutMs"]           = "2000",
+                ["Wcs:ChuteStatePush:SorterObserveIntervalMs"] = "30",
             };
             cfg.AddInMemoryCollection(dict);
         });
@@ -269,7 +174,7 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
             services.AddSingleton<ISorterGatewayRegistry>(nop);
             services.AddSingleton<IHostedService>(nop);
 
-            // DestinationStatusPusher IHostedService 재등록(푸시 활성 유지).
+            // 통합 발신 소스(DestinationStatusPusher) IHostedService 재등록(발신 활성 유지).
             //   → 가짜 RCS 수신 검증을 위해 반드시 살아 있어야 한다.
             services.AddSingleton<IHostedService>(sp =>
                 sp.GetRequiredService<DestinationStatusPusher>());
@@ -295,7 +200,7 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// VS-PUSH 테스트
+// PUSH 테스트 (확정 와이어 UpdateChuteState — 가짜 RCS 수신 본문 입증)
 // ════════════════════════════════════════════════════════════════════════════
 
 public class RcsPushTests
@@ -345,65 +250,73 @@ public class RcsPushTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-6 + VS-PUSH-7: 부트스트랩 초기 스냅샷 푸시 + payload 정합
-    // 기동 시 전 목적지(슈트 5 + PAUSED 슈트 1 + 소터 1)의 현재 ready를 1회 푸시.
-    // payload는 {chuteNo, ready, timeStamp} 정확히 — 개별 full/paused/online 키 부재.
+    // PUSH6_7 (VS-2 + VS-9): 부트스트랩 초기 스냅샷 발신 + 와이어 형태 정합.
+    // 기동 시 전 목적지(슈트 5 + PAUSED 슈트 1 + 소터 1)의 현재 수용상태를 1회 발신.
+    // 와이어: PUT · snake_case chute_numbers/next_states · 단건 배열(길이 1) · 값 ∈ {2,3}.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task PUSH6_7_Bootstrap_InitialSnapshot_And_PayloadShape()
+    public async Task PUSH6_7_Bootstrap_InitialSnapshot_And_WireShape()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();  // 호스트 기동(HostedService StartAsync 실행)
 
-        // 부트스트랩: 활성 목적지 전부 1회 푸시 — 슈트 1~5(chuteNo 1~5) + PAUSED(chuteNo 6) + 소터(chuteNo 30)
+        // 부트스트랩: 활성 목적지 전부 1회 발신 — 슈트 1~5(chuteNo 1~5) + PAUSED(chuteNo 6) + 소터(chuteNo 30)
         // = 7개. 각 chuteNo가 정확히 1건씩 수신될 때까지 대기.
-        await WaitUntilAsync(() => rcs.All.Count >= 7, 8000, "부트스트랩 7목적지 푸시 수신");
+        await WaitUntilAsync(() => rcs.All.Count >= 7, 8000, "부트스트랩 7목적지 발신 수신");
 
         // 무변화 안정 — 7건에서 더 늘지 않음(폴마다 폭주 0)
         await WaitUntilExactAsync(() => rcs.All.Count, 7, stableCount: 6, timeoutMs: 4000,
             msg: "부트스트랩 후 무변화 안정");
 
-        // 슈트 1~5 = NORMAL → ready:true / chuteNo 6 = PAUSED → ready:false / 소터 30 = 미정렬(CurFloor=1≠2) → ready:false
+        // 슈트 1~5 = NORMAL·비만재 → next_state 3 / chuteNo 6 = PAUSED → 2 / 소터 30 = 미정렬(CurFloor=1≠2) → 2.
         Assert.Equal(1, rcs.CountFor(1));
         var c1 = rcs.LastFor(1)!;
-        Assert.True(c1.Ready, "NORMAL 슈트 1 → ready:true");
+        Assert.Equal(new[] { 3 }, c1.NextStates);   // NORMAL 슈트 1 → 수용가능(3)
 
         Assert.Equal(1, rcs.CountFor(6));
-        Assert.False(rcs.LastFor(6)!.Ready, "PAUSED 슈트 6 → ready:false");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(6)!.NextStates);   // PAUSED 슈트 6 → 불가(2)
 
         Assert.Equal(1, rcs.CountFor(factory.SorterChuteNo));
-        Assert.False(rcs.LastFor(factory.SorterChuteNo)!.Ready, "미정렬 소터 → ready:false");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(factory.SorterChuteNo)!.NextStates);   // 미정렬 소터 → 2
 
-        // payload 정합: {chuteNo, ready, timeStamp} 정확히 — 개별 full/paused/online 키 부재.
+        // ── 와이어 형태 정합(VS-9) ──────────────────────────────────────────────
+        Assert.Equal("PUT", c1.Method);   // ★ PUT(positive).
+
         using var doc = JsonDocument.Parse(c1.RawBody);
         var props = doc.RootElement.EnumerateObject().Select(p => p.Name).ToHashSet();
-        Assert.Equal(3, props.Count);
-        Assert.Contains("chuteNo",   props);
-        Assert.Contains("ready",     props);
-        Assert.Contains("timeStamp", props);
-        Assert.DoesNotContain("full",   props);
-        Assert.DoesNotContain("paused", props);
-        Assert.DoesNotContain("online", props);
-        // timeStamp 포맷 "yyyy-MM-dd HH:mm:ss"
-        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", c1.TimeStamp!);
+        Assert.Equal(2, props.Count);
+        Assert.Contains("chute_numbers", props);
+        Assert.Contains("next_states",   props);
+        Assert.DoesNotContain("chuteNumbers", props);   // camelCase 금지(계약 함정).
+        Assert.DoesNotContain("nextStates",   props);
+        Assert.DoesNotContain("chuteNo",   props);      // 폐지 와이어 키 부재.
+        Assert.DoesNotContain("ready",     props);
+        Assert.DoesNotContain("timeStamp", props);
 
-        _out.WriteLine($"[VS-PUSH-6/7] 부트스트랩 7건 수신. payload 정합·timeStamp={c1.TimeStamp}");
+        // 두 배열 동일 길이·인덱스 정렬·길이 1, 값 ∈ {2,3}.
+        Assert.Single(c1.ChuteNumbers);
+        Assert.Single(c1.NextStates);
+        Assert.Equal(1, c1.ChuteNumbers[0]);
+        Assert.Contains(c1.NextStates[0], new[] { 2, 3 });
+
+        _out.WriteLine($"[PUSH6_7] 부트스트랩 7건 수신 · 와이어 PUT snake_case 단건 {{2,3}}: {c1.RawBody}");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-1: 슈트 ready 전이(true→false→true) → 전이당 정확히 1건
+    // PUSH1 (VS-4): 슈트 수용상태 전이(3→2→3) → 전이당 정확히 1건.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task PUSH1_Chute_ReadyTransition_OnePushPerTransition()
+    public async Task PUSH1_Chute_AcceptTransition_OnePushPerTransition()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
-        // 부트스트랩 정착 대기(슈트 4 = NORMAL → ready:true 1건)
+        // 부트스트랩 정착(슈트 4 = NORMAL → next_state 3, 1건)
         await WaitUntilAsync(() => rcs.CountFor(4) >= 1, 8000, "부트스트랩 슈트4 수신");
         await WaitUntilExactAsync(() => rcs.CountFor(4), 1, stableCount: 5, timeoutMs: 4000, "부트스트랩 후 슈트4 안정");
+        Assert.Equal(new[] { 3 }, rcs.LastFor(4)!.NextStates);
 
         using var scope = factory.Services.CreateScope();
         var db       = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
@@ -411,77 +324,76 @@ public class RcsPushTests
         var dest4    = db.Destinations.First(d => d.ChuteNo == 4 && d.DestType == Wcs.Data.DestType.CHUTE);
         var detail4  = db.ChuteDetails.First(cd => cd.DestinationId == dest4.Id);
 
-        // true→false: 만재 경계 통과(OnReserved qty=workFullQty)
+        // 3→2: 만재 경계 통과(OnReserved qty=workFullQty)
         capacity.OnReserved(dest4.Id, detail4.WorkFullQty);
-        await WaitUntilAsync(() => rcs.CountFor(4) >= 2, 5000, "슈트4 true→false 푸시");
-        await WaitUntilExactAsync(() => rcs.CountFor(4), 2, stableCount: 5, timeoutMs: 4000, "true→false 후 안정(중복 0)");
-        Assert.False(rcs.LastFor(4)!.Ready, "만재 → ready:false");
+        await WaitUntilAsync(() => rcs.CountFor(4) >= 2, 5000, "슈트4 3→2 발신");
+        await WaitUntilExactAsync(() => rcs.CountFor(4), 2, stableCount: 5, timeoutMs: 4000, "3→2 후 안정(중복 0)");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(4)!.NextStates);   // 만재 → 수용불가(2)
 
-        // false→true: 비움(OnCleared)
+        // 2→3: 비움(OnCleared)
         await capacity.OnCleared(dest4.Id, "test-op");
-        await WaitUntilAsync(() => rcs.CountFor(4) >= 3, 5000, "슈트4 false→true 푸시");
-        await WaitUntilExactAsync(() => rcs.CountFor(4), 3, stableCount: 5, timeoutMs: 4000, "false→true 후 안정");
-        Assert.True(rcs.LastFor(4)!.Ready, "비움 → ready:true");
+        await WaitUntilAsync(() => rcs.CountFor(4) >= 3, 5000, "슈트4 2→3 발신");
+        await WaitUntilExactAsync(() => rcs.CountFor(4), 3, stableCount: 5, timeoutMs: 4000, "2→3 후 안정");
+        Assert.Equal(new[] { 3 }, rcs.LastFor(4)!.NextStates);   // 비움 → 수용가능(3)
 
         // 총 3건(부트스트랩 1 + 전이 2). 전이당 정확히 1건.
         Assert.Equal(3, rcs.CountFor(4));
-        _out.WriteLine($"[VS-PUSH-1] 슈트4 전이당 1건 — 총 {rcs.CountFor(4)}건(부트1+전이2)");
+        _out.WriteLine($"[PUSH1] 슈트4 전이당 1건 — 총 {rcs.CountFor(4)}건(부트1+전이2)");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-2 + VS-PUSH-3: 소터 ready 전이(false→true→false) + 무변화 0건(폭주 방지)
+    // PUSH2_3 (VS-1): 소터 분류 사이클(2→3→2) + 무변화 폴 폭주 0.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task PUSH2_3_Sorter_ReadyTransition_OnePush_NoFloodOnUnchangedPolls()
+    public async Task PUSH2_3_Sorter_SortingCycle_OnePush_NoFloodOnUnchangedPolls()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
         int sorterChute = factory.SorterChuteNo;
 
-        // 부트스트랩: 소터 미정렬(CurFloor=1≠운영층2) → ready:false 1건
+        // 부트스트랩: 소터 미정렬(CurFloor=1≠운영층2) → next_state 2, 1건
         await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 1, 8000, "부트스트랩 소터 수신");
         await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 1, stableCount: 6, timeoutMs: 4000,
-            "무변화 폴 다수에도 소터 푸시 1건 유지(폭주 0)");
-        Assert.False(rcs.LastFor(sorterChute)!.Ready);
+            "무변화 폴 다수에도 소터 발신 1건 유지(폭주 0)");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(sorterChute)!.NextStates);
 
-        // false→true: 운영층 정렬(CurFloor=2·Ready=1) → ready:true
+        // 2→3: 운영층 정렬(CurFloor=2·Ready=1) → next_state 3
         factory.FakeMaster.SetReady(true);
         factory.FakeMaster.SetCurFloor(2);
         factory.FakeMaster.SetTgtFloor(0);
         await WaitForSnapshotAsync(factory, s => s.Online && s.CurFloor == 2 && s.Ready, 5000);
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 2, 5000, "소터 false→true 푸시");
+        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 2, 5000, "소터 2→3 발신");
         await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 2, stableCount: 6, timeoutMs: 4000,
-            "false→true 후 무변화 폴 다수에도 2건 유지(폭주 0·핵심)");
-        Assert.True(rcs.LastFor(sorterChute)!.Ready, "정렬 완료 → ready:true");
+            "2→3 후 무변화 폴 다수에도 2건 유지(폭주 0·핵심)");
+        Assert.Equal(new[] { 3 }, rcs.LastFor(sorterChute)!.NextStates);   // 정렬 완료 → 3
 
-        // true→false: 분류 시작(Ready 1→0) → ready:false
+        // 3→2: 분류 시작(Ready 1→0) → next_state 2
         factory.FakeMaster.SetReady(false);
         await WaitForSnapshotAsync(factory, s => s.Online && !s.Ready, 5000);
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 3, 5000, "소터 true→false 푸시");
+        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 3, 5000, "소터 3→2 발신");
         await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 3, stableCount: 6, timeoutMs: 4000,
-            "true→false 후 안정(중복 0)");
-        Assert.False(rcs.LastFor(sorterChute)!.Ready, "분류 시작 → ready:false");
+            "3→2 후 안정(중복 0)");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(sorterChute)!.NextStates);   // 분류 시작 → 2
 
         // 총 3건(부트스트랩 1 + 전이 2). 무변화 폴 N회에도 폭주 0.
         Assert.Equal(3, rcs.CountFor(sorterChute));
-        _out.WriteLine($"[VS-PUSH-2/3] 소터 전이당 1건·폭주 0 — 총 {rcs.CountFor(sorterChute)}건");
+        _out.WriteLine($"[PUSH2_3] 소터 분류 사이클 전이당 1건·폭주 0 — 총 {rcs.CountFor(sorterChute)}건");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-4: 동시 전이 → 전이당 1회 멱등(중복 0·누락 0)
-    // 슈트 콜백(스레드 다수) + 소터 관찰 타이머가 동시에 같은/다른 chuteNo를 갱신.
-    // 같은 chuteNo의 한 전이에 대해 정확히 1건 수신.
+    // PUSH4 (VS-7): 동시 전이 → 전이당 1회 멱등(중복 0·누락 0).
+    // 슈트 콜백(스레드 다수)이 동시에 같은 chuteNo를 갱신해도 한 전이에 정확히 1건.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task PUSH4_ConcurrentTransition_ExactlyOncePerTransition()
     {
-        await using var rcs     = await FakeRcsServer.StartAsync();
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();
 
-        // 부트스트랩 정착(슈트 5 chuteNo 5 = NORMAL → ready:true 1건)
+        // 부트스트랩 정착(슈트 5 chuteNo 5 = NORMAL → next_state 3, 1건)
         await WaitUntilAsync(() => rcs.CountFor(5) >= 1, 8000, "부트스트랩 슈트5 수신");
         await WaitUntilExactAsync(() => rcs.CountFor(5), 1, stableCount: 5, timeoutMs: 4000, "부트스트랩 안정");
 
@@ -491,43 +403,42 @@ public class RcsPushTests
         var dest5    = db.Destinations.First(d => d.ChuteNo == 5 && d.DestType == Wcs.Data.DestType.CHUTE);
         var detail5  = db.ChuteDetails.First(cd => cd.DestinationId == dest5.Id);
 
-        // 같은 chuteNo의 한 전이(true→false)를 다수 스레드가 동시에 통지(만재 도달 후 추가 예약 폭주).
-        // 첫 전이만 1건, 이후 같은 ready=false 재산출은 0건이어야 함(동일 전이 중복 억제 + 동시 멱등).
-        capacity.OnReserved(dest5.Id, detail5.WorkFullQty);  // 만재 진입 = true→false 전이
+        // 같은 chuteNo의 한 전이(3→2)를 다수 스레드가 동시에 통지(만재 도달 후 추가 예약 폭주).
+        // 첫 전이만 1건, 이후 같은 값(2) 재산출은 0건이어야 함(동일 전이 중복 억제 + 동시 멱등).
+        capacity.OnReserved(dest5.Id, detail5.WorkFullQty);  // 만재 진입 = 3→2 전이
 
-        // 동시에 같은 ready=false를 유발하는 NotifyChuteChanged를 병렬 발사(추가 예약 — 이미 만재)
         const int concurrency = 16;
         using var barrier = new Barrier(concurrency);
         var tasks = Enumerable.Range(0, concurrency).Select(_ => Task.Run(() =>
         {
             barrier.SignalAndWait();
-            capacity.OnReserved(dest5.Id, 1);  // 이미 만재 → ready 여전히 false(전이 없음)
+            capacity.OnReserved(dest5.Id, 1);  // 이미 만재 → 값 여전히 2(전이 없음)
         })).ToArray();
         await Task.WhenAll(tasks);
 
-        // 전이는 1회(true→false)뿐 — 부트스트랩 1 + 전이 1 = 정확히 2건. 동시 폭주에도 중복 0.
+        // 전이는 1회(3→2)뿐 — 부트스트랩 1 + 전이 1 = 정확히 2건. 동시 폭주에도 중복 0.
         await WaitUntilAsync(() => rcs.CountFor(5) >= 2, 5000, "슈트5 전이 1건 도달");
         await WaitUntilExactAsync(() => rcs.CountFor(5), 2, stableCount: 8, timeoutMs: 5000,
             "동시 16통지에도 전이당 정확히 1건(중복 0)");
         Assert.Equal(2, rcs.CountFor(5));
-        Assert.False(rcs.LastFor(5)!.Ready);
-        _out.WriteLine($"[VS-PUSH-4] 동시 {concurrency}통지 → 전이당 1건(총 {rcs.CountFor(5)}건=부트1+전이1)");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(5)!.NextStates);
+        _out.WriteLine($"[PUSH4] 동시 {concurrency}통지 → 전이당 1건(총 {rcs.CountFor(5)}건=부트1+전이1)");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-5: RCS 미도달 → 재시도 → 복구 후 푸시 도달(최신값 유지·확정3)
+    // PUSH5 (VS-11): RCS 미도달 → 재시도 → 복구 후 최신값 도달(Fail-Loud).
     // 가짜 RCS를 거부(503)로 토글 → 전이 발생 → 재시도 소진(미알림 유지) →
-    // 가짜 RCS 재개 → 다음 전이(또는 재산출)에서 최신 ready 도달.
+    // 가짜 RCS 재개 → 재산출에서 최신 수용상태 도달.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task PUSH5_RcsUnreachable_Retry_RecoverAndPushLatest()
     {
-        await using var rcs = await FakeRcsServer.StartAsync();
+        await using var rcs = await FakeChuteStateServer.StartAsync();
         // 재시도 2회·짧은 백오프(테스트 속도) — 설정 경유.
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl, retryCount: 2, retryBaseDelayMs: 30);
         _ = factory.CreateClient();
 
-        // 부트스트랩 정착(슈트 3 chuteNo 3 = NORMAL → ready:true 1건)
+        // 부트스트랩 정착(슈트 3 chuteNo 3 = NORMAL → next_state 3, 1건)
         await WaitUntilAsync(() => rcs.CountFor(3) >= 1, 8000, "부트스트랩 슈트3 수신");
         await WaitUntilExactAsync(() => rcs.CountFor(3), 1, stableCount: 5, timeoutMs: 4000, "부트스트랩 안정");
         int baseline = rcs.CountFor(3);
@@ -538,50 +449,50 @@ public class RcsPushTests
         var dest3    = db.Destinations.First(d => d.ChuteNo == 3 && d.DestType == Wcs.Data.DestType.CHUTE);
         var detail3  = db.ChuteDetails.First(cd => cd.DestinationId == dest3.Id);
 
-        // RCS 거부 모드 — 이후 푸시는 재시도 소진(미도달).
+        // RCS 거부 모드 — 이후 발신은 재시도 소진(미도달·성공 delivery 0건).
         rcs.StartRejecting();
 
-        // true→false 전이 발생(만재) — 재시도 소진되어 수신 0건(거부 중).
+        // 3→2 전이 발생(만재) — 재시도 소진되어 성공 delivery 0건(거부 중).
         capacity.OnReserved(dest3.Id, detail3.WorkFullQty);
 
-        // 재시도 소진까지 대기 후에도 수신 카운트는 baseline 유지(미알림 — 확정3: 실패를 성공으로 간주 안 함).
+        // 재시도 소진까지 대기 후에도 성공 카운트는 baseline 유지(미알림 — 실패를 성공으로 간주 안 함).
         await Task.Delay(400);
         Assert.Equal(baseline, rcs.CountFor(3));
-        _out.WriteLine($"[VS-PUSH-5] 거부 중 전이 → 수신 {rcs.CountFor(3)}건(미알림 유지)");
+        _out.WriteLine($"[PUSH5] 거부 중 전이 → 성공 delivery {rcs.CountFor(3)}건(미알림 유지)");
 
         // RCS 복구 — 거부 해제.
         rcs.StopRejecting();
 
-        // 복구 후 재푸시 유도: 같은 chuteNo에 추가 상태 변화 통지(여전히 만재 → ready:false).
-        // Acked가 미갱신(stale=true)이므로 Computed(false)≠Acked(true) → 재푸시 1건 도달.
+        // 복구 후 재푸시 유도: 같은 chuteNo에 추가 상태 변화 통지(여전히 만재 → next_state 2).
+        // Acked가 미갱신(stale)이므로 Computed(2)≠Acked(3) → 재푸시 1건 도달.
         capacity.OnReservationCancelled(dest3.Id, 0);  // 상태 무변(만재 유지) → 재평가 트리거
 
         await WaitUntilAsync(() => rcs.CountFor(3) >= baseline + 1, 5000, "복구 후 재푸시 도달");
         await WaitUntilExactAsync(() => rcs.CountFor(3), baseline + 1, stableCount: 5, timeoutMs: 4000,
-            "복구 재푸시 1건(최신 ready=false)");
-        Assert.False(rcs.LastFor(3)!.Ready, "복구 후 최신 ready=false 도달");
-        _out.WriteLine($"[VS-PUSH-5] 복구 후 재푸시 도달 — 최신 ready={rcs.LastFor(3)!.Ready}");
+            "복구 재푸시 1건(최신 next_state 2)");
+        Assert.Equal(new[] { 2 }, rcs.LastFor(3)!.NextStates);   // 복구 후 최신 수용불가(2) 도달
+        _out.WriteLine($"[PUSH5] 복구 후 재푸시 도달 — 최신 next_states={string.Join(",", rcs.LastFor(3)!.NextStates)}");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-PUSH-8: BaseUrl 미설정 → 푸시 비활성(크래시 X·수신 0) — 사용자 확정4
+    // PUSH8 (VS-6): BaseUrl 미설정(DORMANT) → 발신 비활성(크래시 0·수신 0·인바운드 정상).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task PUSH8_NoBaseUrl_PushDisabled_NoCrash_NoReceive()
     {
-        await using var rcs = await FakeRcsServer.StartAsync();
-        // BaseUrl=null → 푸시 비활성. 인바운드는 정상.
+        await using var rcs = await FakeChuteStateServer.StartAsync();
+        // BaseUrl=null → 발신 비활성. 인바운드는 정상.
         await using var factory = new RcsPushWebApplicationFactory(rcsBaseUrl: null);
         var client = factory.CreateClient();  // 기동 크래시 없어야 함
 
-        // 인바운드 IF-05 정상 동작(회귀 0 — 푸시 비활성이 인바운드를 막지 않음)
+        // 인바운드 IF-05 정상 동작(회귀 0 — 발신 비활성이 인바운드를 막지 않음)
         var req  = new { pId = 20001, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null };
         var resp = await client.PostAsJsonAsync("/api/v1/destination-query", req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        // 충분히 대기해도 가짜 RCS 수신 0건(푸시 비활성).
+        // 충분히 대기해도 가짜 RCS 수신 0건(발신 비활성).
         await Task.Delay(500);
         Assert.Empty(rcs.All);
-        _out.WriteLine($"[VS-PUSH-8] BaseUrl 미설정 → 푸시 비활성. 수신 {rcs.All.Count}건, IF-05 정상(200)");
+        _out.WriteLine($"[PUSH8] BaseUrl 미설정(DORMANT) → 발신 비활성. 수신 {rcs.All.Count}건, IF-05 정상(200)");
     }
 }

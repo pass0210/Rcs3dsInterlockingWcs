@@ -1,58 +1,62 @@
-# WCS ↔ RCS API 레퍼런스 (배포 기준 · Azure VM 테스트 환경)
+# WCS ↔ RCS API Reference (As Deployed · Test Environment)
 
-> RCS 연동 개발자를 위한 **실전 API 레퍼런스**. 아래 예제·응답은 전부 배포 VM에서 실제 호출·검증한
-> 값이다(2026-07-10 E2E). 설계 배경·판정표 전체는 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html) 참조.
+> A **hands-on API reference** for RCS integration developers. Every example/response below was
+> actually called and verified against the deployed server (E2E, 2026-07-10). For the full design
+> spec (decision tables, sequences), see [wcs_rcs_interface.html](wcs_rcs_interface.html).
 
-## 0. 접속 정보
+## 0. Connection
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
 | **Base URL** | `http://20.24.10.147:5205` |
-| 프로토콜 | HTTP / JSON (사내망 전제 — 인증 없음, 단일 포트) |
-| 환경 | Azure Linux VM(Ubuntu) + Azure SQL(`Rcs3dsInterlockingWcs`) + Sim3ds(소터 시뮬레이터) |
-| 방향 | **이 테스트 환경은 인바운드 전용** — RCS→WCS(IF-05/09/10)만. WCS→RCS 푸시(IF-08)는 **비활성**(§6). |
-| 자동생성 문서 | **없음**(Swagger/Scalar/OpenAPI 미노출). 이 문서가 API 레퍼런스다. |
+| Protocol | HTTP / JSON (internal network assumed — no auth, single port) |
+| Environment | Test server + Sim3ds (sorter simulator) |
+| Direction | **This test environment is inbound-only** — RCS→WCS (IF-05/09/10). The WCS→RCS push (IF-08) is **inactive** (§6). |
+| Generated docs | **None** (no Swagger/Scalar/OpenAPI exposed). This document is the API reference. |
 
-> ⚠ Sim3ds는 실 3DS PLC 대역이다. 소터 동작(층 이동·분류)은 시뮬레이션이며 타이밍은 실 PLC와 다를 수 있다.
+> ⚠ Sim3ds stands in for the real 3DS PLC. Sorter behavior (floor moves, sorting) is simulated —
+> timing may differ from the real PLC.
 
-### 필드 규약 (전 인터페이스 공통)
-`pId, agvNo, barcode, inductionNo, chuteNo, qty, timeStamp` — JSON은 **camelCase**.
-`timeStamp` 형식 `"yyyy-MM-dd HH:mm:ss"`(로컬). `pId`는 **1~30000**.
+### Field conventions (all interfaces)
+`pId, agvNo, barcode, inductionNo, chuteNo, qty, timeStamp` — JSON is **camelCase**.
+`timeStamp` format: `"yyyy-MM-dd HH:mm:ss"` (local). `pId` range: **1–30000**.
 
 ---
 
-## 1. 헬스 체크 — `GET /health`
+## 1. Health check — `GET /health`
 
-프로세스 생존은 항상 200. 본문의 `db`·`sorters[].online`으로 상태 판독.
+Process liveness is always 200; read `db` and `sorters[].online` in the body for status.
 ```bash
 curl http://20.24.10.147:5205/health
 ```
 ```json
 {"status":"ok","db":true,"sorters":[{"chuteNo":1,"online":true,"lastPollAt":"2026-07-10T04:16:21Z"}]}
 ```
-- `db:true` = Azure SQL 연결 정상. `sorters[].online:true` = 소터(Sim3ds) 폴링 정상.
+- `db:true` = WCS internal DB connection OK. `sorters[].online:true` = sorter (Sim3ds) polling OK.
 
 ---
 
-## 2. RCS 인바운드 API (IF-05 / IF-09 / IF-10)
+## 2. RCS inbound APIs (IF-05 / IF-09 / IF-10)
 
-3개 모두 `POST`, `Content-Type: application/json`. 정상/가부는 **200 + `result`**, 입력 검증 실패만 **400**.
-NG 사유(NORMAL·BUSY·FULL·PAUSED·NO_DEST 등)는 **WCS 내부 로그(piece_event)에만** 기록되고 RCS로는 `result`만 반환한다.
+All three are `POST` with `Content-Type: application/json`. Business outcomes come back as
+**200 + `result`**; only input-validation failures return **400**.
+NG reasons (NORMAL·BUSY·FULL·PAUSED·NO_DEST, …) are recorded in **WCS internal logs only** —
+RCS receives just `result`.
 
-### 2-1. IF-05 목적지 조회 — `POST /api/v1/destination-query`
-인덕션 스캔 시 피스 단위로 1회 호출. WCS가 피스를 기록하고 목적지·수량을 판정한다.
+### 2-1. IF-05 Destination Query — `POST /api/v1/destination-query`
+Called once per piece at the induction scan. WCS records the piece and decides the destination and quantity.
 
-**요청**
-| 필드 | 타입 | 필수 | 설명 |
+**Request**
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `pId` | int(1~30000) | ✔ | 피스 ID(AGV 트레이 단위) |
-| `agvNo` | int | ✔ | AGV 번호(기록·감사용) |
-| `barcode` | string(≤200) | ✔ | 상품 바코드 → 오더 매칭 키 |
-| `inductionNo` | int | ✔ | 인덕션 번호 |
-| `qty` | int(≥1) | ✔ | 수량(전량 틸트 기준값 — 진실의 원천) |
-| `timeStamp` | string(≤30) | ✔ | `"yyyy-MM-dd HH:mm:ss"` |
+| `pId` | int (1–30000) | ✔ | Piece ID (per AGV tray) |
+| `agvNo` | int | ✔ | AGV number (for records/audit) |
+| `barcode` | string (≤200) | ✔ | Product barcode → order matching key |
+| `inductionNo` | int | ✔ | Induction number |
+| `qty` | int (≥1) | ✔ | Quantity (full-tilt basis — source of truth) |
+| `timeStamp` | string (≤30) | ✔ | `"yyyy-MM-dd HH:mm:ss"` |
 
-**응답** `200 {result, chuteNo}` — OK면 `chuteNo`(목적지 슈트번호), NG면 `chuteNo=null`.
+**Response** `200 {result, chuteNo}` — on OK, `chuteNo` (destination chute number); on NG, `chuteNo=null`.
 ```bash
 curl -X POST http://20.24.10.147:5205/api/v1/destination-query \
   -H 'Content-Type: application/json' \
@@ -61,22 +65,25 @@ curl -X POST http://20.24.10.147:5205/api/v1/destination-query \
 ```json
 {"result":"OK","chuteNo":1}
 ```
-- 미매칭 바코드 → `{"result":"NG","chuteNo":null}` (내부사유 NO_DEST).
-- 검증 실패(예 `pId:0`) → `400 {"error":"pId는 1~30000 범위여야 합니다."}`.
-- 가부 판정(요약): **슈트**는 full/paused여도 OK(보내고 대기). **3D 소터**는 `PAUSED`면 NG, 셀 수용 불가면 NG(FULL), BUSY(분류·이동 중)는 OK(이동시킴). 전체 표는 스펙 HTML §6.
+- Unmatched barcode → `{"result":"NG","chuteNo":null}` (internal reason NO_DEST).
+- Validation failure (e.g. `pId:0`) → `400` with an error body.
+- Decision summary: a **plain chute** returns OK even when full/paused (send and wait). A **3D sorter**
+  returns NG when `PAUSED`, NG (FULL) when it cannot receive by cell, and OK when BUSY (sorting/moving —
+  still move the AGV). Full table: spec HTML §6.
 
-### 2-2. IF-09 도착 보고 — `POST /api/v1/arrival-report`
-AGV가 목적지 슈트에 도착해 투입 직전 1회 호출. WCS가 도착을 기록하고, **3D 소터면 운영층(2층)으로 정렬**(TgtFloor 쓰기)한다.
+### 2-2. IF-09 Arrival Report — `POST /api/v1/arrival-report`
+Called once when the AGV reaches the destination chute, right before depositing. WCS records the
+arrival and, for a 3D sorter, **aligns it to the operating floor (floor 2)**.
 
-**요청**
-| 필드 | 타입 | 필수 | 설명 |
+**Request**
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `pId` | int(1~30000) | ✔ | 피스 ID |
-| `chuteNo` | int(>0) | ✔ | 도착 목적지 슈트번호 |
-| `agvNo` | int | ✔ | AGV 번호 |
-| `timeStamp` | string(≤30) | – | 선택 |
+| `pId` | int (1–30000) | ✔ | Piece ID |
+| `chuteNo` | int (>0) | ✔ | Arrived destination chute number |
+| `agvNo` | int | ✔ | AGV number |
+| `timeStamp` | string (≤30) | – | Optional |
 
-**응답** `200 {result:"OK"}`
+**Response** `200 {result:"OK"}`
 ```bash
 curl -X POST http://20.24.10.147:5205/api/v1/arrival-report \
   -H 'Content-Type: application/json' \
@@ -85,23 +92,25 @@ curl -X POST http://20.24.10.147:5205/api/v1/arrival-report \
 ```json
 {"result":"OK"}
 ```
-- 소터의 경우 이 호출 뒤 소터가 2층으로 이동 → `/api/monitor/sorters`의 `ready`가 `false→true`로 전이(관측 가능).
-- 미존재/비활성 `chuteNo`도 500 없이 200(도착만 기록, 정렬 스킵).
+- For a sorter, this call makes it move to floor 2 → `ready` in `/api/monitor/sorters` transitions
+  `false→true` (observable).
+- A non-existent/inactive `chuteNo` still returns 200 (arrival recorded, alignment skipped) — no 500.
 
-### 2-3. IF-10 투입 보고 — `POST /api/v1/deposit-report`
-틸트 후 전송. 3D 목적지면 WCS가 내부적으로 **Modbus 핸드셰이크(셀 배정→C_Flag→R_Flag)** 를 트리거한다. 멱등(중복 보고 무해).
+### 2-3. IF-10 Deposit Report — `POST /api/v1/deposit-report`
+Sent after the tilt. For a 3D destination, WCS internally triggers the **Modbus handshake
+(cell assignment → C_Flag → R_Flag)**. Idempotent (duplicate reports are harmless).
 
-**요청**
-| 필드 | 타입 | 필수 | 설명 |
+**Request**
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `pId` | int(1~30000) | ✔ | 피스 ID |
-| `barcode` | string(≤200) | ✔ | 바코드 |
-| `chuteNo` | int(>0) | ✔ | 목적지 슈트번호 |
-| `agvNo` | int | ✔ | AGV 번호 |
-| `qty` | int(≥0) | – | 선택(미전송 시 IF-05 등록값 사용 — 전량 틸트) |
-| `timeStamp` | string(≤30) | – | 선택 |
+| `pId` | int (1–30000) | ✔ | Piece ID |
+| `barcode` | string (≤200) | ✔ | Barcode |
+| `chuteNo` | int (>0) | ✔ | Destination chute number |
+| `agvNo` | int | ✔ | AGV number |
+| `qty` | int (≥0) | – | Optional (when omitted, the IF-05 registered qty is used — full tilt) |
+| `timeStamp` | string (≤30) | – | Optional |
 
-**응답** `200 {result:"OK"}`
+**Response** `200 {result:"OK"}`
 ```bash
 curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
   -H 'Content-Type: application/json' \
@@ -110,84 +119,92 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 ```json
 {"result":"OK"}
 ```
-- 핸드셰이크 완료 후 해당 셀 `currentQty`·오더 `sortedQty`가 증가(모니터로 확인 — §4).
+- After the handshake completes, the cell's `currentQty` and the order's `sortedQty` increase
+  (observable via the monitor — §4).
 
 ---
 
-## 3. 투입 플로우 (한 피스 사이클)
+## 3. Deposit flow (one piece cycle)
 
 ```
-[IF-05] destination-query  → {result:OK, chuteNo}       (목적지·수량 판정, 피스 기록)
-   ↓ AGV가 슈트로 이동
-[IF-09] arrival-report      → {result:OK}                (도착 기록 + 3D 소터 2층 정렬)
-   ↓ 소터 ready 전이(운영층 도달)
-[IF-10] deposit-report      → {result:OK}                (틸트 보고 + Modbus 핸드셰이크)
-   ↓ WCS 내부: 셀 배정 → C_Flag → R_Flag → sorter_command COMPLETED
-   결과: 셀 currentQty +qty, 오더 sortedQty +qty
+[IF-05] destination-query  → {result:OK, chuteNo}       (destination/qty decision, piece recorded)
+   ↓ AGV travels to the chute
+[IF-09] arrival-report      → {result:OK}                (arrival recorded + 3D sorter aligned to floor 2)
+   ↓ sorter ready transition (reaches the operating floor)
+[IF-10] deposit-report      → {result:OK}                (tilt report + Modbus handshake)
+   ↓ inside WCS: cell assignment → C_Flag → R_Flag → command COMPLETED
+   result: cell currentQty +qty, order sortedQty +qty
 ```
 
 ---
 
-## 4. 모니터링 엔드포인트 (읽기 전용 — 테스트 관측용)
+## 4. Monitoring endpoints (read-only — for test observation)
 
-| 엔드포인트 | 반환 |
+| Endpoint | Returns |
 |---|---|
 | `GET /api/monitor/sorters` | `[{destId,chuteNo,online,ready,full,paused}]` |
 | `GET /api/monitor/sorters/{destId}/cells` | `[{cellNo,capacity,currentQty,occupied,enabled,assignedOrderNo}]` |
 | `GET /api/monitor/orders?take=` | `[{id,orderNo,orderType,destinationChuteNo,status,plannedQty,reservedQty,sortedQty}]` |
 | `GET /api/monitor/orders/{id}/items` | `[{id,barcode,plannedQty,reservedQty,sortedQty}]` |
 | `GET /api/monitor/sorter-commands?destId=&take=` | `{items:[{id,pId,barcode,cellNo,cSeq,rSeq,status,cWrittenAt,rFlagAt}],nextCursor}` |
-| `GET /api/monitor/operation-log?take=&category=` | `{items:[{id,at,category,action,level,barcode,pId,detail}],nextCursor}` — API·PLC_WRITE·HANDSHAKE 전 단계 기록 |
+| `GET /api/monitor/operation-log?take=&category=` | `{items:[{id,at,category,action,level,barcode,pId,detail}],nextCursor}` — every API/PLC-write/handshake step recorded |
 
-- `sorters[].ready` = 소터 운영 준비도 = `online && CurFloor==운영층(2) && Ready(D4.2)==1`. 부팅 직후엔 1층이라 `false`, IF-09 정렬 후 `true`.
-- 모니터링 UI(웹): 브라우저로 `http://20.24.10.147:5205/` (WCS가 SPA 동일 포트 서빙).
-
----
-
-## 5. 테스트 데이터 (현재 Azure DB)
-
-- **오더/바코드**: `0701-CELL-01` ~ `0701-CELL-20` (GENERAL, RUNNING, plannedQty=9999). 바코드 = orderNo.
-- **소터**: destId=1, chuteNo=1 (SORTER_3D).
-- **셀**: cellNo 1~20, 각 capacity=3, 각 오더 `0701-CELL-NN`에 사전 배정(enabled).
-- 예: 바코드 `0701-CELL-03` → 셀3에 적재.
-
-> 초기화가 필요하면 시드/리셋 스크립트로 재설정(운영자). 이 DB는 **테스트 전용** — 필드 DB 아님.
+- `sorters[].ready` = sorter operating readiness = `online && CurFloor==operating floor(2) && Ready==1`.
+  Right after boot it is `false` (floor 1); it turns `true` after IF-09 alignment.
+- Monitoring UI (web): open `http://20.24.10.147:5205/` in a browser (served by WCS on the same port).
 
 ---
 
-## 6. IF-08 목적지 상태 푸시 (이 환경에선 비활성)
+## 5. Test data (currently registered)
 
-설계상 WCS는 목적지 상태 변화 시 `POST {RCS base}/api/v1/destination-status`로 푸시하지만, **이 테스트
-배포는 인바운드 전용**이라 `Wcs:RcsPush:BaseUrl` 미설정 → 푸시 **비활성(DORMANT)**. 인바운드(IF-05/09/10)는
-정상. 푸시 수신까지 테스트하려면 RCS 엔드포인트 URL을 WCS 환경변수 `Wcs__RcsPush__BaseUrl`로 주입 후 재기동.
-(페이로드·ready 의미 등 상세는 스펙 HTML §IF-08.)
+- **Orders/barcodes**: `0701-CELL-01` … `0701-CELL-20` (GENERAL, RUNNING, plannedQty=9999). Barcode = orderNo.
+- **Sorter**: destId=1, chuteNo=1 (SORTER_3D).
+- **Cells**: cellNo 1–20, capacity 3 each, pre-assigned to orders `0701-CELL-NN` (enabled).
+- Example: barcode `0701-CELL-03` → loaded into cell 3.
+
+> To reset, ask the WCS operator (re-seeded by script). All data is **test-only**.
 
 ---
 
-## 7. 검증 결과 (2026-07-10, 배포 VM E2E)
+## 6. Outbound push — IF-08 UpdateChuteState (inactive in this environment)
+
+The WCS→RCS outbound is a **single channel: UpdateChuteState** (fixed contract based on the
+RCS-provided document [UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md)).
+
+| Item | Value |
+|---|---|
+| Wire | `PUT {RCS base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| Meaning | `next_state` = receivability flag: **3** (Manual open) = can receive · **2** (Pause) = cannot (sorting / moving / not aligned / offline / paused) |
+| Trigger | Only on an actual receivability transition (not periodic — a sorter may toggle 2↔3 every sorting cycle) |
+| Activation | Activated once **RCS provides its receiving base URL to WCS** (not provided yet → **inactive**) |
+
+---
+
+## 7. Verification results (2026-07-10, deployed-server E2E)
 
 **Part I · B2C (IF-05/09/10)**
-| 시나리오 | 결과 |
+| Scenario | Result |
 |---|---|
-| IF-05 정상 | `{result:OK, chuteNo:1}` |
-| IF-09 → 2층 정렬 | `{result:OK}` + 소터 `ready:false→true` |
-| IF-10 → 핸드셰이크 | `{result:OK}` + sorter_command **COMPLETED**(cSeq1→rSeq1), 셀1 `currentQty 0→1`, 오더1 `sortedQty 0→1` |
-| IF-05 검증실패(pId=0) | `400` |
-| IF-05 미존재 바코드 | `{result:NG, chuteNo:null}`(NO_DEST) |
-| 헬스/모니터/구조화로그/프론트 | 전부 정상 |
+| IF-05 normal | `{result:OK, chuteNo:1}` |
+| IF-09 → floor-2 alignment | `{result:OK}` + sorter `ready:false→true` |
+| IF-10 → handshake | `{result:OK}` + command **COMPLETED** (cSeq1→rSeq1), cell 1 `currentQty 0→1`, order 1 `sortedQty 0→1` |
+| IF-05 validation failure (pId=0) | `400` |
+| IF-05 unknown barcode | `{result:NG, chuteNo:null}` (NO_DEST) |
+| Health / monitor / structured logs / frontend | All OK |
 
-**Part II · B2B (`/api/v1/works/*` 5종)** — 스펙 [api-spec-ko.html](api-spec-ko.html)
-| 시나리오 | 결과 |
+**Part II · B2B (`/api/v1/works/*`, 5 endpoints)** — spec: [api-spec-ko.html](api-spec-ko.html)
+| Scenario | Result |
 |---|---|
-| `GET unprocessed` | 생성 데이터 그룹화 반환(0건이면 `[]` 200) |
-| `POST input` / `classification` / `results` / `box` | 전부 `{status:"S","message":"Success"}` |
-| box 중복 재전송 | `F "Box already exists…"` |
-| classification 슈트 불일치 | `F "Chute mismatch: … expected chute(s) [002], received 001."` |
-| bizDay 형식 오류 | `400 F "BizDay must be in YYYYMMDD or YYYY-MM-DD format."` |
-| 미등록 바코드 | `F "Barcode not found, or bizDay/batch does not match…"` |
-| 조회 API(`/api/logs/input·sort`, `/api/boxes`, `/api/test-data/comparison`) | 전부 정상(comparison `isMatch:true`) |
+| `GET unprocessed` | Returns generated data grouped (empty `[]` with 200 when none) |
+| `POST input` / `classification` / `results` / `box` | All `{status:"S","message":"Success"}` |
+| Duplicate box resend | `F "Box already exists…"` |
+| Classification chute mismatch | `F "Chute mismatch: … expected chute(s) [002], received 001."` |
+| Malformed bizDay | `400 F "BizDay must be in YYYYMMDD or YYYY-MM-DD format."` |
+| Unknown barcode | `F "Barcode not found, or bizDay/batch does not match…"` |
+| Query APIs (`/api/logs/input·sort`, `/api/boxes`, `/api/test-data/comparison`) | All OK (`isMatch:true`) |
 
-> 실패 `message` 문구가 스펙 문서 §6 실패표와 **정확히 일치**함을 확인. 테스트 잔여 데이터는 검증 후 전량 초기화됨(셀·오더·B2B 로그 클린 상태).
+> Failure `message` strings match the spec document's failure tables **exactly**. Test data is
+> provided in a clean, initialized state.
 
-> 전체 스펙(판정표·시퀀스·B2B `/api/v1/works/*`)은 [wcs_rcs_interface_kr.html](wcs_rcs_interface_kr.html),
-> 배포·재배포 절차는 [DEPLOY-AZURE-RCS-TEST.md](DEPLOY-AZURE-RCS-TEST.md).
+> For the full spec (decision tables, sequences, B2B `/api/v1/works/*`), see
+> [wcs_rcs_interface.html](wcs_rcs_interface.html).
