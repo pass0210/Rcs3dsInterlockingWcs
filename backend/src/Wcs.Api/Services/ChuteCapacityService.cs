@@ -155,6 +155,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
                   cd => (long?)cd.DestinationId,
                   (p, cd) => new { Piece = p, ChuteDetail = cd })
             .Where(x => x.Piece.IsActive
+                     && x.Piece.ArchivedAt == null   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) piece 제외.
                      && (x.Piece.Status == PieceStatus.DEPOSITED
                       || x.Piece.Status == PieceStatus.CELL_ASSIGNED
                       || x.Piece.Status == PieceStatus.LOADED)
@@ -169,6 +170,7 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
 
         var inFlightQtys = await db.Pieces
             .Where(p => p.IsActive
+                     && p.ArchivedAt == null   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) piece 제외.
                      && (p.Status == PieceStatus.RESERVED
                       || p.Status == PieceStatus.PERMITTED))
             .GroupBy(p => p.DestinationId)

@@ -473,6 +473,9 @@ public class WcsDbContext : DbContext
             e.Property(x => x.ClientTs).HasMaxLength(30).IsRequired(false);
             e.Property(x => x.CreatedAt).IsRequired();
             e.Property(x => x.UpdatedAt).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(기존 컬럼·인덱스 무변경).
+            //   물리 컬럼명 = 프로퍼티명(PascalCase, B2C 규약 — HasColumnName 미사용).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
@@ -512,6 +515,8 @@ public class WcsDbContext : DbContext
             e.Property(x => x.PayloadJson).IsRequired(false);
             e.Property(x => x.ClientTs).HasMaxLength(30).IsRequired(false);
             e.Property(x => x.At).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(부모 piece와 함께 아카이브).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             // (at) 선두 인덱스 + (piece_id, at) 보조
             e.HasIndex(x => x.At).HasDatabaseName("IX_piece_event_at");
@@ -544,6 +549,8 @@ public class WcsDbContext : DbContext
              .HasMaxLength(20)
              .IsRequired();
             e.Property(x => x.CreatedAt).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(부모 piece와 함께 아카이브).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             // S-SQLSERVER-FK-CASCADE: sorter_command는 piece·cell 양쪽에서 수렴, 두 경로 모두
             // destination으로 거슬러 올라가 다중 캐스케이드 경로(1785, 대표 케이스

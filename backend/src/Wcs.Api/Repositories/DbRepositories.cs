@@ -179,8 +179,8 @@ public sealed class EfOrderRepository : IOrderRepository
             item.ReservedQty += qty;
             item.UpdatedAt    = now;
 
-            // p_id 순환: 기존 활성 piece 비활성화
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive);
+            // p_id 순환: 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외 — 재테스트 시 옛 piece 오소비 차단)
+            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
             if (prevActive is not null)
             {
                 prevActive.IsActive  = false;
@@ -252,8 +252,8 @@ public sealed class EfOrderRepository : IOrderRepository
         {
             var now = DateTime.UtcNow;
 
-            // 기존 활성 piece 비활성화
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive);
+            // 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외)
+            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
             if (prevActive is not null)
             {
                 prevActive.IsActive  = false;
@@ -360,8 +360,9 @@ public sealed class EfArrivalRecorder : IArrivalRecorder
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
 
         // 활성 piece 조회 (IF-05에서 생성된 RESERVED/PERMITTED piece).
+        // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외 — 옛 piece에 도착 이벤트가 붙지 않게.
         var piece = _db.Pieces
-            .Where(p => p.PId == pId && p.IsActive)
+            .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
             .OrderByDescending(p => p.Id)
             .FirstOrDefault();
 
@@ -427,8 +428,9 @@ public sealed class EfDepositRecorder : IDepositRecorder
         using var tx = _db.Database.BeginTransaction();
         try
         {
+            // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외 — 옛 LOADED piece를 새 IF-10이 "중복"으로 오판하지 않게.
             var piece = _db.Pieces
-                .Where(p => p.PId == pId && p.IsActive)
+                .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
                 .OrderByDescending(p => p.Id)
                 .FirstOrDefault();
 
@@ -523,6 +525,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
         _db.Pieces.Any(p =>
             p.PId == pId &&
             p.IsActive &&
+            p.ArchivedAt == null &&   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
             (p.Status == PieceStatus.DEPOSITED ||
              p.Status == PieceStatus.CELL_ASSIGNED ||
              p.Status == PieceStatus.LOADED));

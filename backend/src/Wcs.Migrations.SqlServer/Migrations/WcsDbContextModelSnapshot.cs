@@ -767,6 +767,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<long?>("AgvId")
                         .HasColumnType("bigint");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<string>("Barcode")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -849,6 +852,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateTime>("At")
                         .HasColumnType("datetime2");
@@ -960,6 +966,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<int>("CSeq")
                         .HasColumnType("int");

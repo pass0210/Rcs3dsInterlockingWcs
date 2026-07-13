@@ -278,7 +278,8 @@ public sealed class RcsController : ControllerBase
         // ── FULL/PAUSED 인메모리 집계: IF-10 투입 반영 ───────────────────────────
         if (dest is not null && destType == DestinationType.Chute)
         {
-            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive);
+            // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
+            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null);
             var qty   = piece?.Qty ?? req.Qty ?? 1;
             capacity.OnDeposited(dest.Id, qty);
         }
@@ -326,7 +327,7 @@ public sealed class RcsController : ControllerBase
 
         // piece.id / cell.id 조회 (sorter_command 연결 키 — 백그라운드 콜백에서 사용)
         long pieceId = db.Pieces
-            .Where(p => p.PId == req.PId && p.IsActive)
+            .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)   // S-B2C-DATAGEN: 아카이브 제외.
             .Select(p => p.Id)
             .FirstOrDefault();
         long cellId = db.Cells
