@@ -1,114 +1,100 @@
-# Sprint Feedback — S-IF08-READY-PUSH (아웃바운드 수용상태 발신 재배선: 폐지 destination-status → 확정 `PUT /api/UpdateChuteState`, 단일 발신 소스 통합)
+# Sprint Feedback — S-HARDENING-1 (슈트 복구 하트비트 + 멀티소터 해제 격리 회귀 잠금 + 핫패스 인덱스 2종 + 라이드얼롱 2건)
 
 **APPROVED** — Evaluator, 2026-07-13 (1 iteration to pass).
 
-브랜치 `feat/if08-ready-push`. 스프린트 변경분은 전부 **미커밋 working tree**(HEAD=`2ba2c9d`, docs 병합 커밋 — orchestrator 가 승인 후 커밋). 재핸드오프 아님(HEAD 에 이 스프린트 커밋 없음 · working tree 에만 존재). Backend/API 단일 차원(functional only, 계약 선언). Evaluator 는 코드를 고치지 않음.
-Ground truth = git diff/status + 코드 직접 판독 + **독립 재실행 dotnet test**(full 1× + push군 5× + E2E군 5×) + **가짜 RCS 수신 서버(FakeChuteStateServer)가 실제 수신한 JSON 본문**. Generator 요약(327 GREEN 등)은 신뢰하지 않고 전부 독립 재현.
+브랜치 `feat/hardening-1`. 스프린트 변경분은 전부 **미커밋 working tree**(HEAD=`ded2bea`, 이전 스프린트 커밋 — orchestrator 가 승인 후 커밋). 재핸드오프 아님(HEAD 에 이 스프린트 커밋 없음 · working tree 에만 존재). Backend/API 단일 차원(functional only, 계약 선언). Evaluator 는 코드를 고치지 않음. 커밋/푸시 0.
+Ground truth = git diff/status + 변경 코드 직접 판독 + **독립 재실행 dotnet test**(full 1× + push군 5× + E2E군 5×) + **가짜 RCS 수신 서버(FakeChuteStateServer)가 실제 수신한 본문** + **양 provider 스크래치 DB `ef database update` 실적용 + 스키마 카탈로그 조회**. Generator 요약(330 GREEN 등)은 신뢰하지 않고 전부 독립 재현.
 
-핸드오프 확인: `tasks/sprint-log.md` L3257 에 `## IMPLEMENTATION COMPLETE — S-IF08-READY-PUSH (Generator, 2026-07-13)` 마커 존재(파일 UTF-8 — L15 의 stale S-B2B-3b 마커가 아니라 파일 최말단의 IF08 마커가 정본) → 활성화 정당.
+핸드오프 확인: `tasks/sprint-log.md` **L3307**(파일 최말단)에 `## IMPLEMENTATION COMPLETE — S-HARDENING-1 (Generator, 2026-07-13)` 마커 존재(L3078~L3257 의 stale 마커 4건이 아니라 말단 마커가 정본) → 활성화 정당.
 
 ---
 
-## [정적] 빌드 / 테스트 — 독립 재실행 fresh evidence
+## [Completion #1] 빌드 — PASS
 
-- `dotnet build backend/Wcs.sln`: **오류 0**. 경고 전부 선재 **NU1903**(`SQLitePCLRaw.lib.e_sqlite3` 2.1.10 취약성 advisory) × 5 프로젝트(Wcs.Api/Data/Migrations.Sqlite/Migrations.SqlServer/Tests). 신규 경고 0. (MSBuild 요약 라인 "경고 10개" = restore/build 단계 중복 계수 — 근원은 동일 NU1903 하나. 계약 Completion #4 가 NU1903 을 선재 advisory 로 명시 제외.)
-- `dotnet test backend/Wcs.sln`(full, 독립 재실행): **`통과! 실패:0 통과:327 건너뜀:0 전체:327` (18s, exit 0)**. 회귀 0·skip 0.
-- **결정성(계약 Completion #2 — 실-Kestrel/폴링 I/O flake 이력[S9·testhost teardown] 대비 ≥5회 반복 필수)**:
-  - push 군 `--filter FullyQualifiedName~Push|SorterCellFullness|Field20Cells` **5회 연속 = 52/52 GREEN**(각 8s). (계약 언급 42 의 상위집합 — SorterCellFullness+Field20+전 Push 클래스 포함.)
-  - E2E 군 `--filter FullyQualifiedName~E2E` **5회 연속 = 50/50 GREEN**(각 14~18s).
+- `dotnet build backend/Wcs.sln`: **오류 0**. 경고 전부 선재 **NU1903**(`SQLitePCLRaw.lib.e_sqlite3` 2.1.10 advisory — 계약 명시 제외) × 5 프로젝트. **신규 경고 0**.
+- 빌드 전 고아 프로세스 점검(`Wcs.Sim3ds.exe`/`Wcs.Api.exe` tasklist): 0건 — MSB3021 함정 배제 상태에서 빌드.
+
+## [Completion #2 / VS-4 후단] 테스트 — 독립 재실행 fresh evidence — PASS
+
+- full `dotnet test backend/Wcs.sln`(처음부터 재실행): **`통과! 실패:0 통과:330 건너뜀:0 전체:330` (19s)**. 327 선재 + 신규 3(HB-1·HB-2·EC-14) 산술 일치. 회귀 0·skip 0.
+- **결정성(flake 이력 대비 ≥5회 반복)**:
+  - push 군 `--filter FullyQualifiedName~Push|SorterCellFullness|Field20Cells`(신규 하트비트·EC-14 포함 — `ChuteRecoveryPushHeartbeatTests` 는 "Push" 매치, EC-14 는 SorterCellFullness 매치): **5회 연속 = 55/55 GREEN**(각 8~9s). 직전 스프린트 52 + 신규 3 = 55 산술 일치.
+  - E2E 군 `--filter FullyQualifiedName~E2E`: **5회 연속 = 50/50 GREEN**(각 15~17s).
   - flake 0. 단일 run 신뢰 회피 규칙 준수.
 
-## [Completion #3 / VS-8] 폐지 와이어 grep-clean — PASS
+## [Completion #3 / VS-1·VS-5·VS-6] 항목 1 — 슈트 복구 하트비트 — PASS
 
-- 프로덕션(`backend/src`): `destination-status|RcsPush|IRcsPushClient|DestinationStatusPushPayload|RcsPushOptions` **0건**.
-- `appsettings.json`: 폐지 심볼 0건. `SorterObserveIntervalMs` 는 `Wcs:ChuteStatePush` 섹션으로 **이전됨**(SC-5) — 유일 매치.
-- 테스트(`backend/tests`) 정밀 grep(`\bIRcsPushClient\b|\bDestinationStatusPushPayload\b|\bRcsPushOptions\b|\bRcsPushClient\b|destination-status`): **0건**. 잔존 매치는 전부 `DestinationStatusPusher`(SC-3 통합 단일 소스 — 존치 심볼, 폐지 아님). 픽스처명 `RcsPushWebApplicationFactory`·파일명 `RcsPushTests.cs` 는 SC-8 이 명시 존치를 요구한 산물(폐지 심볼 아님). "gone everywhere" 확정.
-- 삭제 확인(git status): `RcsPushClient.cs` (D), `ChuteStatePusher.cs` (D).
+**가짜 RCS 실수신 본문 ground-truth**(detailed 콘솔에서 fresh 캡처):
 
-## [Completion #5] 마이그레이션 0 · [Completion #6] 인프라 격리 — PASS
+- **VS-1(HB-1, `HB1_ChuteRecoveryHeartbeat_FullChutes_Redelivered_WithoutSubsequentEvents`) GREEN** —
+  `[HB-1] RCS 다운 중 만재 전이 2건 — 성공 delivery 슈트1=1·슈트2=1(부트뿐·stale)` →
+  `[HB-1] 복구 후 이벤트 0으로 만재 2건 재도달(각 1건) — 이후 시도 정지(총 11건에서 stable)`.
+  = (a) RCS 503 중 만재 슈트 2건 전이 → 재시도 소진(실패 시도 Accepted=false 관측·성공 delivery 는 부트스트랩뿐) (b) 복구 (c) **후속 슈트 이벤트 0**으로 관찰 주기 경과만으로 최신 상태(next_state=2)가 각 슈트 정확히 1건 재도달 → 이후 전체 발신 시도 자체 정지(폭주 0). 계약 VS-1 의 "만재 2건 복구 재도달" 정확 재현.
+- **VS-5(HB-2, `HB2_SyncedChute_NoHeartbeatResend_NoContradiction`) GREEN** —
+  `[HB-2] 동기 슈트 재발신 0·전체 시도 stable(8건)·이력 [3,2] 무모순`.
+  = 동기(Acked==Computed) 슈트는 관찰 주기(30ms) 반복에도 재발신 0(성공+실패 시도 모두 stable) + 슈트4 수신 이력 정확히 `[3,2]` — 같은 chuteNo 모순 발신 0.
+- **VS-6(DORMANT)**: 기존 `PUSH8`·`CS_PUSH_6`·`CS_PUSH_6c` 가 커버(BaseUrl 미설정 → `StartAsync` 조기 return 으로 관찰 루프 자체 미기동 — 하트비트 포함 발신 0·크래시 0·인바운드 정상). 셋 다 full 및 push 군 5× 반복에 포함되어 GREEN.
+- **S-IF08 계약 성질 보존(코드 직접 판독 + 회귀 실측)**: 하트비트는 `RunSorterObserveLoopAsync` 안에서 **미동기(`!Acked.HasValue || Acked != Computed`, Gate 락 하 판독) 슈트만** `Observe(st)` 호출 — 동기 슈트는 Observe 자체를 안 탐(폭주 구조적 0). 발신은 기존 `Observe→ComputeAccept(단일 술어)→PumpAsync(Gate 락 + PushInFlight 클레임 + 값기반 억제)` 단일 경로 그대로 — 별도 병렬 발신 경로/이중 소스 재도입 0, 모순 발신 구조적 불가, 전이당 1회 멱등 불변. 신규 타이밍 상수 0(기존 `SorterObserveIntervalMs`(appsettings, 운영 150ms) cadence 재사용 — 절대규칙 #7). 관찰 루프 예외 흡수+로깅 유지(예외 삼킴 0 — Fail-Loud 로그 후 다음 주기 재시도).
+- 직전 스프린트(S-IF08) 아카이브의 minor "슈트는 주기 관찰이 없어 RCS 장기 다운 중 stale" 를 정확히 닫음 — 반복 이슈 아님(해소 방향).
 
-- `git status`: migration/snapshot 파일 변경 **0건**. 스키마 무접촉.
-- 무접촉 재확인: `Wcs.PlcGateway`·`Wcs.Core`·`Wcs.Data` diff **0**(git status 에 해당 경로 변경 없음 — 절대규칙 #1/#2/#3/#4/#5, SC scope-OUT 준수).
-- 검증 인프라: FakeChuteStateServer(Kestrel `127.0.0.1:0` 동적 포트) + E2E Sim3ds(`GetFreePort()` 동적 TCP `127.0.0.1`) + in-memory SQLite(named, per-factory Guid). **COM1/RTU·실 PLC·원격/현장 DB 무접촉 확인**(고정 :1502/:5205 미사용 — 전부 동적/loopback).
+## [Completion #4 / VS-2] 항목 2 — 멀티소터 셀 해제 격리 회귀 테스트 — PASS
 
----
+- **EC-14(`EC14_ReleaseEmptyAssignment_MultiSorter_DestinationScoped_NoCrossRelease`) GREEN** —
+  `[EC-14] 멀티소터 해제 격리 — A(cell1) 해제·B(cell1·동일 바코드·최신 배정) 생존(교차 해제 0).`
+  소터 A(시드 30)·B(신규 31)가 **같은 CellNo=1·같은 바코드** 활성 배정 보유 → A 에 `ReleaseEmptyAssignment` → A 해제(양성 대조 — 공허 통과 아님) + **B 생존** DB 카운트 단언 + B 오더 기준 재확인.
+- **회귀 민감화 실효 확인(구현 쿼리 직접 대조)**: `DbRepositories.cs` 의 실제 쿼리가 `OrderByDescending(a => a.AssignedAt)` — 테스트가 B 배정을 +1s 최신으로 만들었으므로 **dest 필터(`a.Cell.DestinationId == dest.Id`)가 빠지면 B 가 선택·해제되어 즉시 RED**. 바코드 공유로 barcode 필터 무력화. 회귀 잠금 실효.
+- **`ReleaseEmptyAssignment` 본문/시그니처 무변경**: `git diff -- backend/src/Wcs.Api/Repositories/DbRepositories.cs` **0건**(계약 Completion #4 원문 그대로 충족).
 
-## [★★★ API 계약 정합성] — PASS
+## [Completion #5 / VS-3] 항목 3 — 인덱스 2종 + 양 provider 마이그레이션 — PASS
 
-- **와이어 형태(VS-9)**: 가짜 수신 서버가 기록한 실제 요청으로 입증 — `last.Method=="PUT"`(positive), RawBody 키 `chute_numbers`/`next_states` **Contains** ∧ `chuteNumbers`/`nextStates`/`chuteNo`/`ready`/`timeStamp` **DoesNotContain**(camelCase·폐지키 함정 차단), 두 배열 동일 길이·인덱스 정렬·길이 1, 값 ∈ {2,3}. (RcsPushTests.PUSH6_7 + ChuteStatePushClientTests.CS_PUSH_7.)
-- **상태 매핑(SC-2)**: `NextStateOpen=3`(accept)/`NextStatePause=2` 상수 LOCKED. accept 합성 = `Compute().Ready && !Compute().Paused` — 코드 직접 확인(DestinationStatusPusher.ComputeAccept).
-  - 슈트: `Compute().Ready = !full && !paused` → accept = !full && !paused(만재·정지 반영).
-  - 소터: `Compute().Ready = decision.Ready`(online·정렬·Ready==1, SorterFull·paused 제외) → accept = 운영 ready && !paused. **paused 재접힘 + SorterFull 제외** 확인.
-- **성공/실패 판정**: 2xx && `flag==1` 성공 / `{result:"Failed"}`·flag≠1·비2xx 실패(status code 만 보지 않음). ChuteStatePushClient.IsSuccessBody 코드 확인 + CS_PUSH_4/5 실증.
+- **양 provider 존재 + 체이닝**: `AddHotPathIndexes` 가 SqlServer `20260713012244`·Sqlite `20260713012257` 로 존재, Designer `[Migration]` 애트리뷰트 정합, 타임스탬프가 `AddB2BArchivedAt`(20260708…) **뒤**. Up/Down 이 두 provider 문자 그대로 동일 델타(CreateIndex 2 / DropIndex 2 — 대칭). 스냅샷 diff 각 **+6/-0 순수 additive**(기존 엔트리 재정렬 0).
+- **SQLite 실적용**: 스크래치 파일 DB에 `ef database update --connection` → 5개 체인 전부 적용. `sqlite_master` 조회:
+  `CREATE INDEX "IX_piece_pid_active" ON "piece" ("PId", "IsActive")` · `CREATE INDEX "IX_order_item_barcode" ON "order_item" ("Barcode")` **실재** + 기존 `UQ_piece_pid_active_status`·`UQ_order_item_order_barcode` **보존**. 검증 후 스크래치 삭제.
+- **SqlServer 실적용(스크래치, 사용자 DB 무접촉)**: localhost 일회용 `WcsMigCheck_eval7c31` 에 `ef database update --connection` → 5개 체인 전부 적용. `sys.indexes` 조회(fresh):
+  `IX_piece_pid_active | piece | is_unique=0 | has_filter=0 | (PId,IsActive)` · `IX_order_item_barcode | order_item | is_unique=0 | has_filter=0 | (Barcode)` **실재** + `UQ_piece_pid_active_status`(unique·filtered)·`UQ_order_item_order_barcode`(unique) **공존·비파괴**. 검증 후 **DROP DATABASE 완료**(`sys.databases WHERE name LIKE 'WcsMigCheck%'` = 0 rows).
+- **사용자 DB 무접촉 입증(읽기 전용 점검)**: `Rcs3dsInterlockingWcs.dbo.__EFMigrationHistory` 최신 = `20260708021450_AddB2BArchivedAt` — 신규 마이그레이션 **미적용 그대로**(이 스프린트가 사용자 DB를 건드리지 않았음의 직접 증거). Azure/현장/실 PLC/COM1 무접촉. 검증 포트 전부 동적 loopback(고정 :5205/:1502 미사용).
+- 판독 노트: 신규 인덱스가 비필터라 기존 필터드 유니크의 "물리 컬럼명 207 함정"(SQLite 검증만으론 못 잡는 부류) 비해당 — 그래도 SQLite 만으로 판정하지 않고 실 SqlServer 적용으로 이중 확인(lessons 2026-06-30 준수).
 
-## [★★★ 아키텍처 — 단일 발신 소스·동시성 멱등] — PASS (코드 직접 검사)
+## [Completion #6 / VS-7] 항목 4 — 라이드얼롱 2건 — PASS
 
-- **단일 소스(SC-3/VS-7)**: 변화원 3종(슈트 capacity 콜백 ① · 소터 스냅샷 관찰 타이머 ② · 운영자 `OnTransition` ③)이 전부 `Observe → PumpAsync` 단일 경로로 수렴. 발신값은 항상 단일 술어 `ComputeAccept`(현재 DB Status 직접 read) 산출 — 갈라진 두 소스(구 DestinationStatusPusher ready + ChuteStatePusher pause) 는 `ChuteStatePusher.cs` **삭제**로 소멸. 같은 chuteNo 에 한쪽 3·다른 쪽 2 모순 발신이 **구조적으로 불가**.
-  - 실증: PUSH4(16스레드 동시 통지 → 정확히 1건) · SorterPushOperational VS-9a(N스레드 동시 관찰 → 1건) · CS_PUSH_3(정지 중 관찰 타이머 계속 돌아도 모순 3 발신 0 — stableCount 10회 관측).
-- **전이당 1회 멱등(중복 0·누락 0)**: `PumpAsync` per-dest `Gate` 락에서 `PushInFlight` 클레임 + `Acked==Computed` 값기반 억제 → I/O 는 락 밖 → 완료 후 락에서 `Acked` 갱신 + 재평가. 동시 클레임은 락 직렬화로 1개만 성공(나머지 즉시 반환). 성공만 `Acked` 갱신, 실패 시 `Acked` 불변 → 다음 관찰이 재푸시(복구). **비원자 check-then-act 없음** — 클레임·판정·Acked 갱신 전부 동일 락 안.
-- **관심사 분리**: 전이 감지(DestinationStatusPusher) ↔ 1건 전송+지수 백오프 재시도+Fail-Loud(ChuteStatePushClient) 분리 유지.
-- **teardown 경쟁 방어**: `StopAsync` `Interlocked.Exchange(_stopped)` 1회 실행 · CTS `CancelAsync` ObjectDisposedException catch · observe task await 예외 흡수. `PumpAsync` OperationCanceledException catch(PushInFlight 리셋) · `_cts?.Token ?? None`. 픽스처 `_fakeWriteQueue.Writer.TryComplete()` before DisposeAsync(testhost teardown 패턴 준수).
+- **사장 DI 제거**: `Program.cs` 에서 `AddSingleton<IDestinationChangeNotifier>(...)` 제거. 전수 grep(`backend/`): `IDestinationChangeNotifier` 잔존 = 인터페이스 정의 + `DestinationStatusPusher` 구현 선언 + 설명 주석 **3곳뿐 — DI resolve 소비처 0** 재확인(슈트 변화원은 `OnChuteStateChanged` 이벤트 직구독 경로가 실효). `AddHostedService(sp => sp.GetRequiredService<DestinationStatusPusher>())` 존치 — 부팅·push 경로(슈트 capacity 콜백·소터 관찰·운영자 전이) 전부 push 군 5× GREEN 으로 실증.
+- **`_cts` 재배치**: `StartAsync` 에서 `_cts = CreateLinkedTokenSource(...)` 가 부트스트랩 발신 루프 **앞**(L154 < L158-163) — 부트스트랩 `PumpAsync` 의 `_cts?.Token ?? None` 이 이제 실 토큰 사용(취소 가능). teardown 경쟁 스위트(RcsPush teardown 포함 push 군 + full) 전부 GREEN.
 
-## [★★ Craft] — PASS
+## [Completion #7 / VS-4] 무접촉 — PASS
 
-- 하드코딩 0: BaseUrl·Path·RetryCount·RetryBaseDelayMs·RetryMaxDelayMs·HttpTimeoutMs·SorterObserveIntervalMs 전부 `ChuteStatePushOptions`(appsettings). URL/타이밍 리터럴 0(절대규칙 #7). 백오프 shift overflow 가드(`Min(attempt-1,30)`) 존재.
-- DORMANT: `BaseUrl` null → `IsEnabled=false` → StartAsync 경고 후 전체 비활성(구독 안 함·관찰 타이머 미기동·HTTP 0·크래시 0). 클라이언트도 방어적 재확인 false.
-- Fail-Loud: 재시도 소진 시 명시 ERROR 로깅 + false 반환 + operation_log WARN 부수 기록. 성공 위장 0.
-
-## [★★ Functionality] — PASS
-
-- IF-05 dispatch 회귀 0: 소터 2단계 게이트 분리 보존 — push ready(운영상태)는 SorterFull/Paused 무반영, IF-05 는 `SorterCanAcceptBarcode`+`r.Paused` 소비. SorterCellFullness EC-1/EC-2/EC-3(만재·PAUSED → IF-05 NG) + SorterPushOperational VS7 실증.
-
----
-
-## Verification Scenarios — VS-1 ~ VS-11 (전부 자동 xUnit · 가짜 수신 본문 입증)
-
-| VS | 내용 | 커버 테스트(가짜 수신 본문 단언) | 판정 |
-|----|------|-------------------------------|------|
-| VS-1 | 소터 분류 사이클 2→3→2 전이당 1건·무변화 폭주 0 | RcsPushTests.PUSH2_3 (부트1+전이2=3건, stableCount 6) | **PASS** |
-| VS-2 | 기동 부트스트랩 전 활성 목적지 1회 | RcsPushTests.PUSH6_7 (슈트5+PAUSED1+소터1=7건, 무변화 안정) | **PASS** |
-| VS-3 | 운영자 pause 합성(운영 ready여도 paused→2) | ChuteStatePushObserverTests.CS_PUSH_3 + SorterPushOperational VS-5 (`Compute().Ready=true`∧`Paused=true`이나 발신 2) | **PASS** |
-| VS-4 | 슈트 만재/정지→2, 해소→3 | RcsPushTests.PUSH1 (3→2→3) + CS_PUSH_1/CS_PUSH_2 | **PASS** |
-| VS-5 | 소터 셀 만재 무영향(발신 3 유지)+IF-05 여전히 차단 | 발신측 SorterPushOperational VS-9b/VS-4(만재 전이 push 0·last=3) · IF-05측 SorterCellFullness EC-1/EC-2 + VS-7(만재 NG) | **PASS** |
-| VS-6 | DORMANT: 발신 0·크래시 0·인바운드 정상 | RcsPushTests.PUSH8 + CS_PUSH_6/CS_PUSH_6c (전이 다수에도 수신 0, IF-05 200) | **PASS** |
-| VS-7 | 단일 소스·이중/모순 발신 금지 | RcsPushTests.PUSH4(동시16→1) + CS_PUSH_3(no-contradiction) + VS-9a | **PASS** |
-| VS-8 | 폐지 와이어 완전 제거(grep) | 프로덕션+appsettings+테스트 정밀 grep 0건 | **PASS** |
-| VS-9 | 와이어 형태(PUT·snake_case·인덱스정렬·{2,3}) | RcsPushTests.PUSH6_7 + CS_PUSH_7 (RawBody 파싱 이중 단언) | **PASS** |
-| VS-10 | 전체 스위트 GREEN(0 회귀) 독립 실행 | full 327/327 + push 52×5 + E2E 50×5 GREEN | **PASS** |
-| VS-11 | RCS 미도달→재시도(설정3)→복구 후 최신값 도달(Fail-Loud) | RcsPushTests.PUSH5(503 중 성공 0→복구 재푸시 최신 2) + CS_PUSH_5(503/Failed/flag0→false, 복구 true) | **PASS** |
-
-**모든 Completion Condition(1~6) 충족. 11개 VS 전부 PASS. 동시성 정합(단일소스·전이당1회·teardown) 코드 직접 검사 통과.**
+- `git status --porcelain` 전수 대조: 변경 파일 = 계약 4항목 파일 + 신규 마이그레이션 4 + 신규 테스트 1 + tasks/*.md **뿐**. `Wcs.PlcGateway`·`Wcs.Core`·`HandshakeOrchestrator`·`frontend/`·`Sim3ds`·`DbRepositories.cs` **diff 0**(grep 매치 0건). Modbus 레지스터 맵 불변.
 
 ---
 
-## Repeat detection
+## 평가 기준 판정 (Backend/API 4기준)
 
-- 이 스프린트는 feedback-archive S-CHUTESTATE-PUSH 가 확립한 교훈(가짜 수신 서버 본문 = 유일 신뢰 증거 · snake_case JsonPropertyName 캡처 이중단언 · DORMANT 3중 실증 · 관찰-전용 additive 코어 무변경 · 실-Kestrel/폴링 ≥5× 결정성 · 스택 PR 금지/현장 DB 무접촉)을 **정확히 계승·적용**했다. 반복된 **결함**은 0 → lessons.md 승격 불요(반복 교훈은 반복된 실패에 한함).
+1. **API/컴포넌트 설계 정합성 (★★★) PASS** — 하트비트가 S-IF08 단일 발신 계약을 우회하지 않고 관찰 루프 내부에서만 확장(미동기 게이트 + 기존 Observe→PumpAsync). 인덱스는 기존 유니크 2종과 공존(양 provider 카탈로그로 실증).
+2. **아키텍처 원본성 (★★★) PASS** — 별도 병렬 경로/이중 소스 0. 마이그레이션 양 provider 문자 동일 델타·순수 additive 스냅샷.
+3. **Craft (★★) PASS** — 신규 타이밍 상수 0(계약 명령 그대로 `SorterObserveIntervalMs` 재사용), DORMANT/teardown 방어 보존, 스크래치 DB 절차 준수(생성→검증→DROP→사용자 DB 무접촉 입증), 예외 삼킴 0(관찰 루프 로깅 유지).
+4. **Functionality (★★) PASS** — VS-1~VS-7 전부 실제 재현(가짜 수신 본문·DB 카운트·스키마 카탈로그·git diff). 회귀 0.
 
-## Minor (비블로킹 — 다음 sprint Generator 참고, APPROVED 불변)
+## Minor (비블로킹 — 차단 없음, 기록만)
 
-- **소터는 관찰 타이머(SorterObserveIntervalMs)로 실패 후 자동 재푸시가 보장되나, 슈트는 주기 관찰이 없어 push 최종 실패 후 재푸시가 "다음 capacity 이벤트/운영자 전이"에 의존**한다(주기적 reconcile 부재). 이는 계약 정합(SC-6 전이-트리거 · SC-7 클라 레벨 3회 재시도 · VS-11 이 subsequent 전이로 복구 입증 · 주기 reconcile/coalescing 은 명시 scope-OUT)이며 결함 아님. 다만 RCS 장기 다운 중 슈트 상태가 다음 슈트 이벤트까지 stale 로 남을 수 있으므로, 후속 배치/주기 reconcile 스프린트에서 슈트 주기 재푸시(또는 부트스트랩성 재동기) 도입을 고려할 것.
-- S-CHUTESTATE-PUSH Step 4.5 에서 이연된 항목(활성화 시 재동기화 협의 · `DetailJson` 수동 보간 STJ 통일 등)은 이 스프린트가 재도입하지 않았고 여전히 이연 상태 — 활성화(고객사 host 제공) 시점에 함께 처리.
+- **[관찰·by-design] RCS 장기 다운 중 미동기 슈트의 지속 재시도 cadence**: 하트비트는 다운 중에도 매 관찰 주기 미동기 슈트를 재구동한다. 실제 부하는 `PushInFlight` 가 재시도 사이클(운영 1s/2s/4s 백오프 ≈7s) 동안 True 로 유지돼 슈트당 "재시도 사이클 연속 실행" 수준으로 자체 제한됨(주기 150ms 폭주 아님 — HB-1 이 복구 후 정지도 실증). 계약이 명시적으로 선택한 설계(신규 상수 금지·주기 재사용)라 결함 아님. 운영 로그 노이즈가 문제되면 후속에서 하트비트 전용 감쇠(예: N주기 스킵) 검토 가능 — todo 등재는 불요 수준.
 
-→ **결론: functional 단일 차원 PASS, 계약 Completion 1~6 + VS-1~11 + 와이어/동시성 전부 충족. APPROVED.**
+## 판정
 
-**APPROVED — S-IF08-READY-PUSH**
+**APPROVED.** Completion Conditions 7/7 충족. 잔여 조치: orchestrator 커밋(Evaluator 는 커밋/푸시하지 않음 — working tree 상태 그대로 인계).
 
 ## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-13)
 
-**판정: Ready to merge = Yes. Critical/BLOCKING 0.**
+**판정: Ready to merge = Yes. Critical 0 · Important 0 · Minor 2.**
 
-강점: 계약 바이트 정합([JsonPropertyName] snake_case 강제·단일 Compute 호출 합성·IsSuccessBody 엄격 판정),
-단일 발신 소스가 "운 좋게"가 아니라 구조적으로 건전(per-dest Gate + PushInFlight claim + 성공 후
-Acked≠Computed 재수렴 루프 — 모순 발신 불가·최종상태 유실 창 없음), Fail-Loud 보존, 테스트가 실수신
-JSON으로 입증(WaitUntilExact 결정성 폴링·bare sleep 없음).
+강점: 하트비트가 단일 Observe→Pump 경로를 그대로 재사용(병렬 발신 경로 없음), 미동기 술어가
+Acked==null(부트스트랩 실패)을 포함해 정확·완전, DORMANT 엄격 no-op, PushInFlight로 폭주 아닌
+관찰주기당 1회의 유계 재시도, stale 덮어쓰기 창 없음(발신 직전 라이브 재계산), 마이그레이션 양
+provider 대칭·비파괴, EC-14 민감화 실효(dest 필터 제거 시 양방향 RED), 테스트 결정성(bare sleep 0).
 
-### Minor (비블로킹 — 다음 sprint Generator 참고)
-1. **[Important→후속] 슈트 복구 하트비트 부재** — DestinationStatusPusher.cs:242-244(관찰 루프 소터
-   전용)+:361-366. 슈트 FULL 전이 push가 RCS 장애로 재시도 소진되면, 만재라 후속 용량 이벤트도 없어
-   RCS가 "받을 수 있음"으로 무기한 오인 가능. 선재 동작(Phase 2 이월)·계약 VS-11 허용 — 병합 비차단.
-   후속: 관찰 루프에 "Acked≠Computed인 슈트 재평가"(chute Compute=인메모리 GetHold라 비용 ~0) 확장.
-2. Program.cs:198 `IDestinationChangeNotifier` DI 등록이 사장(이벤트 구독으로 대체됨·선재) — 제거 후보.
-3. 구 `Wcs:RcsPush` 키가 남은 수기 appsettings는 조용히 무시됨(진단 없음) — 양 와이어 DORMANT 출하라 수용.
-4. StartAsync에서 `_cts` 생성(:161)이 부트스트랩 루프(:153-158) 뒤 — 부트스트랩 발신이 CancellationToken.None로
-   나감(영향 극소). `_cts` 생성을 부트스트랩 앞으로 재배치 후보.
+### Minor (비블로킹 — 다음 sprint 참고)
+1. **슈트 복구 cadence가 SorterObserveIntervalMs에 결합** — 계약이 지시한 트레이드오프(신규 상수 금지).
+   운영자가 이 값을 공격적으로 낮추면 RCS 장애 중 아웃바운드 재시도율도 같이 올라감 — appsettings
+   주석/SPEC 한 줄 문서화 후보.
+2. **IDestinationChangeNotifier가 마커 인터페이스화** — DI 제거 후 타입 참조 0(이벤트 직결). 무해 —
+   후속 정리 때 인터페이스 자체 제거 후보.
+3. (Generator 발견·선재) 마이그레이션 팩토리 헤더의 `--startup-project src/Wcs.Data` 안내 명령이
+   실제론 실패(Wcs.Data가 마이그레이션 어셈블리 미참조) — 헤더 주석 정정 후보(감사 묶음 E 계열).
