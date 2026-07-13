@@ -190,13 +190,13 @@ builder.Services.AddSingleton<IDestinationControlService, DestinationControlServ
 builder.Services.AddSingleton<IChuteStatePushClient, ChuteStatePushClient>();
 
 // ③ 전이 감지·전이당 1회 발신 파이프(변화원 셋 수렴 + 부트스트랩 + 복구 재푸시 + 동시성 멱등).
-//    IHostedService + IDestinationChangeNotifier 양쪽을 같은 싱글톤으로 공급.
+//    싱글톤 + IHostedService로 공급.
 //    변화원: ChuteCapacityService.OnChuteStateChanged(슈트) + 소터 스냅샷 관찰 타이머 +
 //    DestinationControlService.OnTransition(운영자 PAUSED/RESUMED) — StartAsync에서 구독.
 //    BaseUrl 미설정이면 StartAsync가 경고 후 비활성(구독 안 함 — 크래시 0).
+//    ※ IDestinationChangeNotifier는 DI로 resolve하는 소비처가 0(슈트 변화원은 ChuteCapacityService의
+//      OnChuteStateChanged 이벤트를 StartAsync에서 직접 구독) — S-HARDENING-1에서 사장 DI 등록 제거.
 builder.Services.AddSingleton<DestinationStatusPusher>();
-builder.Services.AddSingleton<IDestinationChangeNotifier>(sp =>
-    sp.GetRequiredService<DestinationStatusPusher>());
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<DestinationStatusPusher>());
 

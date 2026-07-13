@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Wcs.Data;
 
@@ -10,9 +11,11 @@ using Wcs.Data;
 namespace Wcs.Migrations.Sqlite.Migrations
 {
     [DbContext(typeof(WcsDbContext))]
-    partial class WcsDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260713012257_AddHotPathIndexes")]
+    partial class AddHotPathIndexes
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.5");

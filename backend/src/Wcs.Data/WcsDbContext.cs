@@ -378,6 +378,13 @@ public class WcsDbContext : DbContext
              .IsUnique()
              .HasDatabaseName("UQ_order_item_order_barcode");
 
+            // S-HARDENING-1(감사 A-3): IF-05의 순수 Barcode 조회용 비유니크 인덱스.
+            //   IF-05는 매 호출 `i.Barcode == barcode`(OrderId 없음)로 목적지를 조회하는데,
+            //   위 UQ_order_item_order_barcode는 OrderId 선두라 순수 Barcode 조회에 못 쓴다(스캔).
+            //   (Barcode) 단독 인덱스로 seek 가능하게 한다. 기존 유니크와 공존·비파괴.
+            e.HasIndex(x => x.Barcode)
+             .HasDatabaseName("IX_order_item_barcode");
+
             e.Property(x => x.PlannedQty).IsRequired();
             e.Property(x => x.ReservedQty).IsRequired();
             e.Property(x => x.SortedQty).IsRequired();
@@ -430,6 +437,15 @@ public class WcsDbContext : DbContext
                  .HasFilter("[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED')")
                  .HasDatabaseName("UQ_piece_pid_active_status");
             }
+
+            // S-HARDENING-1(감사 A-3): 핫패스 조회 (p_id, is_active) 비필터 복합 인덱스.
+            //   IF-09/IF-10 등이 매번 `PId == pId && IsActive`(Status 술어 없음)로 활성 piece를 찾는데,
+            //   위 필터드 유니크 UQ_piece_pid_active_status는 `Status IN (...)` 조건이 붙어 이 조회를
+            //   커버하지 못한다(영구 보존 테이블 풀스캔). 비필터 (PId, IsActive) 복합으로 seek 가능하게 한다.
+            //   기존 필터드 유니크(멱등 백스톱)와 공존·비파괴 — filter 없으므로 물리 컬럼명 207 함정 비해당,
+            //   양 provider 동일 형태.
+            e.HasIndex(x => new { x.PId, x.IsActive })
+             .HasDatabaseName("IX_piece_pid_active");
 
             // 보조 인덱스
             e.HasIndex(x => x.Status)

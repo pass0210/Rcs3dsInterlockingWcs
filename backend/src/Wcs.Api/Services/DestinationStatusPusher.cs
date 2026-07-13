@@ -148,6 +148,11 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         _control.OnTransition             += OnControlTransition;   // ③ 운영자 PAUSED/RESUMED 전이
         _subscribed = true;
 
+        // ── CTS 생성(부트스트랩 발신 앞으로 재배치 — S-HARDENING-1 라이드얼롱) ────────
+        // 종전엔 부트스트랩 루프 뒤에서 생성돼 부트스트랩 push가 CancellationToken.None으로 나갔다.
+        // 발신 앞에서 생성하면 부트스트랩 push도 _cts.Token으로 취소 가능(StopAsync 경쟁 시 즉시 종료).
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
         // ── 부트스트랩: 기동 시 전 목적지 현재 수용상태 1회 발신 ──────────────────
         // 각 destination의 현재 accept를 초기 전이로 간주(Acked=null → 무조건 1회 발신). 이후엔 전이만.
         foreach (var st in _states.Values)
@@ -157,12 +162,11 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             _ = PumpAsync(st);
         }
 
-        // ── 소터 스냅샷 관찰 타이머 시작(변화원 ② — Latest diff) ─────────────────
-        _cts         = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // ── 관찰 루프 시작(변화원 ② 소터 Latest diff + 슈트 복구 하트비트) ─────────
         _observeTask = Task.Run(() => RunSorterObserveLoopAsync(_cts.Token));
 
         _log.LogInformation(
-            "[IF-08푸시] 활성 — 목적지 {Count}개 전이 추적 시작(기동 스냅샷 발신 + 소터 관찰 주기 {Ms}ms + 운영자 전이 구독)",
+            "[IF-08푸시] 활성 — 목적지 {Count}개 전이 추적 시작(기동 스냅샷 발신 + 관찰 주기 {Ms}ms[소터 스냅샷 diff + 슈트 미동기 복구 하트비트] + 운영자 전이 구독)",
             _states.Count, _opt.SorterObserveIntervalMs);
     }
 
@@ -225,11 +229,24 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         Observe(st);
     }
 
-    // ── 변화원 ② 소터 스냅샷 관찰 루프 ────────────────────────────────────────
+    // ── 변화원 ② 소터 스냅샷 관찰 루프 + 슈트 복구 하트비트 ─────────────────────
     //
     // 게이트웨이 폴링 스냅샷(bundle.Latest)을 주기적으로 관찰해 수용상태 전이를 감지한다.
     // 게이트웨이 본문은 무변경(Latest 읽기만). 전이가 없으면 발신 0건
     // (Observe가 Computed==Acked면 발신 안 함 — 폴마다 폭주 금지).
+    //
+    // ★ 슈트 복구 하트비트(S-HARDENING-1 항목 1) — 관찰 주기를 재사용(신규 상수 0, 절대규칙 #7):
+    //   소터는 분류 사이클(Ready 1↔0)·정렬·오프라인에 명시 이벤트가 없어 **매 주기** 스냅샷을 관찰해야
+    //   한다. 슈트는 capacity 이벤트/운영자 전이가 있어 평시엔 관찰이 불필요하나, push가 재시도 소진으로
+    //   실패(Acked ≠ Computed)한 슈트는 후속 이벤트 없이 stale로 남는다 — 특히 만재 슈트는 그 이벤트가
+    //   오지 않아 RCS가 "받을 수 있음"으로 무기한 오인한다. 그래서 **미동기 슈트만** 주기적으로 재평가·
+    //   재발신해 자율 복구한다.
+    //   S-IF08 성질 보존:
+    //     · 동기 완료(Acked == Computed) 슈트는 Observe를 호출하지 않는다 → 폴마다 재발신 0(폭주 금지).
+    //     · Observe → PumpAsync 단일 경로로 수렴 → 별도 병렬 발신 경로/이중 소스 재도입 0.
+    //     · 발신값은 여전히 단일 술어 ComputeAccept 산출 → 같은 chuteNo 모순 발신 불가.
+    //     · per-dest Gate 락 + PushInFlight 클레임 그대로 경유 → 전이당 1회 멱등 불변.
+    //   슈트 Compute는 인메모리 GetHold 기반이라 미동기 슈트 재평가 비용은 ~0.
     private async Task RunSorterObserveLoopAsync(CancellationToken ct)
     {
         int intervalMs = Math.Max(1, _opt.SorterObserveIntervalMs);
@@ -241,8 +258,23 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
 
                 foreach (var st in _states.Values)
                 {
-                    if (st.DestType != DestType.SORTER_3D) continue;
-                    Observe(st);
+                    if (st.DestType == DestType.SORTER_3D)
+                    {
+                        // 소터: 매 주기 스냅샷 diff 관찰(명시 이벤트 없음 → 관찰이 유일 감지 수단).
+                        Observe(st);
+                        continue;
+                    }
+
+                    // 슈트: 미동기(Acked ≠ Computed)일 때만 재평가·재발신(복구 하트비트).
+                    //   이미 동기된 슈트는 건드리지 않는다 — 무변화 폴 재발신 0.
+                    //   (Acked==null = 부트스트랩 발신 실패분도 미동기로 간주해 복구.)
+                    bool unsynced;
+                    lock (st.Gate)
+                    {
+                        unsynced = !st.Acked.HasValue || st.Acked.Value != st.Computed;
+                    }
+                    if (unsynced)
+                        Observe(st);
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -250,7 +282,7 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             {
                 // 관찰 루프 예외가 루프를 죽이지 않도록 흡수(로깅은 유지 — Fail-Loud).
                 // 다음 주기에 재시도(이벤트 영구 손실 방지).
-                try { _log.LogError(ex, "[IF-08푸시] 소터 관찰 루프 예외 — 다음 주기 재시도"); }
+                try { _log.LogError(ex, "[IF-08푸시] 관찰 루프 예외 — 다음 주기 재시도"); }
                 catch { /* teardown 중 로거 disposed */ }
             }
         }

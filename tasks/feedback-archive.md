@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-HARDENING-1 (슈트 복구 하트비트 + 멀티소터 해제 격리 회귀 잠금 + 핫패스 인덱스 2종 + 라이드얼롱, 백엔드) — APPROVED (2026-07-13, 1 iteration)
+
+- **"주기 재구동" 류 복구 메커니즘의 진짜 게이트 = 기존 단일 발신 경로를 우회하지 않았는지(구조) + "이벤트 0 복구"와 "동기 시 무발신"을 가짜 수신 본문으로 각각 실증(행동)**: 하트비트는 관찰 루프 안에서 **미동기(`Acked≠Computed`, per-dest Gate 락 하 판독) 슈트만** `Observe` 호출 — 발신 자체는 기존 `Observe→ComputeAccept(단일 술어)→PumpAsync(락+PushInFlight+값기반 억제)` 그대로라 모순·중복이 구조적으로 불가. 검증은 (i) HB-1: RCS 503 중 만재 전이 2건 → 성공 delivery 는 부트뿐(stale 확정) → 복구 → **후속 이벤트 0**으로 각 슈트 정확히 1건 재도달 → 전체 발신 시도 정지(카운트 freeze stable), (ii) HB-2: 동기 슈트는 주기 반복에도 성공+실패 시도 모두 0 + 수신 이력 정확히 `[3,2]`, 두 테스트가 "복구 실효"와 "폭주 부재"를 **분리 단언**해야 닫힌다. GREEN 하나로 합치면 어느 쪽이 공허한지 안 보인다.
+- **"이미 올바른 동작"의 회귀 잠금 테스트는 가상 회귀가 실제로 RED 를 내도록 민감화 설계를 구현 쿼리와 대조해 확인**: EC-14 는 두 소터가 같은 CellNo·**같은 바코드**(barcode 필터 무력화) + B 배정을 A 보다 최신(+1s)으로 — 실제 쿼리가 `OrderByDescending(AssignedAt)` 이므로 dest 필터가 빠지는 순간 B 가 선택·해제돼 즉시 RED. 여기에 A 해제 양성 대조(공허 통과 차단)까지 있어야 "격리의 유일 근거 = destination 스코프"가 잠긴다. 민감화 없는 격리 테스트는 필터 제거 회귀를 GREEN 으로 통과시킬 수 있다.
+- **마이그레이션 검증 = 양 provider 실적용 + 카탈로그 조회 + 사용자 DB "무접촉의 직접 증거"까지**: SQLite 스크래치 파일 + `sqlite_master`, SqlServer 는 localhost 일회용 `WcsMigCheck_*` 에 `ef database update --connection`(design-time factory 의 하드코딩 연결 무시하고 override — factory 헤더의 `--startup-project src/Wcs.Data` 명령은 마이그레이션 어셈블리 미참조로 선재 괴리, 자기 자신을 startup 으로) + `sys.indexes`(is_unique·has_filter·key_cols) 조회 후 DROP. 마지막에 **사용자 DB `__EFMigrationHistory` 최신이 여전히 직전 마이그레이션임을 읽기 전용으로 확인**하면 "스크래치에만 적용했다"가 증거로 닫힌다(주장이 아니라).
+- **인덱스 추가 계약의 판정 축 = "핫패스 술어가 탈 수 있는 형태인가"(필터드 유니크는 술어 불일치 조회를 못 덮는다) + 기존 유니크와 공존**: `UQ_piece_pid_active_status` 는 `Status IN(...)` 필터 탓에 `PId==x && IsActive`(Status 없음) 조회를 커버 못 함 → 비필터 `(PId,IsActive)` 신설이 정답 형태. `UQ_order_item_order_barcode` 는 OrderId 선두라 순수 Barcode 조회 불가 → `(Barcode)` 단독. 양쪽 카탈로그에서 신규 2 + 기존 유니크 2 공존을 실측.
+- **결정성**: full 330/330(=327+신규 3 산술 일치)·push 군 5×=55/55(신규 포함 — 필터 `~Push` 가 신규 클래스명 `ChuteRecoveryPushHeartbeatTests` 를 매치하는지 확인하고 반복)·E2E 5×=50/50·flake 0. 빌드 경고 선재 NU1903 만. 무접촉존(PlcGateway/Core/핸드셰이크/frontend/DbRepositories) diff 0.
+- **[관찰·by-design]** RCS 장기 다운 중 미동기 슈트는 매 관찰 주기 재구동되나 `PushInFlight` 가 재시도 사이클(운영 백오프 ≈7s) 동안 유지돼 자체 제한 — 폭주 아님. 로그 노이즈가 문제되면 후속 감쇠 검토 여지.
+
 ## S-IF08-READY-PUSH (아웃바운드 수용상태 발신 재배선: 폐지 destination-status → 확정 `PUT /api/UpdateChuteState` · 두 발신 소스를 목적지당 단일 소스로 통합, 백엔드) — APPROVED (2026-07-13, 1 iteration)
 
 - **"단일 발신 소스" 통합의 진짜 게이트 = 두 변화원이 같은 chuteNo 에 모순값을 낼 수 있는 경로가 물리적으로 없는지 코드로 확인 + 정지 중 no-contradiction 실측**: 구조는 `ChuteStatePusher.cs` **삭제** + 변화원 3종(슈트 capacity 콜백·소터 스냅샷 관찰 타이머·운영자 `OnTransition`)이 전부 `Observe→PumpAsync` 단일 경로로 수렴 + 발신값이 항상 단일 술어 `ComputeAccept=Compute().Ready && !Compute().Paused`(현재 DB Status 직접 read) 산출임을 판독해야 닫힌다. GREEN 만으론 부족 — CS_PUSH_3 가 "운영상태 ready=true 인 소터를 PAUSE 후 관찰 타이머가 계속 도는 동안 stableCount 10회 동안 모순 3 발신 0"을 실측해야 "단일 소스라 이중/모순 발신 불가"가 역증된다(구 2-소스 설계에선 ready 소스가 3, pause 소스가 2 를 동시 발신 가능했음).
@@ -524,3 +533,4 @@
 
 - [CODE-REVIEW] sprint=S-CHUTESTATE-PUSH critical=0 major=2 minor=4 iter=0 (major: #1 재동기화 부재→best-effort 문서화·활성화 시 고객사 협의로 이연(dormant·API에 normal 상태 없어 bootstrap 시맨틱 미정), #2 4xx 재시도→RcsPush와 동일패턴·자가발생 불가로 이연. minor 4건 todo. fix 반복 불요)
 - [CODE-REVIEW] sprint=S-IF08-READY-PUSH critical=0 major=1(선재·scope-OUT·후속등재) minor=3 iter=1
+- [CODE-REVIEW] sprint=S-HARDENING-1 critical=0 major=0 minor=2(+선재 문서괴리 1) iter=1

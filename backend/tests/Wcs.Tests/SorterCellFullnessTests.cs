@@ -1202,4 +1202,107 @@ public class SorterCellFullnessTests
         Assert.Equal(expectAccept, picked is not null);       // 동형: OK ⟺ 비-null.
         Assert.Equal(expectCell, picked);
     }
+
+    // ── 헬퍼: 두 번째 소터(멀티소터 시나리오용) — destination + 셀 생성 ──────────
+    //
+    // 시드는 소터 1대(chuteNo=30)뿐이라 멀티소터 격리 검증엔 두 번째 SORTER_3D destination이
+    // 필요하다. 팩토리 기동 **후** 삽입하므로 pusher 전이 추적/가짜 레지스트리(소터 A 전용)에는
+    // 등록되지 않는다 — DB 계층(ICellSelector) 검증에는 영향 0.
+    private static long AddSecondSorterWithCells(WcsDbContext db, int chuteNo, int cellCount)
+    {
+        var now  = DateTime.UtcNow;
+        var dest = new Destination
+        {
+            ChuteNo   = chuteNo,
+            DestType  = DestType.SORTER_3D,
+            Floor     = null,
+            Status    = DestStatus.NORMAL,
+            IsActive  = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.Destinations.Add(dest);
+        db.SaveChanges();
+
+        for (int cellNo = 1; cellNo <= cellCount; cellNo++)
+            db.Cells.Add(new Cell
+            {
+                DestinationId = dest.Id, CellNo = cellNo, Capacity = null, Enabled = true, CreatedAt = now,
+            });
+        db.SaveChanges();
+        return dest.Id;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // EC-14 [S-HARDENING-1 항목 2 — 멀티소터 셀 해제 격리 회귀 잠금(감사 A-7·VS-2)]:
+    //   소터 A·B가 **같은 CellNo(=1)**·**같은 바코드**에 각각 활성 cell_assignment를 보유한 상태에서
+    //   소터 A의 그 셀에 ReleaseEmptyAssignment(빈 orphan 롤백)를 호출하면
+    //   → A 배정만 해제되고 **B의 동일 CellNo 배정은 생존**(교차 해제 0)해야 한다.
+    //
+    //   ReleaseEmptyAssignment는 이미 destination(chuteNo) 스코프(`a.Cell.DestinationId == dest.Id`
+    //   필터 — S-CELL-ACCUM Scope 5)라 이 테스트는 GREEN이 정상 — RED면 A-7 회귀(CellNo만으로
+    //   전 소터 해제)가 재유입된 것이다. 기존 EC-12(단일 소터 O/P)는 교차 격리를 커버하지 않음.
+    //
+    //   회귀 민감화: B 배정을 A보다 **늦게(AssignedAt 최신)** 만든다 — destination 필터가 빠지면
+    //   쿼리의 OrderByDescending(AssignedAt) 탓에 B 것이 선택·해제되어 B 생존 단언이 즉시 RED.
+    //   바코드도 공유해 barcode 필터만으로는 A/B를 구별 못 하게 한다(격리의 유일 근거 = destination).
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task EC14_ReleaseEmptyAssignment_MultiSorter_DestinationScoped_NoCrossRelease()
+    {
+        await using var rcs     = await FakeChuteStateServer.StartAsync();
+        await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
+        _ = factory.CreateClient();
+
+        long sorterAId = factory.SorterDestinationId;   // 시드 소터(chuteNo=30).
+        int  chuteA    = factory.SorterChuteNo;
+        const int    chuteB        = 31;                // 미사용 chuteNo(시드: 슈트1~6 + 소터30).
+        const string sharedBarcode = "ISO-SHARED-BC";   // A·B 공유 — barcode 필터 무력화.
+        long sorterBId;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            sorterBId = AddSecondSorterWithCells(db, chuteB, cellCount: 3);
+
+            // A: 같은 바코드 오더 + CellNo=1 배정(적재 0 = 빈 orphan → 해제 대상).
+            AddSorterOrderWithAssignedCell(db, sorterAId, "ORD-ISO-A", sharedBarcode, cellNo: 1);
+            // B: 같은 바코드·같은 CellNo=1 배정(적재 0) — 서로 다른 오더(UQ는 (OrderId,Barcode)라 허용).
+            AddSorterOrderWithAssignedCell(db, sorterBId, "ORD-ISO-B", sharedBarcode, cellNo: 1);
+
+            // 회귀 민감화 — B 배정을 최신으로(“dest 필터 부재” 가상 회귀 시 B가 선택되도록).
+            var bAssign = db.CellAssignments
+                .First(a => a.Cell.DestinationId == sorterBId && a.Cell.CellNo == 1 && a.ReleasedAt == null);
+            bAssign.AssignedAt = bAssign.AssignedAt.AddSeconds(1);
+            db.SaveChanges();
+
+            // 사전 상태: A·B 각 CellNo=1 활성 배정 1건씩.
+            Assert.Equal(1, db.CellAssignments.Count(
+                a => a.Cell.DestinationId == sorterAId && a.Cell.CellNo == 1 && a.ReleasedAt == null));
+            Assert.Equal(1, db.CellAssignments.Count(
+                a => a.Cell.DestinationId == sorterBId && a.Cell.CellNo == 1 && a.ReleasedAt == null));
+        }
+
+        // 소터 A의 cell 1만 해제 요청(빈 orphan 롤백 경로 — chuteNo=A).
+        using (var scope = factory.Services.CreateScope())
+        {
+            var selector = scope.ServiceProvider.GetRequiredService<ICellSelector>();
+            selector.ReleaseEmptyAssignment(chuteA, sharedBarcode, 1);
+        }
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+            // 양성 대조: A의 빈 orphan은 해제됨(해제 경로 자체가 동작 — 공허 통과 아님).
+            Assert.Equal(0, db.CellAssignments.Count(
+                a => a.Cell.DestinationId == sorterAId && a.Cell.CellNo == 1 && a.ReleasedAt == null));
+            // ★격리 단언★: B의 동일 CellNo·동일 바코드 활성 배정은 생존(교차 해제 0).
+            Assert.Equal(1, db.CellAssignments.Count(
+                a => a.Cell.DestinationId == sorterBId && a.Cell.CellNo == 1 && a.ReleasedAt == null));
+            // B 오더 기준 재확인(배정이 다른 셀로 이동하지도 않음).
+            Assert.Equal(1, db.CellAssignments.Count(
+                a => a.Order.OrderNo == "ORD-ISO-B" && a.ReleasedAt == null));
+        }
+        _out.WriteLine("[EC-14] 멀티소터 해제 격리 — A(cell1) 해제·B(cell1·동일 바코드·최신 배정) 생존(교차 해제 0).");
+    }
 }
