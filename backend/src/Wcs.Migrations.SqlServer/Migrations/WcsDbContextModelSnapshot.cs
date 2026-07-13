@@ -746,6 +746,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Barcode")
+                        .HasDatabaseName("IX_order_item_barcode");
+
                     b.HasIndex("OrderId", "Barcode")
                         .IsUnique()
                         .HasDatabaseName("UQ_order_item_order_barcode");
@@ -832,6 +835,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasIndex("DestinationId", "Status")
                         .HasDatabaseName("IX_piece_dest_status");
+
+                    b.HasIndex("PId", "IsActive")
+                        .HasDatabaseName("IX_piece_pid_active");
 
                     b.ToTable("piece", (string)null);
                 });
