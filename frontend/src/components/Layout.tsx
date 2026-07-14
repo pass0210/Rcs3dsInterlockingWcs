@@ -32,15 +32,16 @@ interface NavItem {
 }
 
 // ── 모드별 메뉴 세트(docs/B2B-DATAGEN.md §5) ──────────────────────────────────
-//   B2C: 모니터링(F1)·3DS 워드(F2)·운영 제어(F3b) 활성. 기존 항목·동작 무접촉.
+//   B2C: 관리 흐름(생성→설비) 순으로 데이터 생성·설비 관리를 최상단(S-B2C-UX), 이어서
+//        모니터링(F1)·3DS 워드(F2)·운영 제어(F3b). 항목 정의·경로·enabled 불변 — 순서만 재배열.
 //   B2B: 데이터 생성(S-B2B-2b) 활성 + 로그·비교·박스·설정(B2B-3 배지 예고).
 const NAV_SETS: Record<UiMode, NavItem[]> = {
   b2c: [
+    { to: '/b2c/test-data', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '미할당 오더/바코드 생성 · 생성 결과 열람 · 배치 초기화' },
+    { to: '/b2c/facility', label: '설비 관리', icon: Warehouse, enabled: true, phase: null, title: '설비 관리', subtitle: '목적지 구성 · 소터 셀 설정 · 오더 할당 · 슈트 제어' },
     { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null, title: '실시간 모니터링', subtitle: '작업 데이터 · 로봇 이동중 · 분류 현황' },
     { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null, title: '3DS 워드값', subtitle: 'D0~D6 레지스터 실시간 관찰' },
     { to: '/ops', label: '운영 제어', icon: SlidersHorizontal, enabled: true, phase: null, title: '운영 제어', subtitle: 'Pause/Resume · 워드 편집(안전 3종)' },
-    { to: '/b2c/test-data', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '미할당 오더/바코드 생성(목적지 배정은 설비 관리)' },
-    { to: '/b2c/facility', label: '설비 관리', icon: Warehouse, enabled: true, phase: null, title: '설비 관리', subtitle: '목적지 구성 · 소터 셀 설정 · 오더 할당 · 슈트 제어' },
   ],
   b2b: [
     { to: '/data-generator', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '테스트 데이터 생성 · 업로드 · 관리' },

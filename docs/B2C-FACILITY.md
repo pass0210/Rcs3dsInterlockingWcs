@@ -32,7 +32,7 @@
 | POST | `/api/b2c/facility/destinations/{id}/activate` | 활성/비활성 토글(`isActive·force`) — OQ-2 가드 |
 | POST | `/api/b2c/facility/destinations/{id}` | 수정(`status·floor·workFullQty`) — chuteNo/type 변경 없음(OQ-2) |
 | POST | `/api/b2c/facility/sorters/{id}/cells` | 소터 셀 벌크(`rows·cols·capacity?·enabled?`) — 순차 cellNo(OQ-1) |
-| GET  | `/api/b2c/facility/orders?assigned=&batchId=&take=` | 오더 목록(할당 UI 소스) — `B2cOrderDto[]` |
+| GET  | `/api/b2c/facility/orders?assigned=&batchId=&take=` | 오더 목록(할당 UI 소스) — `B2cOrderDto[]`. ★ take 상한 = `GenerateCountMax`(1000, 기본값도 동일). 프론트는 항상 상한을 명시 전달하고 반환수==상한이면 절단 힌트를 표면화(Fail-Loud — S-B2C-UX FIX ITER 2). 과거 200/500 침묵 절단 제거 |
 | POST | `/api/b2c/facility/orders/assign` | 오더→목적지 할당(`orderId·destinationId·cellNo?`) — 소터면 cell_assignment |
 | POST | `/api/b2c/facility/orders/unassign` | 할당 해제/재배정(`orderId`) — OQ-3 |
 | (재사용·무변경) POST | `/api/ops/chutes/{id}/clear`·`/api/ops/destinations/{id}/pause`·`/resume` | 슈트 제어(O1·O2·O3) |
@@ -74,13 +74,18 @@ CHUTE `workFullQty·lastClearedAt`(chute_detail) / SORTER_3D `cellTotal·cellEna
 
 ---
 
-## 5. 프론트 페이지 (`/b2c/facility` · NAV_SETS.b2c "설비 관리")
+## 5. 프론트 페이지 (`/b2c/facility` · NAV_SETS.b2c "설비 관리") — ★ S-B2C-UX 개정
 
-- **목적지 구성·제어**: 전 목적지 테이블(chuteNo·타입·상태 배지·셀/만재) + 행별 제어(pause/resume·슈트 clear·소터 셀 설정·소터 초기화·활성/비활성) + "새 목적지" 다이얼로그.
-- **오더 할당**: 미할당/할당 탭 → 오더 테이블 → 배정 다이얼로그(목적지 선택·소터면 셀 번호) / 재배정·해제(OQ-3 — `canReassign` false 면 버튼 비활성).
-- **작업자 이름**: 페이지 상단 필수 입력(감사 귀속) — 공백이면 파괴/변경 액션 차단. 파괴 액션은 `ConfirmDialog`(범위·비가역·작업자 표기).
+- **목적지 구성·제어**: 전 목적지 테이블(chuteNo·타입·상태 배지·셀/만재) + 행별 제어(pause/resume·슈트 clear·소터 셀 설정·활성/비활성) + "새 목적지" 다이얼로그.
+  ★ **초기화(reset) 제거** — 데이터 생성 페이지로 이관(배치 스코프). 소터 행의 초기화 버튼·다이얼로그 없음(고아 엔드포인트 0 — reset 라우트는 데이터 생성이 배치 스코프로 소비).
+  ★ **비활성 목적지 배지 정리(Minor #1/#7)**: `!isActive` 면 `비활성` 배지만 표기(정지·만재·정상 억제·정지 배지 혼동 해소) + 소터는 online/offline 하드웨어 상태만 병기.
+- **오더 할당 = 2패널(OQ-4)**: 미할당/할당 탭 대체.
+  - **좌 = 배정 대상 그리드**: 슈트(리프·체크박스) + 소터(펼침 가능 — 셀별 체크박스·점유 오더 표시). 각 대상 현재 배정 정보 병기(슈트=배정 오더 수·오더번호 발췌 / 셀=점유 오더). 상단 **`해제` 버튼**(체크 대상의 배정 미시작 오더 다건 순차 unassign·진행 중 스킵·집계 리포트).
+  - **우 = 미할당 오더 그리드**: `orders?assigned=false` + 행별 체크박스(진행 중 오더는 비활성·OQ-3).
+  - **`배정` 버튼**: 좌 선택 대상 ↔ 우 선택 오더 **min(N,M) 인덱스 1:1 페어링**(대상=chuteNo/cellNo 정렬·오더=orderNo 정렬). 슈트 → `assign(order, destId)`, 소터 셀 → `assign(order, destId, cellNo)`. 기존 단건 assign 엔드포인트 순차 호출(OQ-3 가드·DENIED 예외·감사 보존). 양쪽 ≥1 체크 시 활성.
+- **작업자 이름**: 페이지 상단 필수 입력(감사 귀속) — 공백이면 파괴/변경/배정/해제 액션 차단. 파괴 액션(해제·비활성·clear·pause)은 `ConfirmDialog`(범위·비가역·작업자 표기).
 - 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/`StateMessage`/TanStack Query. 신규 UI 프리미티브 0. 단일 라이트 테마.
-- API 클라이언트: `b2cFacility.ts`(facility 표면 미러) · `ops.ts`(`clearChute` 추가·pause/resume 재사용) · `queries.ts`(`useDestinations`).
+- API 클라이언트: `b2cFacility.ts`(facility 표면 미러 + `useFacilityBatchOrders`) · `ops.ts`(`clearChute`·pause/resume) · `queries.ts`(`useDestinations`·`useCells` — 소터 셀 드롭다운 소스).
 
 ---
 

@@ -1,90 +1,364 @@
 import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus } from 'lucide-react'
+import { Plus, RotateCcw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { ConfirmDialog } from '@/components/ui/dialog'
 import { EmptyRow, ErrorRow, LoadingRow } from '@/components/StateMessage'
 import { useToast } from '@/lib/toast'
+import { cn } from '@/lib/utils'
 import { todayBizDay } from '@/lib/uiMode'
-import { b2cTestData, useB2cBatches } from '@/lib/b2cTestData'
+import { b2cTestData, useB2cBatches, type BatchSummary } from '@/lib/b2cTestData'
+import { ORDERS_FETCH_MAX, useFacilityBatchOrders } from '@/lib/b2cFacility'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// B2cDataGenPage — B2C(3D 소터) 데이터 생성(2a 슬림). 오더/바코드만 만든다(목적지 미할당).
-//   좌: 5-파라미터 생성 폼(작업일자·배치명·차수·계획수량·바코드 접두).
-//   우: 생성 결과 view(최근 배치 요약 — 미할당 오더 수). 목적지 배정은 "설비 관리" 페이지가 담당.
-// docs/B2C-DATAGEN.md. 목적지 구성/셀/오더 할당/reset 은 설비 관리 페이지로 이관됨.
+// B2cDataGenPage — B2C(3D 소터) 데이터 생성 + 생성 결과 마스터-디테일 + 배치 초기화(S-B2C-UX).
+//   · 좌: 5-파라미터 생성 폼(작업일자·배치명·차수·계획수량·바코드 접두) — 미할당 오더/바코드 생성.
+//   · 우: 생성 결과 그리드 = 마스터. 행별 체크박스(초기화 다중 선택) + 상단 초기화 버튼 + 행 선택(디테일 로드).
+//   · 하단: 선택 배치의 오더/바코드/수량/할당 상태 디테일 그리드(GET /api/b2c/facility/orders?batchId=).
+// ★ 초기화 이관(S-B2C-UX): reset 을 설비 관리 → 여기로 이관하고 스코프를 소터 → **배치**로 재정의.
+//   "초기화 = 생성한 테스트 데이터를 되돌린다"는 도메인 판단. 파괴 액션 = ConfirmDialog + 작업자 이름(감사) +
+//   in-flight 거부 시 강제 초기화(force) 체이닝. 다건은 체크된 배치별 순차 호출 + 집계 토스트. docs/B2C-DATAGEN.md.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// 파괴 확인 액션(ConfirmDialog 소비) — run 은 실행·표면화(force 재요청 체이닝 시 pending 교체).
+interface PendingConfirm {
+  title: string
+  description: ReactNode
+  confirmLabel: string
+  run: () => Promise<void>
+}
 
 export function B2cDataGenPage() {
   const qc = useQueryClient()
+  const { toast } = useToast()
+
   const batchesQ = useB2cBatches(false)
   const batches = useMemo(() => batchesQ.data ?? [], [batchesQ.data])
 
-  const invalidateBatches = useCallback(() => {
+  // 작업자 이름 — 초기화 감사 귀속(공백이면 초기화 차단 · 설비 페이지와 동형).
+  const [operatorName, setOperatorName] = useState('')
+  // 체크박스(초기화 다중 선택 대상 batchId)와 행 선택(디테일 단건 로드)은 목적이 달라 분리(OQ-5).
+  const [checked, setChecked] = useState<Set<number>>(() => new Set())
+  const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null)
+  const [pending, setPending] = useState<PendingConfirm | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const invalidateAll = useCallback(() => {
     qc.invalidateQueries({ queryKey: ['b2c-batches'] })
+    qc.invalidateQueries({ queryKey: ['facility-orders'] }) // 디테일 그리드(배치 오더) 갱신.
   }, [qc])
 
-  return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
-      {/* 좌: 생성 폼 */}
-      <Card className="self-start">
-        <CardHeader>
-          <CardTitle>데이터 생성</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <B2cGenerateForm onGenerated={invalidateBatches} />
-        </CardContent>
-      </Card>
+  // 존재하지 않는(초기화 등으로 사라진 게 아니라 목록 변동) 체크는 실재 배치로 정리 — 안정성.
+  const validBatchIds = useMemo(() => new Set(batches.map((b) => b.batchId)), [batches])
 
-      {/* 우: 생성 결과(최근 배치) */}
-      <Card className="flex min-w-0 flex-col">
-        <CardHeader>
-          <CardTitle>생성 결과 — 최근 배치</CardTitle>
-        </CardHeader>
-        <CardContent className="min-w-0 overflow-auto p-0">
-          {batchesQ.isLoading ? (
-            <LoadingRow />
-          ) : batchesQ.isError ? (
-            <ErrorRow message={(batchesQ.error as Error)?.message ?? '배치 조회 실패'} />
-          ) : batches.length === 0 ? (
-            <EmptyRow label="생성된 배치가 없습니다. 좌측에서 데이터를 생성하세요." />
-          ) : (
-            <table className="w-full text-[12px]">
-              <thead className="sticky top-0 bg-panel text-left text-faint">
-                <tr className="border-b border-line">
-                  <th className="px-3 py-2 font-medium">작업일자</th>
-                  <th className="px-3 py-2 font-medium">배치</th>
-                  <th className="px-3 py-2 font-medium">차수</th>
-                  <th className="px-3 py-2 font-medium">상태</th>
-                  <th className="px-3 py-2 font-medium">오더(미할당)</th>
-                  <th className="px-3 py-2 font-medium">항목</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {batches.map((b) => (
-                  <tr key={b.batchId} className="text-ink">
-                    <td className="px-3 py-1.5 font-mono tabular-nums">{b.workDate}</td>
-                    <td className="px-3 py-1.5">{b.batchNo}</td>
-                    <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{b.waveNo}</td>
-                    <td className="px-3 py-1.5 text-faint">{b.status}</td>
-                    <td className="px-3 py-1.5 font-mono tabular-nums">
-                      {b.orderTotal}
-                      <span className="ml-1 text-faint">(미할당 {b.orderUnassigned})</span>
-                    </td>
-                    <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{b.itemTotal}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <p className="border-t border-line px-3 py-2 text-[11px] text-faint">
-            생성된 오더는 <b>목적지 미할당</b> 상태입니다. 목적지·셀 구성과 오더 배정은{' '}
-            <b>설비 관리</b> 페이지에서 수행하세요.
+  const requireOperator = useCallback((): string | null => {
+    const op = operatorName.trim()
+    if (op.length === 0) {
+      toast('warning', '작업자 이름을 입력하세요(초기화 감사 귀속).')
+      return null
+    }
+    return op
+  }, [operatorName, toast])
+
+  const onConfirm = useCallback(async () => {
+    if (!pending) return
+    const justRan = pending
+    setBusy(true)
+    try {
+      await justRan.run()
+    } catch (e) {
+      toast('error', `초기화 실패 — ${(e as Error).message}`)
+    } finally {
+      setBusy(false)
+      // run() 이 force 재요청으로 pending 을 교체했으면 유지(React 배칭 silent-close 회피) — 자기 자신일 때만 닫음.
+      setPending((cur) => (cur === justRan ? null : cur))
+    }
+  }, [pending, toast])
+
+  const toggleCheck = (batchId: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(batchId)) next.delete(batchId)
+      else next.add(batchId)
+      return next
+    })
+
+  const allChecked = batches.length > 0 && batches.every((b) => checked.has(b.batchId))
+  const toggleAll = () =>
+    setChecked((prev) => (prev.size >= batches.length && batches.length > 0 ? new Set() : new Set(batches.map((b) => b.batchId))))
+
+  // ── 배치 초기화(다건 · 순차 호출 + 집계 + force 체이닝) ──────────────────────────
+  //   재귀(plain 함수 — 설비 페이지 패턴): in-flight 로 거부된 배치는 force=true 로 재확인 다이얼로그를 띄운다.
+  const requestReset = (targetIds: number[], force: boolean) => {
+    const op = requireOperator()
+    if (!op) return
+    const targets = batches.filter((b) => targetIds.includes(b.batchId))
+    if (targets.length === 0) return
+    setPending({
+      title: force ? '강제 초기화' : '배치 초기화',
+      confirmLabel: force ? '강제 초기화' : '초기화',
+      description: (
+        <>
+          {force
+            ? `진행 중(in-flight) 작업이 있는 배치 ${targets.length}건을 강제로 초기화합니다.`
+            : `선택한 배치 ${targets.length}건을 초기화합니다(생성한 테스트 데이터 되돌리기).`}
+          <ul className="mt-2 max-h-40 list-disc overflow-auto pl-4 text-[12px] leading-relaxed">
+            {targets.map((b) => (
+              <li key={b.batchId}>
+                {fmtDate(b.workDate)} / {b.batchNo} #{b.waveNo} — 오더 {b.orderTotal}건
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[12px] text-muted">
+            피스·이력·소터명령 보관 처리(soft-delete) · 예약/분류 수량 0 · 완료 오더 재개(오더·셀 배정 보존). 작업자 <b>{op}</b>.
           </p>
-        </CardContent>
-      </Card>
+          <p className="mt-1 text-offline">이 작업은 되돌릴 수 없습니다{force ? ' (진행 중 피스까지 보관).' : '.'}</p>
+        </>
+      ),
+      run: async () => {
+        let success = 0
+        let failed = 0
+        const refused: number[] = []
+        for (const id of targetIds) {
+          const r = await b2cTestData.reset({ batchId: id, force, operatorName: op })
+          if (r.ok) success++
+          else if (!force && (r.counts?.inFlight ?? 0) > 0) refused.push(id)
+          else failed++
+        }
+        invalidateAll()
+        // 성공 처리된 배치는 체크 해제(거부된 것은 force 재확인 위해 유지).
+        setChecked((prev) => {
+          const next = new Set(prev)
+          for (const id of targetIds) if (!refused.includes(id)) next.delete(id)
+          return next
+        })
+        if (!force && refused.length > 0) {
+          toast('warning', `${success}건 초기화, ${refused.length}건 진행 중 — 강제 초기화 재확인이 필요합니다.`)
+          requestReset(refused, true) // pending 교체 → onConfirm 가드가 유지.
+          return
+        }
+        toast(success > 0 ? 'success' : failed > 0 ? 'error' : 'info', `초기화 ${success}건 완료${failed > 0 ? `, 실패 ${failed}건` : ''}.`)
+      },
+    })
+  }
+
+  const checkedCount = useMemo(() => [...checked].filter((id) => validBatchIds.has(id)).length, [checked, validBatchIds])
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+        {/* 좌: 생성 폼 */}
+        <Card className="self-start">
+          <CardHeader>
+            <CardTitle>데이터 생성</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <B2cGenerateForm onGenerated={invalidateAll} />
+          </CardContent>
+        </Card>
+
+        {/* 우: 생성 결과(마스터 그리드) + 초기화 */}
+        <Card className="flex min-w-0 flex-col">
+          <CardHeader>
+            <CardTitle>생성 결과 — 최근 배치</CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+                작업자 <span className="text-offline">*</span>
+                <input
+                  value={operatorName}
+                  onChange={(e) => setOperatorName(e.target.value)}
+                  placeholder="예: 홍길동"
+                  maxLength={100}
+                  aria-label="작업자 이름"
+                  className="h-8 w-36 rounded-lg border border-line bg-panel px-2.5 text-[13px] text-ink focus-visible:outline-2 focus-visible:outline-ink"
+                />
+              </label>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={checkedCount === 0}
+                onClick={() => requestReset([...checked].filter((id) => validBatchIds.has(id)), false)}
+                className="border-offline/50 text-offline hover:bg-offline/5"
+              >
+                <RotateCcw className="size-3.5" />초기화 ({checkedCount})
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="min-w-0 overflow-auto p-0">
+            {batchesQ.isLoading ? (
+              <LoadingRow />
+            ) : batchesQ.isError ? (
+              <ErrorRow message={(batchesQ.error as Error)?.message ?? '배치 조회 실패'} />
+            ) : batches.length === 0 ? (
+              <EmptyRow label="생성된 배치가 없습니다. 좌측에서 데이터를 생성하세요." />
+            ) : (
+              <table className="w-full text-[12px]">
+                <thead className="sticky top-0 bg-panel text-left text-faint">
+                  <tr className="border-b border-line">
+                    <th className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={allChecked}
+                        onChange={toggleAll}
+                        aria-label="전체 선택"
+                        className="size-3.5 cursor-pointer accent-[var(--color-brand-active)]"
+                      />
+                    </th>
+                    <th className="px-3 py-2 font-medium">작업일자</th>
+                    <th className="px-3 py-2 font-medium">배치</th>
+                    <th className="px-3 py-2 font-medium">차수</th>
+                    <th className="px-3 py-2 font-medium">상태</th>
+                    <th className="px-3 py-2 font-medium">오더(미할당)</th>
+                    <th className="px-3 py-2 font-medium">항목</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {batches.map((b) => (
+                    <tr
+                      key={b.batchId}
+                      onClick={() => setSelectedBatchId(b.batchId)}
+                      className={cn(
+                        'cursor-pointer text-ink hover:bg-elevated',
+                        selectedBatchId === b.batchId && 'bg-elevated',
+                      )}
+                    >
+                      {/* 체크박스 셀 — 행 선택(디테일)과 분리(propagation 차단). */}
+                      <td className="px-3 py-1.5" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={checked.has(b.batchId)}
+                          onChange={() => toggleCheck(b.batchId)}
+                          aria-label={`배치 ${b.batchNo} 초기화 선택`}
+                          className="size-3.5 cursor-pointer accent-[var(--color-brand-active)]"
+                        />
+                      </td>
+                      <td className="px-3 py-1.5 font-mono tabular-nums">{fmtDate(b.workDate)}</td>
+                      <td className="px-3 py-1.5">{b.batchNo}</td>
+                      <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{b.waveNo}</td>
+                      <td className="px-3 py-1.5 text-faint">{b.status}</td>
+                      <td className="px-3 py-1.5 font-mono tabular-nums">
+                        {b.orderTotal}
+                        <span className="ml-1 text-faint">(미할당 {b.orderUnassigned})</span>
+                      </td>
+                      <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{b.itemTotal}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="border-t border-line px-3 py-2 text-[11px] text-faint">
+              행을 클릭하면 하단에 그 배치의 오더 상세가 표시됩니다. 체크 후 <b>초기화</b>로 여러 배치를 되돌릴 수 있습니다.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 하단: 선택 배치 상세(마스터-디테일) */}
+      <BatchDetailGrid batch={batches.find((b) => b.batchId === selectedBatchId) ?? null} />
+
+      {/* 초기화 확인 다이얼로그(파괴 액션) */}
+      <ConfirmDialog
+        open={pending !== null}
+        title={pending?.title ?? ''}
+        description={pending?.description}
+        confirmLabel={pending?.confirmLabel ?? '확인'}
+        danger
+        busy={busy}
+        onConfirm={onConfirm}
+        onCancel={() => {
+          if (!busy) setPending(null)
+        }}
+      />
     </div>
   )
+}
+
+// ── 하단 디테일 그리드(선택 배치의 오더/바코드/수량/할당 상태) ────────────────────
+function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
+  const ordersQ = useFacilityBatchOrders(batch?.batchId ?? null, false)
+  const orders = useMemo(() => ordersQ.data ?? [], [ordersQ.data])
+  // Fail-Loud(FIX ITER 2): 반환수가 조회 상한과 같으면 초과 오더가 표시에서 누락됐을 수 있음 → 힌트 표면화.
+  //   (초기화는 배치키 서버 스코프라 표시 절단과 무관하게 배치 전량에 적용됨 — 별도 명시.)
+  const truncated = orders.length >= ORDERS_FETCH_MAX
+
+  return (
+    <Card className="flex min-w-0 flex-col">
+      <CardHeader>
+        <CardTitle>
+          배치 상세{batch ? ` — ${batch.batchNo} #${batch.waveNo}` : ''}
+        </CardTitle>
+        {batch && orders.length > 0 && (
+          <span className="text-[11px] text-faint tabular-nums">
+            {truncated ? `상위 ${ORDERS_FETCH_MAX.toLocaleString()}건 표시` : `${orders.length.toLocaleString()}건`}
+          </span>
+        )}
+      </CardHeader>
+      <CardContent className="min-w-0 overflow-auto p-0">
+        {truncated && (
+          <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+            표시 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달했습니다 — 이 배치에 초과 오더가 있으면 목록에 표시되지 않을 수 있습니다.
+            (초기화는 배치 전량에 적용되므로 표시 절단과 무관합니다.)
+          </p>
+        )}
+        {batch === null ? (
+          <EmptyRow label="상단에서 배치 행을 선택하면 오더 상세가 표시됩니다." />
+        ) : ordersQ.isLoading ? (
+          <LoadingRow />
+        ) : ordersQ.isError ? (
+          <ErrorRow message={(ordersQ.error as Error)?.message ?? '오더 상세 조회 실패'} />
+        ) : orders.length === 0 ? (
+          <EmptyRow label="이 배치에 오더가 없습니다." />
+        ) : (
+          <table className="w-full text-[12px]">
+            <thead className="sticky top-0 bg-panel text-left text-faint">
+              <tr className="border-b border-line">
+                <th className="px-3 py-2 font-medium">오더</th>
+                <th className="px-3 py-2 font-medium">바코드</th>
+                <th className="px-3 py-2 font-medium">계획</th>
+                <th className="px-3 py-2 font-medium">예약</th>
+                <th className="px-3 py-2 font-medium">분류</th>
+                <th className="px-3 py-2 font-medium">상태</th>
+                <th className="px-3 py-2 font-medium">목적지</th>
+                <th className="px-3 py-2 font-medium">할당</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {orders.map((o) => (
+                <tr key={o.orderId} className="text-ink">
+                  <td className="px-3 py-1.5 font-mono">{o.orderNo}</td>
+                  <td className="px-3 py-1.5 font-mono text-muted">{o.barcode}</td>
+                  <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{o.plannedQty}</td>
+                  <td className="px-3 py-1.5 font-mono tabular-nums">{o.reservedQty}</td>
+                  <td className="px-3 py-1.5 font-mono tabular-nums">{o.sortedQty}</td>
+                  <td className="px-3 py-1.5 text-faint">{o.status}</td>
+                  <td className="px-3 py-1.5">
+                    {o.destinationChuteNo != null ? (
+                      <span>
+                        {o.destType} #{o.destinationChuteNo}
+                        {o.assignedCellNo != null && <span className="text-faint"> · 셀 {o.assignedCellNo}</span>}
+                      </span>
+                    ) : (
+                      <span className="text-faint">미할당</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5">
+                    {o.destinationId != null ? <Badge tone="online">배정</Badge> : <Badge tone="neutral">미할당</Badge>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// 작업일자 표시 — batches view 의 workDate 는 ISO(yyyy-MM-dd[THH:...]) 문자열. 앞 10자만.
+function fmtDate(v: string): string {
+  return typeof v === 'string' && v.length >= 10 ? v.slice(0, 10) : v
 }
 
 // ── 생성 폼(5 파라미터) ──────────────────────────────────────────────────────

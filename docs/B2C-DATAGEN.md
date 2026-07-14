@@ -13,10 +13,12 @@
   - **데이터 생성(2a · 이 문서)**: 생성 폼은 **오더/바코드만** 만든다(목적지 **미할당**). 파라미터 5개 — 작업일자·배치명·차수·계획수량·바코드 접두.
     소터/셀/cell_assignment 자동 생성·N↔N 배정은 **제거**(설비 관리 2b 로 이관).
   - **설비 관리(2b · `docs/B2C-FACILITY.md`)**: 목적지(소터/슈트) 생성·활성화, 소터 셀 설정, 오더→목적지(+셀) 할당, 슈트 제어(clear/pause/resume).
-- **포함(이 문서·2a)**: 생성(`generate` 슬림) · 최근 배치(`batches`) · 요약(`summary`) · 셀 상세(`detail`) · 초기화(`reset`) API + 데이터 생성 페이지(5-필드 폼 + 배치 결과 view).
-  `summary`/`detail`/`reset` 은 백엔드 무변경(설비 관리 페이지가 소비 — 셀 상세·소터별 초기화).
+- **포함(이 문서·2a)**: 생성(`generate` 슬림) · 최근 배치(`batches`) · 요약(`summary`) · 셀 상세(`detail`) · 초기화(`reset`) API + 데이터 생성 페이지.
+  ★ **S-B2C-UX**: 초기화(`reset`)는 **데이터 생성 페이지 소속**으로 이관되고 스코프가 **소터 → 배치**로 바뀐다. 데이터 생성 페이지는
+  (a) 5-필드 생성 폼 + (b) 생성 결과 **마스터-디테일 그리드**(행 체크박스 다건 초기화 + 상단 초기화 버튼 + 하단 배치 오더 상세)를 제공.
+  `summary`/`detail` 은 백엔드 무변경. 하단 디테일 소스 = `GET /api/b2c/facility/orders?batchId=`(F2 재사용).
 - **핵심 결정(OQ1=B)**: 초기화는 `piece`/`piece_event`/`sorter_command` 를 **하드삭제하지 않고 `archived_at` 소프트삭제**(B2B 정책 일관).
-  → 모든 활성 조회 경로가 archived 행을 제외해야 함(§3 — HIGHEST-STAKES). **reset 의미는 S-B2C-FACILITY 에서 불변.**
+  → 모든 활성 조회 경로가 archived 행을 제외해야 함(§3 — HIGHEST-STAKES). **reset 시맨틱은 스코프(소터→배치)만 바뀌고 나머지는 불변.**
 
 ---
 
@@ -32,7 +34,7 @@
 | GET  | `/api/b2c/test-data/batches?take=` | 최근 배치 요약(생성 결과 view) | query `take?` | `B2cBatchSummary[]` |
 | GET  | `/api/b2c/test-data/summary?sorterChuteNo=` | 소터별 요약 집계(선택 필터) | query `sorterChuteNo?` | `B2cSorterSummary[]` |
 | GET  | `/api/b2c/test-data/detail?sorterChuteNo=` | 셀 상세(그리드) | query `sorterChuteNo`(필수) | `B2cCellDetail[]` |
-| POST | `/api/b2c/test-data/reset` | 재테스트 초기화(OQ1·2·3) | `B2cResetRequest`(body) | `B2cManagementResponse` |
+| POST | `/api/b2c/test-data/reset` | 재테스트 초기화(**배치 스코프** · S-B2C-UX) | `B2cResetRequest`(body) | `B2cManagementResponse` |
 
 ### 1.1 `B2cGenerateRequest` (슬림 5-파라미터 · DataAnnotations 검증 — 실패 시 400 + `{status:"F"}`)
 
@@ -49,12 +51,16 @@
 - 비존재 날짜(형식통과·달력 무효, 예 `2026-02-30`)는 `AppUtils.NormalizeBizDay` 가 `ArgumentException` → 컨트롤러 국소 catch → 400 `{status:"F"}`.
 - 상한 상수는 `B2cConstants`(하드코딩 금지 — 절대규칙 #7): `GenerateCountMax=1000`.
 
-### 1.2 `B2cResetRequest`
+### 1.2 `B2cResetRequest` (★ S-B2C-UX — 배치 스코프로 재정의, 소터 스코프 폐지)
 
 | 필드 | 타입 | 의미 |
 |---|---|---|
-| sorterChuteNo | int `[Range(1,9999)]` | 초기화 대상 소터(OQ2 — 대상 소터 지정) |
+| batchId | long `[Range(1,long.Max)]` | 초기화 대상 배치 대리키(work_batch.id — 배치에 속한 오더 전체가 대상) |
 | force | bool | in-flight 존재 시 강제(OQ3 — 기본 false 거부·true 만 진행) |
+| operatorName | string? | 작업자 이름(감사 귀속 · OQ-3 — operation_log detail 기록. 공백은 "(unspecified)") |
+
+> ★ 소터 스코프(`sorterChuteNo`)는 **폐지**. "초기화 = 생성한 배치를 되돌린다"는 도메인 판단으로 스코프를
+> 배치로 옮겼다. 다건 초기화는 프론트가 체크된 batchId 별 **순차 호출 + 집계 토스트**(force 체이닝)로 표현한다.
 
 ---
 
@@ -77,16 +83,20 @@
 
 ## 3. ★ 초기화(reset) 의미 + 아카이브 정합 (OQ1=B · HIGHEST-STAKES)
 
-### 3.1 reset 동작 (OQ1·OQ2·OQ3)
-대상 소터(sorterChuteNo)에 대해 한 트랜잭션으로:
-1. **in-flight 가드(OQ3)** — 활성 piece 중 status ∈ {QUERIED,RESERVED,PERMITTED,CELL_ASSIGNED,LOADED} 이 있고 `force==false` 면
-   **거부(F + `counts.inFlight`)·데이터 무접촉**. `force==true` 면 진행 중 포함 진행.
-2. **아카이브(소프트삭제·OQ1=B)** — 그 소터의 `piece`(+ 연관 `piece_event`·`sorter_command`) 중 `archived_at==null` 을 `archived_at=now` 로 세팅. **하드삭제(DELETE) 0**.
-3. **수량 리셋(OQ2)** — 소터 소속 오더의 `order_item.reserved_qty=0, sorted_qty=0`.
-4. **오더 재개** — `COMPLETED` 오더만 → `RUNNING`(ClosedAt=null). *재테스트 가능성 보장*: `QueryDestination` 이 COMPLETED/CANCELLED 오더를 제외하므로 재개하지 않으면 같은 바코드 재투입이 NG.
+### 3.1 reset 동작 (★ S-B2C-UX = **배치 스코프** · 시맨틱 불변)
+대상 **배치(batchId)** 에 속한 오더(슈트/소터/미할당 무관)에 대해 한 트랜잭션으로. piece 는 `order_item →
+wcs_order.WorkBatchId` 를 통해 배치에 귀속(스코프 술어 = `p.OrderItem.Order.WorkBatchId == batchId`):
+1. **in-flight 가드(OQ3)** — 배치 오더의 활성 piece 중 status ∈ {QUERIED,RESERVED,PERMITTED,CELL_ASSIGNED,LOADED} 이 있고 `force==false` 면
+   **거부(F + `counts.inFlight`)·데이터 무접촉**. `force==true` 면 진행 중 포함 진행. (재판정은 트랜잭션 안 — TOCTOU 협착.)
+2. **아카이브(소프트삭제·OQ1=B)** — 배치 오더의 `piece`(+ 연관 `piece_event`·`sorter_command`) 중 `archived_at==null` 을 `archived_at=now` 로 세팅. **하드삭제(DELETE) 0**.
+3. **수량 리셋** — 배치 소속 오더의 `order_item.reserved_qty=0, sorted_qty=0`.
+4. **오더 재개** — 배치 내 `COMPLETED` 오더만 → `RUNNING`(ClosedAt=null). *재테스트 가능성 보장*: `QueryDestination` 이 COMPLETED/CANCELLED 오더를 제외하므로 재개하지 않으면 같은 바코드 재투입이 NG.
    - ⚠ **CANCELLED 오더는 재개하지 않는다**(의도 — 취소는 운영자 결정이므로 reset 이 되살리지 않음). CANCELLED 바코드 재투입이 필요하면 운영자가 명시적으로 오더 상태를 되돌려야 한다.
 5. **보존(OQ2)** — `wcs_order`·`cell_assignment` 행 보존(재테스트 시 같은 배정 재사용). CANCELLED 오더는 유지(재개 안 함).
 - 응답 counts: `archivedPieces·archivedPieceEvents·archivedSorterCommands·resetOrderItems·reopenedOrders·forcedInFlight`.
+- 감사(operation_log STATE `B2C_RESET`) — 성공 INFO·거부/force WARN 전수, `op`(작업자)·`batchId` 실어 기록.
+- ★ **소터 스코프 폐지(OQ-1)**: 기존 `sorterChuteNo` reset 은 은퇴(고아 엔드포인트 0 — 라우트 재사용·본문만 변경).
+  아카이브 소프트삭제·수량 리셋·오더/배정 보존·COMPLETED→RUNNING·archived-exclusion 불변량은 스코프만 바뀌고 **전부 보존**.
 
 ### 3.2 활성 조회 경로 archived 제외 (전수 감사 — 이중 카운트 차단)
 `piece`/`piece_event`/`sorter_command` 에 `DateTime? ArchivedAt`(nullable, 물리 컬럼 `ArchivedAt`) 추가. 모든 활성 조회는 `ArchivedAt == null` 만 읽는다:
@@ -112,15 +122,18 @@
 
 ---
 
-## 4. 프론트 페이지 (S-B2C-FACILITY 개정 — 2a/2b 분리)
+## 4. 프론트 페이지 (S-B2C-UX 개정 — 마스터-디테일 + 초기화 이관)
 
-- **데이터 생성(2a)**: 경로 `/b2c/test-data`, NAV_SETS **b2c** "데이터 생성". 헤더 "데이터 생성".
-  - 2분할: (좌) 5-필드 생성 폼(작업일자·배치명·차수·계획수량[생성 개수]·바코드 접두) / (우) 생성 결과 view = 최근 배치 요약(작업일자·배치·차수·상태·오더 총/미할당·항목).
-  - 목적지 요약/셀 상세/초기화 패널·오더 배정은 **설비 관리 페이지(2b)로 이관**. 이 페이지는 "미할당 오더/바코드"만 만든다.
-- **설비 관리(2b)**: 경로 `/b2c/facility`, NAV_SETS **b2c** "설비 관리". 상세는 `docs/B2C-FACILITY.md`.
-  - 목적지 목록·제어(pause/resume·clear·활성/비활성) + 목적지 생성 다이얼로그 + 소터 셀 설정(행×열) + 오더 할당(미할당/할당 탭) + 소터별 초기화(reset · danger·force).
+- **데이터 생성(2a)**: 경로 `/b2c/test-data`, NAV_SETS **b2c** "데이터 생성"(★ NAV 최상단). 헤더 "데이터 생성".
+  - 상단 2분할: (좌) 5-필드 생성 폼(작업일자·배치명·차수·계획수량[생성 개수]·바코드 접두) / (우) 생성 결과 **마스터 그리드** =
+    최근 배치(작업일자·배치·차수·상태·오더 총/미할당·항목) + **행별 체크박스**(초기화 다중 선택·OQ-5) + **행 선택**(디테일 로드) +
+    상단 **작업자 이름 입력 + 초기화 버튼**(체크된 배치 다건 초기화).
+  - 하단 **디테일 그리드**: 선택 배치의 오더/바코드/계획·예약·분류 수량/상태/목적지/할당여부. 소스 = `GET /api/b2c/facility/orders?batchId=`(take=1000 명시).
+    반환수가 상한(1000)이면 절단 힌트 표면화(Fail-Loud · FIX ITER 2) — 표시 절단이며 초기화는 배치키 서버 스코프라 전량 적용.
+  - **초기화** = 배치 스코프 · **danger `ConfirmDialog`**(대상 배치 목록·삭제 범위·"되돌릴 수 없음"·작업자 이름) 경유.
+    작업자 이름 공백이면 초기화 차단. 다건 = 체크된 batchId 별 순차 호출 + 집계 토스트. in-flight 거부 시 **강제 초기화(force) 재확인 체이닝**.
+- **설비 관리(2b)**: 경로 `/b2c/facility`, NAV_SETS **b2c** "설비 관리". 상세는 `docs/B2C-FACILITY.md`. **초기화 없음(데이터 생성으로 이관).**
 - 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/TanStack Query/`StateMessage`. 신규 UI 프리미티브 0. 단일 라이트 테마(다크모드 N/A).
-- 초기화 = **danger `ConfirmDialog`** + 삭제 범위·"되돌릴 수 없음" 명시 + 진행 중(in-flight) 경고. force 경로: 기본 초기화가 in-flight 로 거부되면(`counts.inFlight>0`) **강제 초기화 다이얼로그**로 재요청(설비 관리 페이지).
 
 ---
 
@@ -134,6 +147,8 @@
 
 ## 6. 검증 (실증)
 
-- `dotnet test backend/Wcs.sln`: 345 GREEN(기존 330 + 신규 15). 회귀 0.
-- 신규 테스트: `B2cTestDataServiceTests`(BuildPlan 결정성·생성 멱등·수량 보존·CHUTE 점유 F·reset 소프트삭제/재개/보존·**아카이브 후 셀 currentQty=0 이중카운트 차단**·in-flight 가드/force·미존재 F) + `B2cApiTests`(generate 왕복·검증 400·비즈니스 200 F·detail 400·**E2E generate→IF-05 예약→reset(force)→재 IF-05 재예약** + 하드삭제 0 단언).
+- `dotnet test backend/Wcs.sln`: 전체 GREEN(회귀 0). ★ **S-B2C-UX: 마이그레이션 0**(ArchivedAt 기존재 — 스키마 무변경).
+- reset 테스트(배치 스코프로 갱신): `B2cTestDataServiceTests`(BuildPlan 결정성·생성 멱등·수량 보존·**배치 reset** 소프트삭제/재개/보존·
+  **아카이브 후 셀 currentQty=0 이중카운트 차단**·in-flight 가드/force·**미존재 배치 F**·TOCTOU COUNT-in-tx) + `B2cApiTests`(generate 왕복·검증 400·**미존재 배치 200 F**) +
+  `B2cFacilityApiTests`(**E2E generate→소터 셀 배정→IF-05 예약→배치 reset(force)→재 IF-05 재예약** + 하드삭제 0 단언).
 - 마이그레이션: SQLite 스크래치 `ef database update` 5체인 적용 + `ArchivedAt` 3테이블 실재 확인. (SqlServer 는 localhost 일회용 DB 로 검증.)
