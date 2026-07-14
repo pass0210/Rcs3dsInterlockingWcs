@@ -1,179 +1,96 @@
-# Sprint Feedback — S-B2C-FACILITY (B2C 설비 관리 페이지 + 데이터 생성 슬림화)
+# Sprint Feedback — S-B2C-UX (B2C 데이터 생성/설비 관리 UX 재구성)
 
-**APPROVED (유지)** — Evaluator, 2026-07-14 (iter-1 FAIL → FIX ITER 2 PASS → Step 4.5 코드리뷰 FIX ITER 3 재검증 PASS).
+**APPROVED (FIX ITER 2 재검증 · 유지)** — Evaluator, 2026-07-15. Step 4.5 코드리뷰 Important 1건(침묵 절단 / Fail-Loud) 완전 해소·회귀 0(360/360)·브라우저 실증·콘솔 0.
 
 ---
 
-## FIX ITER 3 재검증 (Step 4.5 코드리뷰 Important 2건 · PASS) — 2026-07-14
+## FIX ITER 2 재검증 (Important — 침묵 절단 제거 / Fail-Loud · PASS) — 2026-07-15
 
-핸드오프 마커 = `tasks/sprint-log.md` L3580(말단) `## IMPLEMENTATION COMPLETE — FIX ITER 3`. HEAD=`888f062`(불변·미커밋). fix-only 3파일(B2cFacilityService·ChuteCapacityService + B2cChutePushTests)·무접촉 경계·마이그레이션 0·프론트 diff 0(iter-2 대비 변경 없음) 재확인.
-재검증 환경: Wcs.Api :5215(Release·fresh scratch SQLite `eval-wcs3.db`) + Sim3ds :1512 + fake UpdateChuteState :5315(ack `{"flag":1}`). 증거 `screenshots/S-B2C-FACILITY_fix3_20260714-060107/`(fix3-eval-01 + chutestate_push.log + console.log).
+핸드오프 마커 = `tasks/sprint-log.md` L3646(말단) `## IMPLEMENTATION COMPLETE — FIX ITER 2`. HEAD=`679aacc`(불변·미커밋). 브랜치 `feat/b2c-ux`. 검증 환경(격리): Wcs.Api :5215(Release·fresh scratch SQLite `wcs-fix2.db`) + Vite :5190. 증거 `screenshots/S-B2C-UX-FIX2_20260715-084000/`(01 datagen-1000-truncation-banner · 02 facility-unassign-204-dialog · 03 facility-after-unassign-all).
 
-### FIX 1 (Important — 작업자 귀속: 감사 detail op 병합) ✅
-- iter-1에서 내가 U+FFFD 표시깨짐만 보고 넘긴 실제 결함: `Audit`가 detail이 `{`로 시작하면 op를 **드롭**(모든 mutation 성공 INFO가 `{`-prefixed JSON → 작업자 실종). `MergeOp(op, detail)` 신설로 JSON 객체는 선두 `"op"` 삽입·평문은 `{op,msg}` 래핑 — 코드 판독으로 빈객체/whitespace/공존 케이스 정합 확인(결과 JSON 유효성 보존).
-- **라이브 실측**: B2C_DEST_CREATE INFO detail = `{"op":"mechanic","destType":"CHUTE","chuteNo":2,"workFullQty":100}`(iter-1엔 op 없었음) + 거부 WARN = `{"op":"mechanic","msg":"...이미 존재..."}`. 브라우저 경로(op=홍길동)로 B2C_DEST_DEACTIVATE/ACTIVATE INFO 모두 `"op"` 존재 + **Python 디코드 문자열 매칭으로 DB에 `홍길동` 정확 저장 확인** → iter-1 "한글 깨짐"이 콘솔 cp949 렌더 아티팩트였음을 확정(DB UTF-8 왕복 정상).
-- destination_event(트랜잭션·enum 부재로 cells/assign/unassign 미기록)와 별개로 operation_log가 이들의 정본 작업자 감사임을 코드 주석에 명시 — 마이그레이션 0 하 합리적.
+### 문제 (Step 4.5 Important)
+`GET /api/b2c/facility/orders` take clamp 기본 200·최대 500 인데 프론트 훅이 take 미전달 → 한 배치 최대 1000 오더 시 **침묵 절단**: (a) 배치 디테일 그리드가 200건만 "전체"로 표시, (b) 미할당/할당 집계·**슈트 단위 해제**가 200 상한 → 언더카운트·부분 해제·무경고. (내 iter-1 브라우저 검증이 4-오더 소규모라 미포착 — 정당한 코드리뷰 캐치.)
 
-### FIX 2 (Important — 비활성화 레지스트리/IF-08 일관성) ✅
-- iter-1 검증 사각: CHUTE 비활성화가 인메모리 IsActive·IF-08 push를 반영 안 해 RCS가 비활성 슈트를 "수용가능3"으로 오인할 수 있었음(IF-05는 DB 직독이라 오라우팅은 없었으나 push 일관성 갭). `ApplyActiveStateInMemory`(ApplyPauseStateInMemory 대칭) 신설 — 인메모리 IsActive + `RaiseChuteStateChanged` 락 밖 발화, SetActiveAsync 커밋 후 CHUTE만 호출(소터 no-op). S-IF08 단일-emit 경로(OnChuteStateChanged→Observe→Pump·per-dest Gate 락) 재사용 확인.
-- **라이브 실측(UI+FakeChuteStateServer)**: 재기동 부트스트랩 `[2]→[3]` → UI 비활성화(op 홍길동) → push **`[2]→[2]`**(수용불가) + isActive=false → UI 재활성화 → push **`[2]→[3]`**(수용가능) + ready=true. **단일-emit 확인**: 비활성화가 정확히 `[2]` push 1건만 발생(스팸 0). 신규 회귀잠금 테스트 `Deactivate_PushesState2_Reactivate_PushesState3`.
+### 수정 검증 (코드 판독 + 실증) ✅
+- **백엔드**(`B2cFacilityController.GetOrders`): clamp 상한·기본값 모두 `B2cConstants.GenerateCountMax`(1000)로 상향. 스케일-세이프(무한 조회 금지·cap 유지). 서비스/스키마/**마이그레이션 0**. 신규 테스트 `GetOrders_LargeBatch_NotClampedAtLegacyCap`(250 오더·take 미지정 GET → 250 전량, 200 clamp 회귀 잠금).
+- **프론트**(`b2cFacility.ts`): `ORDERS_FETCH_MAX=1000` export(백엔드 미러) + `orders(...,take,...)` 인자. `useFacilityOrders`·`useFacilityBatchOrders` 모두 take=1000 명시. `orders()` 시그니처에 take 를 signal 앞에 삽입 — 유일 소비처 2 훅만(다른 `.orders` 는 별개 `api.orders`)·tsc 0 로 스테일 콜러 0 확인.
+- **Fail-Loud 배너**(반환수 >= 상한): DataGen 디테일 + Facility 미할당/할당 각각 warn 배너·근거 문구.
 
-### 회귀·정적 (fresh)
-- **전체 스위트 359/359 GREEN**(iter-2 358 + 신규 deactivate-push 1). ⚠ **flake 귀속 주의(fresh 증거)**: 내 live 스택(API+Sim3ds) 가동 중 1회차는 358/1-fail(부하 유도)·1회 42분류 환경 행 발생 → **live 스택 중단 후 격리 재실행 4회 연속 359/359 GREEN**(18~19s)로 확정. 단일 RED/행은 문서화된 환경 flake(lessons: e2e-parallel-load-surfaces-integration-flakes·testhost-teardown-channel-race)이며 FIX 3 변경(감사 문자열·인메모리 active·push)은 E2E 핸드셰이크/타이밍 경로와 무관 — 코드 귀속 아님. 생성자 `--blame-hang` 결정적 GREEN과 일치.
-- 비-B2C 330 불변(B2C 29). `npx tsc --noEmit` 0 · `npm run lint` 0 · `npm run build` exit 0(프론트 무변경). 콘솔: fix3 상호작용창(:5215, 06:16~) error/warning/pageerror 0.
+### 브라우저 실증 (핵심 — >200 시나리오)
+- **데이터 생성 디테일**: BIG-A(250) 선택 → 디테일 **250행 전량**·헤더 "250건"·**배너 없음**(250<1000, false-hint 0) — 과거 200 clamp 제거 실증(evaluate: detailRows=250). MAX-A(1000) 선택 → **1000행**·헤더 "상위 1,000건 표시"·**절단 warn 배너 present**(Fail-Loud at cap).
+- **슈트 단위 해제 전량 커버**: 슈트 50 에 **204 오더**(>200) 배정(API 벌크) → 좌 그리드 현재배정 **"204건"** → 체크 → `해제` → ConfirmDialog **"해제될 오더 204건"**(200 clamp 였다면 200) → 확인 → 순차 unassign → **assigned=0**(API 폴 확인)·현재배정 "—". 200 초과분(4건) 누락 0.
+- **미할당 배너**: 미할당 1046(1000 MAX+46 BIG) → 우 패널 **"조회 상한 1,000건 도달" 배너 present**(Fail-Loud)·할당 배너는 204<1000 이라 미표시(false 0).
+- **콘솔 BLOCKING**: :5190 origin error/warning/pageerror **0**(전 세션).
+
+### 회귀 · 정적 (fresh · 격리)
+- **전체 스위트 360/360 GREEN**(359 + large-batch 1·실패0·건너뜀0·**18s**·exit0). raw: `통과! - 실패: 0, 통과: 360, 건너뜀: 0, 전체: 360`. Release 빌드 0 error(경고 10 = 기존 NU1903).
+- `tsc --noEmit` 0 · `eslint .` 0 · `vite build`(스크래치 outDir·wwwroot 무접촉) 0. 무접촉: 수정 표면 4파일(controller·b2cFacility.ts·2 페이지)+테스트/문서만. PlcGateway/Core/실 PLC/사용자 DB diff 0. 라이브 assign 204 + unassign 204 정상 — 기존 배정/해제 경로 회귀 0.
+- 나머지 5 Minor 는 백로그 잔류(무접촉) — 계약 위반 아님.
 
 ### 판정
-Step 4.5 Important 2건 완전 해소(감사 작업자 귀속 전수·비활성화 IF-08 일관성)·회귀 0(격리 4회 GREEN)·단일-emit 보존·콘솔 0. 두 fix 모두 iter-1/iter-2에서 내가 미흡하게 다룬 지점(op 드롭 표시깨짐으로 오판·CHUTE 비활성 push 미검증)을 정확히 교정 — 코드리뷰 가치 실증. **APPROVED 유지.**
-
-### Minor 처리 상태 (미착수 6건 — coordinator 이관·tasks/todo.md 등재 대상)
-1. 비활성 CHUTE/소터 행 `정지` 배지 동반 노출(readiness paused 파생, status=NORMAL) — 이번에도 재현(비활성 시 "비활성 정지" 병기). cosmetic·혼동 소지. **미착수**.
-2. facility API `operatorName` 서버측 공백 허용(/api/ops 400과 비대칭) — **미착수**.
-3. `GetBatchesAsync` N+1 — **미착수**.
-4. destination_event enum 확장 후속(enum 재사용 수용) — **미착수**.
-5. (기타 Step 4.5 Minor — coordinator 이관분) — **미착수**.
-> 6건 전부 비차단. fix-only 스코프 준수(Important만) — 정당.
+Step 4.5 Important(침묵 절단) 완전 해소 — 백엔드 cap 상향·프론트 take 명시·Fail-Loud 배너 3처. >200(250·204) 및 cap(1000) 실증으로 배치 디테일·슈트 단위 해제 전량 커버 확인. 회귀 0(360 격리)·콘솔 0·마이그레이션 0. **APPROVED 유지.**
 
 ---
 
-## FIX ITER 2 재검증 (PASS) — 2026-07-14
+## (이하) S-B2C-UX 최초 APPROVED 기록 — 2026-07-14
 
-핸드오프 마커 = `tasks/sprint-log.md` L3558(말단) `## IMPLEMENTATION COMPLETE — FIX ITER 2`. HEAD=`888f062`(불변·미커밋 working tree). fix-only 스코프(4파일 + 테스트 1)·무접촉 경계·마이그레이션 0 재확인(git status에 Migrations/PlcGateway/Core/Sim3ds/appsettings/vite.config diff 0).
-재검증 환경: Wcs.Api :5215(Release·fresh scratch SQLite `eval-wcs2.db`) + Sim3ds :1512 + fake UpdateChuteState :5315(ack `{"flag":1}`). 증거 `screenshots/S-B2C-FACILITY_fix2_20260714-141500/`(fix2-eval-01~03.png + console.log).
+**APPROVED** — Evaluator, 2026-07-14. 게이트 확정(OQ-1~OQ-5 + 해제) 전부 반영·회귀 0·브라우저 4-플로우 + E2E-1 실증·콘솔 0.
 
-## FIX ITER 2 재검증 (PASS) — 2026-07-14
-
-핸드오프 마커 = `tasks/sprint-log.md` L3558(말단) `## IMPLEMENTATION COMPLETE — FIX ITER 2`. HEAD=`888f062`(불변·미커밋 working tree). fix-only 스코프(4파일 + 테스트 1)·무접촉 경계·마이그레이션 0 재확인(git status에 Migrations/PlcGateway/Core/Sim3ds/appsettings/vite.config diff 0).
-재검증 환경: Wcs.Api :5215(Release·fresh scratch SQLite `eval-wcs2.db`) + Sim3ds :1512 + fake UpdateChuteState :5315(ack `{"flag":1}`). 증거 `screenshots/S-B2C-FACILITY_fix2_20260714-141500/`(fix2-eval-01~03.png + console.log).
-
-### FIX 1 (BLOCKING B-1 해소) — 목적지 수정 UI 결선 ✅
-- `b2cFacility.ts`: `updateDestination(destId, {floor?, workFullQty?, operatorName})` 클라 미러 추가(백엔드 POST /destinations/{id} 결선). status 제외(pause/resume 정본·주석).
-- `B2cFacilityPage.tsx`: CHUTE 행 `수정`(Pencil) 버튼 + `EditDestinationDialog`. 프리필은 **React 렌더-중 파생상태 패턴**(`dest.id !== loadedId` 가드 — setState-during-render 안전·effect cascade 0·닫힘 시 리셋으로 재오픈 시 최신 재프리필). SORTER는 수정 필드 없어 버튼 미노출(코드 확인). 클라 검증(floor≥0·workFullQty≥1) 유지.
-- **브라우저 실측(B-1 계획 그대로)**: 슈트 2 행에 수정 버튼 노출(fix2-eval 스냅샷) → 다이얼로그 프리필 workFullQty=100 → 50 입력(fix2-eval-01) → 제출 → 행 **"풀 50"** 반영(fix2-eval-02) + `GET /api/monitor/destinations` chuteNo=2 **workFullQty=50** + operation_log **`B2C_DEST_UPDATE` INFO** `{"status":"NORMAL","workFullUpdated":1}` 감사. 고아 엔드포인트 해소 — 정상 nav 경로로 도달·동작(Completion Condition 2 충족).
-
-### FIX 2 (게이트 보완 — OQ-3 DENIED 예외) ✅ — 계약 게이트 근거 확인
-- 계약 `tasks/sprint-contract.md` 게이트 확정 §에 **OQ-3 보완 = DENIED 예외**(L207-209) 기재됨: "거부(DENIED) 피스는 물리 라우팅 0이므로 재할당 가드의 '피스 이력'에 카운트하지 않는다 … 예약/적재(비-DENIED) 이력이 있으면 기존대로 차단." — iter-1 Minor #1(사용자 게이트 재확인 필요)이 이 게이트 라인으로 해소. 계약(설계 권위)이 이 예외를 담고 있어 수용. (게이트 발부 주체 = orchestrator/user 경유로 전제 — Evaluator는 계약을 권위로 검증. 만약 실제 사용자 발부가 아니라면 orchestrator가 reconcile 필요 — 단 변경은 iter-1 권고와 정합·정정 방향.)
-- 코드: `OrderProgressAsync` + `GetOrdersAsync` 차단 술어에 `&& p.Status != PieceStatus.DENIED` 추가. **HasActivePiece = ANY 비-DENIED 활성 피스** — DENIED와 RESERVED가 공존하면 RESERVED가 여전히 차단 트리거(예외 누수 없음). reserved/sorted 합 가드는 별도 유지.
-- 신규 테스트 `AssignOrder_DeniedOnlyOrder_Allowed_ReservedOrder_Blocked` — 양방향 단언(DENIED-only → canReassign true·배정 S / RESERVED → canReassign false·재배정 F+reserved≥1). DB 직접 조성으로 AUTO 비결정성 회피 — 잘 격리됨.
-- **라이브 실측(예외 정밀 스코핑 확인)**: ① 슈트 2 비활성화 → 미할당 FX-01 IF-05 → NG(DENIED 피스 조성) → 슈트 2 재활성 → facility orders `hasActivePiece=false·canReassign=true`(DENIED 제외 실증) → **미할당 탭 배정 버튼 enabled**(fix2-eval-03) → CHUTE #2 배정 **S**(assigned 탭 "CHUTE #2·MANUAL"). ② **대조(누수 방지)**: 배정된 FX-01에 IF-05 재질의 → RESERVED 피스 생성 → unassign 시도 → **F**("예약 1")·canReassign=false로 전환. 비-DENIED 활성 피스는 그대로 차단됨을 라이브로 확인.
-
-### 회귀·정적 (fresh)
-- **전체 스위트 358/358 GREEN**(iter-1 357 + 신규 DENIED 테스트 1), 0 실패·0 스킵, 19s, exit 0(`dotnet test -c Release`). 42분 행 재현 없음.
-- 분리 산술: `--filter ~Wcs.Tests.B2C` → **28 GREEN** ⇒ 비-B2C = 358−28 = **330 불변**(iter-1과 동일).
-- `npx tsc --noEmit` 0 · `npm run lint` 0 · `npm run build` exit 0(5.23s). 청크 경고는 기존 informational.
-- 콘솔: fix2 기능 세션(:5215, 05:36:10 이후) **error/warning/pageerror 0**. console.log의 :5216 잔재(build hash `index-Le7eLIxr.js` — 생성자 세션 탭)·05:26 재기동 창 CONNECTION_REFUSED는 내 세션·인프라 아티팩트로 앱 결함 아님.
-
-### 판정
-iter-1 BLOCKING B-1 완전 해소(수정 UI 결선·브라우저 왕복·감사) + FIX 2 게이트 보완이 계약 게이트 라인에 근거·예외 스코핑 라이브 검증·회귀 0. iter-1의 여타 GREEN 항목(혼합 토폴로지 E2E·OQ-1/2·AUTO/NO_DEST·감사)은 접촉 파일(facility service의 update/DENIED 술어 + b2cFacility.ts + page)이 그 표면을 건드리지 않고 358 전체 GREEN·수치 불변으로 회귀 0 확인 — 재실행 불요. Evaluation Criteria: 통합 품질 ★★★(수정 결선·IF-05 라우팅 불변)·파괴 작업 안전성 ★★★(OQ-3 예외가 비-DENIED 차단을 누수 없이 유지)·레이어별 품질 ★★(콘솔 0·파생상태 패턴 안전)·회귀 0 ★★ 전부 충족. → **APPROVED**.
-
-### Minor 처리 상태 (최종 PASS — tasks/todo.md 등재 대상)
-1. ~~DENIED 활성 피스가 OQ-3 영구 차단~~ → **FIX 2로 해소**(게이트 보완).
-2. 비활성 소터 행 `정지` 배지+`재개` 버튼 노출(readiness paused 파생) — 미착수(fix-only 스코프). todo 등재.
-3. facility API `operatorName` 서버측 공백 허용(/api/ops와 비대칭) — 미착수. todo 등재.
-4. `GetBatchesAsync` N+1 — 미착수. todo 등재.
-5. destination_event enum 확장 후속(enum 재사용 수용) — 미착수. todo 등재.
+핸드오프 마커 = `tasks/sprint-log.md` L3602(말단) `## IMPLEMENTATION COMPLETE — S-B2C-UX`. HEAD=`679aacc`(불변·미커밋). 브랜치 `feat/b2c-ux`.
+검증 환경(평가자 격리): Wcs.Api :5215(Release·fresh scratch SQLite `wcs-eval.db`·`MigrateOnStartup` 스키마 생성·`SeedOnStartup=false` 0 목적지) + Vite :5190(`VITE_API_TARGET=http://localhost:5215`). Sim3ds :1512 **불요** — 소터 IF-05 가용성은 `SorterCanAcceptBarcode`(셀 술어)만 게이트하고 Online 을 요구하지 않아(RcsController IF-05 lambda·DestinationStatusService.ComputeSorter bundle-null=Paused:false) UI-생성 offline 소터도 셀 배정만 있으면 OK — 테스트 `Mixed_Topology_IF05` 와 동형. 증거: `screenshots/S-B2C-UX_20260714-164600/`(01~07 png + console.log).
 
 ---
 
-## 이하 iteration 1 기록 (FAIL — 참고 보존)
+## 1. 백엔드 — 배치-스코프 reset (OQ-1) ✅
+- `B2cResetRequest`: `sorterChuteNo`(int) → **`batchId`(long)** + `force` + **`operatorName?`**(OQ-3). 소터 스코프 폐지.
+- `ResetAsync`: 스코프 술어 = `p.OrderItem != null && orderIds.Contains(p.OrderItem.OrderId)`(배치 오더). in-flight COUNT 재판정 **트랜잭션 안**(TOCTOU 협착 유지)·아카이브 소프트삭제(`ExecuteUpdate ArchivedAt`·하드삭제 0)·order_item reset·**COMPLETED→RUNNING 재개, CANCELLED 비재개**(명시 주석) 전부 보존. 감사 `B2C_RESET` detail 에 `op`·`batchId` 병기. `Op()` 공백→"(unspecified)".
+- **고아 엔드포인트 0**: 라우트 `POST /api/b2c/test-data/reset` 재사용(본문만 변경). 소터-스코프 잔존 코드/호출부 0(컨트롤러·서비스·프론트 grep 확인).
+- **마이그레이션 0**: `git status backend/src/Wcs.Data/` diff 0(ArchivedAt 기존재). 신규 마이그레이션 파일 0.
+- reset 테스트 배치 스코프로 갱신: `B2cTestDataServiceTests`(6 — SeedSorter가 (SorterId,BatchId) 반환·piece 를 OrderItemId 로 배치 귀속·미존재 배치 F·TOCTOU) + `B2cApiTests`(Reset_UnknownBatch_200F) + `B2cFacilityApiTests`(E2E batchId+operatorName). 의도된 계약 변경 — 회귀 아님.
 
-**FAIL (iteration 1)** — Evaluator, 2026-07-14. **BLOCKING 1건**(목적지 수정 UI 부재 — 고아 엔드포인트). 그 외 전 항목 GREEN — 아래 증거 전부 fresh(본 세션 실측).
+## 2. 회귀 · 정적 (fresh · 격리) ✅
+- **전체 스위트 359/359 GREEN**(실패 0·건너뜀 0·**18s**). raw: `통과!  - 실패: 0, 통과: 359, 건너뜀: 0, 전체: 359 - Wcs.Tests.dll` (DOTNET_TEST_EXIT=0).
+- ⚠ **flake 귀속(fresh 증거)**: live 스택(:5215)+브라우저+빌드 **동시 부하 중** 1회차 dotnet test 가 ~17분 미완(CPU 기아·행 아님·testhost 생존 확인) → **live 스택·Vite·browser 전부 중단 후 격리 재실행 = 18s 359/359 GREEN**·exit 0 로 확정. 문서화된 환경 flake(lessons: e2e-parallel-load-surfaces-integration-flakes·testhost-teardown-channel-race)이며 S-B2C-FACILITY Evaluator 도 동일 패턴 기록(피드백 L22). reset 변경은 E2E 핸드셰이크/타이밍 경로 무관 — 코드 귀속 아님.
+- 프론트: `npx tsc --noEmit` exit 0(무출력) · `npx eslint .` exit 0(무출력) · `npx vite build`(스크래치 outDir — wwwroot 무접촉) exit 0. Release 빌드 0 error(경고 10 = 기존 NU1903 SQLitePCLRaw 취약성 advisory·본 스프린트 무관).
+- 무접촉: diff 는 B2C API(2)/테스트(3)/프론트(6)/docs(2)/tasks(2)만. Wcs.PlcGateway·Wcs.Core·실 PLC/COM1/Azure/사용자 DB diff 0. 상수 외부화 유지(GENERATE_COUNT_MAX 미러·근거 주석).
 
-브랜치 `feat/b2c-facility`. HEAD=`888f062`(직전 스프린트 커밋). 스프린트 변경분 전부 **미커밋 working tree**. 핸드오프 마커 = `tasks/sprint-log.md` L3477(말단) `## IMPLEMENTATION COMPLETE — S-B2C-FACILITY`.
+## 3. 브라우저 검증 (Playwright MCP · :5190 · 콘솔 BLOCKING 0) ✅
+- **U1 NAV**: b2c 사이드바 상단 2개 = 데이터 생성 → 설비 관리, 이어 모니터링·3DS 워드·운영 제어. nav 클릭 도달(직접 URL 아님). `homePathFor('b2c')`=`/monitor`(하드코딩·NAV순서 비의존 — 재배열로 불변, 계약 §C "바뀌면 조정" 조건 미발생). [01-nav-order.png]
+- **U2/U3/U8 데이터 생성 마스터-디테일**: 생성 폼(EVAL-A·4건) → 그리드 행 체크박스 + 상단 초기화(0=비활성) + 하단 디테일 빈안내. 행 클릭 → `배치 상세 — EVAL-A #1`(orders?batchId 왕복·EVA-01~04). **체크박스≠행선택 분리(OQ-5)** — 행 클릭이 체크 미발생. [02-datagen-master-detail.png]
+- **U5/U6 설비 2패널(OQ-4a/4b)**: 좌=슈트 201(리프 체크박스) + 소터 231(펼침→셀1·셀2 체크박스), 우=미할당 오더, **초기화 버튼 부재(이관 확인 OQ-1/2)**. 3 대상 + 3 오더 체크 → "선택 대상 3·오더 3 → 3건 배정" → `배정` → **min(N,M)=3 인덱스 페어링**: EVA-01→CHUTE#201, EVA-02→SORTER#231 셀1, EVA-03→셀2. 좌 현재배정 갱신·우에서 제거. [03,04]
+- **U4 다건 초기화**: 배치 체크 → 작업자 공백 초기화 시도 → **경고·다이얼로그 미개시(OQ-3 게이트)**. 작업자 입력 후 초기화 → danger ConfirmDialog(대상 배치 목록·soft-delete 범위·작업자 평가자·비가역) → 확인 → in-flight 3건 거부 토스트("0건 초기화, 1건 진행 중") + **강제 초기화 다이얼로그 체이닝**(silent-close 없음) → 강제 확인 → 성공. [05,06]
+- **U7 다건 해제**: 좌 슈트+소터 셀2 대상 3개 체크 → `해제` → ConfirmDialog(대상 3·해제 오더 3·작업자·OQ-3 안내) → 확인 → "해제 1건 완료, 진행 중 스킵 2건" — **OQ-3 가드 실증**: 재-IF-05로 reserved=1 된 EVA-01/02 스킵, 미시작 EVA-03만 해제·미할당 복귀. [07-facility-unassign-oq3guard.png]
+- **콘솔 BLOCKING**: :5190 origin error/warning/pageerror **0**(전 세션·React DevTools info 1건만). console.log 첨부.
 
-평가 환경(평가자 포트·사용자/생성자 환경 무접촉): Wcs.Api :5215(Release·scratch SQLite·SeedOnStartup=false·SPA 정적 서빙) + Sim3ds TCP :1512 + 가짜 UpdateChuteState 수신 서버 :5315(**ack `{"flag":1}` — 계약 준수 필수**, 아래 참고①).
-증거: `screenshots/S-B2C-FACILITY_20260714-044726/` (01~12.png + console.log + chutestate_push.log + chutestate_push.phase1-badack.log).
+## 4. E2E-1 교차 레이어 (BE+FE+DB · MANDATORY) ✅
+① 배치 생성(4 오더) ② 2패널 혼합 배정(슈트+소터 셀) ③ **IF-05 왕복**: EVA-01→OK chuteNo 201·EVA-02→OK 231·EVA-03→OK 231(reserved 1 each) ④ 데이터 생성 디테일이 예약/할당(셀번호 포함) 반영 ⑤ 배치 초기화 refuse→force → **piece 아카이브(reserved→0)·오더/셀 배정 보존·배치 존치(orderTotal 4·하드삭제 0)** ⑥ **재 IF-05(동일 pId)** → 재예약 OK·reserved **정확히 1**(아카이브 dedup 제외·이중카운트 0 — HIGHEST-STAKES 불변량 실증).
 
----
+## 5. 문서 · Minor ✅
+- `docs/B2C-DATAGEN.md`(reset 배치 스코프·마스터-디테일·마이그레이션 0)·`docs/B2C-FACILITY.md`(reset 제거·2패널·min(N,M)·Minor #1/#7) 개정 정합.
+- **Minor #1/#7 흡수**: `DestStatusBadges` — 활성 슈트 "정상"만·`!isActive`면 "비활성"만(정지/만재/정상 억제) 코드+관측 확인. 파괴 액션(초기화·해제·비활성·clear·pause) 전부 ConfirmDialog+작업자 귀속.
+- defer Minor(#2 서버측 공백 거부·N+1·enum·abort)는 tasks/todo.md 잔류 — 계약 위반 아님.
 
-## BLOCKING — 수정 후 재핸드오프 요망
+## 판정
+게이트 확정 OQ-1~5 + 해제 전부 정합. 통합 품질(reset batchId 계약 BE↔FE 미러·고아 0)·파괴 안전성(배치 reset·다중 해제 OQ-3 가드·아카이브 불변량·감사·ConfirmDialog)·레이어 품질(마스터-디테일·2패널·콘솔 0)·회귀 0(359/359 격리)·마이그레이션 0·무접촉 경계 — 완료 조건 9/9 충족. **APPROVED.**
 
-### B-1. 목적지 수정(floor·workFullQty) UI 부재 — 고아 엔드포인트 (Completion Condition 2 위반)
+### 비차단 관찰(후속 참고 · FAIL 아님)
+- NAV 최상단이 데이터 생성이나 `homePathFor('b2c')`는 여전히 `/monitor`(모드 진입 착지 ≠ nav 최상단). 계약이 "순서만 변경·item/경로/enabled 불변"을 요구했고 homePathFor 는 하드코딩이라 미변경이 계약 부합 — 필요 시 후속에서 착지 페이지 정합 검토 가능.
 
-- 백엔드 `POST /api/b2c/facility/destinations/{id}` (수정: status/floor/workFullQty)는 구현·문서화됨(`docs/B2C-FACILITY.md` L33 API 표에 게시).
-- 그러나 **프론트 결선 0**: `frontend/src/lib/b2cFacility.ts`에 update 함수 없음(orders/create/setActive/configureCells/assign/unassign만), `B2cFacilityPage.tsx`에 수정 버튼/다이얼로그 없음(행 제어 = 정지/재개·비움·셀 설정·초기화·활성/비활성만). grep "수정|edit" → 0건.
-- 계약 §11 Completion Condition 2: "설비 관리 페이지에서 **목적지 생성/수정/활성화** … 정상 nav 경로로 도달·동작". workFullQty(만재 임계)·floor는 생성 시 1회 입력 후 UI로 변경 불가 — 운영자가 만재 기준을 조정하려면 직접 API 호출뿐. workflow-agents §Evaluator: "API 엔드포인트는 있지만 호출할 UI가 없음 → FAIL".
-- **수정 요구(최소 범위)**: ① `b2cFacility.updateDestination(destId, {floor?, workFullQty?, operatorName})` 클라 미러 추가 ② 목적지 행에 수정 진입(예: 아이콘 버튼) → 다이얼로그(CHUTE: floor·workFullQty / SORTER: 대상 필드 없으면 비노출 또는 CHUTE 전용 버튼) ③ 성공 시 목록 갱신 + 응답 message(재기동 반영 주석) toast 표출. status 필드는 /api/ops(pause/resume)가 정본이므로 다이얼로그에서 제외해도 무방(제외 시 그 근거 주석).
-- **재검증 계획(iteration 2에서 평가자 수행)**: tsc/eslint/build 0 → 브라우저에서 chute 2 workFullQty 100→50 수정 → 행 "풀 50" 반영 + `GET /api/monitor/destinations` workFullQty=50 + operation_log `B2C_DEST_UPDATE` INFO 감사 + 콘솔 0. 여타 GREEN 항목은 파일 접촉 범위 밖이면 회귀 재실행 최소화(전체 스위트 1회 + 스모크).
+## Code Review Pass (Step 4.5 — 독립 리뷰 + fix iter 2, 2026-07-15)
 
----
+**최종: Ready to merge = Yes** (초판 "With fixes" → Important 1건 fix 후 Evaluator 재검증 APPROVED 유지).
 
-## GREEN — 검증 완료 항목 (fresh evidence)
+강점(리뷰): 배치스코프 reset이 in-tx TOCTOU in-flight 재확인·아카이브·수량·COMPLETED재개·CANCELLED
+비재개·archived-exclusion 전부 보존 / 소터스코프 orphan-free(테스트 이관) / min(N,M) 안정정렬 페어링 /
+force 체이닝 / vite 기본 :5205 유지 / 파괴액션 confirm+operator / 비활성 배지 혼동 해소.
 
-### 1. 회귀·정적 (§10.2 E2E-2)
-- **전체 스위트 from scratch: 357/357 GREEN, 0 실패·0 스킵, 20s, exit 0** (`dotnet test backend/Wcs.sln -c Release`, 원문: "통과! - 실패: 0, 통과: 357, 건너뜀: 0, 전체: 357, 기간: 20 s"). 42분 행 재현 없음(1회 결정적).
-- 분리 산술: `--filter FullyQualifiedName~Wcs.Tests.B2C` → **27 GREEN** ⇒ 비-B2C = 357−27 = **330 불변**.
-- 프론트: `npx tsc --noEmit` 0 · `npm run lint` 0 · `npm run build` exit 0(6.23s — 산출물 wwwroot 재생성, 검증 UI = 최신 빌드). 청크 500kB 경고는 기존 informational.
-- **마이그레이션 0**: git status에 Migrations 신규/변경 파일 없음(계약 준수). 무접촉 경계: PlcGateway/Wcs.Core/Sim3ds/vite.config/appsettings diff 0 확인.
+- **[해소] Important — orders take=200 조용한 잘림(Fail-Loud 위반)**: 백엔드 clamp를 GenerateCountMax(1000)로
+  상향, 프론트가 명시 take 전달 + 캡 도달 시 truncation 배너(상세/미할당/배정그룹핑). 250-오더 전량·1000
+  배너·204 배정 슈트 전량 해제 실측.
 
-### 2. 혼합 토폴로지 E2E-1 (MANDATORY — 전 단계 실측)
-1. **발견가능성(U6)**: B2C nav에 `설비 관리` 노출·클릭 도달(01.png). 기존 항목 "데이터 생성" 개명 확인.
-2. **빈 상태(U4)**: 목적지 0·미할당 오더 0 안내 + 소터 재기동 주의문(02.png).
-3. **UI 생성**: 소터 #1(SORTER_3D) + **슈트 2~9 전부 UI 다이얼로그로 생성**(8회 반복 — 03.png) + 셀 5×4=20 벌크(다이얼로그 라벨 "20셀 설정"·멱등 안내문, 04.png) → 행 "20/20 셀".
-4. **런타임 슈트 등록**: 신설 슈트 각각 재기동 없이 IF-08 부트스트랩 push 발신(수신 로그 — phase1 로그에 chute 2~9 전수 `next_states:[3]`).
-5. **재기동 → 소터 폴링**: /health `"sorters":[{"chuteNo":1,"online":true,…}]` + destinations online:true + UI 배지 online(05.png). 기동 부트스트랩 push = **목적지당 정확히 1회**(chute 2~9 [3]·소터 1 [2], 9줄 — chutestate_push.log 04:56:53).
-6. **슬림 생성(2a·U1)**: 5-필드 폼 → FAC-EVAL 배치, **미할당 오더 5건**(EV-01~05) — 결과 view "5(미할당 5)"(06.png). OQ-4(계획수량=생성 개수·planned_qty=1) API 재확인. **멱등**: 동일 파라미터 재실행 → `ordersCreated 0·orderItemsCreated 0`.
-7. **혼합 할당(UI)**: EV-01→소터#1 셀1 / EV-02·03→슈트#2. 할당됨 탭 "SORTER_3D #1 · 셀 1"/"CHUTE #2"(07.png).
-8. **IF-05 혼합 라우팅**: EV-01→`{"result":"OK","chuteNo":1}` · EV-02→`{"result":"OK","chuteNo":2}` (POST /api/v1/destination-query 실왕복).
-9. **슈트 pause→push→분리→resume→clear**: UI 정지(확인 다이얼로그: 대상·타입·작업자 — 08.png) → push `{"chute_numbers":[2],"next_states":[2]}` 1건 실수신(05:03:01) → **같은 슈트 오더 EV-03 IF-05 여전히 OK**(dispatch/readiness 분리 실증) → UI 재개 → push `[2]→[3]` 실수신(05:03:55) → UI 비움 → `lastClearedAt` 스탬프(destinations API) + OPS_CLEAR 감사. 상태 배지 정지↔정상 전환(09.png).
-
-### 3. 2a 슬림 회귀 (미할당 IF-05 거동 — QueryDestination 코드 앵커 일치)
-- **AUTO 배정**: 미할당 EV-04 IF-05 → `{"result":"OK","chuteNo":3}` (최저 빈 NORMAL 활성 슈트 — 슈트 2는 RUNNING 점유라 제외, DbRepositories.cs L97-110 앵커와 일치).
-- **NO_DEST**: 빈 슈트 전무 상태(슈트 4~9 비활성화) → 미할당 EV-05 IF-05 → `{"result":"NG","chuteNo":null}` (piece_event에 NO_DEST — 응답 reason 필드 없음 = 기존 계약). 미존재 바코드 → NG. 상태 원복 완료(4~9 재활성).
-
-### 4. 가드 (OQ-1/2/3 — ★★★ 파괴 작업 안전성)
-- **OQ-2 refuse→force 체이닝(UI)**: in-flight(EV-01 RESERVED) 소터#1 비활성화 → 백엔드 거부 → **강제 비활성화 다이얼로그 자동 체이닝**("진행 중 작업 포함 강제" 문구, 10.png) → 강제 성공(isActive=false) → **비활성 목적지 IF-05 NG 실증**(EV-01 재질의 → NG) → UI 재활성화 성공. 거부·강제 전수 WARN 감사.
-- **OQ-3 시작 오더 차단**: IF-05로 예약(1/0)된 EV-01~03 — UI 할당됨 탭 **재배정/해제 버튼 disabled**(11.png) + API 직접 호출도 F(`"진행 중 오더는 재배정할 수 없습니다(예약 1·분류 0·활성 피스 있음)"` / unassign 동형) — UI 우회 불가(가드 tx 내).
-- **OQ-1 셀 벌크**: 5×4 재실행 → `created 0·updated 0·total 20`(멱등). 2×2 축소 → **기존 20셀 보존**(`total 20`·삭제 0 — DTO 문서와 일치).
-- **reset 이관 + refuse 체인(UI)**: 설비 페이지 소터 행 초기화 → 범위·비가역 고지 다이얼로그 → in-flight 거부 → **강제 초기화 체이닝 확인 후 취소**(12.png — force 실행 경로는 B2cFacilityApiTests reset E2E가 잠금: 예약→거부→force→재예약·하드삭제 0).
-- **에러 케이스**: 중복 chuteNo → 200 F("이미 존재(CHUTE)") · CHUTE+cellNo → F · 미존재 오더/목적지 → F · **점유 셀 배정 → F**("다른 오더가 점유 중" — 부분 유니크 준수) · workDate 400 · barcodePrefix 인젝션 400 · plannedQty 1001 → 400 · chuteNo=0 → 400(Fail 형상 — allowlist 동작) · rows=0 → 400 · **ops blank operator → 400**.
-
-### 5. 목적지 열거 API (A2)
-- `GET /api/monitor/destinations` → CHUTE+SORTER_3D 전 9건, 형상 = id/chuteNo/destType/floor/status/isActive + online/ready/full/paused + CHUTE workFullQty/lastClearedAt + 소터 cellTotal/cellEnabled(타입별 null 상보). 빈 DB에서 `[]`(빈 배열) 확인. 부수효과 0(AsNoTracking — 코드 확인).
-
-### 6. 감사 전수 (operation_log STATE)
-`B2C_DEST_CREATE` INFO×9(소터1+슈트2~9)+WARN×1(중복 거부) · `B2C_DEST_DEACTIVATE` INFO×6+**WARN×2(거부·강제)** · `B2C_DEST_ACTIVATE` INFO×7 · `B2C_GENERATE` INFO×2 · `B2C_ORDER_ASSIGN` INFO×3+WARN×5(거부·미존재) · `B2C_ORDER_UNASSIGN` WARN×1 · `B2C_SORTER_CELLS` INFO×3 · `B2C_RESET` WARN×1(거부) · OPS_PAUSE/RESUME/CLEAR + PAUSED/NORMAL 전이. 실패/거부 전수 기록 확인. 한글 detail 무결(U+FFFD 0건 — 표시 깨짐은 평가자 콘솔 cp949 파이프라인 아티팩트로 판명).
-
-### 7. 콘솔 (BLOCKING 규칙)
-- 기능 세션(재기동 이후 04:57~종료) **error/warning/pageerror 0**. React dev-mode 경고 0.
-- 유일한 에러군 = 평가자의 계획된 백엔드 재기동 창(04:56:26~31, ERR_CONNECTION_REFUSED + SignalR negotiate — 인프라, 앱 결함 아님, 재접속 자동 회복). console.log의 04:41~04:42 :5216행은 생성자 세션 잔재(브라우저 프로필 공유 — all:true 캡처).
-
----
-
-## 판단 요청 회신 (Generator → Evaluator)
-
-- **destination_event 기존 enum 재사용**(CREATE→FULL_QTY_CHANGED·활성전이→CLOSED, detail JSON 구분): **수용**. 마이그레이션 0 제약 하 합리적 절충 — operation_log STATE가 완전한 정본이고 detail JSON(`{"action":"CREATE",…}`/`{"isActive":…,"force":…}`)으로 구분 가능함을 실데이터로 확인. 단 이벤트 통계·조회 시 의미 혼선 소지 → **후속 스프린트에서 enum 확장(+양 provider 마이그레이션) 권고**(Minor #5, 최종 PASS 시 todo 등재).
-
-## Minor (비차단 — 최종 PASS 시 todo.md 등재 예정)
-
-1. **DENIED 활성 피스가 OQ-3 가드를 영구 차단** — 실측: NO_DEST 거부(pId 9007)만 받은 EV-05(예약 0·분류 0)가 이후 수동 배정 불가("활성 피스 있음" F, UI 배정 disabled). `RecordDenied`가 piece를 IsActive=true로 영속(DbRepositories.cs L270) + `OrderProgressAsync`의 HasActivePiece가 status 무관 카운트. **게이트 문언("피스 이력 0")과는 합치**하므로 계약 위반 아님 — 그러나 "RCS 선질의 NG → 운영자 수동 배정" 복구 시나리오가 dead-end(소터 reset도 destination=null 피스는 못 푼다). 사용자 게이트 재확인 필요: DENIED 제외 여부. UI도 disabled 사유 무표시(툴팁 권고).
-2. 비활성 소터 행에 `정지` 배지+`재개` 버튼 노출(readiness paused=true 파생, status=NORMAL) — 운영자 혼동 소지(재개 눌러도 활성화 안 됨).
-3. facility API `operatorName` 공백 허용("(unspecified)" 대체) — UI만 필수 게이트. /api/ops는 400 강제와 비대칭. 서버측 Required 보강 권고(감사 귀속 방어심층).
-4. `GetBatchesAsync` 배치당 3쿼리 N+1(take 상한 있음·관리 화면 — 저위험, 기존 GetSummaryAsync #4와 동류).
-5. destination_event enum 확장 후속(위 판단 요청 회신 참조).
-
-## 참고 (환경·재검증 노트)
-
-① **가짜 UpdateChuteState 수신 서버는 반드시 `{"flag":1}` ack** — `ChuteStatePushClient.IsSuccessBody` 계약(2xx+flag==1). 평가자 초기 `{"result":"OK"}` ack 시 전 슈트가 재시도+미동기-하트비트 재발신 루프(539줄/8분, phase1-badack.log) — **구현 결함 아님**(S-HARDENING-1 자율 복구가 설계대로 동작함을 역증명). ack 교정 후 "전이당 정확히 1회" 확인.
-② 소터 push-ready는 세션 내내 false(Sim3ds 초기 Ready 워드 0) — IF-05 dispatch는 무관(분리 채널·설계 일치).
-③ 평가자 실행 잔재: `screenshots/S-B2C-FACILITY_20260714-044726/`(증거·보존). Evaluator 코드 수정 0·커밋/푸시 0. 사용자 DB·Azure·실 PLC/COM1 무접촉.
-
-## Code Review Pass (Step 4.5 — 독립 리뷰 + fix iter 3, 2026-07-14)
-
-**최종: Ready to merge = Yes** (초판 "With fixes" → Important 2건 fix 후 Evaluator 재검증 APPROVED 유지).
-
-강점(리뷰): 런타임 등록 순서(DB commit→capacity→pusher)·멱등성·push 레지스트리 ConcurrentDictionary 동시성·
-가드 트랜잭션 in-tx(TOCTOU 규율)·DENIED 일관성(가드=프로젝션)·null-safe 소터·DI(concrete singleton) 전부 견실.
-
-- **[해소] Important #1 — 감사 작업자 귀속**: Audit가 `{`-prefixed JSON detail에서 op 드롭 → MergeOp로 전
-  detail(성공·거부) 병합. 라이브 확인(op DB 정확 저장). iter-1 "한글 깨짐"은 콘솔 cp949 아티팩트로 확정.
-- **[해소] Important #2 — 비활성화 IF-08 일관성**: ApplyActiveStateInMemory 신설(인메모리 IsActive+OnChuteStateChanged,
-  단일-emit 보존) → 비활성 push[2] 1건·재활성 push[3]. 회귀잠금 테스트 추가.
-
-### Minor (비블로킹 — 다음 sprint Generator 참고 / todo 등재)
-1. 재배정이 ConfirmDialog 미게이트(AssignOrderDialog 폼 — unassign은 게이트됨). §U3 확인셋 이탈.
-2. 변경 다이얼로그(create/edit/cell/assign) 공백 operatorName 허용(requireOperator 미적용) — OpsController는 거부, 불일치.
-3. GetBatchesAsync N+1(배치당 3 CountAsync) — GroupBy 1쿼리로 축약 후보. (GetSummaryAsync N+1도 병존.)
-4. destination_event enum에 CELL_CONFIG/ASSIGN/UNASSIGN 부재 → operation_log가 해당 감사 정본(후속 enum 확장 시 destination_event 병기).
-5. 소터 신설 재기동 경고 문구가 "appsettings 없이 재기동 시 부팅 실패(fail-loud)" 결과 미고지.
-6. useDestinations abort signal 부재 / facility Audit의 sorterChuteNo 컬럼명 오칭(CHUTE에도 사용).
-7. 비활성 소터 UI: 정지 배지+재개 버튼 병기 혼동(Evaluator Minor).
+### Minor (비블로킹 — 다음 sprint / todo 등재)
+1. b2c 랜딩(homePathFor)이 /monitor인데 NAV 최상단은 데이터 생성 — 랜딩 일관성(의도면 유지). **판단: /monitor 유지**(모니터링=운영 기본 뷰, nav 순서≠랜딩) — 사용자 이견 시 변경.
+2. 대량 배정 부분실패 시 식별 피드백 부재(집계만) — identity-level 피드백 후보.
+3. 레거시 null cellNo 소터 배정은 좌측 셀 행이 없어 UI 해제 불가(엣지/레거시).
+4. QUERIED(예약 전) 피스 거부가 "진행중 스킵" 아닌 "실패"로 분류(표시상).
+5. pre-existing dead code(useB2cSummary/Detail·b2cTestData.summary/detail·백엔드 summary/detail 미사용) — 별도 정리 스프린트.
