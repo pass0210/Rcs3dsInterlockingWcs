@@ -315,6 +315,11 @@ public sealed class Piece
     public DateTime  CreatedAt  { get; set; }
     public DateTime  UpdatedAt  { get; set; }
 
+    // S-B2C-DATAGEN(OQ1=B 아카이브): 재테스트 초기화(reset) 소프트삭제 타임스탬프. NULL=활성.
+    //   ★ 모든 활성 조회 경로(IF-05/09/10 dedup·셀 currentQty·SorterFull·모니터·집계)는 archived_at==null
+    //     행만 읽는다(아카이브 행 누출 = 재테스트 시 이중 카운트 → HIGHEST-STAKES 회귀). 하드삭제 금지.
+    public DateTime? ArchivedAt { get; set; }
+
     [Timestamp]
     public byte[]? RowVersion { get; set; }
     public int XminRowVersion { get; set; }
@@ -340,6 +345,9 @@ public sealed class PieceEvent
     public string?        ClientTs    { get; set; }  // RCS 원문 timeStamp (varchar NULL)
     public DateTime       At          { get; set; }  // UTC, 선두 인덱스
 
+    // S-B2C-DATAGEN(OQ1=B): reset 소프트삭제 타임스탬프. NULL=활성. 부모 piece와 함께 아카이브된다.
+    public DateTime? ArchivedAt { get; set; }
+
     // 네비게이션
     public Piece Piece { get; set; } = null!;
 }
@@ -359,6 +367,11 @@ public sealed class SorterCommand
     public SorterCommandStatus Status     { get; set; }
 
     public DateTime CreatedAt { get; set; }
+
+    // S-B2C-DATAGEN(OQ1=B): reset 소프트삭제 타임스탬프. NULL=활성. 부모 piece와 함께 아카이브된다.
+    //   ★ 셀 currentQty(SorterCellQty.LoadedQtyByCell) = COMPLETED sorter_command JOIN piece 이므로
+    //     아카이브 행이 새면 재테스트 셀 적재량이 이중 카운트된다 → 활성 조회는 archived_at==null만.
+    public DateTime? ArchivedAt { get; set; }
 
     // 네비게이션
     public Piece Piece { get; set; } = null!;

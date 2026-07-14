@@ -63,9 +63,11 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options 
     options.InvalidModelStateResponseFactory = context =>
     {
         // S-B2B-2a: allowlist 에 /api/test-data 추가(additive) — /api/v1/works· B2C ProblemDetails 불변.
+        // S-B2C-DATAGEN: /api/b2c/test-data 추가(additive) — 검증실패 400 을 B2cManagementResponse.Fail 형식으로.
         var path = context.HttpContext.Request.Path;
         if (path.StartsWithSegments(Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase)
-         || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase))
+         || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase)
+         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.RoutePrefix, StringComparison.OrdinalIgnoreCase))
         {
             var firstError = context.ModelState
                 .Where(kv => kv.Value is not null && kv.Value.Errors.Count > 0)
@@ -229,6 +231,10 @@ builder.Services.AddScoped<Wcs.Api.B2B.ITestDataService, Wcs.Api.B2B.TestDataSer
 // ── S-B2B-3a: 조회 전용 서비스(로그·API호출이력·3-way 비교 / 투입+분류 Excel) — additive ──
 builder.Services.AddScoped<Wcs.Api.B2B.ILogService,       Wcs.Api.B2B.LogService>();
 builder.Services.AddScoped<Wcs.Api.B2B.ILogExportService, Wcs.Api.B2B.LogExportService>();
+
+// ── S-B2C-DATAGEN: B2C(3D 소터) 테스트 데이터 관리 서비스(생성·요약·초기화) — additive ──
+// 컨트롤러가 판정/PLC 를 직접 호출하지 않음(절대규칙 #1·#8). WcsDbContext(scoped)+IOperationLogger 만 사용.
+builder.Services.AddScoped<Wcs.Api.B2C.IB2cTestDataService, Wcs.Api.B2C.B2cTestDataService>();
 
 var app = builder.Build();
 

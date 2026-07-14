@@ -138,6 +138,7 @@ public sealed class MonitoringQueries : IMonitoringQueries
     {
         var q = _db.Pieces.AsNoTracking()
             .Where(p => p.IsActive
+                     && p.ArchivedAt == null   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) piece 제외.
                      && (p.Status == PieceStatus.QUERIED
                       || p.Status == PieceStatus.RESERVED
                       || p.Status == PieceStatus.PERMITTED));
@@ -226,7 +227,8 @@ public sealed class MonitoringQueries : IMonitoringQueries
     // ── E7 sorter commands (키셋 커서 페이징) ──────────────────────────────────
     public PagedResult<SorterCommandDto> GetSorterCommands(long? destId, int take, long? cursor)
     {
-        var q = _db.SorterCommands.AsNoTracking().AsQueryable();
+        // S-B2C-DATAGEN: 아카이브(재테스트 초기화) sorter_command 제외.
+        var q = _db.SorterCommands.AsNoTracking().Where(sc => sc.ArchivedAt == null);
 
         if (destId.HasValue)
             q = q.Where(sc => sc.Cell.DestinationId == destId.Value);
