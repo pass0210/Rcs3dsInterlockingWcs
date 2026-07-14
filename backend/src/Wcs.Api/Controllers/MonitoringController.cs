@@ -60,6 +60,11 @@ public sealed class MonitoringController : ControllerBase
     public IActionResult GetSorters()
         => Ok(_queries.GetSorters());
 
+    // ── A2 GET /api/monitor/destinations — 전 목적지(CHUTE + SORTER_3D) 열거 ─────
+    [HttpGet("destinations")]
+    public IActionResult GetDestinations()
+        => Ok(_queries.GetDestinations());
+
     // ── E6 GET /api/monitor/sorters/{destId}/cells ──────────────────────────────
     [HttpGet("sorters/{destId:long}/cells")]
     public IActionResult GetCells([FromRoute] long destId)

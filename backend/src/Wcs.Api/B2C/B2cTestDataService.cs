@@ -11,9 +11,11 @@ namespace Wcs.Api.B2C;
 // 무접촉 경계: Wcs.PlcGateway·Wcs.Core·HandshakeOrchestrator 무의존. 판정/Modbus 직접 호출 0
 //   (절대규칙 #1·#8). WcsDbContext(Scoped) + IOperationLogger 만 주입.
 //
-// 생성(OQ4 멱등 upsert): scripts/seed-field-20cells.sql 을 코드로 흡수 — 같은 파라미터 재실행 시
-//   카운트 불변. 셀 N ↔ 오더 N 결정적 배정(N↔N). orderNo == barcode == "{prefix}-{NN}"(OQ5).
-//   소터/셀 없으면 생성(OQ6). 기존 order_item reserved/sorted 는 보존(멱등 — 재생성이 실적 클로버 금지).
+// 생성(2a 슬림 · 멱등 upsert): 같은 파라미터 재실행 시 카운트 불변.
+//   ★ S-B2C-FACILITY: 생성은 **오더/바코드만** 만든다(목적지 미할당 — DestinationId=null·
+//     DestAssignType=null). 소터/셀/cell_assignment 자동 생성·N↔N 배정 제거(설비 관리 2b 로 이관).
+//   orderNo == barcode == "{prefix}-{NN}"(zero-pad). 계획수량 = 생성 개수 N(각 order_item.planned_qty=1·OQ-4).
+//   기존 order_item reserved/sorted 는 보존(멱등 — 재생성이 실적 클로버 금지).
 //
 // 초기화(OQ1=B 아카이브): piece/piece_event/sorter_command 를 하드삭제하지 않고 archived_at 로
 //   소프트삭제(보존). order_item reserved/sorted=0 리셋. wcs_order/cell_assignment 보존(OQ2).
@@ -25,8 +27,11 @@ namespace Wcs.Api.B2C;
 
 public interface IB2cTestDataService
 {
-    /// <summary>생성(멱등 upsert). workDate 비존재 날짜 → ArgumentException(#17 → 컨트롤러 400).</summary>
+    /// <summary>생성(멱등 upsert · 슬림). 미할당 오더 N건 생성. workDate 비존재 날짜 → ArgumentException → 400.</summary>
     Task<B2cManagementResponse> GenerateAsync(B2cGenerateRequest req, CancellationToken ct = default);
+
+    /// <summary>최근 work_batch 요약(생성 결과 view) — 미할당 오더 수 포함.</summary>
+    Task<List<B2cBatchSummary>> GetBatchesAsync(int take, CancellationToken ct = default);
 
     /// <summary>요약 집계(소터별) — sorterChuteNo 지정 시 그 소터만, 미지정 시 전체 SORTER_3D.</summary>
     Task<List<B2cSorterSummary>> GetSummaryAsync(int? sorterChuteNo, CancellationToken ct = default);
@@ -64,66 +69,38 @@ public sealed class B2cTestDataService : IB2cTestDataService
            || p.Status == PieceStatus.CELL_ASSIGNED
            || p.Status == PieceStatus.LOADED);
 
-    // ── 순수 함수: 생성 계획(N↔N 결정적) — I/O 무의존(절대규칙 #8 정신·테스트 가능) ──────────
+    // ── 순수 함수: 생성 계획(결정적) — I/O 무의존(절대규칙 #8 정신·테스트 가능) ──────────
     /// <summary>
-    /// (cellNo, orderNo) 계획을 결정적으로 산출한다. n=1..cellCount, orderNo = "{prefix}-{NN}"(zero-pad).
-    /// zero-pad 폭 = max(2, cellCount 자릿수) — 현장 규약(0701-CELL-01) 재현이자 정렬 안정.
-    /// barcode == orderNo(OQ5). 순수(부수효과·I/O 0) — 같은 입력 → 같은 출력(멱등의 기반).
+    /// 생성할 오더번호(=바코드) 목록을 결정적으로 산출한다. n=1..count, "{prefix}-{NN}"(zero-pad).
+    /// zero-pad 폭 = max(2, count 자릿수) — 정렬 안정(0714-A-01 …). 순수(부수효과·I/O 0) —
+    /// 같은 입력 → 같은 출력(멱등의 기반). barcode == orderNo.
     /// </summary>
-    public static IReadOnlyList<(int CellNo, string OrderNo)> BuildPlan(int cellCount, string orderPrefix)
+    public static IReadOnlyList<string> BuildOrderNumbers(int count, string prefix)
     {
-        int width = Math.Max(2, cellCount.ToString(System.Globalization.CultureInfo.InvariantCulture).Length);
-        var plan = new List<(int, string)>(cellCount);
-        for (int n = 1; n <= cellCount; n++)
-            plan.Add((n, $"{orderPrefix}-{n.ToString("D" + width, System.Globalization.CultureInfo.InvariantCulture)}"));
-        return plan;
+        int width = Math.Max(2, count.ToString(System.Globalization.CultureInfo.InvariantCulture).Length);
+        var list = new List<string>(count);
+        for (int n = 1; n <= count; n++)
+            list.Add($"{prefix}-{n.ToString("D" + width, System.Globalization.CultureInfo.InvariantCulture)}");
+        return list;
     }
 
-    // ── 생성(멱등 upsert) ──────────────────────────────────────────────────────
+    // ── 생성(2a 슬림 · 멱등 upsert) — 미할당 오더 N건만 ───────────────────────────
     public async Task<B2cManagementResponse> GenerateAsync(B2cGenerateRequest req, CancellationToken ct = default)
     {
         // 작업일자 정규화(비존재 날짜 → ArgumentException → 컨트롤러 400). DateOnly 로 변환.
         var normalized = AppUtils.NormalizeBizDay(req.WorkDate);   // "yyyy-MM-dd"
         var workDate   = DateOnly.ParseExact(normalized, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
 
-        var plan = BuildPlan(req.CellCount, req.OrderPrefix);
-        var now  = DateTime.UtcNow;
+        // OQ-4: 계획수량 = 생성 개수 N. 오더번호=바코드="{prefix}-{NN}".
+        var orderNos = BuildOrderNumbers(req.PlannedQty, req.BarcodePrefix);
+        var now = DateTime.UtcNow;
 
-        int destCreated = 0, cellsCreated = 0, ordersCreated = 0, itemsCreated = 0, assignmentsCreated = 0;
+        int ordersCreated = 0, itemsCreated = 0;
 
         await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
         try
         {
-            // ── 1) 소터 destination (SORTER_3D) — 있으면 재사용, 다른 타입이면 F ────────────
-            var dest = await _db.Destinations
-                .FirstOrDefaultAsync(d => d.ChuteNo == req.SorterChuteNo, ct).ConfigureAwait(false);
-
-            if (dest is not null && dest.DestType != DestType.SORTER_3D)
-            {
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
-                var msg = $"chuteNo={req.SorterChuteNo} 는 이미 {dest.DestType} 타입입니다(SORTER_3D 아님).";
-                Audit("B2C_GENERATE", OperationLogLevel.WARN, req.SorterChuteNo, dest.Id, msg);
-                return B2cManagementResponse.Fail(msg);
-            }
-
-            if (dest is null)
-            {
-                dest = new Destination
-                {
-                    ChuteNo   = req.SorterChuteNo,
-                    DestType  = DestType.SORTER_3D,
-                    Floor     = null,               // 3D 소터 = 층 무관(NULL)
-                    Status    = DestStatus.NORMAL,
-                    IsActive  = true,
-                    CreatedAt = now,
-                    UpdatedAt = now,
-                };
-                _db.Destinations.Add(dest);
-                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-                destCreated = 1;
-            }
-
-            // ── 2) work_batch (RUNNING) — UQ(work_date,batch_no,wave_no) 멱등 ──────────────
+            // ── 1) work_batch (RUNNING) — UQ(work_date,batch_no,wave_no) 멱등 ──────────────
             var batch = await _db.WorkBatches.FirstOrDefaultAsync(
                 b => b.WorkDate == workDate && b.BatchNo == req.BatchNo && b.WaveNo == req.WaveNo, ct)
                 .ConfigureAwait(false);
@@ -139,46 +116,20 @@ public sealed class B2cTestDataService : IB2cTestDataService
                 await _db.SaveChangesAsync(ct).ConfigureAwait(false);
             }
 
-            // ── 3) 셀 upsert (Capacity/Enabled 보정) — UQ(destination_id,cell_no) 멱등 ──────
-            var existingCells = await _db.Cells
-                .Where(c => c.DestinationId == dest.Id)
-                .ToDictionaryAsync(c => c.CellNo, ct).ConfigureAwait(false);
-
-            foreach (var (cellNo, _) in plan)
-            {
-                if (existingCells.TryGetValue(cellNo, out var cell))
-                {
-                    // 보정: Capacity/Enabled 만(멱등 — 다른 컬럼 무접촉).
-                    if (cell.Capacity != req.CellCapacity || !cell.Enabled)
-                    {
-                        cell.Capacity = req.CellCapacity;
-                        cell.Enabled  = true;
-                    }
-                }
-                else
-                {
-                    _db.Cells.Add(new Cell
-                    {
-                        DestinationId = dest.Id, CellNo = cellNo,
-                        Capacity = req.CellCapacity, Enabled = true, CreatedAt = now,
-                    });
-                    cellsCreated++;
-                }
-            }
-
-            // ── 4) 오더 upsert (RUNNING·UPSTREAM·destination=sorter) — UQ(batch,order_no) ────
+            // ── 2) 미할당 오더 upsert (DestinationId=null·DestAssignType=null) — UQ(batch,order_no) ──
+            //   ★ 슬림: 목적지 미할당. 배정은 설비 관리(2b)의 오더 할당이 담당. RUNNING·GENERAL.
             var existingOrders = await _db.Orders
                 .Where(o => o.WorkBatchId == batch.Id)
                 .ToDictionaryAsync(o => o.OrderNo, ct).ConfigureAwait(false);
 
-            foreach (var (_, orderNo) in plan)
+            foreach (var orderNo in orderNos)
             {
                 if (!existingOrders.ContainsKey(orderNo))
                 {
                     _db.Orders.Add(new WcsOrder
                     {
                         WorkBatchId = batch.Id, OrderNo = orderNo, OrderType = OrderType.GENERAL,
-                        DestinationId = dest.Id, DestAssignType = DestAssignType.UPSTREAM, DestAssignedAt = now,
+                        DestinationId = null, DestAssignType = null, DestAssignedAt = null,  // 미할당
                         Status = OrderStatus.RUNNING, StartedAt = now, ClosedAt = null,
                         CreatedAt = now, UpdatedAt = now,
                     });
@@ -186,56 +137,30 @@ public sealed class B2cTestDataService : IB2cTestDataService
                 }
             }
 
-            // 셀·오더 ID 확정(order_item·cell_assignment FK 연결용).
+            // 오더 ID 확정(order_item FK 연결용).
             await _db.SaveChangesAsync(ct).ConfigureAwait(false);
-
-            // 최신 맵 재로드(신규 포함).
-            var cellByNo  = await _db.Cells.Where(c => c.DestinationId == dest.Id)
-                .ToDictionaryAsync(c => c.CellNo, c => c.Id, ct).ConfigureAwait(false);
             var orderByNo = await _db.Orders.Where(o => o.WorkBatchId == batch.Id)
                 .ToDictionaryAsync(o => o.OrderNo, o => o.Id, ct).ConfigureAwait(false);
 
-            // ── 5) order_item (barcode==orderNo, PlannedQty) — 기존 실적 보존(INSERT 만) ─────
+            // ── 3) order_item (barcode==orderNo, planned_qty=1 고정·OQ-4) — 기존 실적 보존(INSERT 만) ──
             var existingItemKeys = await _db.OrderItems
                 .Where(i => orderByNo.Values.Contains(i.OrderId))
                 .Select(i => new { i.OrderId, i.Barcode })
                 .ToListAsync(ct).ConfigureAwait(false);
             var itemKeySet = existingItemKeys.Select(x => (x.OrderId, x.Barcode)).ToHashSet();
 
-            foreach (var (_, orderNo) in plan)
+            foreach (var orderNo in orderNos)
             {
                 long orderId = orderByNo[orderNo];
-                var barcode  = orderNo;   // OQ5: barcode == orderNo
+                var barcode  = orderNo;   // barcode == orderNo
                 if (!itemKeySet.Contains((orderId, barcode)))
                 {
                     _db.OrderItems.Add(new OrderItem
                     {
-                        OrderId = orderId, Barcode = barcode, PlannedQty = req.PlannedQty,
+                        OrderId = orderId, Barcode = barcode, PlannedQty = 1,   // OQ-4: 단건 테스트 모델
                         ReservedQty = 0, SortedQty = 0, CreatedAt = now, UpdatedAt = now,
                     });
                     itemsCreated++;
-                }
-            }
-
-            // ── 6) cell_assignment (N↔N) — 그 셀에 활성 배정 없을 때만 생성(부분 유니크 준수) ───
-            var occupiedCellIds = await _db.CellAssignments
-                .Where(a => a.ReleasedAt == null && a.Cell.DestinationId == dest.Id)
-                .Select(a => a.CellId)
-                .ToListAsync(ct).ConfigureAwait(false);
-            var occupiedSet = occupiedCellIds.ToHashSet();
-
-            foreach (var (cellNo, orderNo) in plan)
-            {
-                long cellId  = cellByNo[cellNo];
-                long orderId = orderByNo[orderNo];
-                if (!occupiedSet.Contains(cellId))
-                {
-                    _db.CellAssignments.Add(new CellAssignment
-                    {
-                        CellId = cellId, OrderId = orderId, AssignedAt = now, ReleasedAt = null, CreatedAt = now,
-                    });
-                    occupiedSet.Add(cellId);   // 같은 실행 내 중복 방지.
-                    assignmentsCreated++;
                 }
             }
 
@@ -244,18 +169,14 @@ public sealed class B2cTestDataService : IB2cTestDataService
 
             var counts = new Dictionary<string, int>
             {
-                ["destinationCreated"] = destCreated,
-                ["cellsCreated"]       = cellsCreated,
-                ["ordersCreated"]      = ordersCreated,
-                ["orderItemsCreated"]  = itemsCreated,
-                ["cellAssignmentsCreated"] = assignmentsCreated,
-                ["cellCount"]          = req.CellCount,
+                ["ordersCreated"]     = ordersCreated,
+                ["orderItemsCreated"] = itemsCreated,
+                ["requestedCount"]    = req.PlannedQty,
             };
-            var message = $"생성 완료 — 소터 {req.SorterChuteNo}, 셀 {req.CellCount}개(신규 {cellsCreated}), "
-                        + $"오더 신규 {ordersCreated}·항목 신규 {itemsCreated}·배정 신규 {assignmentsCreated}"
-                        + (destCreated == 1 ? " (소터 신규 생성)" : "");
-            Audit("B2C_GENERATE", OperationLogLevel.INFO, req.SorterChuteNo, dest.Id,
-                $"{{\"batch\":\"{req.BatchNo}\",\"workDate\":\"{normalized}\",\"cellsCreated\":{cellsCreated},\"ordersCreated\":{ordersCreated},\"itemsCreated\":{itemsCreated},\"assignmentsCreated\":{assignmentsCreated}}}");
+            var message = $"생성 완료 — 배치 {req.BatchNo}(#{req.WaveNo}), 미할당 오더 신규 {ordersCreated}건"
+                        + $"·항목 신규 {itemsCreated}건 (요청 {req.PlannedQty}건). 목적지 배정은 설비 관리에서 수행하세요.";
+            Audit("B2C_GENERATE", OperationLogLevel.INFO, sorterChuteNo: null, destinationId: null,
+                $"{{\"batch\":\"{Esc(req.BatchNo)}\",\"workDate\":\"{normalized}\",\"waveNo\":{req.WaveNo},\"ordersCreated\":{ordersCreated},\"itemsCreated\":{itemsCreated}}}");
             return B2cManagementResponse.Ok(message, counts);
         }
         catch
@@ -263,6 +184,30 @@ public sealed class B2cTestDataService : IB2cTestDataService
             await tx.RollbackAsync(ct).ConfigureAwait(false);
             throw;
         }
+    }
+
+    // ── 생성 결과 view: 최근 배치 요약(미할당 오더 수 포함) ────────────────────────
+    public async Task<List<B2cBatchSummary>> GetBatchesAsync(int take, CancellationToken ct = default)
+    {
+        var batches = await _db.WorkBatches
+            .OrderByDescending(b => b.Id)
+            .Take(take)
+            .Select(b => new { b.Id, b.WorkDate, b.BatchNo, b.WaveNo, b.Status })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var result = new List<B2cBatchSummary>(batches.Count);
+        foreach (var b in batches)
+        {
+            int orderTotal      = await _db.Orders.CountAsync(o => o.WorkBatchId == b.Id, ct).ConfigureAwait(false);
+            int orderUnassigned = await _db.Orders.CountAsync(o => o.WorkBatchId == b.Id && o.DestinationId == null, ct).ConfigureAwait(false);
+            int itemTotal       = await _db.OrderItems
+                .CountAsync(i => _db.Orders.Any(o => o.Id == i.OrderId && o.WorkBatchId == b.Id), ct).ConfigureAwait(false);
+
+            result.Add(new B2cBatchSummary(
+                b.Id, b.WorkDate, b.BatchNo, b.WaveNo, b.Status.ToString(),
+                orderTotal, orderUnassigned, itemTotal));
+        }
+        return result;
     }
 
     // ── 요약 집계 ───────────────────────────────────────────────────────────────
@@ -475,7 +420,10 @@ public sealed class B2cTestDataService : IB2cTestDataService
     }
 
     // ── operation_log 감사(STATE·OQ8) — 논블로킹 enqueue(fail-safe) ──────────────────
-    private void Audit(string action, OperationLogLevel level, int sorterChuteNo, long? destinationId, string detail)
+    private void Audit(string action, OperationLogLevel level, int? sorterChuteNo, long? destinationId, string detail)
         => _opLog.Log(OperationLogCategory.STATE, action, level,
             sorterChuteNo: sorterChuteNo, destinationId: destinationId, detail: detail);
+
+    // detail JSON 문자열 안전 삽입(배치명 등 자유 입력의 따옴표/역슬래시 이스케이프).
+    private static string Esc(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
 }

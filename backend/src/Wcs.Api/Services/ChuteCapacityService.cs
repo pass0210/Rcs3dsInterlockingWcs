@@ -65,6 +65,24 @@ public interface IChuteCapacityService
     /// DestinationStatusService.ComputeSorter가 DB를 직접 읽는다(인메모리 불요).
     /// </summary>
     void ApplyPauseStateInMemory(long destinationId, bool paused);
+
+    /// <summary>
+    /// 슈트 활성/비활성(IsActive) 인메모리 반영(런타임 전이) — chute 전용(S-B2C-FACILITY FIX ITER 3).
+    /// 설비 관리 비활성화/활성화(SetActiveAsync)가 DB 전이 커밋 후 호출한다. 인메모리 IsActive 를 갱신 +
+    /// OnChuteStateChanged 발화 → GetHold(비활성→Paused) 정합 + DestinationStatusPusher 가 수용상태
+    /// 전이(비활성=2/활성=3)를 IF-08 push 로 발신(레지스트리 일관성). 미등록(소터 등)이면 no-op.
+    /// </summary>
+    void ApplyActiveStateInMemory(long destinationId, bool isActive);
+
+    /// <summary>
+    /// 런타임 신설 슈트를 인메모리 집계에 등록(S-B2C-FACILITY) — 설비 관리 페이지에서 만든 CHUTE 가
+    /// 기동 후에도 GetHold·pause/resume·IF-08 push readiness 에서 즉시 정상 동작하게 한다.
+    /// 기동 시 InitializeFromDbAsync 는 그 시점 DB 슈트만 집계하므로, 런타임 신설 슈트는 이 메서드로
+    /// 등록하지 않으면 GetHold 가 "미등록 → Paused" 로 오분류된다(resume 후에도 push 2 오발신).
+    /// 이미 등록돼 있으면 no-op(멱등 — 재생성/중복 호출 안전). 등록 후 OnChuteStateChanged 발화로
+    /// 푸시 부트스트랩을 유도한다(신규 슈트 수용상태를 RCS 에 알림).
+    /// </summary>
+    void EnsureChuteRegistered(long destinationId, int workFullQty, bool isActive, bool isPaused);
 }
 
 /// <summary>
@@ -361,6 +379,58 @@ public sealed class ChuteCapacityService : IChuteCapacityService, IHostedService
         }
         // 게이트(GetHold)·푸시(DestinationStatusPusher)·STATE 훅 재평가 — 락 밖 발화.
         RaiseChuteStateChanged(destinationId);
+    }
+
+    /// <inheritdoc/>
+    public void ApplyActiveStateInMemory(long destinationId, bool isActive)
+    {
+        _rwLock.EnterWriteLock();
+        try
+        {
+            // CHUTE 집계에 있는 경우만 반영(소터 destId 는 no-op — DB Status/IsActive 로 산출).
+            if (_states.TryGetValue(destinationId, out var state))
+                state.IsActive = isActive;
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+        // GetHold(비활성→Paused)·푸시(수용상태 2/3 전이)·STATE 훅 재평가 — 락 밖 발화.
+        RaiseChuteStateChanged(destinationId);
+    }
+
+    /// <inheritdoc/>
+    public void EnsureChuteRegistered(long destinationId, int workFullQty, bool isActive, bool isPaused)
+    {
+        bool added = false;
+        _rwLock.EnterWriteLock();
+        try
+        {
+            if (!_states.ContainsKey(destinationId))
+            {
+                _states[destinationId] = new ChuteState
+                {
+                    WorkFullQty  = workFullQty,
+                    IsPaused     = isPaused,
+                    IsActive     = isActive,
+                    DepositedQty = 0,   // 신설 슈트 — 투입 이력 0.
+                    InFlightQty  = 0,
+                };
+                added = true;
+            }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+        // 신규 등록 시에만 발화(멱등 — 이미 있으면 상태 무변경·발화 0).
+        // 게이트·푸시(DestinationStatusPusher)가 신설 슈트 수용상태를 재평가·부트스트랩 발신.
+        if (added)
+        {
+            _log.LogInformation("[ChuteCapacity] 런타임 슈트 등록 destId={Id} workFullQty={Qty} active={Active} paused={Paused}",
+                destinationId, workFullQty, isActive, isPaused);
+            RaiseChuteStateChanged(destinationId);
+        }
     }
 
     // ── IF-08 푸시 변화원 통지 — 락 밖에서 발화 ───────────────────────────────

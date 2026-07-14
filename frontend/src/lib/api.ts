@@ -57,6 +57,24 @@ export interface SorterStatus {
   paused: boolean
 }
 
+/** 전 목적지(CHUTE + SORTER_3D) 열거 — GET /api/monitor/destinations(설비 관리·슈트 제어 소스). */
+export interface Destination {
+  id: number
+  chuteNo: number
+  destType: string // "CHUTE" | "SORTER_3D"
+  floor: number | null
+  status: string // "NORMAL" | "PAUSED"
+  isActive: boolean
+  online: boolean
+  ready: boolean
+  full: boolean
+  paused: boolean
+  workFullQty: number | null // CHUTE 전용
+  lastClearedAt: string | null // CHUTE 전용
+  cellTotal: number | null // SORTER_3D 전용
+  cellEnabled: number | null // SORTER_3D 전용
+}
+
 export interface CellStatus {
   cellNo: number
   capacity: number | null
@@ -129,6 +147,8 @@ export const api = {
     getJson<Paged<InFlightPiece>>(`/pieces/in-flight${qs({ take, cursor })}`),
 
   sorters: () => getJson<SorterStatus[]>(`/sorters`),
+
+  destinations: () => getJson<Destination[]>(`/destinations`),
 
   cells: (destId: number) => getJson<CellStatus[]>(`/sorters/${destId}/cells`),
 

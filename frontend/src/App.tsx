@@ -4,6 +4,7 @@ import { MonitorPage } from './pages/MonitorPage'
 import { SortersPage } from './pages/SortersPage'
 import { OpsPage } from './pages/OpsPage'
 import { B2cDataGenPage } from './pages/B2cDataGenPage'
+import { B2cFacilityPage } from './pages/B2cFacilityPage'
 import { DataGeneratorPage } from './pages/DataGeneratorPage'
 import { LogsPage } from './pages/LogsPage'
 import { ComparisonPage } from './pages/ComparisonPage'
@@ -29,8 +30,10 @@ export default function App() {
         <Route path="/sorters" element={<SortersPage />} />
         {/* 페이지 ③ 운영 제어(B2C·소터 제어·F3b) */}
         <Route path="/ops" element={<OpsPage />} />
-        {/* 페이지 ④ B2C 테스트 데이터 생성·초기화(S-B2C-DATAGEN) */}
+        {/* 페이지 ④ B2C 데이터 생성(S-B2C-DATAGEN → 슬림 S-B2C-FACILITY) */}
         <Route path="/b2c/test-data" element={<B2cDataGenPage />} />
+        {/* 페이지 ⑤ B2C 설비 관리(S-B2C-FACILITY): 목적지·셀·오더 할당·슈트 제어 */}
+        <Route path="/b2c/facility" element={<B2cFacilityPage />} />
         {/* B2B 데이터 생성/관리(S-B2B-2b) */}
         <Route path="/data-generator" element={<DataGeneratorPage />} />
         {/* B2B 조회 3화면(S-B2B-3b): 로그 조회 · 결과 비교 · 박스 조회 */}

@@ -1,196 +1,209 @@
-# Sprint Contract — S-B2C-DATAGEN (B2C 테스트 데이터 생성·초기화 페이지)
+# [Sprint Contract] S-B2C-FACILITY — B2C 설비/목적지 관리 페이지(백로그 2b) + 데이터 생성 폼 슬림화(2a)
 
-> 작성: Planner Subagent · 2026-07-13 · 사용자 백로그 2a(승인됨).
-> **WHAT만 정의**(기술 상세는 Generator 판단). 아래 **Open Questions 는 사용자 게이트에서 결정**되어야 착수한다 — 특히
-> 초기화(reset) 의미·범위와 아카이브 정책은 도메인 결정이라 이 계약만으로 확정하지 않는다.
-> 근거 문서: `docs/ERD.md`(17테이블·이력 불변 원칙)·`docs/SPEC.md`·`docs/B2B-DATAGEN.md`(B2B 데이터생성 선례 계약)·
-> `docs/FRONTEND.md`(프론트 스택·단일 라이트 테마)·`scripts/seed-field-20cells.sql`(현재 수동 시드의 형태)·
-> `backend/src/Wcs.Api/Controllers/B2B/TestDataController.cs`(관리 API 패턴)·`frontend/src/pages/DataGeneratorPage.tsx`(페이지 패턴)·
-> `frontend/src/lib/uiMode.ts`·`frontend/src/components/Layout.tsx`(B2C/B2B 토글·NAV).
+> 작성: Planner Subagent · 2026-07-14. 사용자 착수 승인 + 사전 확정 사항 다수(아래 §0) 반영.
+> 근거(직접 확인): 프로젝트 CLAUDE.md · tasks/lessons.md · tasks/workflow-agents.md(계약 템플릿) ·
+> tasks/sprint-feedback.md(S-B2C-DATAGEN Minor) · docs/B2C-DATAGEN.md · docs/FRONTEND.md(§3.1·§3.3) ·
+> 실코드(B2cTestDataService·OpsController·MonitoringController/Queries·DestinationControlService·
+> SorterGatewayRegistry·WcsDbContext·Entities·DbRepositories.QueryDestination·B2cDataGenPage·Layout·OpsControls·ops.ts·b2cTestData.ts).
 
 ---
 
-## 배경 (WHY — 계약 아님, 문맥)
+## 0. 사전 확정 사항 (재질문 금지 — 계약 반영본)
 
-- B2B 에는 데이터 생성·초기화 UI 가 이미 있다(`TestDataController` + `DataGeneratorPage`, 계약=`docs/B2B-DATAGEN.md`).
-  **B2C(실시간 3D 소터)에는 없다** — 현재 B2C 테스트 데이터는 개발자가 `scripts/seed-field-20cells.sql` 을 `sqlcmd` 로 직접
-  실행하고, 재테스트 초기화도 수동 SQL(피스·이력 삭제 + `order_item` 수량 리셋)로 처리한다.
-- RCS(협력사)가 테스트 서버로 연동 테스트 중이며 "데이터 리셋" 요청이 오면 운영자가 UI 에서 처리할 수 있어야 한다.
-- 대상 도메인 모델(`docs/ERD.md`): `destination`(SORTER_3D)·`cell`·`cell_assignment`·`wcs_order`·`order_item`·`piece`·
-  `piece_event`·`sorter_command`. 현재 시드 형태 = 오더/바코드 `0701-CELL-01~NN`, `plannedQty=3`(현장) 또는 대량,
-  소터 destination 1개에 셀 1~N 각 오더 사전 배정(N↔N).
-
----
-
-## Goal
-
-B2C(3D 소터) 도메인 테스트 데이터를 **UI 에서 파라미터로 생성**하고, **재테스트 준비용으로 초기화**할 수 있는
-백엔드 관리 API + React 페이지를 제공한다. 개발자의 수동 `sqlcmd`/수동 삭제 SQL 절차를 운영자가 브라우저에서
-대체할 수 있게 한다. 생성 데이터는 실제 IF-05(RCS→WCS) 투입 판정에서 유효하게 소비 가능해야 하고, 초기화 후에는
-같은 데이터로 재투입(재테스트)이 가능해야 한다.
+1. **역할 분배**: 데이터 생성 페이지(2a, PR #62 병합)는 **"오더/바코드 데이터"만** 생성. **목적지 구성·셀 설정·오더→목적지 할당은 이 스프린트(2b) 설비 관리 페이지**가 담당.
+2. **2a 생성 폼 재설계**: 파라미터 **5개만** — 작업일자·배치명·차수·계획수량·바코드 접두. 생성 결과 = **목적지 미할당 오더**(할당 전 IF-05 라우팅은 §4). 기존 generate 의 소터/셀 자동생성 + N↔N 배정 **제거**(설비 관리로 이관).
+   - ✅ **Planner 코드 확인 결과: 마이그레이션 불필요.** `WcsOrder.DestinationId`·`DestAssignType` 는 이미 nullable(`WcsDbContext` 의 `IsRequired(false)`, Entities 의 `long?`/`DestAssignType?`). 미할당 오더는 **FK 를 세팅하지 않는 코드 변경만**으로 성립 — 양 provider 스키마 무변경(사전 확정의 조건부 마이그레이션 발동 안 함).
+3. **설비 관리 페이지(2b) 3+1 기능**:
+   a. **목적지 구성**: 소터(SORTER_3D)·슈트(CHUTE) 생성/수정/활성화. DB 목적지 레코드 수준(소터 Transport 연결은 appsettings 소관 — DB 레벨만).
+   b. **소터별 셀 설정**: 셀 레이아웃/Capacity/Enabled (현재 seed SQL 로만 하던 것을 UI 로).
+   c. **오더→목적지/셀 할당**: 미할당 오더를 소터(+셀) 또는 슈트에 할당(슈트행 오더 할당이 현재 UI 불가 갭).
+   d. **슈트 제어 UI**(F3b 이연분): 슈트 clear(O1) + pause/resume — **백엔드는 OpsController 에 이미 존재**(코드 확인 완료), 프론트 결선만. 선행: **전 목적지 열거 API `GET /api/monitor/destinations` 신설**(FRONTEND.md §3.1 계획됐으나 미구현 — 코드 확인 완료).
+4. **혼합 토폴로지 E2E(필수 슬롯)**: **소터 1(chuteNo=1) + 일반 슈트 chuteNo 2~9** 를 UI 로 구성, 오더를 슈트/소터 양쪽에 할당해 **IF-05 가 각각 올바르게 라우팅**(슈트행 OK · 소터행 OK+셀), 슈트 제어(pause 시 슈트도 IF-08 푸시 발신 · IF-05 정책 반영)를 E2E 로 입증.
 
 ---
 
-## Implementation Scope
+## 1. Goal
 
-### A. 백엔드 — B2C 테스트 데이터 관리 API (프론트 전용 · RCS 계약 아님)
-1. **신규 컨트롤러 + 서비스** — B2B `TestDataController`/`ITestDataService` 패턴을 따르되 **B2C 모델(오더·아이템·셀 배정·
-   피스·이력)** 에 맞게. 라우트 접두는 기존과 무충돌해야 한다(B2B `/api/test-data`·RCS `/api/v1`·`/api/monitor`·`/api/ops`
-   와 겹치지 않게 — 권고 `/api/b2c/test-data/*`, 정확 세그먼트는 OQ7). 관리 액션 응답 = `{status:"S"|"F", message, ...counts}`,
-   조회 = 원시 JSON(camelCase). 프론트 성공 판정은 `res.ok && body.status==="S"`(200 F 를 성공 오인 금지 — B2B-DATAGEN §7.1 함정).
-2. **엔드포인트(계약)** — 아래 3종이 코어(상세는 OQ 반영):
-   - `POST …/generate` — 오더+아이템(바코드)+셀 배정 생성(파라미터화). 생성 로직은 순수 함수로 분리(I/O 의존 최소·테스트 가능, 절대규칙 #8 정신).
-   - `GET  …/summary`  — 현재 B2C 테스트 데이터 상태 요약(소터/셀/오더/수량/진행중 피스 집계).
-   - `POST …/reset`    — 재테스트 준비 초기화(OQ1·OQ2·OQ3 의미에 따름).
-   - (선택) `GET …/detail?destinationId=` — 소터별 셀·배정·오더 상세 그리드용.
-3. **생성 알고리즘(WHAT)** — 파라미터: 대상 소터(destinationId 또는 sorterChuteNo), 셀 범위/개수(또는 cellNos),
-   `plannedQty`, 바코드/오더 패턴(현재 `0701-CELL-NN` 규약 재현 또는 파라미터화 — OQ4·OQ5), 배치 식별(workDate/batchNo/waveNo).
-   셀↔오더 배정 규칙(현재 N↔N 결정적 배정)·멱등성 여부는 OQ4 확정값 기준. 생성이 `destination`/`cell`(Capacity·Enabled)까지
-   만드는지 시드 전제인지 = OQ6.
-4. **파괴 작업 감사** — reset(및 필요 시 generate)은 `operation_log` 에 1행 기록(카테고리/액션 = OQ8; 권고: 기존 `STATE`
-   재사용으로 마이그레이션 0). 실패/거부도 기록. B2C `OpsController` 의 `IOperationLogger` 사용 패턴 재사용.
-5. **DI 배선** — 신규 서비스 `AddScoped` append(기존 배선 무접촉). 컨트롤러가 판정/PLC 를 직접 호출하지 않음.
-
-### B. 프론트 — B2C 데이터 생성·초기화 페이지
-6. **신규 페이지** — 생성 폼 + 현재 상태 요약 + 초기화 버튼. 기존 `DataGeneratorPage`/`sections/*` 및 `components/ui`
-   (Card·Button·Select·`ConfirmDialog`·`useToast`·TanStack Query) 재사용. 신규 UI 프리미티브 도입 최소화.
-7. **라우트 등록** — `App.tsx` 에 신규 경로 추가.
-8. **사이드바 등록** — `Layout.tsx` `NAV_SETS` 에 항목 추가. **B2C vs B2B 메뉴 세트 배치 = OQ6**(권고: B2C 세트 — B2C 도메인
-   데이터이므로). bizDay 전역 상태(`uiMode`)와의 관계 정의(B2C 데이터는 workDate 기반 — OQ5 반영).
-9. **파괴 작업 가드(UI)** — 초기화 = danger `ConfirmDialog` + 대상/삭제 범위 명시("되돌릴 수 없음"). 진행 중(in-flight) 작업 존재 시 경고 표기(OQ3).
-
-### C. 스키마·마이그레이션 (조건부)
-10. **기본 = 마이그레이션 0**(권고 reset 이 하드삭제+수량 UPDATE 면 스키마 무변경). **OQ1 에서 아카이브(soft-delete) 정책이
-    선택되면** `piece`/`piece_event`/`sorter_command` 에 `archived_at` 추가 → 양 provider 마이그레이션
-    (`Wcs.Migrations.SqlServer`·`Wcs.Migrations.Sqlite`, 직전 `AddHotPathIndexes` 선례) + B2C 17테이블 add-only. **OQ1 결정 후** 확정.
-
-### D. 문서 (선택 · 권고)
-11. 게이트에서 확정된 결정을 `docs/B2C-DATAGEN.md`(B2B-DATAGEN.md 대응물)에 캡처 — 후속 Generator/Evaluator 의 단일 근거.
+운영자가 브라우저에서 **목적지(소터/슈트)를 구성하고, 소터 셀을 설정하고, 미할당 오더를 목적지/셀에 할당하고, 슈트를 제어**할 수 있는 **B2C 설비 관리 페이지**를 제공한다. 동시에 **데이터 생성 페이지를 "오더/바코드만 만드는" 5-파라미터 폼으로 슬림화**해 생성과 목적지 배정의 책임을 분리한다. 결과적으로 **혼합 토폴로지(소터 1 + 슈트 2~9)** 를 UI 만으로 구성·배정·제어할 수 있고, IF-05 가 각 목적지 타입으로 정확히 라우팅됨을 E2E 로 입증한다.
 
 ---
 
-## Evaluation Criteria (가중치)
+## 2. Implementation Scope (Generator 구현 대상)
 
-1. **도메인 정합성 (★★★)** — 생성 데이터가 ERD 모델·현재 시드 형태와 일치하고 **IF-05 판정에서 유효 오더로 소비 가능**.
-   초기화가 게이트 확정 의미(OQ1·OQ2·OQ3)를 정확히 구현 — 삭제/리셋 범위가 스펙과 일치, 재테스트 가능 상태 복원.
-2. **파괴 작업 안전성 (★★★)** — 확인 다이얼로그·범위 명시·진행 중 작업 가드(OQ3)·전수 `operation_log` 감사. 무접촉 경계
-   준수(실 PLC/COM1/Azure/사용자 DB·PlcGateway/Core/핸드셰이크 diff 0).
-3. **패턴 일관성 (★★)** — B2B 관리 API/페이지 패턴 및 기존 프론트 프리미티브 재사용. 하드코딩 금지(절대규칙 #7 — 포트·수량·패턴 등).
-4. **회귀 0 + 아키텍처 (★★)** — 기존 330 테스트 GREEN 불변 + 신규 단위/통합/E2E. 신규 API 별도 라우트·무충돌. tsc/eslint 0·콘솔 error 0.
+> ⚠ 아래 **API 표면(경로·필드명)** 은 백엔드/프론트 두 병렬 모듈이 공유하는 **좌표 계약(coordination contract)** 이다 — 두 모듈이 이 표면에 맞춰 독립 빌드 후 fan-in 통합한다. 내부 구현(서비스 구조·컴포넌트 분해)은 Generator 재량. 필드명/경로는 프론트 클라이언트가 미러하므로 **변경 시 양 모듈 동시 반영**.
 
----
+### A. 백엔드 (모듈 A — `backend/src/Wcs.Api/**`, `docs/**`)
 
-## Completion Conditions (통과 최소 조건)
+**A1. 생성 슬림화 (`B2cGenerateRequest` + `GenerateAsync`)**
+- `B2cGenerateRequest` 를 5-파라미터로 축소: `workDate`·`batchNo`·`waveNo`·`plannedQty`(→ OQ-4 확정 의미)·`barcodePrefix`. **제거**: `sorterChuteNo`·`cellCount`·`cellCapacity`.
+- `GenerateAsync`: work_batch(멱등) + **미할당 오더 N건**(`DestinationId=null`·`DestAssignType=null`) + order_item(barcode=`{prefix}-{NN}`) 생성. **소터/셀/cell_assignment 생성 제거.** 기존 실적(reserved/sorted) 보존·멱등 유지.
+- `B2cConstants`: `cellCount`/`cellCapacity`/`sorterChuteNo` 관련 상한 정리. `OrderPrefixRegex`·`WorkDateRegex` 유지.
+- **마이그레이션 없음**(§0-2 확인). 스키마 무변경.
 
-- 생성 API 로 만든 데이터가 `summary`/모니터링에서 확인되고, **IF-05 로 실제 투입 판정에 사용 가능**(피스 예약·`order_item.reserved` 증가) — Sim3ds TCP + SQLite 로 실증.
-- 초기화 API 실행 후 재테스트 가능 상태(게이트 확정 의미대로: 권고 기본 = 피스·이력 제거 + `reserved/sorted=0` + 배정 유지)가 실증되고, 같은 데이터로 재투입 성공.
-- 파괴 작업이 확인 다이얼로그 없이 실행되지 않으며 `operation_log` 에 기록됨. 진행 중 작업 가드 동작(OQ3 확정대로).
-- 프론트 페이지가 확정 메뉴 세트에서 진입되고 생성→요약갱신→초기화 플로우가 브라우저에서 동작(콘솔 error 0).
-- `dotnet test backend/Wcs.sln` 회귀 0(기존 330 + 신규). 무접촉 경계 git diff 0. 마이그레이션은 OQ1 결정에 따라 0 또는 양 provider 동일 델타.
+**A2. 목적지 열거 API (신설)**
+- `GET /api/monitor/destinations` — `MonitoringController` + `IMonitoringQueries`(AsNoTracking) 에 추가. 전 목적지(CHUTE + SORTER_3D) 열거: `id·chuteNo·destType·floor·status·isActive` + CHUTE 는 `workFullQty·lastClearedAt`(chute_detail), SORTER_3D 는 `cellTotal/cellEnabled`. readiness(online/ready/full/paused)는 기존 `DestinationStatusService` 재사용(가능 시). 읽기 전용·부수효과 0.
 
----
+**A3. 설비 관리 API (신설 — 목적지 CRUD·셀 설정·오더 할당)**
+- 라우트 접두 `/api/b2c/facility`(기존 `/api/v1`·`/api/test-data`·`/api/monitor`·`/api/ops` 무충돌). 관리 액션 응답 = 기존 `B2cManagementResponse`(`{status:"S"|"F", message, counts}`) 재사용, 조회는 원시 JSON(camelCase). 성공 판정 = `res.ok && status==="S"`.
+- 좌표 계약(제안 표면 — 필드명/경로 프리즈):
 
-## Parallel Modules
+  | 메서드 | 경로 | 용도 |
+  |---|---|---|
+  | POST | `/api/b2c/facility/destinations` | 목적지 생성(`chuteNo·destType·floor?·workFullQty?`) — 소터/슈트 |
+  | POST | `/api/b2c/facility/destinations/{id}/activate` | 활성/비활성 토글(`isActive`) — 파괴/변경 가드(OQ-2) |
+  | POST | `/api/b2c/facility/destinations/{id}` (또는 PATCH) | 수정(`status`·`floor`·`workFullQty` 등, chuteNo/type 변경 제약은 OQ-2) |
+  | POST | `/api/b2c/facility/sorters/{id}/cells` | 소터 셀 설정(레이아웃/Capacity/Enabled — OQ-1 확정 형태) |
+  | GET | `/api/b2c/facility/orders?assigned=false&batchId=` | 미할당(또는 전체) 오더 목록(할당 UI 소스) |
+  | POST | `/api/b2c/facility/orders/assign` | 오더→목적지 할당(`orderId·destinationId·cellNo?`) — 소터면 cell_assignment 생성 |
+  | POST | `/api/b2c/facility/orders/unassign` | 할당 해제/재배정(OQ-3 확정) |
 
-N/A (single module). 프론트가 백엔드의 **delivered API 형상**에 의존하므로(B2B 가 2a 백엔드→2b 프론트로 분리한 이유와 동일)
-한 Generator 가 **백엔드 우선 → 프론트** 순으로 진행. 단일 파일 이중 기록 위험 없음.
+- 할당 규칙: 오더에 `DestinationId` + `DestAssignType=MANUAL` + `DestAssignedAt` 세팅. 소터 대상이면 `(cell_id) WHERE released_at IS NULL` 부분 유니크 준수하며 `cell_assignment` 생성. 슈트 대상이면 셀 없음.
+- **파괴/변경 안전**(사전 확정): 비활성화·재배정 등은 트랜잭션 + operation_log 감사(카테고리 `STATE`, action 예 `B2C_DEST_CREATE`/`B2C_DEST_DEACTIVATE`/`B2C_ORDER_ASSIGN` — 기존 STATE 재사용, 마이그레이션 0). 실패/거부도 전수 기록.
 
-## Evaluation Dimensions
+**A4. 슈트 제어 (백엔드 무변경 — 기존 API 소비)**
+- `OpsController` 의 O1 `POST /api/ops/chutes/{destId}/clear`, O2 `.../destinations/{destId}/pause`, O3 `.../resume` **이미 존재**(코드 확인). 백엔드 신규 작업 0 — 프론트 결선만(모듈 B). `DestinationControlService` 가 CHUTE pause/resume 을 인메모리(`ApplyPauseStateInMemory`)까지 반영 + `OnTransition` 발화 → `DestinationStatusPusher` 가 IF-08 UpdateChuteState 발신. **런타임 생성 슈트의 인메모리 반영 가능 여부는 Generator 가 구현 중 확인**(§4 제약).
 
-functional only. 파괴 작업 안전성은 Evaluation Criteria #2 + Step 4.5 코드리뷰(보안/SQL injection/삭제 범위)로 커버 — 별도 병렬 차원 불요.
+**A5. 문서 갱신**
+- `docs/B2C-DATAGEN.md`: 생성=오더/바코드만(목적지 미할당)·설비 관리로 목적지/셀/할당 이관 반영. reset 의 CANCELLED 비재개 명시(S-B2C-DATAGEN Minor #3 흡수).
+- `docs/FRONTEND.md` §3.1: `GET /api/monitor/destinations` 를 "계획"→"구현" 표기. §3.3 슈트 제어 프론트 결선 완료 반영.
 
-## Detected Project Type
+### B. 프론트엔드 (모듈 B — `frontend/src/**`)
 
-**Full-stack** — 리포에 브라우저 진입점(`frontend/` React SPA + `index.html`)과 서버 라우트/컨트롤러(`backend/src/Wcs.Api/Controllers/*`)가
-같은 리포에 공존. 이 스프린트는 두 표면(신규 React 페이지 + 신규 API 컨트롤러)을 모두 만진다.
+**B1. 데이터 생성 페이지 슬림화 (`B2cDataGenPage.tsx` + `b2cTestData.ts`)**
+- 생성 폼을 5-필드로 축소(작업일자·배치명·차수·계획수량·바코드 접두). `B2cGenerateRequest` 인터페이스 미러 갱신. 클라 검증(정규식·정수·상한) 유지·불필요분 제거.
+- 생성 결과 view: 생성된 **미할당 오더/배치** 목록(운영자가 무엇이 만들어졌는지 확인). 목적지 요약/셀 상세/초기화 패널은 **설비 관리 페이지로 이관**(B2).
 
----
+**B2. 설비 관리 페이지 (신설 — `설비 관리` NAV)**
+- 목적지 구성: 목적지 목록(소터/슈트) + 생성 다이얼로그 + 활성/비활성 토글(ConfirmDialog + 작업자 감사). 소터별 셀 설정 패널(레이아웃/Capacity/Enabled — OQ-1 형태).
+- 오더 할당: 미할당 오더 목록 → 목적지(+셀) 선택 → 할당. 재배정/해제(OQ-3).
+- 슈트 제어: 슈트 목록 대상 clear(O1) + pause/resume(O2/O3) — 확인 다이얼로그 + 작업자 이름 필수(기존 `OpsControls` 패턴 재사용). `ops.ts` 에 `clearChute`·`pauseChute`/`resumeChute`(destId 로 pause/resume 재사용) 추가.
+- 목적지 요약 + **재테스트 초기화(reset)** 이관: 목적지-스코프 액션이므로 설비 관리 페이지에 배치(기존 `/api/b2c/test-data/reset` 계약·force 경로 재사용, 백엔드 무변경).
+- 재사용 프리미티브: `Card`·`Button`·`Select`·`Dialog`/`ConfirmDialog`·`useToast`·`Badge`·TanStack Query·`StateMessage`. 신규 UI 프리미티브 0. 단일 라이트 테마.
 
-## Verification Scenarios (Full-stack — 실재현, 최종 DOM/헬스핑 대체 불가)
+**B3. API 클라이언트**
+- `b2cFacility.ts`(신설) — A2·A3 표면 미러(성공 판정 함정·200 F 처리는 기존 `b2cTestData.ts` 패턴 준용).
+- `ops.ts` — `clearChute(destId, op)` 등 슈트 제어 추가(기존 pause/resume 은 destId 로 CHUTE 에도 동작).
+- `api.ts`/`queries.ts` — `GET /api/monitor/destinations` 훅.
 
-### === Web/UI (프론트 표면) ===
-- **각 표면 기본 상태**: B2C 데이터 생성 페이지 최초 로드 — (좌) 생성 폼(대상 소터·셀 범위/개수·plannedQty·바코드/오더 패턴·배치),
-  (중/우) 현재 상태 요약(소터·셀 총/가용/배정·오더 상태별 수·reserved/sorted 합·진행중 피스 수), 초기화 버튼. 데이터 없을 때 빈 상태 안내 문구.
-- **스프린트가 도입하는 대체 상태**: (1) 생성 성공 → 성공 토스트 + 요약 즉시 갱신, (2) 초기화 클릭 → danger 확인 다이얼로그(삭제 범위·되돌릴 수 없음 명시),
-  (3) 진행 중(in-flight) 작업 존재 → 경고 배지/문구(OQ3 확정대로), (4) 조회 로딩 상태.
-- **빈/에러 상태**: 대상 소터/셀 없음 안내 · 생성 파라미터 검증 실패 토스트(범위/패턴/개수) · "초기화할 데이터 없음" · API 실패 토스트(`{status:"F", message}` 노출).
-- **다크모드 변형**: **N/A** — 프로젝트는 단일 라이트 테마(`docs/FRONTEND.md`·`frontend/src/index.css` "다크모드 없음" 명시).
-- **핵심 인터랙션 플로우**: 폼 입력 → 생성 → 요약이 오더 N개·셀 배정 N건·plannedQty 반영으로 갱신 → 초기화 → 확인 → 요약이 재테스트 준비 상태(진행중 피스 0·reserved/sorted 0·배정 유지)로 갱신.
+**B4. 내비게이션**
+- `Layout.tsx` `NAV_SETS.b2c` 에 `설비 관리`(예 `/b2c/facility`) 항목 추가(모니터링·3DS 워드·운영 제어·데이터 관리 옆). 발견가능성 = Evaluator 검증 대상.
 
-### === Backend/API (서버 표면) ===
-- **엔드포인트(method + path)**: `POST /api/b2c/test-data/generate` · `GET /api/b2c/test-data/summary` · `POST /api/b2c/test-data/reset` (+ 선택 `GET /api/b2c/test-data/detail`). 정확 접두는 OQ7.
-- **엔드포인트별 happy path**:
-  - `generate`: 유효 파라미터(대상 소터·셀 N·plannedQty·패턴) → 200 `{status:"S"}` + 생성 건수(오더/아이템/배정). DB 에 실제 행 생성 확인.
-  - `summary`: → 현재 집계 원시 JSON(데이터 없으면 0/빈 배열).
-  - `reset`: 대상 지정 → 200 `{status:"S"}` + 처리 건수(삭제/리셋). DB 상태가 확정 의미대로 전이.
-- **엔드포인트별 관련 에러 케이스**(적용 대상만 — 패딩 금지):
-  - `generate` **400**: 파라미터 검증 실패(셀 범위/개수 상한·패턴 형식) → `{status:"F", message}`.
-  - `generate` **200 F**: 대상 소터 미존재/비 SORTER_3D → 비즈니스 실패.
-  - `reset` **가드**(OQ3): 진행 중 작업 존재 시 `force` 없이는 거부(200 F 또는 409 — OQ3 확정). 데이터 파괴 안 됨을 단언.
-  - `reset` **200 F**: 초기화 대상 0건 / 대상 미지정.
-
-### === End-to-end (2+ 계층 교차 — Sim3ds TCP + SQLite, 실 PLC/사용자 DB 무접촉) ===
-- **생성→소비→초기화→재테스트 데이터 플로우**: (1) `generate` API 로 오더+아이템+셀 배정 생성 → (2) 그 바코드로 **IF-05(RCS→WCS) 호출**
-  → 유효 오더로 판정되어 `piece` 예약(RESERVED) + `order_item.reserved` 증가(생성 데이터 실사용 가능 입증) → (가능 시 IF-10 핸드셰이크로 `sorter_command`/`sorted` 생성)
-  → (3) `reset` API → 진행중 피스·이력 제거 + `reserved/sorted=0` + 배정 유지(확정 의미대로) → (4) 같은 바코드로 재차 IF-05 → 재예약 성공(재테스트 가능).
-  프론트 페이지에서 (1)·(3) 을 실제 클릭으로도 재현(브라우저 검증).
+### C. 이월 Minor 처리 (관련 파일 접촉 시 함께 — 비차단)
+- S-B2C-DATAGEN Minor: ① 프론트 셀 개수 상한 200 하드코딩 미러 → 상수화(설비 셀 설정 접촉 시). ④ `GetSummaryAsync` 소터당 N+1(요약 이관 시 개선 후보). ② 인프라 예외 operation_log 미기록. ⑥ B2B 모드에서 `/b2c/*` 직접 진입 배너 제목 cosmetic.
+- S-HARDENING-1 이월 Minor: 관련 파일 접촉 시 함께 처리 후보(coordinator 판단 — 강제 아님).
 
 ---
 
-## Open Questions (★ 사용자 게이트에서 결정 — 미해결 시 착수 금지)
+## 3. Evaluation Criteria (Evaluator 판정 기준 — Full-stack)
 
-> 도메인/정책 결정이라 Planner 가 임의 확정하지 않는다. 각 항목에 **권고(default)** 를 제시하되, 사용자가 게이트에서 확정한다.
-
-- **OQ1 — 초기화 의미·아카이브 정책 (가장 중요)**: 재테스트 준비 reset 이 `piece`/`piece_event`/`sorter_command` 를
-  **(A) 하드삭제** 하고 `order_item.reserved/sorted` 를 0 으로 UPDATE 할지(= 현재 개발자 수동 SQL 재현, 마이그레이션 0),
-  **(B) 아카이브(soft-delete)** 로 보존할지(= B2B reset 이 사용자·사수 확정으로 채택한 `archived_at` 패턴, 단 B2C 3테이블에
-  `archived_at` 신설 + 양 provider 마이그레이션 필요). **긴장 지점**: ERD 원칙 3 은 `piece_event`/`sorter_command` 를
-  **append-only 이력(UPDATE 금지)** 으로 규정 — 하드삭제는 "테스트 데이터 초기화" 성격상 정당화되나 이력 불변 원칙과 상충하고,
-  B2B 는 동일 긴장에서 (B) 를 택했다. **권고: (A) 하드삭제**(테스트 데이터·재테스트 목적·수동 SQL 충실 재현·마이그레이션 0).
-  사용자가 B2B 와의 정책 일관성을 우선하면 (B).
-- **OQ2 — 초기화 범위**: reset 이 (a) 대상 소터/배치 데이터만, (b) 전체 B2C SORTER 데이터, (c) 선택 배치 목록을 지우는지.
-  그리고 `wcs_order`/`cell_assignment` 자체는 **보존**(수량만 리셋·배정 유지 → 즉시 재테스트)인지, 오더까지 제거인지.
-  **권고: 대상 소터 지정 + 오더·배정 보존(수량 리셋), 피스·이력만 제거** — 수동 SQL·재테스트 편의와 정합.
-- **OQ3 — 진행 중 작업 가드**: reset 시 in-flight 피스(status ∈ QUERIED/RESERVED/PERMITTED/CELL_ASSIGNED/LOADED)나
-  진행 중 핸드셰이크가 있을 때 (a) 차단(fail-loud), (b) 경고 후 `force` 로만 허용, (c) 무조건 진행. **권고: (b)** — 기본 거부 +
-  명시 force 확인. (핸드셰이크 런타임 상태는 DB 만으로 완전 판정 불가 → in-flight 피스 존재로 근사.)
-- **OQ4 — 생성 파라미터·멱등성**: 파라미터 집합(셀 개수/범위·plannedQty·capacity·배치·패턴)의 확정 목록과, 생성이
-  시드처럼 **멱등**(재실행 시 카운트 불변)인지 **가산**(매번 새 오더 추가)인지. **권고: 멱등 upsert**(시드 SQL 과 동형, N↔N 결정적 배정).
-- **OQ5 — 바코드/오더 규약**: 현재 `orderNo == barcode == 0701-CELL-NN` 결합을 유지할지, 바코드 패턴을 별도 파라미터로 열지.
-  workDate(bizDay 전역)·배치명(`FIELD-16` 등) 파생 규칙. **권고: 현재 규약 재현 + 배치/일자 파라미터화**.
-- **OQ6 — destination/cell 생성 범위 & 메뉴 세트**: 생성이 `destination`(SORTER_3D)·`cell`(Capacity/Enabled)까지 만드는지,
-  시드로 존재한다고 전제하는지. 페이지가 **B2C 메뉴 세트** vs B2B 세트 vs 양쪽 중 어디에 놓이는지. **권고: 셀/소터 없으면
-  생성(시드 SQL 동작 흡수), 페이지는 B2C 세트**(B2C 도메인 데이터). bizDay 전역 상태 연동 여부도 여기서 확정.
-- **OQ7 — 라우트 접두**: `/api/b2c/test-data/*`(권고) vs 다른 세그먼트. 기존 `/api/test-data`(B2B)·`/api/v1`(RCS)·`/api/monitor`·`/api/ops` 무충돌 필수.
-- **OQ8 — operation_log 카테고리**: reset 감사를 기존 `STATE` 재사용(마이그레이션 0·권고) vs 신규 카테고리(CHECK 제약 변경 → 양 provider 마이그레이션). **권고: STATE 재사용**.
+- **통합 품질(★★★)**: API 계약 정합(백엔드 DTO ↔ 프론트 클라이언트 필드명/형상 일치), IF-05 라우팅 정확성(슈트/소터 분기), 슈트 제어 결선(clear/pause/resume → 백엔드 → IF-08 push). 레이어 경계 갭 0.
+- **파괴 작업 안전성(★★★)**: 목적지 비활성화·오더 재배정·reset 의 가드(OQ-2/OQ-3 확정 규칙 준수)·감사 전수 기록(operation_log STATE + 실패/거부 포함)·아카이브 행 제외 회귀 0(reset 계약 불변)·하드삭제 0. 확인 다이얼로그(범위·비가역·작업자 귀속) 실동작.
+- **레이어별 품질(★★)**: (프론트) 밀집 운영툴 톤 일관·발견가능성·상태(로딩/빈/에러) 처리·콘솔 0. (백엔드) RESTful 네이밍 일관·검증(400)·에러 응답 구조·트랜잭션·멱등.
+- **회귀 0 + 크래프트(★★)**: 기존 스위트 GREEN(비-B2C 330 불변, B2C 테스트는 슬림 계약에 맞춰 갱신 — 후술), tsc/eslint 0, 무접촉 경계 준수, 상수 외부화(절대규칙 #7).
 
 ---
 
-## Constraints / 무접촉 (절대)
+## 4. 현실적 제약 (Generator 유의 — 코드 확인 기반)
 
-- **무접촉 코드**: `Wcs.PlcGateway`·`Wcs.Core`·`HandshakeOrchestrator` diff 0. Modbus 레지스터 맵 불변. 컨트롤러가 Modbus/판정 직접 호출 금지(절대규칙 #1·#8).
-- **무접촉 환경**: 실 3DS PLC/COM1/Azure/사용자 로컬 DB 무접촉. 검증은 **Sim3ds TCP + SQLite** 만.
-- **검증 포트(하드코딩 금지 — 동적/설정 기반)**: 평가자 backend `:5215`/Sim `:1512`/Vite `:5190`대(`--strictPort`), 생성자 backend `:5216`/Sim `:1513`/Vite `:5191`대. **`:5205`/`:1502` 는 사용자 소유 — 사용 금지**.
-- **하드코딩 금지**(절대규칙 #7): 포트·수량·패턴·타이밍은 파라미터/설정.
-- **마이그레이션**: 필요 시(OQ1=B) 양 provider 동일 델타 + B2C 17테이블 add-only. 불필요하면 0.
-- **회귀 0**: 현재 330 GREEN 불변. Generator 는 핸드오프 전 전체 스위트 통과 필수.
-- **파괴 작업**: reset 은 Sim3ds/SQLite 상대로만 실증. 사용자 DB·현장 데이터에 절대 실행하지 않음.
+- **소터 런타임 생성**: `MultiSorterGatewayRegistry` 는 **기동 시** DB SORTER_3D ∩ appsettings `Sorters[]`(ChuteNo 매칭)로 번들을 구성한다(불변 딕셔너리). UI 로 신규 SORTER_3D destination 을 만들어도 **재기동 + appsettings 항목 없이는 폴링/핸드셰이크가 시작되지 않는다**(appsettings 누락 시 기동 fail-loud — lessons 2026-07-03). ⇒ **혼합 토폴로지 E2E 는 이미 appsettings/Sim3ds 에 배선된 소터 chuteNo=1 을 사용**하고, **신규 소터 destination 생성은 DB 레코드 수준까지만 검증**(재기동 후 실 폴링은 스코프 아웃/후속). UI 는 "소터 신설은 재기동 후 폴링 시작" 을 명시(운영자 오해 방지).
+- **슈트 런타임 생성**: 신규 CHUTE 는 DB 레코드 즉시 **IF-05 라우팅 유효**(`QueryDestination` 이 DB 직독). 단 `ChuteCapacityService` 의 인메모리 FULL 추적은 기동 시 1회(`InitializeFromDbAsync`) 구성 → 신규 슈트 FULL 추적은 재기동 후 반영. **pause/resume 런타임 전이의 인메모리 반영이 startup-미등록 슈트에도 성립하는지 Generator 가 확인**(성립 안 하면 E2E 의 슈트 pause 는 startup 존재/seed 슈트로 조성). IF-08 push 자체는 `OnTransition` 이 chuteNo 를 실어 발신하므로 인메모리 맵과 독립.
+- **IF-05 미할당 오더 거동**: 오더 `DestinationId=null` → `QueryDestination` 이 **빈 NORMAL 활성 CHUTE 자동 배정(OK)**, 빈 슈트 없으면 **NG NO_DEST**. 즉 "미할당=항상 NG" 아님 — 슈트 존재 시 AUTO 배정된다. 명시 할당(설비 페이지)이 주 경로이며 AUTO 는 슈트 fallback. **CHUTE PAUSED 는 IF-05 에서 OK**(readiness 는 IF-08 push 로 별도 전달 — dispatch/readiness 분리). **SORTER_3D PAUSED 는 IF-05 NG**.
+
+## 5. 무접촉 경계 (사전 확정)
+
+- `Wcs.PlcGateway`·`Wcs.Core` **무접촉**(슈트 제어는 기존 `OpsController` API 호출만·판정/Modbus 직접 호출 0 — 절대규칙 #1·#8).
+- 실 3DS PLC / COM1 / Azure / 사용자 로컬 DB **무접촉** — 검증은 **Sim3ds TCP + SQLite**.
+- 포트(하드코딩 금지 — `.claude/ports.local.json`): 평가자 :5215/:1512/:5190대, 생성자 :5216/:1513/:5191대.
+- 파괴/변경 작업은 ConfirmDialog + operation_log 감사(기존 패턴).
 
 ---
 
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Web/UI, Backend/API, End-to-end). All slots filled: yes.
+## 6. Open Questions (진짜 새로운 도메인 결정 — 사전 확정 재질문 아님)
+
+> 각 항목에 Planner 권고안 포함. 사용자는 확인/수정만 하면 됨.
+
+- **OQ-1 — 소터 셀 "행·열" 모델**: 현 `Cell` 엔티티는 `CellNo·Capacity·Enabled` 만 보유하며 **행/열 컬럼이 없다**(코드 확인). "행·열 설정"이 (a) **UI 전용 대량 생성기**(예 "5행×4열=20셀" → cellNo 1..20 순차 확장, 스키마 무변경) 인지, (b) **영속 물리 레이아웃 속성**(row/col 컬럼 추가 = 양 provider 마이그레이션 + ERD 개정) 인지 결정 필요.
+  - **권고: (a) UI 전용 생성기** — 행×열 입력을 순차 cellNo 로 확장(스키마 무변경·마이그레이션 0). 물리 좌표 표시 요구가 확인되면 (b)를 후속 스프린트로.
+- **OQ-2 — 목적지 비활성화/수정 가드**: 활성 오더·in-flight piece·활성 cell_assignment 가 걸린 목적지를 비활성화/타입·chuteNo 변경할 때 (a) **거부(reset 의 in-flight 가드 선례) + force 로만 강행** 인지 (b) 무조건 허용 인지.
+  - **권고: 비활성화 = in-flight/활성배정 있으면 거부 + force 재확인(reset 선례 일관). chuteNo·destType 변경 = piece 존재 시 불가(정합 위험)·floor/workFullQty/status 만 수정 허용.**
+- **OQ-3 — 오더 재배정**: 이미 할당된 오더를 다른 목적지/셀로 재배정 허용 여부. (a) **미시작 오더만 재배정**(기존 cell_assignment released + 신규 생성) (b) 할당-1회 고정.
+  - **권고: (a) — 예약/적재(reserved/loaded/piece 존재) 전 오더만 재배정 허용, 진행 중이면 거부(force 옵션).**
+- **OQ-4 — "계획수량" 의미**: 슬림 폼의 `계획수량` 이 (a) **생성할 오더/바코드 건수 N**(각 order_item.planned_qty = 1 또는 상수) 인지 (b) **단일 오더의 per-item planned_qty**(그러면 오더 건수 파라미터가 5개에 없음 → 오더 1건) 인지. 현 코드는 `cellCount`(제거됨)가 오더 건수, `plannedQty`(=3)가 per-item 이었다.
+  - **권고: (a) 계획수량 = 생성할 오더/바코드 건수 N**(barcode/orderNo = `{prefix}-{NN}` zero-pad). 각 order_item.planned_qty = 1(단건 테스트 모델). 5-파라미터로 가변 개수의 미할당 오더를 얻는 유일한 정합 해석.
 
 ---
 
-## 게이트 확정 (사용자, 2026-07-13 — 이 섹션이 OQ의 최종 답)
+## 7. Parallel Modules (Generator fan-out — §Multi-Instance Scaling)
 
-- **OQ1 = (B) 아카이브** — reset은 piece/piece_event/sorter_command를 하드삭제하지 않고 `archived_at`
-  soft-delete로 보존(B2B reset 정책 일관). → **스코프 §C 발동**: 3테이블 `archived_at` 컬럼 신설 + 양
-  provider 마이그레이션(AddHotPathIndexes 뒤 체이닝). 모든 활성 조회 경로(IF-05/09/10·모니터·핸드셰이크·
-  집계)가 archived 행을 제외하도록 정합 — **기존 판정·수량 산출이 archived 행을 읽으면 회귀**(셀 currentQty·
-  SorterFull·오더 완료 판정 등 sorter_command COMPLETED JOIN 경로 특히 주의).
-- **OQ2 = 오더·배정 보존** — 수량(reserved/sorted)만 0 리셋, cell_assignment 유지, 대상 소터 지정 가능.
-- **OQ3 = (b) 기본 거부 + force** — in-flight 피스 존재 시 기본 F(사유 반환), UI 경고 확인 후 force 재요청만 허용.
-- **OQ4 = 멱등** — 같은 파라미터 재실행 시 카운트 불변(upsert, N↔N 결정적 배정).
-- **OQ5~OQ8 = Planner 권고 채택** — 현 규약(orderNo==barcode) 재현+배치/일자 파라미터화 / 셀·소터 없으면
-  생성 + B2C 메뉴 세트 / `/api/b2c/test-data/*` / operation_log `STATE` 재사용.
+- **모듈 A (Backend)**: `backend/src/Wcs.Api/**` + `docs/**` — A1~A5(생성 슬림·목적지 열거·설비 API·문서).
+- **모듈 B (Frontend)**: `frontend/src/**` — B1~B4(폼 슬림·설비 페이지·API 클라이언트·NAV).
+- **경계 청정성**: 두 모듈은 **파일을 공유하지 않는다**(`backend/**` vs `frontend/**` disjoint 서브트리). 공유 좌표 = §2 API 표면(경로·필드명) — 본 계약에서 프리즈. worktree 격리 불요(disjoint 경로 = strict partition 로 충분); 만약 worktree 사용 시 lessons(agent-worktree-stale-base) 준수 — 현 HEAD 에서 수동 `git worktree add`.
+- **Fan-in**: 두 모듈 병합 후 **통합 빌드 + §10.3 혼합 토폴로지 E2E** 를 돌린 뒤에야 Evaluator 루프 진입. 미해결 충돌·통합 실패 상태로 fan-in 종료 금지.
+- 각 모듈 로그 → `tasks/sprint-log/{module}.md`, fan-in 이 단일 `## IMPLEMENTATION COMPLETE` 를 `tasks/sprint-log.md` 로 통합.
+
+## 8. Evaluation Dimensions
+
+- **functional only** (단일 Evaluator). 파괴 작업 안전성은 별도 expert pool 없이 §3 기준 내 ★★★ 가중으로 심사(S-B2C-DATAGEN 선례 — 단일 Evaluator 가 TOCTOU 안전성까지 완결). 과도한 machinery 회피.
+
+---
+
+## 9. Detected Project Type: **Full-stack**
+
+(레포 신호: `frontend/`(React+TS+Vite SPA, 브라우저 진입점) + `backend/src/Wcs.Api`(ASP.NET Core Controllers·서버 라우트)가 동일 레포 공존 — 사용자 표현이 아닌 파일 구조로 판정.)
+
+## 10. Verification Scenarios (Full-stack — 필수)
+
+### 10.1 Web/UI 시나리오 (프론트 표면)
+- **U1. 데이터 생성 페이지 기본 상태**: 슬림 5-필드 폼 렌더 + 생성 결과(미할당 오더/배치) view.
+- **U2. 설비 관리 페이지 기본 상태**: 목적지 목록(소터 #1 + 슈트) · 셀 설정 패널 · 미할당 오더 할당 패널 · 슈트 제어 패널 · (이관) 목적지 요약/reset.
+- **U3. Alternate 상태**: 목적지 생성 다이얼로그 · 셀 설정 입력 · 오더 할당 선택 · 파괴 ConfirmDialog(비활성화·재배정·reset·슈트 clear — 범위/비가역/작업자 이름 필수).
+- **U4. 빈/에러 상태**: 목적지 0 · 미할당 오더 0 · API 에러 행(StateMessage).
+- **U5. 다크모드**: **N/A** — B2C 는 단일 라이트 테마(docs/B2C-DATAGEN.md §4).
+- **U6. 발견가능성**: `설비 관리` 가 b2c NAV_SETS 에 노출 + 정상 nav 경로로 도달(직접 URL 아님).
+- **U7. 핵심 상호작용 흐름**: 슈트 생성 → 확인 → 목록 반영 → 오더 할당 → 할당 반영 → 슈트 pause(확인+작업자) → 상태 배지 갱신. 각 단계 번호 스크린샷 + 콘솔 로그(`page.on('console'/'pageerror')` → `screenshots/{sprint}/console.log`, BLOCKING 규칙).
+
+### 10.2 Backend/API 시나리오 (백엔드 표면)
+- **엔드포인트(method+path)**: POST `/api/b2c/test-data/generate`(슬림) · GET `/api/monitor/destinations` · POST `/api/b2c/facility/destinations` · POST `/api/b2c/facility/destinations/{id}/activate` · POST `/api/b2c/facility/sorters/{id}/cells` · GET `/api/b2c/facility/orders?assigned=` · POST `/api/b2c/facility/orders/assign` · POST `/api/b2c/facility/orders/unassign` · (재사용·무변경) POST `/api/ops/chutes/{id}/clear`·`/api/ops/destinations/{id}/pause`·`/resume`.
+- **Happy path(입력→출력 형상)**: generate → 미할당 오더 N(`DestinationId=null`) · counts. destinations → CHUTE+SORTER 열거 형상. facility create → S + 생성 목적지. assign → 오더 `DestinationId`/`DestAssignType=MANUAL` 세팅(+소터면 cell_assignment). chute clear → `last_cleared_at` 갱신 + destination_event(CLEARED,operator).
+- **에러 케이스(적용분만 — pad 금지)**: generate 검증 400(workDate/prefix 인젝션·범위). 중복 chuteNo 생성 → F(또는 409). 미존재 오더/목적지 assign → 404/F. **비활성화 가드(OQ-2)**: in-flight/활성배정 있는 목적지 비활성화 force=false → 거부(F+counts). 비-CHUTE clear → 404. operatorName 공백 → 400.
+
+### 10.3 End-to-end 교차 레이어 (2개 이상 레이어)
+- **E2E-1 (MANDATORY — 혼합 토폴로지)**: (BE+FE+Sim3ds+DB) ① UI 로 슈트 chuteNo 2~9 생성 + 소터 #1 셀 설정(소터 #1 = 기존 appsettings/Sim3ds 배선). ② 슬림 폼으로 미할당 오더 생성. ③ 일부 오더를 **소터 #1(+셀)**, 일부를 **슈트 2~9** 에 할당. ④ 각 바코드로 IF-05(RCS→WCS) 왕복: **소터행 → OK + chuteNo=1 + 셀 선택**, **슈트행 → OK + 해당 chuteNo**. ⑤ 슈트 하나 UI pause → **IF-08 UpdateChuteState(paused/not-ready) 발신 관측** + 그 슈트 오더의 **IF-05 는 여전히 OK**(dispatch/readiness 분리 입증) → resume → push normal. 모두 평가자 포트(Sim3ds :1512 · API :5215 · Vite :5190) + SQLite.
+- **E2E-2 (회귀·통합)**: 독립 `dotnet test backend/Wcs.sln` — 비-B2C **330 GREEN 불변**, B2C 테스트는 **슬림 생성 계약에 맞춰 갱신**(기존 소터/셀 자동생성·N↔N 단언 제거·미할당 오더 단언 추가)한 뒤 GREEN. 전체 스위트 GREEN·exit 0. `npx tsc --noEmit` 0 · `npm run lint` 0 · 브라우저 콘솔 error/warning/pageerror 0.
+
+---
+
+## 11. Completion Conditions (Evaluator PASS 최소 조건)
+
+1. 데이터 생성 폼이 5-파라미터로 슬림화되고 **미할당 오더**(DestinationId=null)를 생성(마이그레이션 0 — order 목적지 이미 nullable).
+2. 설비 관리 페이지에서 **목적지 생성/수정/활성화 · 소터 셀 설정 · 오더→목적지(+셀) 할당 · 슈트 clear/pause/resume** 이 정상 nav 경로로 도달·동작(발견가능성).
+3. `GET /api/monitor/destinations` 신설·프론트 결선(슈트 제어의 destId 소스).
+4. **혼합 토폴로지 E2E(E2E-1) 통과** — 소터행 OK+셀 · 슈트행 OK · 슈트 pause 시 IF-08 push + IF-05 OK(분리) 실증.
+5. 파괴/변경 작업(비활성화·재배정·reset)의 가드(OQ-2/OQ-3) + ConfirmDialog + operation_log 감사(실패/거부 포함) 실동작. reset 아카이브 계약 불변(하드삭제 0·아카이브 행 제외 회귀 0).
+6. 회귀 0: 비-B2C 330 GREEN 불변 + B2C 갱신 테스트 GREEN + 전체 스위트 GREEN, tsc/eslint 0, 브라우저 콘솔 0.
+7. 무접촉 경계 준수(`Wcs.PlcGateway`·`Wcs.Core`·실 PLC/COM1/Azure/사용자 DB diff 0), 상수 외부화(절대규칙 #7).
+8. 문서 갱신: B2C-DATAGEN.md(생성=오더만·이관 반영) · FRONTEND.md §3.1(destinations 구현 표기).
+
+---
+
+> **Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Web/UI 시나리오, Backend/API 시나리오, End-to-end 교차 레이어). All slots filled: yes.**
+>
+> 보강: 절대규칙 점검 — #1 슈트 제어는 기존 OpsController API 호출만(Modbus 직접 0)·#8 판정 로직 무접촉. 마이그레이션 불필요 확인(order 목적지 이미 nullable). 사전 확정 4항 전부 반영·재질문 0. Open Question 은 코드에서 답이 나오지 않는 진짜 새 결정 4건만(셀 행열 모델·비활성화/수정 가드·재배정·계획수량 의미) — 각 Planner 권고안 포함. 혼합 토폴로지 E2E 를 필수 슬롯(E2E-1)으로 명시. Parallel Modules 는 disjoint 파일 경계(backend/frontend)로 선언, 공유 좌표(API 표면)는 계약에서 프리즈. Evaluation Dimensions=functional only(과도 machinery 회피).
+
+---
+
+## 게이트 확정 (사용자, 2026-07-14 — OQ 최종 답)
+
+- **OQ-1 = UI 생성기만**: 행×열 입력 → 순차 cellNo 벌크 생성(스키마 무변경·마이그레이션 0). 행/열은 DB 미저장.
+- **OQ-2 = 거부+force**: 진행 중 피스 있는 목적지 비활성화는 기본 거부·force로만 강행. 피스 이력 있는
+  목적지는 chuteNo/타입 수정 불가(비활성화+신설로 대체).
+- **OQ-3 = 미시작 오더만 재할당**: reserved/sorted=0 ∧ 피스 이력 0인 오더만 목적지 변경 허용.
+- **OQ-4 = 계획수량 = 생성 개수**: 생성 폼 5개 파라미터 유지, 계획수량 = 생성할 바코드/오더 수(각 오더
+  plannedQty=1 고정).
+- **오케스트레이션 노트**: Parallel Modules 선언은 유지하되 실행은 단일 Generator 순차(백엔드→프론트) —
+  프론트 브라우저 검증이 백엔드 신규 API 런타임에 의존 + worktree 스테일 베이스 교훈(agent-worktree-stale-base).
+
+## 게이트 보완 (사용자, 2026-07-14 — iteration 1 평가 중 발견분)
+- **OQ-3 보완 = DENIED 예외**: 거부(DENIED) 피스는 물리 라우팅 0이므로 재할당 가드의 "피스 이력"에
+  카운트하지 않는다 — DENIED 기록만 있는 오더는 할당/재할당 허용(RCS 선조회 NO_DEST → 후할당 흐름 성립).
+  예약/적재(비-DENIED) 이력이 있으면 기존대로 차단.

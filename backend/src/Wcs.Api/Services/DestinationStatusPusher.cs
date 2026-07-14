@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Wcs.Core;
@@ -94,8 +95,10 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
     private readonly ChuteStatePushOptions      _opt;
     private readonly ILogger<DestinationStatusPusher> _log;
 
-    // destination.id → 전이 추적 상태(기동 시 DB로 구성, 이후 불변 키셋).
-    private readonly Dictionary<long, DestState> _states = new();
+    // destination.id → 전이 추적 상태(기동 시 DB로 구성 + 런타임 신설 목적지 등록).
+    // ConcurrentDictionary — 관찰 루프의 foreach 순회 중 RegisterDestination 동시 add 안전
+    // (S-B2C-FACILITY: 설비 관리 페이지가 만든 슈트를 런타임 등록해 pause/resume push 를 가능케 함).
+    private readonly ConcurrentDictionary<long, DestState> _states = new();
 
     // 소터 스냅샷 관찰 타이머 수명.
     private CancellationTokenSource? _cts;
@@ -202,6 +205,36 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
     {
         await StopAsync(CancellationToken.None).ConfigureAwait(false);
         _cts?.Dispose();
+    }
+
+    // ── 런타임 신설 목적지 등록(S-B2C-FACILITY) ────────────────────────────────
+    //
+    // 설비 관리 페이지가 만든 CHUTE 를 전이 추적 대상에 편입한다. 기동 시 BuildStatesFromDb 는
+    // 그 시점 DB 목적지만 등록하므로, 런타임 신설 목적지는 이 메서드로 등록하지 않으면 pause/resume
+    // 전이(OnControlTransition)·capacity 변화(NotifyChuteChanged)가 "미등록 → 무시"로 드롭돼
+    // IF-08 push 가 나가지 않는다.
+    //
+    // DORMANT(BaseUrl 미설정)면 no-op(추적 자체가 비활성). 이미 등록돼 있으면 no-op(멱등).
+    // 등록 직후 Observe 로 현재 수용상태 부트스트랩 발신(신규 목적지를 RCS 에 1회 알림).
+    // ⚠ 호출 전 capacity(ChuteCapacityService)에 먼저 등록돼 있어야 ComputeAccept 가 올바른 값을
+    //   산출한다(GetHold 미등록 → Paused 오분류). 설비 서비스가 순서를 보장한다.
+    public void RegisterDestination(long destinationId, int chuteNo, DestType destType)
+    {
+        if (!_push.IsEnabled) return;
+
+        var st = new DestState
+        {
+            DestinationId = destinationId,
+            ChuteNo       = chuteNo,
+            DestType      = destType,
+        };
+        // 이미 있으면 기존 유지(멱등) — 신규 추가 시에만 부트스트랩 Observe.
+        if (_states.TryAdd(destinationId, st))
+        {
+            _log.LogInformation("[IF-08푸시] 런타임 목적지 등록 destId={Id} chuteNo={ChuteNo} type={Type} — 수용상태 부트스트랩 발신",
+                destinationId, chuteNo, destType);
+            Observe(st);
+        }
     }
 
     // ── 변화원 ① 슈트 콜백 ─────────────────────────────────────────────────────

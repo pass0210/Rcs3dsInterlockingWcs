@@ -51,6 +51,13 @@ export interface SetTgtFloorData {
   operatorName: string
 }
 
+/** O1 슈트 비움 응답 — last_cleared_at 갱신 + destination_event(CLEARED, operator). */
+export interface ClearChuteData {
+  status: string // "cleared"
+  destId: number
+  operatorName: string
+}
+
 /** O5 ClearR · O6 CellAssign 공통 enqueue 응답. */
 export interface EnqueueData {
   status: string // "enqueued"
@@ -123,9 +130,14 @@ export function validateSeq(seq: number): string | null {
   return null
 }
 
-// ── API 표면 (O2/O3 pause·resume, O4 tgtfloor, O5 clear-r, O6 cell-assign) ────
-// 슈트 clear(O1)·CHUTE pause/resume은 F3b 스코프 제외(읽기 열거 엔드포인트 부재 — 후속 이관).
+// ── API 표면 (O1 clear, O2/O3 pause·resume, O4 tgtfloor, O5 clear-r, O6 cell-assign) ──
+// S-B2C-FACILITY: 슈트 제어(O1 clear + pause/resume)를 설비 관리 페이지에 결선(GET /api/monitor/destinations
+// 로 슈트 destId 열거 → 이 표면 호출). pause/resume 은 destId 로 CHUTE 에도 동작(OpsController 공용).
 export const ops = {
+  /** O1 슈트 비움 — POST /api/ops/chutes/{destId}/clear (CHUTE 전용, 비-CHUTE → 404). */
+  clearChute: (destId: number, operatorName: string) =>
+    postOps<ClearChuteData>(`/chutes/${destId}/clear`, { operatorName }),
+
   /** O2 목적지 정지 — POST /api/ops/destinations/{destId}/pause */
   pause: (destId: number, operatorName: string) =>
     postOps<TransitionData>(`/destinations/${destId}/pause`, { operatorName }),
