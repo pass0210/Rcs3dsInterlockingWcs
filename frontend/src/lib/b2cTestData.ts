@@ -40,15 +40,25 @@ export interface CellDetail {
   sortedQty: number | null
 }
 
+/** 생성 요청(2a 슬림 · 5 파라미터). plannedQty = 생성할 오더/바코드 개수 N(OQ-4·각 order_item planned_qty=1). */
 export interface B2cGenerateRequest {
-  sorterChuteNo: number
   workDate: string
   batchNo: string
   waveNo: number
-  cellCount: number
-  cellCapacity: number
   plannedQty: number
-  orderPrefix: string
+  barcodePrefix: string
+}
+
+/** 생성 결과 view — 최근 배치 요약(미할당 오더 수 포함). */
+export interface BatchSummary {
+  batchId: number
+  workDate: string
+  batchNo: string
+  waveNo: number
+  status: string
+  orderTotal: number
+  orderUnassigned: number
+  itemTotal: number
 }
 
 export interface B2cResetRequest {
@@ -112,6 +122,8 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 // ── API 표면 ─────────────────────────────────────────────────────────────────
 export const b2cTestData = {
+  batches: (signal?: AbortSignal) => getJson<BatchSummary[]>(`/batches`, signal),
+
   summary: (sorterChuteNo?: number, signal?: AbortSignal) =>
     getJson<SorterSummary[]>(
       `/summary${sorterChuteNo ? `?sorterChuteNo=${sorterChuteNo}` : ''}`,
@@ -127,6 +139,15 @@ export const b2cTestData = {
 }
 
 // ── TanStack Query 훅(조회) ──────────────────────────────────────────────────
+export function useB2cBatches(refetchInterval: number | false) {
+  return useQuery({
+    queryKey: ['b2c-batches'],
+    queryFn: ({ signal }) => b2cTestData.batches(signal),
+    refetchInterval,
+    placeholderData: keepPreviousData,
+  })
+}
+
 export function useB2cSummary(refetchInterval: number | false) {
   return useQuery({
     queryKey: ['b2c-summary'],

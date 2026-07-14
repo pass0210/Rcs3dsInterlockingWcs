@@ -137,7 +137,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 | `GET /api/monitor/sorters` | 소터 목록 + 현재 스냅샷(Latest) + readiness | `ISorterGatewayRegistry` + `DestinationStatusService` |
 | `GET /api/monitor/sorters/{destId}/cells` | 셀 현황(cell_no·capacity·현재 적재 qty·배정 오더·점유여부) | `cell`·`cell_assignment`·`SorterCellQty`(재사용) |
 | `GET /api/monitor/sorter-commands?destId=&take=` | 적재 결과 이력(c_seq/r_seq·status) | `sorter_command` |
-| `GET /api/monitor/destinations` | 슈트/소터 상태(full/paused/online·work_full_qty·last_cleared_at) | `destination`·`chute_detail`·`DestinationStatusService` |
+| `GET /api/monitor/destinations` | **구현(S-B2C-FACILITY)** — 전 목적지(CHUTE+SORTER_3D) 열거: id·chuteNo·destType·floor·status·isActive + readiness(online/ready/full/paused) + CHUTE work_full_qty/last_cleared_at + SORTER_3D cellTotal/cellEnabled | `destination`·`chute_detail`·`cell`·`DestinationStatusService` |
 | `GET /api/monitor/operation-log?category=&level=&from=&to=&sorterChuteNo=&take=&cursor=` | operation_log 조회(시계열·커서 페이징) | `operation_log`(선두 인덱스 `at` 활용) |
 | `GET /api/monitor/alarms?acked=` | 알람 목록 | `alarm` |
 
@@ -158,6 +158,10 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 **자동 감사(무료)**: 위 큐 쓰기는 컨슈머 `EmitWrite`가 `OnWrite`를 발화 → 이미 operation_log `PLC_WRITE`(`SET_TGTFLOOR`/`CELL_ASSIGN`/`CLEAR_R`/`RMW_D4`)로 **자동 기록**된다(SorterRegistryFactory 구독). 즉 워드 쓰기 감사는 기존 결선을 그대로 탄다. operator_id 귀속은 OpsController가 요청 시 별도 `API`/`OPS` 로그 1행을 남겨 보완(3.4).
 
 ### 3.3 OpsController — 운영자 조작
+
+> **프론트 결선 완료(S-B2C-FACILITY)**: 슈트 clear(O1) + pause/resume(O2/O3)이 **설비 관리 페이지(`/b2c/facility`)** 에 결선됨.
+> `GET /api/monitor/destinations` 로 슈트 destId 를 열거해 목록 행별 제어(clear/pause/resume·활성화)를 확인 다이얼로그 + 작업자 이름으로 수행.
+> `ops.ts` 에 `clearChute(destId, op)` 추가(기존 pause/resume 은 destId 로 CHUTE 에도 동작). 소터 제어(O2~O6)는 `/ops` 페이지(OpsControls) 유지.
 
 | 엔드포인트 | 결선 | 감사 |
 |---|---|---|

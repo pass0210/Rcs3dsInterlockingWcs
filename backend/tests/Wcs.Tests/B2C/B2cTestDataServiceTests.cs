@@ -10,8 +10,12 @@ using Xunit;
 namespace Wcs.Tests.B2C;
 
 // ════════════════════════════════════════════════════════════════════════════
-// S-B2C-DATAGEN 서비스 단위 테스트 — 생성 멱등(OQ4)·초기화 의미(OQ1·OQ2·OQ3)·아카이브 이중카운트 차단.
+// S-B2C-FACILITY 서비스 단위 테스트 — 생성 슬림(미할당 오더·OQ-4)·초기화 의미(불변)·아카이브 이중카운트 차단.
 // TestDb(in-memory SQLite·EnsureCreated) 재사용. 서비스 직접 구동(HTTP 무관) + 캡처 IOperationLogger.
+//
+// ★ 슬림 계약(S-B2C-FACILITY): 생성은 오더/바코드만 만든다(목적지 미할당). 소터/셀/배정 자동 생성 제거 —
+//   설비 관리(B2cFacilityService)로 이관. 초기화(reset) 의미는 불변(아카이브·수량 리셋·오더 재개·가드).
+//   reset 테스트의 소터/셀/오더 셋업은 SeedSorter 헬퍼로 직접 조성(옛 generate 자동생성 대체).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>operation_log 감사(OQ8) 검증용 캡처 로거.</summary>
@@ -35,63 +39,117 @@ internal sealed class CapturingOperationLogger : IOperationLogger
 
 public class B2cTestDataServiceTests
 {
-    private static B2cGenerateRequest Gen(int chute = 1, int cells = 5, string prefix = "CELL",
-        string batch = "B1", int cap = 3, int planned = 3) => new()
+    private static B2cGenerateRequest Gen(int count = 5, string prefix = "CELL", string batch = "B1", int wave = 1) => new()
     {
-        SorterChuteNo = chute, WorkDate = "2026-07-13", BatchNo = batch, WaveNo = 1,
-        CellCount = cells, CellCapacity = cap, PlannedQty = planned, OrderPrefix = prefix,
+        WorkDate = "2026-07-13", BatchNo = batch, WaveNo = wave, PlannedQty = count, BarcodePrefix = prefix,
     };
 
-    // ── BuildPlan 순수·결정성 ────────────────────────────────────────────────
-    [Fact]
-    public void BuildPlan_Deterministic_NxN_ZeroPadded()
+    // reset 테스트용: 소터 + 셀 N + 배치 + 셀당 오더(MANUAL 배정) + order_item + cell_assignment 직접 조성.
+    // (옛 generate 의 소터/셀/N↔N 자동생성 대체 — 이제 그 책임은 설비 관리로 이관됨.)
+    private static long SeedSorter(WcsDbContext db, int chuteNo, int cellCount, int cap = 3, int planned = 3)
     {
-        var plan = B2cTestDataService.BuildPlan(15, "0701-CELL");
-        Assert.Equal(15, plan.Count);
-        Assert.Equal((1, "0701-CELL-01"), plan[0]);
-        Assert.Equal((15, "0701-CELL-15"), plan[14]);
+        var now = DateTime.UtcNow;
+        var dest = new Destination
+        {
+            ChuteNo = chuteNo, DestType = DestType.SORTER_3D, Status = DestStatus.NORMAL, IsActive = true,
+            CreatedAt = now, UpdatedAt = now,
+        };
+        db.Destinations.Add(dest);
+        db.SaveChanges();
 
-        // 100셀 → 폭 3(정렬 안정).
-        var plan100 = B2cTestDataService.BuildPlan(100, "X");
-        Assert.Equal("X-001", plan100[0].OrderNo);
-        Assert.Equal("X-100", plan100[99].OrderNo);
+        var batch = new WorkBatch
+        {
+            WorkDate = DateOnly.FromDateTime(now), BatchNo = $"SEED-{chuteNo}", WaveNo = 1,
+            Status = WorkBatchStatus.RUNNING, OpenedAt = now, CreatedAt = now, UpdatedAt = now,
+        };
+        db.WorkBatches.Add(batch);
+        db.SaveChanges();
+
+        for (int n = 1; n <= cellCount; n++)
+        {
+            var cell = new Cell { DestinationId = dest.Id, CellNo = n, Capacity = cap, Enabled = true, CreatedAt = now };
+            db.Cells.Add(cell);
+            db.SaveChanges();
+
+            var order = new WcsOrder
+            {
+                WorkBatchId = batch.Id, OrderNo = $"S{chuteNo}-{n:D2}", OrderType = OrderType.GENERAL,
+                DestinationId = dest.Id, DestAssignType = DestAssignType.MANUAL, DestAssignedAt = now,
+                Status = OrderStatus.RUNNING, StartedAt = now, CreatedAt = now, UpdatedAt = now,
+            };
+            db.Orders.Add(order);
+            db.SaveChanges();
+
+            db.OrderItems.Add(new OrderItem
+            {
+                OrderId = order.Id, Barcode = order.OrderNo, PlannedQty = planned,
+                ReservedQty = 0, SortedQty = 0, CreatedAt = now, UpdatedAt = now,
+            });
+            db.CellAssignments.Add(new CellAssignment
+            {
+                CellId = cell.Id, OrderId = order.Id, AssignedAt = now, ReleasedAt = null, CreatedAt = now,
+            });
+            db.SaveChanges();
+        }
+        return dest.Id;
     }
 
-    // ── 생성: 소터·셀·오더·항목·배정 생성 + 요약 반영 ────────────────────────────
+    // ── BuildOrderNumbers 순수·결정성 ─────────────────────────────────────────────
     [Fact]
-    public async Task Generate_CreatesSorterCellsOrdersItemsAssignments()
+    public void BuildOrderNumbers_Deterministic_ZeroPadded()
+    {
+        var plan = B2cTestDataService.BuildOrderNumbers(15, "0701-CELL");
+        Assert.Equal(15, plan.Count);
+        Assert.Equal("0701-CELL-01", plan[0]);
+        Assert.Equal("0701-CELL-15", plan[14]);
+
+        // 100개 → 폭 3(정렬 안정).
+        var plan100 = B2cTestDataService.BuildOrderNumbers(100, "X");
+        Assert.Equal("X-001", plan100[0]);
+        Assert.Equal("X-100", plan100[99]);
+    }
+
+    // ── 생성(슬림): 미할당 오더 N + order_item(planned_qty=1) 만 — 소터/셀/배정 0 ────────
+    [Fact]
+    public async Task Generate_CreatesUnassignedOrdersOnly()
     {
         await using var tdb = new TestDb();
         var log = new CapturingOperationLogger();
         await using (var db = tdb.Create())
         {
             var svc = new B2cTestDataService(db, log);
-            var res = await svc.GenerateAsync(Gen(cells: 5));
+            var res = await svc.GenerateAsync(Gen(count: 5, prefix: "A"));
             Assert.Equal("S", res.Status);
-            Assert.Equal(1, res.Counts!["destinationCreated"]);
-            Assert.Equal(5, res.Counts["cellsCreated"]);
-            Assert.Equal(5, res.Counts["ordersCreated"]);
+            Assert.Equal(5, res.Counts!["ordersCreated"]);
             Assert.Equal(5, res.Counts["orderItemsCreated"]);
-            Assert.Equal(5, res.Counts["cellAssignmentsCreated"]);
+            Assert.Equal(5, res.Counts["requestedCount"]);
         }
         await using (var db = tdb.Create())
         {
-            var svc = new B2cTestDataService(db, log);
-            var summary = await svc.GetSummaryAsync(1);
-            var s = Assert.Single(summary);
-            Assert.Equal(1, s.ChuteNo);
-            Assert.Equal(5, s.CellTotal);
-            Assert.Equal(5, s.CellEnabled);
-            Assert.Equal(5, s.CellAssigned);
-            Assert.Equal(5, s.OrderRunning);
-            Assert.Equal(15, s.PlannedSum);   // 5 × 3
-            Assert.Equal(0, s.InFlightPieces);
+            // 오더 5건 전부 미할당(DestinationId=null·DestAssignType=null).
+            var orders = db.Orders.Where(o => o.OrderNo.StartsWith("A-")).ToList();
+            Assert.Equal(5, orders.Count);
+            Assert.All(orders, o =>
+            {
+                Assert.Null(o.DestinationId);
+                Assert.Null(o.DestAssignType);
+                Assert.Equal(OrderStatus.RUNNING, o.Status);
+            });
+            // order_item planned_qty=1 고정(OQ-4), barcode==orderNo.
+            var items = db.OrderItems.Where(i => i.Barcode.StartsWith("A-")).ToList();
+            Assert.Equal(5, items.Count);
+            Assert.All(items, i => Assert.Equal(1, i.PlannedQty));
+            Assert.Contains(items, i => i.Barcode == "A-01");
+            Assert.Contains(items, i => i.Barcode == "A-05");
+            // 소터/셀/배정 자동 생성 0.
+            Assert.Equal(0, db.Destinations.Count());
+            Assert.Equal(0, db.Cells.Count());
+            Assert.Equal(0, db.CellAssignments.Count());
         }
-        // 감사(OQ8): STATE·B2C_GENERATE 기록.
         Assert.Contains(log.Entries, e => e.Category == OperationLogCategory.STATE && e.Action == "B2C_GENERATE");
     }
 
-    // ── 생성 멱등(OQ4): 재실행 시 신규 카운트 0 + reserved/sorted 보존 ──────────────
+    // ── 생성 멱등: 재실행 시 신규 카운트 0 + reserved/sorted 보존 ──────────────────────
     [Fact]
     public async Task Generate_Idempotent_SecondRunZeroCounts_PreservesQty()
     {
@@ -99,76 +157,67 @@ public class B2cTestDataServiceTests
         var log = new CapturingOperationLogger();
 
         await using (var db = tdb.Create())
-            await new B2cTestDataService(db, log).GenerateAsync(Gen(cells: 4));
+            await new B2cTestDataService(db, log).GenerateAsync(Gen(count: 4, prefix: "B"));
 
-        // 한 항목의 reserved/sorted 를 사람이 채운 상태로 둔다(재테스트 실적 시뮬레이션).
+        // 한 항목의 reserved/sorted 를 채운 상태로 둔다(재테스트 실적 시뮬레이션).
         await using (var db = tdb.Create())
         {
             var item = db.OrderItems.First();
-            item.ReservedQty = 2; item.SortedQty = 1;
+            item.ReservedQty = 1; item.SortedQty = 1;
             await db.SaveChangesAsync();
         }
 
         // 같은 파라미터 재실행 → 신규 0.
         await using (var db = tdb.Create())
         {
-            var res = await new B2cTestDataService(db, log).GenerateAsync(Gen(cells: 4));
+            var res = await new B2cTestDataService(db, log).GenerateAsync(Gen(count: 4, prefix: "B"));
             Assert.Equal("S", res.Status);
-            Assert.Equal(0, res.Counts!["destinationCreated"]);
-            Assert.Equal(0, res.Counts["cellsCreated"]);
-            Assert.Equal(0, res.Counts["ordersCreated"]);
+            Assert.Equal(0, res.Counts!["ordersCreated"]);
             Assert.Equal(0, res.Counts["orderItemsCreated"]);
-            Assert.Equal(0, res.Counts["cellAssignmentsCreated"]);
         }
 
         // reserved/sorted 는 재생성이 클로버하지 않음(멱등 — 실적 보존).
         await using (var db = tdb.Create())
         {
             var item = db.OrderItems.OrderBy(i => i.Id).First();
-            Assert.Equal(2, item.ReservedQty);
+            Assert.Equal(1, item.ReservedQty);
             Assert.Equal(1, item.SortedQty);
         }
     }
 
-    // ── 생성 F: chuteNo 가 CHUTE 타입으로 점유됨 ─────────────────────────────────
+    // ── 생성 결과 view: 배치 요약(미할당 오더 수 포함) ────────────────────────────────
     [Fact]
-    public async Task Generate_ChuteTypeOccupied_ReturnsF()
+    public async Task GetBatches_ReportsUnassignedOrderCount()
     {
         await using var tdb = new TestDb();
         await using (var db = tdb.Create())
-        {
-            db.Destinations.Add(new Destination
-            {
-                ChuteNo = 7, DestType = DestType.CHUTE, Status = DestStatus.NORMAL, IsActive = true,
-                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
-            });
-            await db.SaveChangesAsync();
-        }
+            await new B2cTestDataService(db, new CapturingOperationLogger()).GenerateAsync(Gen(count: 3, prefix: "C", batch: "BATCH-C"));
+
         await using (var db = tdb.Create())
         {
-            var res = await new B2cTestDataService(db, new CapturingOperationLogger()).GenerateAsync(Gen(chute: 7));
-            Assert.Equal("F", res.Status);
-            Assert.Contains("SORTER_3D", res.Message);
+            var batches = await new B2cTestDataService(db, new CapturingOperationLogger()).GetBatchesAsync(20);
+            var b = Assert.Single(batches, x => x.BatchNo == "BATCH-C");
+            Assert.Equal(3, b.OrderTotal);
+            Assert.Equal(3, b.OrderUnassigned);   // 슬림 생성 → 전부 미할당.
+            Assert.Equal(3, b.ItemTotal);
         }
     }
 
-    // ── 초기화(OQ1=B 아카이브·OQ2 보존): 소프트삭제 + 수량 리셋 + 오더 재개 ──────────
+    // ── 초기화(아카이브·OQ2 보존): 소프트삭제 + 수량 리셋 + 오더 재개(의미 불변) ──────────
     [Fact]
     public async Task Reset_SoftDeletesPieces_ResetsQty_ReopensCompleted_PreservesOrdersAndAssignments()
     {
         await using var tdb = new TestDb();
         var log = new CapturingOperationLogger();
-        await using (var db = tdb.Create())
-            await new B2cTestDataService(db, log).GenerateAsync(Gen(cells: 3));
-
         long sorterId, pieceId, cellId;
         await using (var db = tdb.Create())
+            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 3);
+
+        await using (var db = tdb.Create())
         {
-            sorterId = db.Destinations.Single(d => d.ChuteNo == 1).Id;
             cellId   = db.Cells.First(c => c.DestinationId == sorterId).Id;
             var order = db.Orders.First(o => o.DestinationId == sorterId);
             var item  = db.OrderItems.First(i => i.OrderId == order.Id);
-            // 완료된 테스트 시뮬레이션: 오더 COMPLETED, 수량 채움, LOADED piece + COMPLETED sorter_command.
             item.ReservedQty = 3; item.SortedQty = 3;
             order.Status = OrderStatus.COMPLETED; order.ClosedAt = DateTime.UtcNow;
             var piece = new Piece
@@ -190,7 +239,6 @@ public class B2cTestDataServiceTests
             await db.SaveChangesAsync();
         }
 
-        // 초기화(force 불필요 — LOADED 는 in-flight 이므로 실제론 force 필요. 여기선 force=true 로 확정 검증).
         await using (var db = tdb.Create())
         {
             var res = await new B2cTestDataService(db, log).ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = true });
@@ -209,7 +257,6 @@ public class B2cTestDataServiceTests
             Assert.NotNull(db.PieceEvents.Single(e => e.PieceId == pieceId).ArchivedAt);
             Assert.NotNull(db.SorterCommands.Single(c => c.PieceId == pieceId).ArchivedAt);
 
-            // 수량 0 리셋 + 오더 재개(RUNNING) + 오더·배정 보존(OQ2).
             var order = db.Orders.First(o => o.DestinationId == sorterId);
             Assert.Equal(OrderStatus.RUNNING, order.Status);
             Assert.All(db.OrderItems.Where(i => i.OrderId == order.Id), i =>
@@ -228,13 +275,12 @@ public class B2cTestDataServiceTests
     public async Task Reset_ArchivedSorterCommand_ExcludedFromCellCurrentQty()
     {
         await using var tdb = new TestDb();
-        await using (var db = tdb.Create())
-            await new B2cTestDataService(db, new CapturingOperationLogger()).GenerateAsync(Gen(cells: 2));
-
         long sorterId, cellId;
         await using (var db = tdb.Create())
+            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 2);
+
+        await using (var db = tdb.Create())
         {
-            sorterId = db.Destinations.Single(d => d.ChuteNo == 1).Id;
             var assign = db.CellAssignments.First(a => a.Cell.DestinationId == sorterId);
             cellId = assign.CellId;
             var piece = new Piece
@@ -276,13 +322,12 @@ public class B2cTestDataServiceTests
     public async Task Reset_InFlightGuard_RefusesWithoutForce_DataUntouched()
     {
         await using var tdb = new TestDb();
-        await using (var db = tdb.Create())
-            await new B2cTestDataService(db, new CapturingOperationLogger()).GenerateAsync(Gen(cells: 2));
-
         long sorterId, pieceId;
         await using (var db = tdb.Create())
+            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 2);
+
+        await using (var db = tdb.Create())
         {
-            sorterId = db.Destinations.Single(d => d.ChuteNo == 1).Id;
             var piece = new Piece
             {
                 PId = 7000, IsActive = true, Barcode = "Y", Qty = 1, DestinationId = sorterId,
@@ -293,7 +338,6 @@ public class B2cTestDataServiceTests
             pieceId = piece.Id;
         }
 
-        // force=false → 거부(F) + piece 무접촉(archived_at NULL 유지).
         await using (var db = tdb.Create())
         {
             var res = await new B2cTestDataService(db, new CapturingOperationLogger())
@@ -304,7 +348,6 @@ public class B2cTestDataServiceTests
         await using (var db = tdb.Create())
             Assert.Null(db.Pieces.Single(p => p.Id == pieceId).ArchivedAt);   // 무접촉.
 
-        // force=true → 진행 중 포함 아카이브.
         await using (var db = tdb.Create())
         {
             var res = await new B2cTestDataService(db, new CapturingOperationLogger())
@@ -326,15 +369,10 @@ public class B2cTestDataServiceTests
         Assert.Equal("F", res.Status);
     }
 
-    // ── FIX ITER 3(코드리뷰 TOCTOU): in-flight 가드 COUNT 가 **트랜잭션 안**에서 실행되는지 구조 단언 ──
-    //   가드가 트랜잭션 밖이면 "체크 → 아카이브 UPDATE" 사이에 IF-05 삽입 창(TOCTOU)이 생겨
-    //   비강제 reset 이 진행 중 piece 를 조용히 아카이브(OQ3 위반). 커맨드 인터셉터로 거부 경로의
-    //   piece COUNT(이 경로 유일의 COUNT)가 DbTransaction 참여 상태로 실행됐음을 단언한다 —
-    //   가드가 트랜잭션 밖으로 되돌아가는 회귀 시 즉시 RED.
+    // ── 코드리뷰 TOCTOU 회귀잠금: in-flight 가드 COUNT 가 트랜잭션 안에서 실행되는지 구조 단언 ──
     [Fact]
     public async Task Reset_InFlightGuard_CountExecutesInsideTransaction()
     {
-        // TestDb 는 인터셉터 주입 불가 → 자체 anchor(공유 in-memory SQLite) 하네스.
         var connStr = $"Data Source=b2c_tx_{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
         await using var anchor = new SqliteConnection(connStr);
         anchor.Open();
@@ -348,7 +386,6 @@ public class B2cTestDataServiceTests
             return b.Options;
         }
 
-        // 스키마 + 시드(소터 + in-flight RESERVED piece) — 인터셉터 없는 컨텍스트로(DDL 노이즈 제외).
         long destId;
         await using (var db = new WcsDbContext(Opts(null)))
         {
@@ -369,7 +406,6 @@ public class B2cTestDataServiceTests
             await db.SaveChangesAsync();
         }
 
-        // 거부 경로 실행(인터셉터 부착) — force=false + in-flight 1 → F.
         var capture = new TxCaptureInterceptor();
         await using (var db = new WcsDbContext(Opts(capture)))
         {
@@ -379,21 +415,19 @@ public class B2cTestDataServiceTests
             Assert.Equal(1, res.Counts!["inFlight"]);
         }
 
-        // 거부 경로의 piece COUNT(가드) 전부가 트랜잭션 참여 상태였는지 — TOCTOU 협착의 구조 증거.
         var guardCounts = capture.Commands
             .Where(c => c.Sql.Contains("COUNT", StringComparison.OrdinalIgnoreCase)
                      && c.Sql.Contains("piece", StringComparison.OrdinalIgnoreCase))
             .ToList();
-        Assert.NotEmpty(guardCounts);   // 가드 COUNT 실행됨(공허 통과 차단).
+        Assert.NotEmpty(guardCounts);
         Assert.All(guardCounts, c =>
             Assert.True(c.InTransaction, "in-flight 가드 COUNT 가 트랜잭션 밖에서 실행됨(TOCTOU 창 회귀)"));
 
-        // 무접촉 재확인: 거부 후 piece 는 여전히 활성(archived_at NULL).
         await using (var db = new WcsDbContext(Opts(null)))
             Assert.Null(db.Pieces.Single(p => p.PId == 8000).ArchivedAt);
     }
 
-    /// <summary>커맨드별 (SQL, 트랜잭션 참여 여부) 캡처 인터셉터 — 가드 위치(트랜잭션 안/밖) 구조 단언용.</summary>
+    /// <summary>커맨드별 (SQL, 트랜잭션 참여 여부) 캡처 인터셉터 — 가드 위치 구조 단언용.</summary>
     private sealed class TxCaptureInterceptor : DbCommandInterceptor
     {
         public readonly List<(string Sql, bool InTransaction)> Commands = new();

@@ -35,6 +35,15 @@ public sealed class B2cTestDataController : ControllerBase
         }
     }
 
+    // ── GET /api/b2c/test-data/batches?take= — 생성 결과 view(최근 배치·미할당 오더 수) ──
+    [HttpGet("batches")]
+    public async Task<IActionResult> Batches([FromQuery] int? take, CancellationToken ct)
+    {
+        // take clamp(1..100, 기본 20) — 하드코딩 상한 대신 국소 방어(관리 화면 소량 조회).
+        int clamped = take is null or <= 0 ? 20 : Math.Min(take.Value, 100);
+        return Ok(await _svc.GetBatchesAsync(clamped, ct));
+    }
+
     // ── GET /api/b2c/test-data/summary?sorterChuteNo= — 소터별 요약 집계 ─────────
     [HttpGet("summary")]
     public async Task<IActionResult> Summary([FromQuery] int? sorterChuteNo, CancellationToken ct)

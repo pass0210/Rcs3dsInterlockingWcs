@@ -1,18 +1,22 @@
-# B2C-DATAGEN.md — B2C(3D 소터) 테스트 데이터 생성·초기화 계약 캡처 (Generator/Evaluator 단일 근거)
+# B2C-DATAGEN.md — B2C(3D 소터) 데이터 생성·초기화 계약 캡처 (Generator/Evaluator 단일 근거)
 
-> 작성: Generator (S-B2C-DATAGEN) · 2026-07-13. 게이트 확정(OQ1~OQ8, 사용자 2026-07-13)을 코드로 구현한 결과를 캡처한다.
-> 근거: `tasks/sprint-contract.md`(게이트 확정) · `docs/ERD.md`(17테이블·이력 불변) · `scripts/seed-field-20cells.sql`(현 수동 시드) ·
-> `docs/B2B-DATAGEN.md`(B2B 선례 — archived_at 소프트삭제 정책).
+> 작성: Generator (S-B2C-DATAGEN) · 2026-07-13. **개정: S-B2C-FACILITY · 2026-07-14 — 생성 폼 슬림화(2a).**
+> 근거: `tasks/sprint-contract.md`(게이트 확정) · `docs/ERD.md`(17테이블·이력 불변) · `docs/B2C-FACILITY.md`(설비 관리 2b).
 
 ---
 
 ## 0. 범위 요약
 
-- **목적**: 개발자가 `sqlcmd` 로 실행하던 `scripts/seed-field-20cells.sql`(B2C 3D 소터 테스트 데이터)과 수동 삭제 SQL(재테스트 초기화)을
-  운영자가 브라우저에서 대체할 수 있는 **백엔드 관리 API + React 페이지**를 제공한다.
-- **포함**: 생성(`generate`) · 요약(`summary`) · 셀 상세(`detail`) · 초기화(`reset`) API + B2C 메뉴 세트 페이지(생성 폼 + 소터 요약 + 셀 상세 + danger 초기화).
+- **목적**: 운영자가 브라우저에서 **B2C 3D 소터 테스트용 오더/바코드를 생성**하고, 별도의 **설비 관리** 페이지에서 목적지·셀을
+  구성하고 오더를 배정한 뒤, 재테스트를 위해 **초기화**할 수 있는 백엔드 관리 API + React 페이지를 제공한다.
+- **★ S-B2C-FACILITY 책임 분리(2a/2b)**:
+  - **데이터 생성(2a · 이 문서)**: 생성 폼은 **오더/바코드만** 만든다(목적지 **미할당**). 파라미터 5개 — 작업일자·배치명·차수·계획수량·바코드 접두.
+    소터/셀/cell_assignment 자동 생성·N↔N 배정은 **제거**(설비 관리 2b 로 이관).
+  - **설비 관리(2b · `docs/B2C-FACILITY.md`)**: 목적지(소터/슈트) 생성·활성화, 소터 셀 설정, 오더→목적지(+셀) 할당, 슈트 제어(clear/pause/resume).
+- **포함(이 문서·2a)**: 생성(`generate` 슬림) · 최근 배치(`batches`) · 요약(`summary`) · 셀 상세(`detail`) · 초기화(`reset`) API + 데이터 생성 페이지(5-필드 폼 + 배치 결과 view).
+  `summary`/`detail`/`reset` 은 백엔드 무변경(설비 관리 페이지가 소비 — 셀 상세·소터별 초기화).
 - **핵심 결정(OQ1=B)**: 초기화는 `piece`/`piece_event`/`sorter_command` 를 **하드삭제하지 않고 `archived_at` 소프트삭제**(B2B 정책 일관).
-  → 모든 활성 조회 경로가 archived 행을 제외해야 함(§3 — HIGHEST-STAKES).
+  → 모든 활성 조회 경로가 archived 행을 제외해야 함(§3 — HIGHEST-STAKES). **reset 의미는 S-B2C-FACILITY 에서 불변.**
 
 ---
 
@@ -24,27 +28,26 @@
 
 | 메서드 | 경로 | 용도 | 요청 | 응답 |
 |---|---|---|---|---|
-| POST | `/api/b2c/test-data/generate` | 멱등 생성(OQ4) | `B2cGenerateRequest`(body) | `B2cManagementResponse` |
+| POST | `/api/b2c/test-data/generate` | 멱등 생성(슬림 — 미할당 오더 N) | `B2cGenerateRequest`(body) | `B2cManagementResponse` |
+| GET  | `/api/b2c/test-data/batches?take=` | 최근 배치 요약(생성 결과 view) | query `take?` | `B2cBatchSummary[]` |
 | GET  | `/api/b2c/test-data/summary?sorterChuteNo=` | 소터별 요약 집계(선택 필터) | query `sorterChuteNo?` | `B2cSorterSummary[]` |
 | GET  | `/api/b2c/test-data/detail?sorterChuteNo=` | 셀 상세(그리드) | query `sorterChuteNo`(필수) | `B2cCellDetail[]` |
 | POST | `/api/b2c/test-data/reset` | 재테스트 초기화(OQ1·2·3) | `B2cResetRequest`(body) | `B2cManagementResponse` |
 
-### 1.1 `B2cGenerateRequest` (DataAnnotations 검증 — 실패 시 400 + `{status:"F"}`)
+### 1.1 `B2cGenerateRequest` (슬림 5-파라미터 · DataAnnotations 검증 — 실패 시 400 + `{status:"F"}`)
 
-| 필드 | 타입 | 검증 | 기본 |
-|---|---|---|---|
-| sorterChuteNo | int | `[Range(1,9999)]` | — |
-| workDate | string | `[Required]`, `^\d{8}$\|^\d{4}-\d{2}-\d{2}$` | — |
-| batchNo | string | `[Required]`, `StringLength(100,Min=1)` | — |
-| waveNo | int | `[Range(1,9999)]` | 1 |
-| cellCount | int | `[Range(1,200)]` | — |
-| cellCapacity | int | `[Range(1,100000)]` | 3 |
-| plannedQty | int | `[Range(1,100000)]` | 3 |
-| orderPrefix | string | `[Required]`, `^[A-Za-z0-9_\-]{1,50}$` | — |
+| 필드 | 타입 | 검증 | 기본 | 의미 |
+|---|---|---|---|---|
+| workDate | string | `[Required]`, `^\d{8}$\|^\d{4}-\d{2}-\d{2}$` | — | 작업일자 |
+| batchNo | string | `[Required]`, `StringLength(100,Min=1)` | — | 배치명 |
+| waveNo | int | `[Range(1,9999)]` | 1 | 차수 |
+| plannedQty | int | `[Range(1,1000)]` | — | **생성할 오더/바코드 개수 N**(OQ-4 · 각 order_item.planned_qty=1 고정) |
+| barcodePrefix | string | `[Required]`, `^[A-Za-z0-9_\-]{1,50}$` | — | 바코드/오더번호 접두 |
 
-- 검증 400 형식화: `InvalidModelStateResponseFactory` allowlist 에 `/api/b2c/test-data` 추가(additive — 기존 `/api/v1/works`·`/api/test-data` 계약·B2C ProblemDetails 불변).
+- **제거된 필드(2a 슬림)**: `sorterChuteNo`·`cellCount`·`cellCapacity`·`orderPrefix`(→ `barcodePrefix` 로 개명). 목적지·셀은 설비 관리 소관.
+- 검증 400 형식화: `InvalidModelStateResponseFactory` allowlist 에 `/api/b2c/test-data`·`/api/b2c/facility` 추가(additive — 기존 계약 불변).
 - 비존재 날짜(형식통과·달력 무효, 예 `2026-02-30`)는 `AppUtils.NormalizeBizDay` 가 `ArgumentException` → 컨트롤러 국소 catch → 400 `{status:"F"}`.
-- 상한 상수는 `B2cConstants`(하드코딩 금지 — 절대규칙 #7).
+- 상한 상수는 `B2cConstants`(하드코딩 금지 — 절대규칙 #7): `GenerateCountMax=1000`.
 
 ### 1.2 `B2cResetRequest`
 
@@ -55,21 +58,20 @@
 
 ---
 
-## 2. 생성 알고리즘 (OQ4 멱등 upsert · OQ5 규약 · OQ6 소터/셀 생성)
+## 2. 생성 알고리즘 (슬림 · 멱등 upsert — 미할당 오더만)
 
-`scripts/seed-field-20cells.sql` 을 코드로 흡수. **순수 함수** `B2cTestDataService.BuildPlan(cellCount, orderPrefix)` 가
-결정적 계획 `(cellNo, orderNo)` 를 산출(I/O 무의존·테스트 가능 — 절대규칙 #8 정신). 이후 upsert 로 적용.
+**순수 함수** `B2cTestDataService.BuildOrderNumbers(count, prefix)` 가 결정적 오더번호 목록을 산출
+(I/O 무의존·테스트 가능 — 절대규칙 #8 정신). 이후 upsert 로 적용.
 
-- **N↔N 결정적 배정**: n = 1..cellCount. `orderNo == barcode == "{orderPrefix}-{NN}"`(zero-pad 폭 = max(2, cellCount 자릿수) — 예 `0701-CELL-01`). 셀 n ↔ 오더 n.
+- **결정적 오더번호**: n = 1..N(=plannedQty). `orderNo == barcode == "{prefix}-{NN}"`(zero-pad 폭 = max(2, N 자릿수) — 예 `0714-A-01`).
 - **멱등 upsert**(같은 파라미터 재실행 → 신규 카운트 0):
-  1. destination(SORTER_3D, chuteNo) — 없으면 생성(OQ6). **다른 타입(CHUTE 등)으로 점유돼 있으면 F**.
-  2. work_batch(workDate, batchNo, waveNo) — 없으면 RUNNING 생성.
-  3. cell(destinationId, cellNo) — 없으면 생성(capacity/enabled=true), 있으면 capacity/enabled 만 보정(멱등).
-  4. wcs_order(batchId, orderNo) — 없으면 RUNNING·UPSTREAM·destination=sorter 생성.
-  5. order_item(orderId, barcode) — 없으면 planned/reserved=0/sorted=0 **INSERT 만**(기존 reserved/sorted **보존** — 재생성이 실적 클로버 금지).
-  6. cell_assignment(cellId↔orderId) — 그 셀에 **활성 배정 없을 때만** 생성(부분 유니크 `(cell_id) WHERE released_at IS NULL` 준수).
-- 응답 counts: `destinationCreated·cellsCreated·ordersCreated·orderItemsCreated·cellAssignmentsCreated·cellCount`.
-- 생성 데이터는 실제 **IF-05(RCS→WCS) 투입 판정에서 유효 오더로 소비 가능**(RUNNING 오더 + 활성 배정 셀 → `SorterCanAcceptBarcode` OK → 예약).
+  1. work_batch(workDate, batchNo, waveNo) — 없으면 RUNNING 생성.
+  2. wcs_order(batchId, orderNo) — 없으면 **RUNNING·GENERAL·destination 미할당(DestinationId=null·DestAssignType=null)** 생성.
+  3. order_item(orderId, barcode) — 없으면 **planned_qty=1**(OQ-4)·reserved/sorted=0 **INSERT 만**(기존 reserved/sorted **보존** — 재생성이 실적 클로버 금지).
+- **소터/셀/cell_assignment 생성 없음**(S-B2C-FACILITY — 설비 관리 2b 로 이관). destination 점유 검사도 없음(오더만 만듦).
+- 응답 counts: `ordersCreated·orderItemsCreated·requestedCount`.
+- **미할당 오더의 IF-05 거동**: `DestinationId=null` → `QueryDestination` 이 빈 NORMAL 활성 CHUTE 자동 배정(AUTO·OK), 빈 슈트 없으면 NG NO_DEST.
+  명시 배정(설비 관리)이 주 경로 — 소터 배정은 설비 관리에서 cell_assignment 를 만들어야 `SorterCanAcceptBarcode` OK 가 된다.
 
 ---
 
@@ -81,8 +83,9 @@
    **거부(F + `counts.inFlight`)·데이터 무접촉**. `force==true` 면 진행 중 포함 진행.
 2. **아카이브(소프트삭제·OQ1=B)** — 그 소터의 `piece`(+ 연관 `piece_event`·`sorter_command`) 중 `archived_at==null` 을 `archived_at=now` 로 세팅. **하드삭제(DELETE) 0**.
 3. **수량 리셋(OQ2)** — 소터 소속 오더의 `order_item.reserved_qty=0, sorted_qty=0`.
-4. **오더 재개** — `COMPLETED` 오더 → `RUNNING`(ClosedAt=null). *재테스트 가능성 보장*: `QueryDestination` 이 COMPLETED/CANCELLED 오더를 제외하므로 재개하지 않으면 같은 바코드 재투입이 NG.
-5. **보존(OQ2)** — `wcs_order`·`cell_assignment` 행 보존(재테스트 시 같은 배정 재사용). CANCELLED 오더는 유지.
+4. **오더 재개** — `COMPLETED` 오더만 → `RUNNING`(ClosedAt=null). *재테스트 가능성 보장*: `QueryDestination` 이 COMPLETED/CANCELLED 오더를 제외하므로 재개하지 않으면 같은 바코드 재투입이 NG.
+   - ⚠ **CANCELLED 오더는 재개하지 않는다**(의도 — 취소는 운영자 결정이므로 reset 이 되살리지 않음). CANCELLED 바코드 재투입이 필요하면 운영자가 명시적으로 오더 상태를 되돌려야 한다.
+5. **보존(OQ2)** — `wcs_order`·`cell_assignment` 행 보존(재테스트 시 같은 배정 재사용). CANCELLED 오더는 유지(재개 안 함).
 - 응답 counts: `archivedPieces·archivedPieceEvents·archivedSorterCommands·resetOrderItems·reopenedOrders·forcedInFlight`.
 
 ### 3.2 활성 조회 경로 archived 제외 (전수 감사 — 이중 카운트 차단)
@@ -109,13 +112,15 @@
 
 ---
 
-## 4. 프론트 페이지 (B2C 메뉴 세트 — OQ6)
+## 4. 프론트 페이지 (S-B2C-FACILITY 개정 — 2a/2b 분리)
 
-- 경로 `/b2c/test-data`, NAV_SETS **b2c** 세트에 "데이터 관리" 추가(모니터링·3DS 워드·운영 제어 옆). 헤더 타이틀 "테스트 데이터 관리".
-- 3분할: (좌) 생성 폼(대상 소터·작업일자·배치·차수·셀 개수·셀 용량·계획 수량·오더 접두) / (중) 소터 요약(셀 enabled/total/배정·오더 R/C/total·계획/예약/분류·진행중 피스) + 소터별 **초기화** 버튼 / (우) 선택 소터 셀 상세(셀·용량·현재수량·배정 오더·예약/분류·enabled).
-- 초기화 = **danger `ConfirmDialog`** + 삭제 범위·"되돌릴 수 없음" 명시 + 진행 중(in-flight) 경고. force 경로: 기본 초기화가 in-flight 로 거부되면(`counts.inFlight>0`) **강제 초기화 다이얼로그**로 재요청.
-- 재사용: `Card`/`Button`/`Select`/`ConfirmDialog`/`useToast`/TanStack Query/`StateMessage`(로딩·에러·빈). 신규 UI 프리미티브 0. 단일 라이트 테마(다크모드 N/A).
-- workDate 는 페이지 폼 로컬 상태(기본 오늘) — B2C 헤더는 StatusRail 이라 전역 bizDay 컨트롤 비노출(B2B 세트 전용).
+- **데이터 생성(2a)**: 경로 `/b2c/test-data`, NAV_SETS **b2c** "데이터 생성". 헤더 "데이터 생성".
+  - 2분할: (좌) 5-필드 생성 폼(작업일자·배치명·차수·계획수량[생성 개수]·바코드 접두) / (우) 생성 결과 view = 최근 배치 요약(작업일자·배치·차수·상태·오더 총/미할당·항목).
+  - 목적지 요약/셀 상세/초기화 패널·오더 배정은 **설비 관리 페이지(2b)로 이관**. 이 페이지는 "미할당 오더/바코드"만 만든다.
+- **설비 관리(2b)**: 경로 `/b2c/facility`, NAV_SETS **b2c** "설비 관리". 상세는 `docs/B2C-FACILITY.md`.
+  - 목적지 목록·제어(pause/resume·clear·활성/비활성) + 목적지 생성 다이얼로그 + 소터 셀 설정(행×열) + 오더 할당(미할당/할당 탭) + 소터별 초기화(reset · danger·force).
+- 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/TanStack Query/`StateMessage`. 신규 UI 프리미티브 0. 단일 라이트 테마(다크모드 N/A).
+- 초기화 = **danger `ConfirmDialog`** + 삭제 범위·"되돌릴 수 없음" 명시 + 진행 중(in-flight) 경고. force 경로: 기본 초기화가 in-flight 로 거부되면(`counts.inFlight>0`) **강제 초기화 다이얼로그**로 재요청(설비 관리 페이지).
 
 ---
 

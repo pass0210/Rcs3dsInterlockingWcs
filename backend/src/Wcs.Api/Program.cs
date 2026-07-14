@@ -67,7 +67,8 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options 
         var path = context.HttpContext.Request.Path;
         if (path.StartsWithSegments(Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase)
          || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase)
-         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.RoutePrefix, StringComparison.OrdinalIgnoreCase))
+         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.RoutePrefix, StringComparison.OrdinalIgnoreCase)
+         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.FacilityRoutePrefix, StringComparison.OrdinalIgnoreCase))
         {
             var firstError = context.ModelState
                 .Where(kv => kv.Value is not null && kv.Value.Errors.Count > 0)
@@ -235,6 +236,11 @@ builder.Services.AddScoped<Wcs.Api.B2B.ILogExportService, Wcs.Api.B2B.LogExportS
 // ── S-B2C-DATAGEN: B2C(3D 소터) 테스트 데이터 관리 서비스(생성·요약·초기화) — additive ──
 // 컨트롤러가 판정/PLC 를 직접 호출하지 않음(절대규칙 #1·#8). WcsDbContext(scoped)+IOperationLogger 만 사용.
 builder.Services.AddScoped<Wcs.Api.B2C.IB2cTestDataService, Wcs.Api.B2C.B2cTestDataService>();
+
+// ── S-B2C-FACILITY: 설비 관리 서비스(목적지 구성·셀 설정·오더 할당) — additive ──
+// WcsDbContext(scoped) + IOperationLogger + IChuteCapacityService + DestinationStatusPusher(런타임 슈트
+// 등록 — 신설 슈트가 GetHold·pause/resume·IF-08 push 에서 즉시 동작). 판정/Modbus 직접 호출 0.
+builder.Services.AddScoped<Wcs.Api.B2C.IB2cFacilityService, Wcs.Api.B2C.B2cFacilityService>();
 
 var app = builder.Build();
 

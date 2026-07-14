@@ -103,3 +103,27 @@ public sealed record OperationLogDto(
 public sealed record PagedResult<T>(
     IReadOnlyList<T> Items,
     long?            NextCursor);
+
+/// <summary>
+/// 전 목적지(CHUTE + SORTER_3D) 열거 항목 — GET /api/monitor/destinations(S-B2C-FACILITY A2).
+/// 설비 관리 페이지의 목적지 목록·슈트 제어 destId 소스. readiness 는 DestinationStatusService 재사용.
+/// CHUTE 는 workFullQty/lastClearedAt(chute_detail), SORTER_3D 는 cellTotal/cellEnabled 를 채운다.
+/// </summary>
+public sealed record DestinationDto(
+    long      Id,
+    int       ChuteNo,
+    string    DestType,        // "CHUTE" | "SORTER_3D"
+    int?      Floor,
+    string    Status,          // "NORMAL" | "PAUSED"
+    bool      IsActive,
+    // readiness(DestinationStatusService.Compute 산출 — 슈트=capacity/paused, 소터=운영상태+full/paused)
+    bool      Online,
+    bool      Ready,
+    bool      Full,
+    bool      Paused,
+    // CHUTE 전용(chute_detail) — SORTER_3D 는 null.
+    int?      WorkFullQty,
+    DateTime? LastClearedAt,
+    // SORTER_3D 전용(cell 집계) — CHUTE 는 null.
+    int?      CellTotal,
+    int?      CellEnabled);

@@ -15,22 +15,32 @@ namespace Wcs.Api.B2C;
 /// <summary>B2C 관리 API 상한·기본값 상수(절대규칙 #7 — 하드코딩 대신 단일 소스).</summary>
 internal static class B2cConstants
 {
-    /// <summary>라우트 접두(OQ7) — 기존 /api/test-data·/api/v1·/api/monitor·/api/ops 무충돌.</summary>
+    /// <summary>생성/초기화(2a) 라우트 접두 — 기존 /api/test-data·/api/v1·/api/monitor·/api/ops 무충돌.</summary>
     public const string RoutePrefix = "/api/b2c/test-data";
 
-    public const int CellCountMax     = 200;    // 물리 소터 셀 상한(생성 셀 개수).
-    public const int CellCapacityMax  = 100000; // 셀 작업 투입 수량 상한.
-    public const int PlannedQtyMax    = 100000; // 오더 항목 계획 수량 상한.
-    public const int WaveNoMax        = 9999;   // 차수 상한.
-    public const int SorterChuteNoMax = 9999;   // 소터 슈트번호 상한.
+    /// <summary>설비 관리(2b) 라우트 접두 — 목적지/셀/오더 할당(무충돌·신설).</summary>
+    public const string FacilityRoutePrefix = "/api/b2c/facility";
 
-    public const int DefaultCellCapacity = 3;   // 현장 시드 기본(seed-field-20cells.sql @cellCap).
-    public const int DefaultPlannedQty   = 3;   // 현장 시드 기본(@plannedQty).
+    // ── 생성(2a 슬림) 상한 ────────────────────────────────────────────────────
+    /// <summary>1회 생성 가능한 오더/바코드 최대 개수(계획수량 = 생성 개수 · OQ-4).</summary>
+    public const int GenerateCountMax = 1000;
+
+    // ── 설비 관리(2b) 상한 ────────────────────────────────────────────────────
+    public const int CellCountMax    = 200;    // 소터 셀 벌크 생성 상한(행×열 총합).
+    public const int CellCapacityMax = 100000; // 셀 작업 투입 수량 상한.
+    public const int CellGridDimMax  = 100;    // 셀 벌크 생성 행/열 각 축 상한(행×열 ≤ CellCountMax 도 검증).
+    public const int WaveNoMax       = 9999;   // 차수 상한.
+    public const int ChuteNoMax      = 9999;   // 목적지 슈트번호 상한(소터·슈트 공용).
+    public const int WorkFullQtyMax  = 1000000;// 슈트 만재 임계 상한.
+    public const int FloorMax        = 99;     // 슈트 층 상한(소터는 NULL).
+
+    public const int DefaultCellCapacity = 3;   // 셀 작업 투입 수량 기본.
+    public const int DefaultWorkFullQty  = 100; // 슈트 만재 임계 기본(시드 동등).
     public const int DefaultWaveNo       = 1;
 
     // 오더번호/바코드 안전 문자(패턴 인젝션 방지) — 숫자·영문·하이픈·언더스코어만.
-    public const string OrderPrefixRegex = @"^[A-Za-z0-9_\-]{1,50}$";
-    public const string OrderPrefixError = "orderPrefix may only contain letters, digits, hyphens, and underscores (1-50 chars).";
+    public const string BarcodePrefixRegex = @"^[A-Za-z0-9_\-]{1,50}$";
+    public const string BarcodePrefixError = "barcodePrefix may only contain letters, digits, hyphens, and underscores (1-50 chars).";
 
     // 작업일자 형식(B2B ValidationRules.BizDayRegex 와 동형).
     public const string WorkDateRegex = @"^\d{8}$|^\d{4}-\d{2}-\d{2}$";
@@ -38,15 +48,14 @@ internal static class B2cConstants
 }
 
 /// <summary>
-/// 생성 요청(OQ4 멱등 upsert·OQ5 규약·OQ6 셀·소터 생성). 셀 N ↔ 오더 N 결정적 배정(N↔N).
-/// orderNo == barcode == "{orderPrefix}-{NN}"(zero-pad) — 현 현장 규약 재현(0701-CELL-01 형).
+/// 생성 요청(2a 슬림 — 5 파라미터). 오더/바코드만 생성한다(목적지 미할당 — 배정은 설비 관리 2b).
+///
+/// ★ OQ-4 확정: <see cref="PlannedQty"/> = **생성할 오더/바코드 개수 N**(각 order_item.planned_qty=1 고정).
+///   생성 결과 = 미할당 오더 N건(DestinationId=null·DestAssignType=null) + order_item(barcode="{prefix}-{NN}").
+///   소터/셀/cell_assignment 는 생성하지 않는다(설비 관리 2b 로 이관 — 스키마 무변경·마이그레이션 0).
 /// </summary>
 public sealed class B2cGenerateRequest
 {
-    /// <summary>대상 3D 소터 슈트번호. 없으면 SORTER_3D 로 생성(OQ6).</summary>
-    [Range(1, B2cConstants.SorterChuteNoMax, ErrorMessage = "sorterChuteNo must be between 1 and 9999.")]
-    public int SorterChuteNo { get; set; }
-
     /// <summary>작업일자 — YYYYMMDD | YYYY-MM-DD.</summary>
     [Required]
     [RegularExpression(B2cConstants.WorkDateRegex, ErrorMessage = B2cConstants.WorkDateError)]
@@ -61,29 +70,21 @@ public sealed class B2cGenerateRequest
     [Range(1, B2cConstants.WaveNoMax, ErrorMessage = "waveNo must be between 1 and 9999.")]
     public int WaveNo { get; set; } = B2cConstants.DefaultWaveNo;
 
-    /// <summary>생성 셀 개수(1..N) — 각 셀에 오더 1개 대응(N↔N).</summary>
-    [Range(1, B2cConstants.CellCountMax, ErrorMessage = "cellCount must be between 1 and 200.")]
-    public int CellCount { get; set; }
+    /// <summary>계획수량 = 생성할 오더/바코드 개수 N(OQ-4). 각 오더의 order_item.planned_qty 는 1로 고정.</summary>
+    [Range(1, B2cConstants.GenerateCountMax, ErrorMessage = "plannedQty(생성 개수) must be between 1 and 1000.")]
+    public int PlannedQty { get; set; }
 
-    /// <summary>셀 작업 투입 수량(cell.capacity). ≤0 은 클라 검증에서 걸러짐 — 여기선 양수만.</summary>
-    [Range(1, B2cConstants.CellCapacityMax, ErrorMessage = "cellCapacity must be between 1 and 100000.")]
-    public int CellCapacity { get; set; } = B2cConstants.DefaultCellCapacity;
-
-    /// <summary>오더 항목 계획 수량(order_item.planned_qty).</summary>
-    [Range(1, B2cConstants.PlannedQtyMax, ErrorMessage = "plannedQty must be between 1 and 100000.")]
-    public int PlannedQty { get; set; } = B2cConstants.DefaultPlannedQty;
-
-    /// <summary>오더번호/바코드 접두(예 "0701-CELL"). 전체 = "{prefix}-{NN}"(zero-pad, N↔N).</summary>
+    /// <summary>오더번호/바코드 접두(예 "0714-A"). 전체 = "{prefix}-{NN}"(zero-pad).</summary>
     [Required]
-    [RegularExpression(B2cConstants.OrderPrefixRegex, ErrorMessage = B2cConstants.OrderPrefixError)]
-    public string OrderPrefix { get; set; } = string.Empty;
+    [RegularExpression(B2cConstants.BarcodePrefixRegex, ErrorMessage = B2cConstants.BarcodePrefixError)]
+    public string BarcodePrefix { get; set; } = string.Empty;
 }
 
 /// <summary>초기화 요청(OQ1 아카이브·OQ2 범위·OQ3 가드). 대상 소터 지정 + force.</summary>
 public sealed class B2cResetRequest
 {
     /// <summary>대상 3D 소터 슈트번호(초기화 범위 — OQ2 대상 소터 지정).</summary>
-    [Range(1, B2cConstants.SorterChuteNoMax, ErrorMessage = "sorterChuteNo must be between 1 and 9999.")]
+    [Range(1, B2cConstants.ChuteNoMax, ErrorMessage = "sorterChuteNo must be between 1 and 9999.")]
     public int SorterChuteNo { get; set; }
 
     /// <summary>진행 중(in-flight) 작업이 있어도 강제 초기화(OQ3 — 기본 false 거부, UI 경고 후 true 재요청).</summary>
@@ -137,3 +138,17 @@ public sealed record B2cCellDetail(
     string? AssignedOrderNo, // 활성 배정 오더번호(없으면 null)
     int?    ReservedQty,     // 배정 오더의 order_item 합(barcode==orderNo 규약)
     int?    SortedQty);
+
+/// <summary>
+/// 생성 결과 view(2a) — 최근 work_batch 요약. 데이터 생성 페이지가 "무엇이 만들어졌는지" 확인.
+/// 미할당(destination 없음) 오더 수를 별도로 노출 — 슬림 생성이 미할당 오더를 만든다는 계약 반영.
+/// </summary>
+public sealed record B2cBatchSummary(
+    long     BatchId,
+    DateOnly WorkDate,
+    string   BatchNo,
+    int      WaveNo,
+    string   Status,           // WorkBatchStatus(WAITING/RUNNING/CLOSED)
+    int      OrderTotal,       // 배치 소속 전체 오더 수
+    int      OrderUnassigned,  // DestinationId==null 오더 수(미할당)
+    int      ItemTotal);       // 배치 소속 order_item 수
