@@ -1,7 +1,6 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity,
-  Cpu,
   SlidersHorizontal,
   Radio,
   Database,
@@ -33,14 +32,16 @@ interface NavItem {
 
 // ── 모드별 메뉴 세트(docs/B2B-DATAGEN.md §5) ──────────────────────────────────
 //   B2C: 관리 흐름(생성→설비) 순으로 데이터 생성·설비 관리를 최상단(S-B2C-UX), 이어서
-//        모니터링(F1)·3DS 워드(F2)·운영 제어(F3b). 항목 정의·경로·enabled 불변 — 순서만 재배열.
+//        모니터링(F1)·운영 로그(operation_log 테일)·운영 제어(F3b). 항목 정의·경로·enabled 불변.
+//        ★ S-UI-LAYOUT: /sorters 라벨을 '3DS 워드'→'운영 로그'로 개명(3DS 레지스터 워드 표시는
+//          중복 제거로 /ops 에만 잔존, 이 페이지는 operation_log 라이브 테일 전용으로 재정의). 라우트 유지.
 //   B2B: 데이터 생성(S-B2B-2b) 활성 + 로그·비교·박스·설정(B2B-3 배지 예고).
 const NAV_SETS: Record<UiMode, NavItem[]> = {
   b2c: [
     { to: '/b2c/test-data', label: '데이터 생성', icon: Database, enabled: true, phase: null, title: '데이터 생성', subtitle: '미할당 오더/바코드 생성 · 생성 결과 열람 · 배치 초기화' },
     { to: '/b2c/facility', label: '설비 관리', icon: Warehouse, enabled: true, phase: null, title: '설비 관리', subtitle: '목적지 구성 · 소터 셀 설정 · 오더 할당 · 슈트 제어' },
     { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null, title: '실시간 모니터링', subtitle: '작업 데이터 · 로봇 이동중 · 분류 현황' },
-    { to: '/sorters', label: '3DS 워드', icon: Cpu, enabled: true, phase: null, title: '3DS 워드값', subtitle: 'D0~D6 레지스터 실시간 관찰' },
+    { to: '/sorters', label: '운영 로그', icon: ScrollText, enabled: true, phase: null, title: '운영 로그', subtitle: 'operation_log 실시간 테일 · category/level 필터' },
     { to: '/ops', label: '운영 제어', icon: SlidersHorizontal, enabled: true, phase: null, title: '운영 제어', subtitle: 'Pause/Resume · 워드 편집(안전 3종)' },
   ],
   b2b: [
@@ -142,7 +143,12 @@ export function Layout() {
           {mode === 'b2c' ? <StatusRail /> : <B2bHeaderControls />}
         </header>
 
-        <main className="min-w-0 flex-1 overflow-auto p-5">
+        {/* 뷰포트 바운드 높이 컨텍스트(S-UI-LAYOUT) — 사이드바·상단 헤더는 이 main 밖이라 항상 고정.
+            main 은 flex 컬럼으로 자식 페이지에 "가시영역에 갇힌 높이"를 제공한다. 각 페이지는 헤더/툴바/
+            필터를 shrink-0 크롬으로, 그리드 본문을 flex-1 min-h-0 overflow-auto 로 두어 본문만 스크롤한다.
+            overflow-auto 는 폴백 전용: 페이지들이 flex-1 로 정확히 채우면 스크롤이 없고, 매우 작은 뷰포트에서
+            내부 min-height 하한 합이 가용 높이를 넘을 때만 페이지(main)가 스크롤한다(하한 미붕괴 보장). */}
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto p-5">
           <Outlet />
         </main>
       </div>

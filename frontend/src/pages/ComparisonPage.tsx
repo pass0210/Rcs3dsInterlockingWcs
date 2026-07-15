@@ -97,8 +97,10 @@ export function ComparisonPage() {
   const error = q.isError ? ((q.error as Error)?.message ?? '비교 조회 실패') : null
 
   return (
-    <Card className="flex min-w-0 flex-col">
-      <CardHeader className="flex-wrap gap-2">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 페이지 루트 카드가 가용 높이를 채우고(flex-1 min-h-0), 헤더+상태 필터
+    // 툴바=고정 크롬, 비교 표 본문만 스크롤. 기존 calc(100vh-280px) 매직값을 flex 패턴으로 대체.
+    <Card className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <CardHeader className="shrink-0 flex-wrap gap-2">
         <CardTitle>결과 비교</CardTitle>
         <div className="flex flex-wrap items-center gap-2">
           <ArchiveSelect value={archived} onChange={setArchived} />
@@ -107,7 +109,7 @@ export function ComparisonPage() {
       </CardHeader>
 
       {/* 상태 필터 버튼(카운트 배지) + 범례 — 스크롤 영역 밖 고정 툴바 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-2">
         <div className="flex rounded-lg border border-line bg-elevated p-0.5" role="group" aria-label="상태 필터">
           <StatusButton active={status === 'all'} onClick={() => setStatus('all')} label="전체" count={counts.all} tone="ink" />
           <StatusButton active={status === 'mismatch'} onClick={() => setStatus('mismatch')} label="불일치" count={counts.mismatch} tone="offline" />
@@ -116,7 +118,7 @@ export function ComparisonPage() {
         <Legend />
       </div>
 
-      <CardContent className="max-h-[calc(100vh-280px)] min-w-0 overflow-auto p-0">
+      <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
         {q.isLoading && rows.length === 0 ? (
           <LoadingRow label="비교 불러오는 중" />
         ) : error ? (

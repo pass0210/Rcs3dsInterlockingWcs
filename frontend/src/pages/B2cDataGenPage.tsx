@@ -152,8 +152,11 @@ export function B2cDataGenPage() {
   const checkedCount = useMemo(() => [...checked].filter((id) => validBatchIds.has(id)).length, [checked, validBatchIds])
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — master-detail: 상단(생성 폼 + 마스터 그리드)과 하단(배치 상세)이 가용
+    // 높이를 flex-1 로 나눠 갖고(각 min-h 하한) 각 그리드 본문만 스크롤한다. 상단 그리드행은 xl 에서 1fr
+    // (xl:grid-rows-1) 로 늘어나 생성 폼은 self-start 자연 높이, 마스터 그리드는 채워 스크롤.
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="grid min-h-[220px] flex-1 grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)] xl:grid-rows-1">
         {/* 좌: 생성 폼 */}
         <Card className="self-start">
           <CardHeader>
@@ -165,8 +168,8 @@ export function B2cDataGenPage() {
         </Card>
 
         {/* 우: 생성 결과(마스터 그리드) + 초기화 */}
-        <Card className="flex min-w-0 flex-col">
-          <CardHeader>
+        <Card className="flex min-h-0 min-w-0 flex-col">
+          <CardHeader className="shrink-0">
             <CardTitle>생성 결과 — 최근 배치</CardTitle>
             <div className="flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
@@ -191,9 +194,9 @@ export function B2cDataGenPage() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="min-w-0 overflow-auto p-0">
-            {/* 그리드 본문 — 우클릭 메뉴/드래그 스코프(OQ-3: 이 컨테이너 내부에서만 네이티브 우클릭 대체). */}
-            <div {...rowSel.containerProps}>
+          <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+            {/* 그리드 본문 — 우클릭 메뉴/드래그 스코프(OQ-3) + 스크롤 컨테이너(sticky thead 고정처). 하단 안내는 고정. */}
+            <div {...rowSel.containerProps} className="min-h-0 min-w-0 flex-1 overflow-auto">
             {batchesQ.isLoading ? (
               <LoadingRow />
             ) : batchesQ.isError ? (
@@ -258,7 +261,7 @@ export function B2cDataGenPage() {
               </table>
             )}
             </div>
-            <p className="border-t border-line px-3 py-2 text-[11px] text-faint">
+            <p className="shrink-0 border-t border-line px-3 py-2 text-[11px] text-faint">
               행을 클릭하면 하단에 그 배치의 오더 상세가 표시됩니다. 체크 후 <b>초기화</b>로 여러 배치를 되돌릴 수 있습니다.
               그리드를 <b>드래그</b>하면 연속 범위가 하이라이트되고, <b>우클릭</b> 메뉴로 전체/선택 행을 일괄 체크·해제할 수 있습니다.
             </p>
@@ -298,8 +301,9 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
   const truncated = orders.length >= ORDERS_FETCH_MAX
 
   return (
-    <Card className="flex min-w-0 flex-col">
-      <CardHeader>
+    // 하단 상세 = 상단(폼+마스터)과 가용 높이를 나눠 갖는 flex-1(min-h-[200px] 하한). 헤더/절단 배너 고정, 표만 스크롤.
+    <Card className="flex min-h-[200px] min-w-0 flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>
           배치 상세{batch ? ` — ${batch.batchNo} #${batch.waveNo}` : ''}
         </CardTitle>
@@ -309,13 +313,14 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
           </span>
         )}
       </CardHeader>
-      <CardContent className="min-w-0 overflow-auto p-0">
+      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
         {truncated && (
-          <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+          <p className="shrink-0 border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
             표시 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달했습니다 — 이 배치에 초과 오더가 있으면 목록에 표시되지 않을 수 있습니다.
             (초기화는 배치 전량에 적용되므로 표시 절단과 무관합니다.)
           </p>
         )}
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {batch === null ? (
           <EmptyRow label="상단에서 배치 행을 선택하면 오더 상세가 표시됩니다." />
         ) : ordersQ.isLoading ? (
@@ -365,6 +370,7 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
             </tbody>
           </table>
         )}
+        </div>
       </CardContent>
     </Card>
   )

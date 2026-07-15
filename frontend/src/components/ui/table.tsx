@@ -1,10 +1,14 @@
 import type * as React from 'react'
 import { cn } from '@/lib/utils'
 
-// 밀집 데이터 테이블 프리미티브. 가로 스크롤은 감싸는 컨테이너가 담당(page body 미스크롤).
+// 밀집 데이터 테이블 프리미티브. 스크롤(가로·세로)은 감싸는 컨테이너(CardContent/스크롤 본문 div,
+// overflow-auto)가 담당한다 — page body 미스크롤. ★ S-UI-LAYOUT: 래퍼 div 에서 overflow-x-auto 를
+// 제거한다. 그 값은 CSS 명세상 overflow-y 도 auto 로 승격시켜 래퍼를 별도 스크롤 컨테이너로 만들었고,
+// 그 결과 sticky thead 가 (세로로 스크롤하지 않는) 이 래퍼에 붙어 상위 컨테이너 스크롤을 따라가지 못했다.
+// 래퍼에서 overflow 를 없애면 sticky thead 가 감싸는 단일 스크롤 컨테이너에 정확히 고정된다(양축 스크롤 일원화).
 export function Table({ className, ...props }: React.ComponentProps<'table'>) {
   return (
-    <div className="w-full overflow-x-auto">
+    <div className="w-full">
       <table className={cn('w-full border-collapse text-[13px]', className)} {...props} />
     </div>
   )

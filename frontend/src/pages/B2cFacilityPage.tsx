@@ -177,9 +177,12 @@ export function B2cFacilityPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 세로 3단(작업자 바[고정] + 목적지 구성 그리드 + 오더 할당 2패널). 작업자 바는
+    // shrink-0 크롬, 아래 두 카드가 가용 높이를 flex-1 로 나눠 갖고(각 min-h 하한) 각자 본문만 스크롤한다.
+    // 하한 합이 뷰포트를 넘는 매우 작은 화면에서는 페이지(main)가 스크롤(폴백) — 어느 영역도 0으로 붕괴하지 않음.
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       {/* 작업자 이름 + 새 목적지 */}
-      <Card>
+      <Card className="shrink-0">
         <CardContent className="flex flex-wrap items-center gap-3 py-3">
           <label className="flex items-center gap-2 text-[12px] font-medium text-ink">
             작업자 이름 <span className="text-offline">*</span>
@@ -199,13 +202,14 @@ export function B2cFacilityPage() {
         </CardContent>
       </Card>
 
-      {/* 목적지 목록 + 제어 */}
-      <Card className="flex min-w-0 flex-col">
-        <CardHeader>
+      {/* 목적지 목록 + 제어 — 오더 할당과 가용 높이를 나눠 갖는 flex-1(min-h-[200px] 하한). 헤더/안내 고정, 표만 스크롤. */}
+      <Card className="flex min-h-[200px] min-w-0 flex-1 flex-col">
+        <CardHeader className="shrink-0">
           <CardTitle>목적지 구성 · 제어</CardTitle>
           <Badge tone="warn">실 하드웨어 제어</Badge>
         </CardHeader>
-        <CardContent className="min-w-0 overflow-auto p-0">
+        <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+          <div className="min-h-0 min-w-0 flex-1 overflow-auto">
           {destQ.isLoading ? (
             <LoadingRow />
           ) : destQ.isError ? (
@@ -277,7 +281,8 @@ export function B2cFacilityPage() {
               </tbody>
             </table>
           )}
-          <p className="border-t border-line px-3 py-2 text-[11px] text-faint">
+          </div>
+          <p className="shrink-0 border-t border-line px-3 py-2 text-[11px] text-faint">
             소터 신설은 재기동 + appsettings Sorters[] 항목 추가 후 폴링이 시작됩니다(DB 레코드는 즉시 생성).
           </p>
         </CardContent>
@@ -555,8 +560,9 @@ function OrderAssign2Panel({
   const errored = unassignedQ.isError || assignedQ.isError
 
   return (
-    <Card className="flex min-w-0 flex-col">
-      <CardHeader>
+    // 오더 할당 카드 — 목적지 카드와 가용 높이를 나눠 갖는 flex-1(min-h-[260px] 하한). 헤더 고정, 2패널이 본문.
+    <Card className="flex min-h-[260px] min-w-0 flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>오더 할당 (2패널)</CardTitle>
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-[12px] text-muted">
@@ -569,11 +575,12 @@ function OrderAssign2Panel({
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <CardContent className="flex min-h-0 flex-1 flex-col">
+        {/* 2패널 그리드 — lg 에서 단일 행(lg:grid-rows-1)을 채워 좌우 패널이 같은 높이를 공유하고 각 리스트만 스크롤. */}
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-2 lg:grid-rows-1">
           {/* 좌: 배정 대상(슈트 리프 + 소터 셀) + 상단 해제 */}
-          <div className="min-w-0 rounded-lg border border-line">
-            <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+          <div className="flex min-h-[160px] min-w-0 flex-col rounded-lg border border-line">
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
               <span className="text-[12px] font-semibold text-ink">배정 대상 (슈트 · 소터 셀)</span>
               <Button
                 variant="outline"
@@ -586,11 +593,11 @@ function OrderAssign2Panel({
               </Button>
             </div>
             {assignedTruncated && (
-              <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+              <p className="shrink-0 border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
                 배정 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 현재 배정 카운트·슈트 단위 해제가 실제보다 적게 처리될 수 있습니다.
               </p>
             )}
-            <div className="max-h-[440px] min-w-0 overflow-auto" {...targetSel.containerProps}>
+            <div className="min-h-0 min-w-0 flex-1 overflow-auto" {...targetSel.containerProps}>
               {loading ? (
                 <LoadingRow />
               ) : errored ? (
@@ -671,16 +678,16 @@ function OrderAssign2Panel({
           </div>
 
           {/* 우: 미할당 오더 */}
-          <div className="min-w-0 rounded-lg border border-line">
-            <div className="border-b border-line px-3 py-2">
+          <div className="flex min-h-[160px] min-w-0 flex-col rounded-lg border border-line">
+            <div className="shrink-0 border-b border-line px-3 py-2">
               <span className="text-[12px] font-semibold text-ink">미할당 오더</span>
             </div>
             {unassignedTruncated && (
-              <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+              <p className="shrink-0 border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
                 미할당 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 초과분은 목록에 표시되지 않습니다.
               </p>
             )}
-            <div className="max-h-[440px] min-w-0 overflow-auto" {...orderSel.containerProps}>
+            <div className="min-h-0 min-w-0 flex-1 overflow-auto" {...orderSel.containerProps}>
               {loading ? (
                 <LoadingRow />
               ) : errored ? (
@@ -728,7 +735,7 @@ function OrderAssign2Panel({
             </div>
           </div>
         </div>
-        <p className="mt-2 text-[11px] text-faint">
+        <p className="mt-2 shrink-0 text-[11px] text-faint">
           좌측에서 슈트/소터 셀을, 우측에서 미할당 오더를 각각 체크한 뒤 <b>배정</b>하면 선택 순서대로 1:1(부족분은 미배정 유지)
           로 배정됩니다. 소터는 행을 눌러 셀을 펼쳐 선택합니다. 각 그리드는 <b>드래그</b>로 범위 하이라이트 + <b>우클릭</b> 메뉴로
           전체/선택 행을 일괄 체크·해제할 수 있습니다(비활성 행은 체크되지 않음).

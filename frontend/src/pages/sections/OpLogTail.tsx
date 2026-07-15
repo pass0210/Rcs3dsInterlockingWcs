@@ -91,8 +91,10 @@ export function OpLogTail() {
   }, [rows, autoScroll])
 
   return (
-    <Card>
-      <CardHeader>
+    // 뷰포트 맞춤(S-UI-LAYOUT) — Card 는 flex 컬럼으로 부모 높이를 채우고(flex-1 min-h-0), 헤더/필터는
+    // 고정 크롬, 로그 테이블 본문만 스크롤한다. (앱에서 유일한 op-log 뷰 = SortersPage 전용 소비.)
+    <Card className="flex min-h-0 flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>operation_log 라이브 테일</CardTitle>
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-[12px] text-muted">카테고리</label>
@@ -135,7 +137,7 @@ export function OpLogTail() {
           </label>
         </div>
       </CardHeader>
-      <CardContent className="p-0">
+      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
         {error && (
           <div className="px-4 py-6 text-center text-[13px] text-offline">데이터를 불러오지 못했습니다 — {error}</div>
         )}
@@ -144,7 +146,7 @@ export function OpLogTail() {
           <div className="px-4 py-6 text-center text-[13px] text-muted">표시할 로그가 없습니다</div>
         )}
         {!error && rows.length > 0 && (
-          <div ref={scrollRef} className="max-h-[340px] overflow-y-auto">
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
             <table className="w-full border-collapse text-[12px]">
               <tbody>
                 {rows.map((r, i) => (

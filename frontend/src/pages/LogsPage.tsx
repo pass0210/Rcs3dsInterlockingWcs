@@ -24,8 +24,10 @@ export function LogsPage() {
   const [tab, setTab] = useState<LogTab>('input')
 
   return (
-    <Tabs value={tab} onValueChange={(v) => setTab(v as LogTab)} className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — Tabs 가 가용 높이를 채우고(flex-1 min-h-0), 탭바+Excel 툴바=고정 크롬,
+    // 활성 탭 카드가 본문을 채워 그리드만 스크롤한다. 기존 calc(100vh-260px) 매직값을 flex 패턴으로 대체.
+    <Tabs value={tab} onValueChange={(v) => setTab(v as LogTab)} className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
         <TabsList>
           <TabsTrigger value="input">
             <ArrowDownToLine className="size-4" />
@@ -43,13 +45,13 @@ export function LogsPage() {
         {tab !== 'apicalls' && <ExcelDownload />}
       </div>
 
-      <TabsContent value="input">
+      <TabsContent value="input" className="mt-0 flex min-h-0 flex-1 flex-col">
         <TestLogTab kind="input" title="투입(INPUT) 로그" equipmentLabel="인덕션" />
       </TabsContent>
-      <TabsContent value="sort">
+      <TabsContent value="sort" className="mt-0 flex min-h-0 flex-1 flex-col">
         <TestLogTab kind="sort" title="분류(SORT) 로그" equipmentLabel="슈트" />
       </TabsContent>
-      <TabsContent value="apicalls">
+      <TabsContent value="apicalls" className="mt-0 flex min-h-0 flex-1 flex-col">
         <ApiCallLogTab />
       </TabsContent>
     </Tabs>
@@ -74,15 +76,15 @@ function TestLogTab({
   const q = useTestLogs(kind, bizDay, archived, interval)
 
   return (
-    <Card className="flex min-w-0 flex-col">
-      <CardHeader className="flex-wrap gap-2">
+    <Card className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <CardHeader className="shrink-0 flex-wrap gap-2">
         <CardTitle>{title}</CardTitle>
         <div className="flex flex-wrap items-center gap-2">
           <ArchiveSelect value={archived} onChange={setArchived} />
           <SearchInput value={search} onChange={setSearch} className="w-48" placeholder="통합 검색" />
         </div>
       </CardHeader>
-      <CardContent className="max-h-[calc(100vh-260px)] min-w-0 overflow-auto p-0">
+      <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
         <TestLogGrid
           rows={q.data ?? []}
           loading={q.isLoading}
@@ -106,8 +108,8 @@ function ApiCallLogTab() {
   const q = useApiCallLogs(date, interval)
 
   return (
-    <Card className="flex min-w-0 flex-col">
-      <CardHeader className="flex-wrap gap-2">
+    <Card className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <CardHeader className="shrink-0 flex-wrap gap-2">
         <CardTitle>API 호출 이력</CardTitle>
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
@@ -122,7 +124,7 @@ function ApiCallLogTab() {
           <SearchInput value={search} onChange={setSearch} className="w-48" placeholder="통합 검색" />
         </div>
       </CardHeader>
-      <CardContent className="max-h-[calc(100vh-260px)] min-w-0 overflow-auto p-0">
+      <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
         <ApiCallLogGrid
           rows={q.data ?? []}
           loading={q.isLoading}
