@@ -133,7 +133,15 @@ wcs_order.WorkBatchId` 를 통해 배치에 귀속(스코프 술어 = `p.OrderIt
   - **초기화** = 배치 스코프 · **danger `ConfirmDialog`**(대상 배치 목록·삭제 범위·"되돌릴 수 없음"·작업자 이름) 경유.
     작업자 이름 공백이면 초기화 차단. 다건 = 체크된 batchId 별 순차 호출 + 집계 토스트. in-flight 거부 시 **강제 초기화(force) 재확인 체이닝**.
 - **설비 관리(2b)**: 경로 `/b2c/facility`, NAV_SETS **b2c** "설비 관리". 상세는 `docs/B2C-FACILITY.md`. **초기화 없음(데이터 생성으로 이관).**
-- 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/TanStack Query/`StateMessage`. 신규 UI 프리미티브 0. 단일 라이트 테마(다크모드 N/A).
+- 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/TanStack Query/`StateMessage`. 단일 라이트 테마(다크모드 N/A).
+
+### ★ 생성 결과 배치 그리드 상호작용 (S-B2C-GRID-UX · 2026-07-15)
+- 배치 그리드(G1)에 공용 행 선택 상호작용을 결선(`useRowSelection` + `ContextMenu` — `docs/FRONTEND.md §5` 프리미티브, 그리드별 중복 0):
+  - **드래그 = 범위 하이라이트**(연속 행·체크 상태와 시각 구분: teal 좌측 바 + 옅은 배경). **우클릭 = 4항목 메뉴**(전체 선택/해제 · 선택행 체크/해제).
+  - ③④는 하이라이트 행에, ①②는 전체 행에 작용. 배치 그리드는 비활성 행이 없어 전 행 체크 가능.
+  - **공존**: 행 클릭(디테일 로드)·헤더 전체선택·개별 체크박스 토글 무손상(클릭↔드래그 이동 임계 판별·click 억제).
+- **랜딩(R1)**: B2C 첫 착지 = 이 데이터 생성 페이지(`homePathFor('b2c')`=`/b2c/test-data`). B2B 는 `/data-generator` 불변.
+- 신규 UI 프리미티브: `context-menu.tsx`(전 그리드 공용) 1종 추가.
 
 ---
 

@@ -5,9 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ConfirmDialog } from '@/components/ui/dialog'
+import { ContextMenu } from '@/components/ui/context-menu'
 import { EmptyRow, ErrorRow, LoadingRow } from '@/components/StateMessage'
 import { useToast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
+import { ROW_HIGHLIGHT_CLASS, useRowSelection } from '@/lib/useRowSelection'
 import { todayBizDay } from '@/lib/uiMode'
 import { b2cTestData, useB2cBatches, type BatchSummary } from '@/lib/b2cTestData'
 import { ORDERS_FETCH_MAX, useFacilityBatchOrders } from '@/lib/b2cFacility'
@@ -42,6 +44,9 @@ export function B2cDataGenPage() {
   // 체크박스(초기화 다중 선택 대상 batchId)와 행 선택(디테일 단건 로드)은 목적이 달라 분리(OQ-5).
   const [checked, setChecked] = useState<Set<number>>(() => new Set())
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null)
+  // 공용 행 선택 상호작용(드래그 하이라이트 + 우클릭 4항목) — 자기 체크 Set(checked)에 브리지.
+  //   전 행 체크 가능(비활성 행 없음)이라 getRowProps eligible=true 고정. 필터 없어 resetKey 불요.
+  const rowSel = useRowSelection<number>({ setChecked, parseId: numberId, menuAriaLabel: '생성 결과 배치 메뉴' })
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -187,6 +192,8 @@ export function B2cDataGenPage() {
             </div>
           </CardHeader>
           <CardContent className="min-w-0 overflow-auto p-0">
+            {/* 그리드 본문 — 우클릭 메뉴/드래그 스코프(OQ-3: 이 컨테이너 내부에서만 네이티브 우클릭 대체). */}
+            <div {...rowSel.containerProps}>
             {batchesQ.isLoading ? (
               <LoadingRow />
             ) : batchesQ.isError ? (
@@ -218,10 +225,12 @@ export function B2cDataGenPage() {
                   {batches.map((b) => (
                     <tr
                       key={b.batchId}
+                      {...rowSel.getRowProps(b.batchId, true)}
                       onClick={() => setSelectedBatchId(b.batchId)}
                       className={cn(
                         'cursor-pointer text-ink hover:bg-elevated',
                         selectedBatchId === b.batchId && 'bg-elevated',
+                        rowSel.isHighlighted(b.batchId) && ROW_HIGHLIGHT_CLASS,
                       )}
                     >
                       {/* 체크박스 셀 — 행 선택(디테일)과 분리(propagation 차단). */}
@@ -248,12 +257,17 @@ export function B2cDataGenPage() {
                 </tbody>
               </table>
             )}
+            </div>
             <p className="border-t border-line px-3 py-2 text-[11px] text-faint">
               행을 클릭하면 하단에 그 배치의 오더 상세가 표시됩니다. 체크 후 <b>초기화</b>로 여러 배치를 되돌릴 수 있습니다.
+              그리드를 <b>드래그</b>하면 연속 범위가 하이라이트되고, <b>우클릭</b> 메뉴로 전체/선택 행을 일괄 체크·해제할 수 있습니다.
             </p>
           </CardContent>
         </Card>
       </div>
+
+      {/* 우클릭 컨텍스트 메뉴(4항목) — 생성 결과 배치 그리드 공용. */}
+      <ContextMenu {...rowSel.menu} />
 
       {/* 하단: 선택 배치 상세(마스터-디테일) */}
       <BatchDetailGrid batch={batches.find((b) => b.batchId === selectedBatchId) ?? null} />
@@ -447,6 +461,9 @@ function B2cGenerateForm({ onGenerated }: { onGenerated: () => void }) {
     </form>
   )
 }
+
+// data-rsid(문자열) → 숫자 id 복원(useRowSelection parseId). 모듈 상수(렌더마다 새 함수 생성 방지).
+const numberId = (s: string) => Number(s)
 
 // 생성 개수 상한 — 백엔드 B2cConstants.GenerateCountMax 미러(1곳·근거 주석). 서버 400 이 최종 권위.
 const GENERATE_COUNT_MAX = 1000

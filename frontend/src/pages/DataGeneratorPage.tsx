@@ -104,11 +104,6 @@ export function DataGeneratorPage() {
     })
   }, [])
 
-  // 포인터 제스처(드래그·Shift 범위) — 선택 집합을 주어진 id 들로 정확히 교체.
-  const selectDetailExact = useCallback((ids: number[]) => {
-    setDetailChecked(new Set(ids))
-  }, [])
-
   // ── 수신 초기화(요약 체크 배치) ─────────────────────────────────────────────
   const summarySelectedRows = useMemo(
     () => summaryRows.filter((r) => summaryChecked.has(summaryKey(r.bizDay, r.batch))),
@@ -242,6 +237,7 @@ export function DataGeneratorPage() {
             error={summaryQ.isError ? ((summaryQ.error as Error)?.message ?? '요약 조회 실패') : null}
             selectedKey={selectedKey}
             checked={summaryChecked}
+            setChecked={setSummaryChecked}
             onRowClick={onRowClick}
             onToggleCheck={toggleSummaryCheck}
             onToggleVisible={toggleSummaryVisible}
@@ -297,9 +293,9 @@ export function DataGeneratorPage() {
             error={detailQ.isError ? ((detailQ.error as Error)?.message ?? '상세 조회 실패') : null}
             hasSelection={selectedBatch !== null}
             checked={detailChecked}
+            setChecked={setDetailChecked}
             onToggleCheck={toggleDetailCheck}
             onToggleVisible={toggleDetailVisible}
-            onSelectExact={selectDetailExact}
           />
         </CardContent>
       </Card>
