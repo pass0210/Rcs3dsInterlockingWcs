@@ -1,3 +1,35 @@
+# Sprint Feedback — S-UI-LAYOUT (뷰포트 맞춤 + 그리드 내부 스크롤 + 3DS 워드 중복 제거)
+
+**APPROVED** — Evaluator, 2026-07-15. 순수 프론트 스프린트. 정적 0·회귀 0·백엔드 diff 0·마이그레이션 0, 전 페이지 브라우저 실증(뷰포트 맞춤·그리드 본문 스크롤·sticky thead·리사이즈), 레지스터 dedup·메뉴 개명 실증, 내 origin 콘솔 error/warning/pageerror 0.
+
+핸드오프 마커 = `tasks/sprint-log.md` 말단(L3732) `## IMPLEMENTATION COMPLETE — S-UI-LAYOUT`. HEAD=`2248f33`(PR #65 병합 위 미커밋 작업트리, 브랜치 `feat/ui-layout`). 변경 = 프론트 15파일 + docs/FRONTEND.md(백엔드/마이그레이션 0). 검증 환경(격리): Sim3ds :1512(TCP) · Wcs.Api :5215(Release·fresh scratch SQLite `wcs-eval.db`·SeedOnStartup·Sorters[0].ChuteNo=30→Sim :1512 ONLINE) · Vite :5190(VITE_API_TARGET=:5215). 포트 5205/1502 미사용(초기 실수로 5205 바인딩 → 즉시 kill 후 `--urls`로 5215 재바인딩·5205 반환). 증거 `screenshots/S-UI-LAYOUT_20260715-145400/`.
+
+## 정적/회귀/무접촉 게이트 (PASS)
+- `tsc --noEmit` = 0 · `eslint .` = 0(warning 포함) · `vite build`(스크래치 outDir) = 0. `backend/src/Wcs.Api/wwwroot` 무접촉(git status backend 빈 출력·전 빌드 후 재확인).
+- `dotnet test -c Release` = **360/360 GREEN**(직렬 실행 `xUnit.parallelizeTestCollections=false …maxParallelThreads=1`, 0 실패·0 스킵·20s·exit 0). 단일 실행에서 결정적 GREEN — 생성자가 보고한 병렬-부하 flake(IT3a_D4_RMW·B2_RealSimServerRtu) 재현 없음(직렬로 회피, lessons 준수).
+- `git diff --stat backend/` 빈 출력 · 신규 마이그레이션 0 · PlcGateway/Core/Data/Sim3ds 소스 무변경. (순수 프론트 계약 준수.)
+
+## 레지스터 dedup + 메뉴 개명 (핵심 불변식 · PASS)
+- grep: `WordPanel` import 는 `OpsPage.tsx` 단 1곳(SortersPage 는 주석만) · `OpLogTail` import 는 `SortersPage.tsx` 단 1곳. 브라우저: `/sorters`에 WordPanel/D-레지스터 타일 **부재**, `/ops`에 `3DS 레지스터 워드` **정확히 1개**.
+- NAV(b2c): `[데이터 생성, 설비 관리, 모니터링, 운영 로그(/sorters), 운영 제어(/ops)]` — `3DS 워드` 소멸·`운영 로그` 존재. `/sorters` 헤더 title=`운영 로그`·subtitle=`operation_log 실시간 테일 · category/level 필터`. 오펀 소터 Select 제거(필터 select 는 category/level 2개뿐). OpLogTail(앱 유일 op-log 뷰) 생존·동작.
+
+## 브라우저 뷰포트 맞춤 실증(각 페이지 docSH==innerH·pageScroll 0·본문만 스크롤)
+- **B2cDataGen(마스터-디테일)**: EVAL-BIG 300오더 → 페이지 fit(900=900), 단일 내부 스크롤=디테일 본문(300행·sh 9334/ch 346). (01)
+- **B2cFacility(3단+2패널·최난)**: 페이지 fit, 3 내부 스크롤 영역(목적지 sh377/ch272·좌 배정대상 sh257/ch169·우 미할당 316행 sh10146/ch180) 분산. (02)
+- **Monitor 작업**: 100행 fit, 그리드 본문만 스크롤(sh4133/ch689) + **sticky thead**: 400px 스크롤 후 thead top=컨테이너 top(191) 유지·position:sticky(table.tsx overflow-x 제거 효과 실증). (03) / **분류**: 셀·적재 2그리드 flex-1 균등(각 342px·min-h 하한). 
+- **/sorters=운영 로그**: WordPanel 부재·OpLogTail 존재. 단축 뷰포트(1280×460)서 op-log 본문 내부 스크롤(sh297/ch258)·페이지 fit(460=460). (04)
+- **/ops=운영 제어**: WordPanel 1개+라이브 SignalR(D0~D6·D5 CurFloor=1·D4 Ready=1·`실시간 연결됨`·소터 chuteNo=30 ONLINE) — 브라우저↔API↔SignalR↔Sim3ds 전계층 왕복(S14). 1280×560 리사이즈서 라이브 데이터·연결 유지+페이지 fit+크롬 고정. (05)
+- **b2b DataGenerator**: EVAL-B2B 300 디테일 fit·내부 스크롤(sh11015/ch738). (06) **Comparison(wide 10열)**: 313행 내부 스크롤(sh11520/ch689)·페이지 **양축** fit(docSW 1440=innerW·가로 페이지 스크롤 0). (07) **Logs/Boxes**: empty-state fit·레거시 고정 max-height 아티팩트 0(calc→flex 확인). **Settings(대상 제외)**: 정상 렌더·회귀 0.
+- 데이터 양극단: 소량(seed·empty)서 조기 스크롤/빈 여백 없음, 넘침(300/313/316)서 페이지 뷰포트 불초과·그리드 본문만 스크롤. 리사이즈(1440×900↔1280×{460,560})서 무붕괴.
+
+## 콘솔(BLOCKING · PASS)
+- 전 세션 error 0 / warning 0 / pageerror 0. info 21건은 전부 React DevTools 다운로드 안내(dev 무해)·일부는 :5191 foreign-origin(불산입, lessons foreign-buffer).
+
+## Minor(비차단 · 백로그 유지)
+- 이월 grid-a11y 2건(ContextMenu Tab·그리드 컨테이너 tabIndex/role) — 계약 OQ-4 기본 defer대로 미접촉. `tasks/todo.md` 백로그 유지 권고.
+
+---
+
 # Sprint Feedback — S-B2C-GRID-UX (랜딩 정합 + 공용 그리드 상호작용)
 
 **APPROVED (FIX ITER 2 재검증 · 유지)** — Evaluator, 2026-07-15. Step 4.5 코드리뷰 3건(Important 1 + fold 2) 완전 해소·회귀 0·브라우저 실증·콘솔 0. 초회 APPROVED 아래 보존.
@@ -98,3 +130,21 @@ data-rsid/rseligible로 lazy 소터 셀도 자동 포섭), 리스너/MutationObs
 ### Minor (비블로킹 — 다음 sprint / todo 등재)
 1. ContextMenu Tab 미처리(Escape/Arrow/Home/End만) — Tab 시 메뉴 뒤로 포커스 이동. 표준 메뉴 close/trap 폴리시.
 2. 그리드 컨테이너 tabIndex/role 부재 — 키보드 메뉴열기(Shift+F10)가 자식 체크박스 포커스 시에만 동작. R4 최소요건은 충족.
+
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-15)
+
+**최종: Ready to merge = Yes. Critical 0 · Important 0 · Minor 5.**
+
+강점(리뷰·전 페이지 concrete 검증): table.tsx overflow-x 제거가 sticky thead 재부모화하면서도 넓은 표
+(3-way 비교 등) 가로 스크롤 유지(CSS 커플링으로 단일 컨테이너가 양축 처리) / flex min-h-0 체인 전
+스크롤 조상에 완비(0-collapse 없음·narrow 폴백 도달가능) / WordPanel dedup 무-dangling(useHubLifecycle가
+연결 소유) / useRowSelection이 elementFromPoint+capture scroll이라 새 컨테이너서 스크롤 무관 정확 / 메뉴
+개명 완결 / 백엔드 diff 0.
+
+- **[정리완료] 옛 라벨 잔재 3건**(App.tsx:29 주석·B2B-DATAGEN.md:244·FRONTEND.md:12) — orchestrator가 커밋 전 텍스트만 수정(로직 0).
+
+### Minor (비블로킹 — 다음 sprint / todo 등재)
+1. SortersPage 상단 span "실시간 operation_log 이벤트 스트림"이 OpLogTail 카드 제목과 중복 — 정리 후보.
+2. min-height floor 매직값(168/200/260/160/220px 등) 페이지별 산발 — 공유 토큰 2~3개로 정리 후보.
+3. Monitor 섹션 CardContent에 min-w-0 누락(b2b는 있음) — 무해하나 일관성.
+4. (이월) ContextMenu Tab 처리 / 그리드 컨테이너 tabIndex·role.
