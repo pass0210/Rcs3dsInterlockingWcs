@@ -8,12 +8,20 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Select } from '@/components/ui/select'
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog'
+import { ContextMenu } from '@/components/ui/context-menu'
 import { EmptyRow, ErrorRow, LoadingRow } from '@/components/StateMessage'
 import { useToast } from '@/lib/toast'
+import { cn } from '@/lib/utils'
+import { ROW_HIGHLIGHT_CLASS, useRowSelection, type RowSelection } from '@/lib/useRowSelection'
 import { useCells, useDestinations } from '@/lib/queries'
 import type { Destination } from '@/lib/api'
 import { b2cFacility, ORDERS_FETCH_MAX, useFacilityOrders, type FacilityOrder } from '@/lib/b2cFacility'
 import { ops } from '@/lib/ops'
+
+// data-rsid(문자열) → 타입 id 복원(useRowSelection parseId). 모듈 상수(렌더마다 새 함수 생성 방지).
+//   좌 배정 대상(G2) = 문자열 키(`chute:{id}`·`cell:{id}:{cellNo}`) 그대로 · 우 미할당 오더(G3) = 숫자 orderId.
+const identityId = (s: string) => s
+const numberId = (s: string) => Number(s)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // B2cFacilityPage — B2C 설비 관리(목적지 구성·소터 셀 설정·오더 할당·슈트 제어). docs/B2C-FACILITY.md.
@@ -384,6 +392,11 @@ function OrderAssign2Panel({
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
   const [assigning, setAssigning] = useState(false)
 
+  // 공용 행 선택 상호작용 — G2(좌 배정 대상·문자열 키) / G3(우 미할당 오더·숫자 id) 각각 자기 체크 Set 에 브리지.
+  //   자격(eligibility): G2 = 슈트 isActive·셀 enabled(개별 체크박스 disabled 조건 동일) · G3 = 오더 canReassign.
+  const targetSel = useRowSelection<string>({ setChecked: setCheckedTargets, parseId: identityId, menuAriaLabel: '배정 대상 메뉴' })
+  const orderSel = useRowSelection<number>({ setChecked: setCheckedOrders, parseId: numberId, menuAriaLabel: '미할당 오더 메뉴' })
+
   // 목적지별 배정 오더(좌 패널 슈트 현재 배정 정보) + (destId,cellNo) → 오더(소터 셀 점유·해제 대상).
   const assignedByDest = useMemo(() => {
     const m = new Map<number, FacilityOrder[]>()
@@ -577,7 +590,7 @@ function OrderAssign2Panel({
                 배정 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 현재 배정 카운트·슈트 단위 해제가 실제보다 적게 처리될 수 있습니다.
               </p>
             )}
-            <div className="max-h-[440px] min-w-0 overflow-auto">
+            <div className="max-h-[440px] min-w-0 overflow-auto" {...targetSel.containerProps}>
               {loading ? (
                 <LoadingRow />
               ) : errored ? (
@@ -597,7 +610,11 @@ function OrderAssign2Panel({
                   <tbody className="divide-y divide-line">
                     {sortedDests.map((d) =>
                       d.destType === 'CHUTE' ? (
-                        <tr key={`c${d.id}`} className="text-ink">
+                        <tr
+                          key={`c${d.id}`}
+                          {...targetSel.getRowProps(`chute:${d.id}`, d.isActive)}
+                          className={cn('text-ink', targetSel.isHighlighted(`chute:${d.id}`) && ROW_HIGHLIGHT_CLASS)}
+                        >
                           <td className="px-3 py-1.5">
                             <input
                               type="checkbox"
@@ -618,7 +635,13 @@ function OrderAssign2Panel({
                         </tr>
                       ) : (
                         <Fragment key={`s${d.id}`}>
-                          <tr onClick={() => toggleExpand(d.id)} className="cursor-pointer text-ink hover:bg-elevated">
+                          {/* 소터 펼침 헤더행 — 비선택 인터랙티브 행. 이 행에서의 드래그가 펼침/접힘을 */}
+                          {/* 오발화하지 않도록 이동거리 기반 가드 스프레드(FIX2·공존·정당 클릭은 유지). */}
+                          <tr
+                            {...targetSel.expandableRowProps}
+                            onClick={() => toggleExpand(d.id)}
+                            className="cursor-pointer text-ink hover:bg-elevated"
+                          >
                             <td className="px-3 py-1.5 text-faint">
                               {expanded.has(d.id) ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
                             </td>
@@ -635,6 +658,7 @@ function OrderAssign2Panel({
                               sorter={d}
                               checkedTargets={checkedTargets}
                               onToggle={toggleTarget}
+                              rowSel={targetSel}
                             />
                           )}
                         </Fragment>
@@ -656,7 +680,7 @@ function OrderAssign2Panel({
                 미할당 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 초과분은 목록에 표시되지 않습니다.
               </p>
             )}
-            <div className="max-h-[440px] min-w-0 overflow-auto">
+            <div className="max-h-[440px] min-w-0 overflow-auto" {...orderSel.containerProps}>
               {loading ? (
                 <LoadingRow />
               ) : errored ? (
@@ -675,7 +699,11 @@ function OrderAssign2Panel({
                   </thead>
                   <tbody className="divide-y divide-line">
                     {sortedUnassigned.map((o) => (
-                      <tr key={o.orderId} className="text-ink">
+                      <tr
+                        key={o.orderId}
+                        {...orderSel.getRowProps(o.orderId, o.canReassign)}
+                        className={cn('text-ink', orderSel.isHighlighted(o.orderId) && ROW_HIGHLIGHT_CLASS)}
+                      >
                         <td className="px-3 py-1.5">
                           <input
                             type="checkbox"
@@ -702,9 +730,14 @@ function OrderAssign2Panel({
         </div>
         <p className="mt-2 text-[11px] text-faint">
           좌측에서 슈트/소터 셀을, 우측에서 미할당 오더를 각각 체크한 뒤 <b>배정</b>하면 선택 순서대로 1:1(부족분은 미배정 유지)
-          로 배정됩니다. 소터는 행을 눌러 셀을 펼쳐 선택합니다.
+          로 배정됩니다. 소터는 행을 눌러 셀을 펼쳐 선택합니다. 각 그리드는 <b>드래그</b>로 범위 하이라이트 + <b>우클릭</b> 메뉴로
+          전체/선택 행을 일괄 체크·해제할 수 있습니다(비활성 행은 체크되지 않음).
         </p>
       </CardContent>
+
+      {/* 우클릭 컨텍스트 메뉴(4항목) — 좌 배정 대상(G2)·우 미할당 오더(G3) 각각. */}
+      <ContextMenu {...targetSel.menu} />
+      <ContextMenu {...orderSel.menu} />
     </Card>
   )
 }
@@ -722,14 +755,17 @@ function ChuteAssignInfo({ orders }: { orders: FacilityOrder[] }) {
 }
 
 // ── 소터 셀 행(드롭다운 펼침 — 각 셀 체크박스 + 점유 오더 표시) ─────────────────────
+//   rowSel = 좌 배정 대상 그리드(G2) 공용 선택 훅 — 셀 행도 같은 훅에 결선(중복 로직 0).
 function SorterCellRows({
   sorter,
   checkedTargets,
   onToggle,
+  rowSel,
 }: {
   sorter: Destination
   checkedTargets: Set<string>
   onToggle: (key: string) => void
+  rowSel: RowSelection<string>
 }) {
   const cellsQ = useCells(sorter.id)
   const cells = useMemo(() => cellsQ.data ?? [], [cellsQ.data])
@@ -758,7 +794,11 @@ function SorterCellRows({
       {cells.map((c) => {
         const key = `cell:${sorter.id}:${c.cellNo}`
         return (
-          <tr key={key} className="bg-elevated/40 text-ink">
+          <tr
+            key={key}
+            {...rowSel.getRowProps(key, c.enabled)}
+            className={cn('bg-elevated/40 text-ink', rowSel.isHighlighted(key) && ROW_HIGHLIGHT_CLASS)}
+          >
             <td className="px-3 py-1.5 pl-8">
               <input
                 type="checkbox"

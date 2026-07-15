@@ -553,3 +553,22 @@
 - [EVAL] sprint=S-B2C-UX iter=1 verdict=APPROVED (게이트 OQ-1~5+해제 전부 정합. BE: reset sorterChuteNo→batchId(long)+operatorName?, 스코프 술어 p.OrderItem.Order.WorkBatchId, TOCTOU 가드 tx-내 유지·아카이브 소프트삭제(하드삭제0)·CANCELLED 비재개·감사 op+batchId·라우트 재사용 고아0·마이그레이션0. 테스트 배치스코프로 갱신(Service6+Api1+FacilityE2E1). 회귀: 격리 dotnet test 359/359 GREEN·실패0·건너뜀0·18s·exit0(⚠ live스택+browser 동시부하시 ~17분 CPU기아·행아님→격리 재실행 18s 확정, e2e-parallel-load/testhost-teardown flake·코드귀속아님). tsc0·eslint0·vite build0. 브라우저(:5190 격리·Sim3ds불요[소터 IF-05=SorterCanAcceptBarcode 셀술어·Online 무관]): U1 nav 상단2(데이터생성→설비관리)·U2/3 마스터-디테일 orders?batchId·OQ-5 체크박스≠행선택 분리·U4 다건초기화 danger ConfirmDialog+작업자게이트+refuse→force 체이닝·U5/6 2패널 슈트리프+소터셀드롭다운·min(N,M)=3 인덱스페어링(EVA-01→CHUTE201·02→셀1·03→셀2)·초기화버튼 부재(이관)·U7 다건해제 OQ-3 가드(reserved>0 스킵·미시작만 해제)·콘솔 error/warn/pageerror 0. E2E-1: 배정→IF-05(chute201 OK·sorter231 OK×2)→디테일 예약/셀 반영→배치reset refuse→force→아카이브(reserved0·배정보존·배치존치·하드삭제0)→재IF-05 재예약 reserved 정확히1(이중카운트0). docs 2건 개정·Minor#1/#7 흡수(비활성 배지 정리). 비차단관찰: homePathFor('b2c')=/monitor≠nav최상단(계약 부합·후속검토). 증거 screenshots/S-B2C-UX_20260714-164600/)
 - [EVAL] sprint=S-B2C-UX iter=fix2 verdict=APPROVED-유지 (Step 4.5 Important=침묵 절단/Fail-Loud 해소. GET /api/b2c/facility/orders take clamp 200기본·500max → GenerateCountMax(1000) 기본·max 상향(스케일세이프·서비스/스키마/마이그0). b2cFacility.ts ORDERS_FETCH_MAX=1000 export + orders(take) 인자·useFacilityOrders/useFacilityBatchOrders 명시 전달(시그니처 take를 signal앞 삽입·소비처 2훅만·tsc0 스테일콜러0). Fail-Loud 배너 3처(datagen 디테일·facility 미할당/할당) 반환수>=cap. 신규테스트 GetOrders_LargeBatch_NotClampedAtLegacyCap(250·take미지정→250). 회귀: 격리 dotnet test 360/360 GREEN·실패0·건너뜀0·18s·exit0(359+1). tsc0·eslint0·vite build0. 브라우저(:5190 격리·:5215 fresh SQLite): BIG-A(250) 디테일 250행 전량·"250건"·배너없음(false0·과거200clamp제거 실증)·MAX-A(1000) 1000행·"상위1,000건표시"·절단배너present(cap Fail-Loud)·슈트50에 204오더(>200) 배정→현재배정"204건"→해제 dialog"해제될 오더 204건"(clamp면200)→확인→assigned=0(누락0)·미할당1046→우패널 상한배너present. 콘솔 error/warn/pageerror 0. 무접촉 4파일(controller·b2cFacility.ts·2페이지)+테스트/문서. 나머지 5 Minor 백로그 잔류. 증거 screenshots/S-B2C-UX-FIX2_20260715-084000/)
 - [CODE-REVIEW] sprint=S-B2C-UX critical=0 major=1(orders take 잘림 Fail-Loud→iter2 fix·재검증) minor=5 iter=2
+
+## S-B2C-GRID-UX — APPROVED (2026-07-15, Evaluator)
+순수 프론트(랜딩 정합 + 공용 그리드 상호작용). HEAD 9c6f63a 위 미커밋. 브랜치 feat/b2c-grid-ux.
+- 정적/회귀: tsc 0 · eslint 0 · vite build 0(스크래치 outDir·wwwroot 무접촉) · dotnet test -c Release 360/360 GREEN. 백엔드 diff 0·신규 마이그레이션 0(계약 준수).
+- 재사용(R3 핵심): 단일 useRowSelection 훅 + 단일 ContextMenu 프리미티브, 5그리드 소비만(중복 0). 각 그리드 자기 체크 Set 소유(브리지). 기존 S-B2B-2c 페인트-선택 완전 제거(잔존 0).
+- 브라우저(격리 :5215/:1512/:5190): V1 랜딩(b2c→/b2c/test-data·b2b→/data-generator 불변) · V4 메뉴 4항목 5그리드 전부 · V3 드래그 범위 하이라이트(체크와 분리·userSelect 억제/복원) · V5 ③=하이라이트 정확일치·①전체·G2 비활성 chute 자격 제외 · V8 공존(G1 행클릭 디테일·드래그후 click 억제·G2 소터 펼침·기존 버튼 카운트) · V9 교차레이어 배정(미할당 19→16·배정 4→7·refetch prune) · V6 빈그리드 안전 · OQ-3 본문한정 · OQ-4 필터리셋+prune · a11y(role/포커스/Escape).
+- 콘솔: 내 origin :5190 error/warning 0. 잔류 168건 전부 :5191(생성자 포트) foreign-origin — 불산입. 생성자 보고 hook-order TypeError 는 :5191 HMR live-edit 아티팩트(fresh load 재현 0).
+- Minor: 없음(계약/게이트 전부 충족).
+
+### S-B2C-GRID-UX FIX ITER 2 — APPROVED (재검증 유지, 2026-07-15, Evaluator)
+Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HEAD 9c6f63a 미커밋.
+- 정적: tsc 0·eslint 0·vite build 0(wwwroot 무접촉). 백엔드 diff 0·마이그레이션 0.
+- 회귀: dotnet test run1=실패2(S5RSeqMismatch 등 타이밍 시나리오) → clean 재run=360/360 GREEN. 백엔드 byte-identical(diff 0)이라 프론트 변경이 논리적으로 못 깨뜨림 + S5 타이밍-취약 + run1 시 잔여 testhost 2개 → flake 귀속(회귀 아님).
+- FIX1 stuck user-select: 창밖 릴리스 누락 후 buttons=0 재진입 복원('' ) + 멱등 begin 이 'none' 재저장 방지("RESTORED"). 영구잠김 제거.
+- FIX2 소터행: 이동거리 기반 expandableRowProps — 타행 드래그 직후 정당 클릭=펼침(생성자 자가발견 stale 회귀 수정 확인), 소터행 드래그=토글 안됨.
+- FIX3 uncheckAll=new Set(): ①선택(8)→소터 접기(선택대상 8 유지)→전체해제(0)→재펼침 전셀 uncheck. 접힌셀 완전 클리어.
+- 회귀: 드래그 하이라이트(3행)→③=정확일치, 자격(chute:5 제외), Escape. 콘솔 내 origin 0(잔류 전부 :5191 foreign).
+- 미접촉 2 Minor(ContextMenu Tab·컨테이너 tabIndex/role) 백로그 지시대로.
+- [CODE-REVIEW] sprint=S-B2C-GRID-UX critical=0 major=1(userSelect 고착→iter2 fix)+minor2fold minor=2 iter=2

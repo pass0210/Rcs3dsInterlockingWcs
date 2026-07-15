@@ -215,6 +215,21 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 
 전역: 좌측 내비 + 상단 상태바(소터 Online/Offline·알람 배지·연결 상태). antd `Layout`. `ConfigProvider locale=ko_KR`. 넓은 다열 밀집 레이아웃.
 
+### ★ 랜딩 정책 (S-B2C-GRID-UX R1, 2026-07-15)
+- **B2C 첫 착지 = 데이터 생성(`/b2c/test-data`)**. `homePathFor('b2c')` 가 반환하는 단일 소스(`frontend/src/lib/uiMode.ts`)를
+  `/monitor` → `/b2c/test-data` 로 변경 — App.tsx `ModeHome`(`/`·미매칭 `*` 리다이렉트)·Layout `ModeToggle`(b2b→b2c 전환) 3경로가
+  이 한 곳으로 정합. "생성 → 설비" 관리 흐름의 시작점과 첫 착지 일치(S-B2C-UX Evaluator Minor #1 해소). **B2B 는 `/data-generator` 불변.**
+
+### ★ 공용 그리드 상호작용 프리미티브 (S-B2C-GRID-UX R2/R3/R4, 2026-07-15)
+- 모든 체크박스 그리드(B2C 3 + B2B 2)가 **단일 훅 + 단일 컨텍스트 메뉴 프리미티브**를 공유(그리드별 중복 로직 0):
+  - `frontend/src/lib/useRowSelection.ts` — 드래그 **범위 하이라이트**(연속 행·id-키) + 우클릭 **4액션**(①전체 선택 ②전체 해제 ③선택행 체크 ④선택행 해제)을
+    그리드가 소유한 체크 `Set` 에 **브리지**(체크 모델 재작성 0). DOM 기반(`data-rsid`·`data-rseligible`)이라 지연 로딩 행(소터 셀)도 자동 포함.
+  - `frontend/src/components/ui/context-menu.tsx` — 위치 지정 팝오버(portal·뷰포트 클램프·키보드 role=menu/menuitem·Escape·포커스 관리 — Dialog 규약 정합).
+- **하이라이트 ≠ 체크**: 드래그는 하이라이트(시각 표시)만, 메뉴 ③④가 하이라이트 행에·①②가 전체 행에 체크를 적용. **자격(eligibility) 존중** — ①③은 개별 체크박스 비활성 조건과 동일하게 비활성 행을 체크하지 않음.
+- **공존**: 좌클릭 이동 임계(4px)로 클릭↔드래그 판별 + 좌/우 버튼 분리 → G1 행 클릭(디테일 로드)·G2 소터 행 펼침·개별 체크박스 토글 무손상. 드래그였으면 뒤따르는 click 을 캡처 단계에서 삼켜 기존 onClick 오발화 차단.
+- **OQ**: OQ-1 로드(렌더)된 행만(가상화 없음·truncation 배너가 캡 고지) · OQ-2 드래그 중 텍스트선택 억제 + 스크롤 추종(엣지 자동스크롤 없음) · OQ-3 그리드 본문 컨테이너 내부에서만 네이티브 우클릭 대체 · OQ-4 id-키 하이라이트(행 add/remove 를 MutationObserver 로 prune · 라우트/스코프/필터 변경 시 resetKey 전체 리셋).
+- 상세 계약: `docs/B2C-DATAGEN.md`·`docs/B2C-FACILITY.md`.
+
 ### 페이지 ① 모니터링 대시보드 (`/monitor`)
 
 - **A. 작업 데이터**: work_batch 선택 → 오더 테이블. 컬럼: order_no·type·destination(chuteNo)·status·planned/reserved/sorted(진행 바). 행 확장 → order_item(barcode·planned/reserved/sorted). 갱신 2~5s 폴링 + API/HANDSHAKE 이벤트 무효화. 필터: 배치·상태.

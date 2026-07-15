@@ -84,7 +84,17 @@ CHUTE `workFullQty·lastClearedAt`(chute_detail) / SORTER_3D `cellTotal·cellEna
   - **우 = 미할당 오더 그리드**: `orders?assigned=false` + 행별 체크박스(진행 중 오더는 비활성·OQ-3).
   - **`배정` 버튼**: 좌 선택 대상 ↔ 우 선택 오더 **min(N,M) 인덱스 1:1 페어링**(대상=chuteNo/cellNo 정렬·오더=orderNo 정렬). 슈트 → `assign(order, destId)`, 소터 셀 → `assign(order, destId, cellNo)`. 기존 단건 assign 엔드포인트 순차 호출(OQ-3 가드·DENIED 예외·감사 보존). 양쪽 ≥1 체크 시 활성.
 - **작업자 이름**: 페이지 상단 필수 입력(감사 귀속) — 공백이면 파괴/변경/배정/해제 액션 차단. 파괴 액션(해제·비활성·clear·pause)은 `ConfirmDialog`(범위·비가역·작업자 표기).
-- 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/`StateMessage`/TanStack Query. 신규 UI 프리미티브 0. 단일 라이트 테마.
+- 재사용: `Card`/`Button`/`Select`/`Badge`/`ConfirmDialog`/`Dialog`/`useToast`/`StateMessage`/TanStack Query. 단일 라이트 테마.
+
+### ★ 오더 할당 2패널 그리드 상호작용 (S-B2C-GRID-UX · 2026-07-15)
+- 좌 배정 대상(G2 — 슈트 리프 + 소터 셀)·우 미할당 오더(G3) 두 그리드에 공용 행 선택 상호작용을 각각 결선
+  (`useRowSelection` + `ContextMenu` — `docs/FRONTEND.md §5` 프리미티브, 그리드별 중복 0):
+  - **드래그 = 범위 하이라이트**(체크와 시각 구분) · **우클릭 = 4항목 메뉴**(전체 선택/해제 · 선택행 체크/해제).
+  - **자격(eligibility) 존중**(핵심): ①전체 선택·③선택행 체크는 개별 체크박스 비활성 조건과 동일 —
+    G2 비활성 슈트(`!isActive`)·비활성 셀(`!enabled`), G3 진행 중 오더(`!canReassign`)는 체크되지 않음.
+  - G2 소터 셀은 펼침 시 렌더되는 지연 로딩 행이지만 DOM 기반 훅이라 자동 포함(전체선택/하이라이트 대상 = 렌더된 행, OQ-1).
+  - **공존**: G2 소터 행 펼침(행 클릭)·개별 체크박스 토글·기존 `배정`/`해제` 버튼 카운트 반영 무손상.
+- 신규 UI 프리미티브: `context-menu.tsx`(전 그리드 공용).
 - API 클라이언트: `b2cFacility.ts`(facility 표면 미러 + `useFacilityBatchOrders`) · `ops.ts`(`clearChute`·pause/resume) · `queries.ts`(`useDestinations`·`useCells` — 소터 셀 드롭다운 소스).
 
 ---

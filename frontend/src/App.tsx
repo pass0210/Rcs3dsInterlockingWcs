@@ -12,7 +12,7 @@ import { BoxesPage } from './pages/BoxesPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { homePathFor, useUiMode } from '@/lib/uiMode'
 
-// 활성 모드의 기본 진입 경로로 리다이렉트(b2c→/monitor, b2b→/data-generator).
+// 활성 모드의 기본 진입 경로로 리다이렉트(b2c→/b2c/test-data[데이터 생성], b2b→/data-generator).
 // "/"·미매칭(*) 공용. 모드 변경 시 이 컴포넌트가 재평가돼 올바른 랜딩으로 보낸다.
 function ModeHome() {
   const { mode } = useUiMode()
