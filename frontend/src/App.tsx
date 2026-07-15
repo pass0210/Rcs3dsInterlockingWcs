@@ -26,7 +26,7 @@ export default function App() {
         <Route path="/" element={<ModeHome />} />
         {/* 페이지 ① 모니터링(B2C·F1) */}
         <Route path="/monitor" element={<MonitorPage />} />
-        {/* 페이지 ② 3DS 워드(B2C·읽기 전용·F2) */}
+        {/* 페이지 ② 운영 로그(B2C·operation_log 라이브 테일). 레지스터 워드는 /ops로 통합됨 */}
         <Route path="/sorters" element={<SortersPage />} />
         {/* 페이지 ③ 운영 제어(B2C·소터 제어·F3b) */}
         <Route path="/ops" element={<OpsPage />} />

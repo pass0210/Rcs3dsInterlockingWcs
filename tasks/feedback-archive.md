@@ -572,3 +572,14 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - 회귀: 드래그 하이라이트(3행)→③=정확일치, 자격(chute:5 제외), Escape. 콘솔 내 origin 0(잔류 전부 :5191 foreign).
 - 미접촉 2 Minor(ContextMenu Tab·컨테이너 tabIndex/role) 백로그 지시대로.
 - [CODE-REVIEW] sprint=S-B2C-GRID-UX critical=0 major=1(userSelect 고착→iter2 fix)+minor2fold minor=2 iter=2
+
+## S-UI-LAYOUT (뷰포트 맞춤 + 그리드 내부 스크롤 + 3DS 워드 dedup) — APPROVED (2026-07-15, Evaluator, 1 iteration to pass)
+순수 프론트(15파일 + docs/FRONTEND.md). HEAD 2248f33 위 미커밋. 브랜치 feat/ui-layout.
+- 정적/회귀: tsc 0 · eslint 0 · vite build 0(스크래치 outDir·wwwroot 무접촉) · dotnet test -c Release **직렬 360/360 GREEN**(단일 실행 결정적, 병렬 flake 재현 없음). 백엔드 diff 0·신규 마이그레이션 0.
+- **뷰포트 맞춤 실증법(재사용)**: 각 페이지 `document.documentElement.scrollHeight == innerHeight`(페이지 무스크롤) + 내부 스크롤러를 computed overflow+scrollHeight>clientHeight 로 열거 → "그리드 본문만 스크롤" 을 수치로 증명. 소량(seed/empty)·넘침(300/313/316행)·리사이즈(1440×900↔1280×{460,560}) 삼중. 넘침 데이터는 API generate(B2C 300·b2b 300)로 주입, empty 페이지(logs/boxes)는 레거시 고정 max-height(px>150) 부재로 calc→flex 확인.
+- **sticky thead 회귀 게이트**: 그리드 본문 400px 스크롤 후 thead getBoundingClientRect().top == 컨테이너 top·position:sticky 로 고정 확인 — table.tsx 래퍼 overflow-x-auto 제거(overflow-y auto 승격으로 래퍼가 별도 스크롤 컨테이너가 되던 결함)가 실제로 sticky 를 살렸는지 실증.
+- **레지스터 dedup**: grep(WordPanel import=OpsPage 1곳·OpLogTail import=SortersPage 1곳) + 브라우저(/sorters WordPanel 부재·/ops 정확 1개). 메뉴 '3DS 워드'→'운영 로그'(title/subtitle 로그화·라우트 유지·오펀 소터 Select 제거·OpLogTail 앱 유일 생존).
+- **S14 교차레이어**: /ops WordPanel 라이브 D0~D6(Sim3ds :1512→SignalR·CurFloor=1·Ready=1·`실시간 연결됨`) — dedup(컴포넌트 1개 삭제)이 구독 무손상임을 라이브 값+리사이즈 유지로 실증(중복/broken 구독 0).
+- 콘솔: 내 origin :5190 error/warning/pageerror 0. info 21=React DevTools 안내(무해)·일부 :5191 foreign(불산입).
+- Minor: 없음. 이월 grid-a11y 2건(ContextMenu Tab·컨테이너 tabIndex/role)은 계약 OQ-4 defer대로 미접촉(백로그 유지).
+- [CODE-REVIEW] sprint=S-UI-LAYOUT critical=0 major=0 minor=5(라벨잔재3 정리) iter=1

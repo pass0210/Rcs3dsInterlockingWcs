@@ -1,52 +1,28 @@
-import { useEffect, useState } from 'react'
-import { useSorters } from '@/lib/queries'
 import { useMonitorState, type ConnStatus } from '@/lib/signalr'
-import { Select } from '@/components/ui/select'
-import { WordPanel } from './sections/WordPanel'
 import { OpLogTail } from './sections/OpLogTail'
 import { cn } from '@/lib/utils'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SortersPage — 페이지 ② "3DS 워드"(읽기 전용·F2).
-//   소터 선택(useSorters 재사용) → 레지스터 워드 실시간 뷰(WordPanel) + operation_log 테일.
-//   워드 상태는 SignalR 스트림(useMonitorState). 편집/제어 없음(F3).
+// SortersPage — 페이지 ② "운영 로그"(operation_log 라이브 테일, 읽기 전용).
+//   ★ S-UI-LAYOUT: 3DS 레지스터 워드(WordPanel)는 /ops 와 중복이라 여기서 제거(레지스터 표시는 /ops
+//     단일 인스턴스로 일원화). WordPanel 의 destId 만 구동하던 소터 Select 도 고아가 되어 함께 제거.
+//     이 페이지는 이제 앱에서 유일한 operation_log 테일 뷰(전역·소터 비종속)만 담는다. 라우트 /sorters 유지.
+//   useMonitorState 는 SignalR 스트림 연결 상태(ConnBadge)만 소비 — useHubLifecycle(Layout)이 앱 수명
+//   동안 연결을 유지하므로 WordPanel 제거가 스트림에 무영향(구독 생성·누수 0).
+//   레이아웃: 상단 크롬(스트림 상태 배지)=shrink-0 · OpLogTail=flex-1 min-h-0(본문만 스크롤·뷰포트 맞춤).
 // ═══════════════════════════════════════════════════════════════════════════
 export function SortersPage() {
-  const { data: sorters, isLoading: sortersLoading } = useSorters()
   const monitor = useMonitorState()
-  const [destId, setDestId] = useState<number | null>(null)
-
-  // 소터 목록 도착 시 첫 소터 기본 선택.
-  useEffect(() => {
-    if (destId === null && sorters && sorters.length > 0) setDestId(sorters[0].destId)
-  }, [sorters, destId])
-
-  const wordState = destId !== null ? monitor.sorters.get(destId) : undefined
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-[12px] text-muted">소터</label>
-        <Select
-          value={destId ?? ''}
-          onChange={(e) => setDestId(Number(e.target.value))}
-          disabled={sortersLoading || !sorters?.length}
-        >
-          {sorters?.map((s) => (
-            <option key={s.destId} value={s.destId}>
-              3DS #{String(s.chuteNo).padStart(2, '0')} {s.online ? '(온라인)' : '(오프라인)'}
-            </option>
-          ))}
-        </Select>
-        {!sortersLoading && !sorters?.length && (
-          <span className="text-[12px] text-muted">등록된 소터가 없습니다</span>
-        )}
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <span className="text-[12px] text-muted">실시간 operation_log 이벤트 스트림</span>
         <div className="ml-auto">
           <ConnBadge status={monitor.status} />
         </div>
       </div>
 
-      <WordPanel state={wordState} />
       <OpLogTail />
     </div>
   )

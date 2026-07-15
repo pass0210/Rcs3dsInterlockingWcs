@@ -31,12 +31,13 @@ export function InFlightSection() {
   const items = data?.items ?? []
 
   return (
-    <Card>
-      <CardHeader>
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 카드가 탭 본문을 채우고, 헤더/페이저는 고정 크롬, 그리드 본문만 스크롤.
+    <Card className="flex min-h-0 flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>로봇 이동중 · in-flight piece</CardTitle>
         <Badge tone="busy" dot>수령~투입 대기</Badge>
       </CardHeader>
-      <CardContent className="p-0">
+      <CardContent className="min-h-0 flex-1 overflow-auto p-0">
         {isLoading && <LoadingRow label="이동중 piece 불러오는 중" />}
         {isError && <ErrorRow message={(error as Error)?.message ?? '조회 실패'} />}
         {!isLoading && !isError && items.length === 0 && (

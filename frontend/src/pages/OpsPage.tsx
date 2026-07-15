@@ -40,9 +40,11 @@ export function OpsPage() {
   const noSorters = !sortersLoading && !sorters?.length
 
   return (
-    <div className="flex flex-col gap-4">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 소터 선택 바=shrink-0 크롬, WordPanel+OpsControls 는 하단 스크롤 본문에
+    // 담는다(그리드형 아님 → OQ-2 하한: 본문 flex-1 min-h-0 overflow-auto, 짧은 뷰포트에선 본문만 스크롤).
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       {/* 소터 선택 + 연결 배지 */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <label className="text-[12px] text-muted">소터</label>
         <Select
           value={destId ?? ''}
@@ -64,11 +66,13 @@ export function OpsPage() {
       </div>
 
       {noSorters ? (
-        <div className="rounded-[14px] border border-line bg-panel px-4 py-10 text-center text-[13px] text-faint shadow-card">
+        <div className="shrink-0 rounded-[14px] border border-line bg-panel px-4 py-10 text-center text-[13px] text-faint shadow-card">
           등록된 소터가 없어 운영 제어를 표시할 수 없습니다.
         </div>
       ) : (
-        <>
+        // 상태 근거(WordPanel) + 제어(OpsControls) 스택 = 스크롤 본문. 짧은 뷰포트에서 크롬은 고정되고
+        // 이 영역만 스크롤(overflow-auto). 넓은 뷰포트에선 자연 높이로 표시(강제 채움 없음).
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto">
           {/* 현재 상태(편집 전 근거) — WordPanel 재사용(무수정). */}
           <WordPanel state={wordState} />
           {/* 소터 대상 제어 — 선택 소터가 확정된 뒤에만 렌더(destId·selected 결선). */}
@@ -80,7 +84,7 @@ export function OpsPage() {
               setOperatorName={setOperatorName}
             />
           )}
-        </>
+        </div>
       )}
     </div>
   )

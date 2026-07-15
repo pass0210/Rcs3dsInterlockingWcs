@@ -205,7 +205,10 @@ export function DataGeneratorPage() {
   const closePending = useCallback(() => setPending(null), [])
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_minmax(0,1.35fr)]">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 3열 그리드가 가용 높이를 채운다(flex-1 min-h-0). xl 단일 행을 1fr 로 늘려
+    // (xl:grid-rows-1) 생성 폼은 self-start 로 자연 높이 유지, 요약·상세 두 그리드는 행 높이를 채워 각자
+    // 본문만 스크롤한다(각 min-h-[220px] 하한). 기존 calc(100vh-220px) 매직값 제거.
+    <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_minmax(0,1.35fr)] xl:grid-rows-1">
       {/* 좌: 생성 폼 + 업로드 */}
       <Card className="self-start">
         <CardHeader>
@@ -217,7 +220,7 @@ export function DataGeneratorPage() {
       </Card>
 
       {/* 중: 요약 그리드 */}
-      <Card className="flex min-w-0 flex-col">
+      <Card className="flex min-h-[220px] min-w-0 flex-col">
         <CardHeader>
           <CardTitle>배치 요약</CardTitle>
           <Button
@@ -230,7 +233,7 @@ export function DataGeneratorPage() {
             수신 초기화{summaryChecked.size > 0 ? ` (${summaryChecked.size})` : ''}
           </Button>
         </CardHeader>
-        <CardContent className="max-h-[calc(100vh-220px)] min-w-0 overflow-auto p-0">
+        <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
           <SummaryGrid
             rows={summaryRows}
             loading={summaryQ.isLoading}
@@ -246,7 +249,7 @@ export function DataGeneratorPage() {
       </Card>
 
       {/* 우: 상세 그리드 */}
-      <Card className="flex min-w-0 flex-col">
+      <Card className="flex min-h-[220px] min-w-0 flex-col">
         <CardHeader className="flex-wrap gap-2">
           <CardTitle>상세</CardTitle>
           <div className="flex items-center gap-2">
@@ -286,7 +289,7 @@ export function DataGeneratorPage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="max-h-[calc(100vh-220px)] min-w-0 overflow-auto p-0">
+        <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
           <DetailGrid
             rows={detailRows}
             loading={detailQ.isLoading}
