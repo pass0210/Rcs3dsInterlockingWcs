@@ -70,9 +70,12 @@ export function OpsPage() {
           등록된 소터가 없어 운영 제어를 표시할 수 없습니다.
         </div>
       ) : (
-        // 상태 근거(WordPanel) + 제어(OpsControls) 스택 = 스크롤 본문. 짧은 뷰포트에서 크롬은 고정되고
-        // 이 영역만 스크롤(overflow-auto). 넓은 뷰포트에선 자연 높이로 표시(강제 채움 없음).
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto">
+        // 상태 근거(WordPanel) + 제어(OpsControls) 스택 = 단일 바운드 내부 스크롤 본문(S-UI-LAYOUT-FIX).
+        //   짧은 뷰포트에서 소터 선택 바(shrink-0)는 고정되고 이 영역만 스크롤한다: 부모 체인(main→루트→이 영역)이
+        //   전부 min-h-0/flex-1 로 뷰포트에 바운드되므로 overflow-auto 가 스택을 여기서 가둔다(page/main 무스크롤).
+        //   ★ [&>*]:shrink-0 = 스택 카드(WordPanel·OpsControls)가 flex 압축돼 2차 스크롤/잘림 지점이 되는 것을 잠가,
+        //   이 영역이 유일한 스크롤 소유자임을 명시 보장(영역당 스크롤 1개 불변식). 넓은 뷰포트=자연 높이(강제 채움 없음).
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto [&>*]:shrink-0">
           {/* 현재 상태(편집 전 근거) — WordPanel 재사용(무수정). */}
           <WordPanel state={wordState} />
           {/* 소터 대상 제어 — 선택 소터가 확정된 뒤에만 렌더(destId·selected 결선). */}

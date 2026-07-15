@@ -152,11 +152,16 @@ export function B2cDataGenPage() {
   const checkedCount = useMemo(() => [...checked].filter((id) => validBatchIds.has(id)).length, [checked, validBatchIds])
 
   return (
-    // 뷰포트 맞춤(S-UI-LAYOUT) — master-detail: 상단(생성 폼 + 마스터 그리드)과 하단(배치 상세)이 가용
-    // 높이를 flex-1 로 나눠 갖고(각 min-h 하한) 각 그리드 본문만 스크롤한다. 상단 그리드행은 xl 에서 1fr
-    // (xl:grid-rows-1) 로 늘어나 생성 폼은 self-start 자연 높이, 마스터 그리드는 채워 스크롤.
+    // 뷰포트 맞춤(S-UI-LAYOUT-FIX) — master-detail: 상단(생성 폼 + 마스터 그리드) / 하단(배치 상세).
+    //   ★ 낮은 뷰포트 폼-오버랩 근본수정: 상단 그리드 <div>에서 고정 하한(구 min-h-[220px])을 제거한다.
+    //   높이 하한(floor)의 실제 출처 = 이 상단 <div>가 min-h-0 을 갖지 않아 그 flex min-height:auto 가
+    //   콘텐츠 기반 최소(= grid min-content)로 잡히는 것. 그 min-content 는 마스터 카드가 min-h-0 라 0 을 기여하고
+    //   폼은 self-start 자연높이라, 곧 폼 카드 자연높이와 같아진다 → 상단이 폼보다 작게 줄지 않음(폼 오버랩 제거).
+    //   폼은 self-start 자연높이로 '+ 데이터 생성' 버튼까지 온전히 보인다.
+    //   xl:grid-rows-1 = minmax(0,1fr)(min-track=0, auto 아님)은 하한이 아니라: 위에서 확정된 상단 높이를 1fr 로 채우되
+    //   행이 표 전체 높이로 부풀지 않게 캡해, 마스터 그리드(min-h-0·overflow-auto)가 그 확정 높이 안에서 내부 스크롤하게 한다.
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="grid min-h-[220px] flex-1 grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)] xl:grid-rows-1">
+      <div className="grid flex-1 grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)] xl:grid-rows-1">
         {/* 좌: 생성 폼 */}
         <Card className="self-start">
           <CardHeader>
@@ -301,8 +306,13 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
   const truncated = orders.length >= ORDERS_FETCH_MAX
 
   return (
-    // 하단 상세 = 상단(폼+마스터)과 가용 높이를 나눠 갖는 flex-1(min-h-[200px] 하한). 헤더/절단 배너 고정, 표만 스크롤.
-    <Card className="flex min-h-[200px] min-w-0 flex-1 flex-col">
+    // 하단 상세 = 남은 높이를 갖는 flex-1. min-h-0 으로 낮은 뷰포트에서 상단(폼 자연높이 하한)에 자리를 양보하고
+    //   자체 바운드 스크롤(아래 overflow-auto)로 접힌다 — 빈/짧은 상세가 상단을 밀어내거나 폼을 덮지 않음.
+    //   상단이 폼 자연높이 하한을 가지므로 detail.height <= topRegion.height 가 항상 성립(빈 상세 50% 점유 해소).
+    //   ★ 상세는 min-h-0 라 헤더(~40px) 아래로 하한이 없다: 뷰포트 높이가 대략 620px 미만이면 폼 자연높이+상세 최소
+    //   합이 가용을 넘어 <main> 이 스크롤하기 시작한다(의도된 에스컬레이션 — 폼을 줄이는 대신 페이지가 스크롤). 목표
+    //   ≥680px 에서는 상세 본문이 자체 바운드 스크롤과 함께 사용 가능하게 남는다(실측 680px≈78px, 700px≈98px).
+    <Card className="flex min-h-0 min-w-0 flex-1 flex-col">
       <CardHeader className="shrink-0">
         <CardTitle>
           배치 상세{batch ? ` — ${batch.batchNo} #${batch.waveNo}` : ''}

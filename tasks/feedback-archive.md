@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-UI-LAYOUT-FIX (낮은 뷰포트 폼-오버랩 + /ops 페이지 오버플로 근본수정, 프론트 2파일) — APPROVED (2026-07-15, 1 iteration)
+
+- **레이아웃 뷰포트-맞춤 검증은 반드시 "사용자 실제(낮은) 뷰포트 다수"에서 수치 게이트로 — 큰 뷰포트 1440×900 통과는 회귀를 숨긴다**: 직전 S-UI-LAYOUT이 큰 뷰포트에서만 `scrollHeight==innerHeight`를 보고 사용자 실 화면(~680–720px)의 오버플로/오버랩을 놓쳤다. 이번엔 1366×720·1280×680·1300×700 3개 전부에서 (a) `main.scrollHeight<=clientHeight+1` ∧ `scrollingElement.scrollHeight<=innerHeight+1`(page 무스크롤), (b) `formCard.bottom<=detailCard.top+1`(오버랩 0), (c) 버튼 rect in-viewport ∧ `elementFromPoint(center)===btn`(가려짐 0), (d) `detailCard.height<=topRegion.height`(빈 영역 50% 미점유)를 raw 수치로 단언. "큰 뷰포트만 통과=FAIL" 원칙을 게이트로 명문화.
+- **`elementFromPoint(center)` + 실 click(검증 토스트) 이중화가 "클릭 가능"의 정직한 증거 — rect in-viewport만으론 형제 카드 가림을 못 잡는다**: 오버랩 버그의 본질은 폼이 배치상세 위로 페인트돼 버튼이 가려지는 것. rect가 뷰포트 안이어도 z-order로 가려질 수 있으므로 `elementFromPoint(중심)`가 버튼/자식인지로 occlusion을 실측하고, 실 `browser_click`이 검증 토스트("…모두 입력하세요"/"셀 번호와 명령 순번을…")를 띄우는 것으로 핸들러 도달을 확정. 토스트가 auto-dismiss로 스냅샷에 안 잡히면 클릭 전 **MutationObserver를 window에 설치**(page 컨텍스트 persistent)해 addedNode 텍스트를 버퍼링 후 캡처.
+- **"단일 바운드 내부 스크롤"의 게이트 = 스크롤 영역이 내부 스크롤을 소유(`scrollHeight>clientHeight`) ∧ 그 영역만 스크롤(main.scrollTop 불변) ∧ 크롬 rect.top 불변**: /ops 수정(`[&>*]:shrink-0`)이 스택 카드 압축을 잠가 영역을 유일 스크롤러로 만드는지는, 영역을 `region.scrollTop=scrollHeight`로 끝까지 민 뒤 (i) 소터바 rect.top 83→83 불변, (ii) main.scrollTop 0 유지, (iii) 마지막 컨트롤('셀 지정') rect가 뷰포트 안·`elementFromPoint`=버튼을 동시 단언해야 닫힌다. CSS containment는 data-independent지만 **실 소터 렌더(WordPanel+OpsControls)로 content를 genuinely tall**하게 만들어 `canScroll`을 실측해야 공허 통과를 피함 → 이를 위해 backend+Sim 라이브 기동이 정당(noSorters 분기에선 스택이 안 떠 스크롤 자체가 없음).
+- **page-local 스프린트의 회귀 스코프 정당성 = diff --stat이 공용 프리미티브 무접촉을 실증한 뒤에만 좁은 8페이지 스코프 신뢰**: 계약이 "공용 프리미티브 만지면 10페이지"를 걸어둠. `git diff --stat`으로 변경이 정확히 2 page 파일(+tasks)뿐이고 Layout/card/index.css=0임을 먼저 확인해야 8페이지 스코프가 정당. 회귀 페이지 중 **/data-generator의 main 35px 내부 오버플로는 pre-existing**임을 `git diff --stat -- <file>` 공란으로 귀속(untouched=베이스라인, 회귀 아님) — 회귀 판정은 "이 스프린트가 바꿨나"이지 "완벽한가"가 아님.
+- **격리 인프라 재확인(정석 준수)**: Sim3ds :1512(TCP·NOT COM1) + Wcs.Api :5215(`--urls` 명시 → 기동 로그 `Now listening on: http://localhost:5215`로 5205 무바인딩 실증) + scratch SQLite(`Provider=Sqlite`+scratchpad 파일·`SeedOnStartup=true`) + Vite :5190(`VITE_API_TARGET=:5215`로 프록시 타깃을 내 백엔드로). 콘솔 BLOCKING: 내 세션 0/0/0 — 단, 리포 루트에 남은 **타 스프린트(S-B2C-GRID-UX) console-all.log의 :5191 에러가 `cat`으로 혼입**될 수 있으니 경로/포트로 내 세션과 분리(lessons foreign-buffer 재확인).
+- **결정성**: typecheck/lint/build 각 exit 0(build "✓ built in 6.30s"·스크래치 outDir로 wwwroot 무접촉)·backend diff 0·package.json/lock diff 0. 빌드 경고=선재 chunk>500kB + signalr PURE-annotation(신규 0).
+
 ## S-B2C-FACILITY (B2C 설비 관리 페이지 + 데이터 생성 슬림화, Full-stack) — APPROVED (2026-07-14, 2 iterations: iter-1 FAIL 1 BLOCKING → FIX ITER 2 PASS)
 
 - **백엔드 엔드포인트 존재 ≠ 기능 완결 — "정상 nav 경로로 도달·동작"을 클라 미러+UI 진입점까지 추적**: iter-1 유일 블로커 B-1은 `POST /destinations/{id}`(수정)가 구현·문서화(API 표 게시)됐으나 `b2cFacility.ts`에 함수 없음·페이지에 진입점 0인 고아 엔드포인트였다. `dotnet test` GREEN·계약 API 표 게재만으로는 안 잡힌다 — 반드시 `grep "수정|edit"` 프론트 결선 + 브라우저 클릭스루로 "운영자가 만재 임계를 UI로 바꿀 수 있나"를 실행해야 드러난다. 수정 검증도 대칭으로: 다이얼로그 제출 → 행 표시(풀 50) + 조회 API 값 + operation_log 감사 3중 확인.
@@ -583,3 +592,4 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - 콘솔: 내 origin :5190 error/warning/pageerror 0. info 21=React DevTools 안내(무해)·일부 :5191 foreign(불산입).
 - Minor: 없음. 이월 grid-a11y 2건(ContextMenu Tab·컨테이너 tabIndex/role)은 계약 OQ-4 defer대로 미접촉(백로그 유지).
 - [CODE-REVIEW] sprint=S-UI-LAYOUT critical=0 major=0 minor=5(라벨잔재3 정리) iter=1
+- [CODE-REVIEW] sprint=S-UI-LAYOUT-FIX critical=0 major=0 important=1(I1 comment,fixed) minor=3 iter=2(impl+fix-only)
