@@ -46,7 +46,8 @@ public class B2cTestDataServiceTests
 
     // reset 테스트용: 소터 + 셀 N + 배치 + 셀당 오더(MANUAL 배정) + order_item + cell_assignment 직접 조성.
     // (옛 generate 의 소터/셀/N↔N 자동생성 대체 — 이제 그 책임은 설비 관리로 이관됨.)
-    private static long SeedSorter(WcsDbContext db, int chuteNo, int cellCount, int cap = 3, int planned = 3)
+    // ★ S-B2C-UX: reset 이 배치 스코프이므로 (소터 dest.Id, 배치 batch.Id) 를 함께 반환한다.
+    private static (long SorterId, long BatchId) SeedSorter(WcsDbContext db, int chuteNo, int cellCount, int cap = 3, int planned = 3)
     {
         var now = DateTime.UtcNow;
         var dest = new Destination
@@ -91,7 +92,7 @@ public class B2cTestDataServiceTests
             });
             db.SaveChanges();
         }
-        return dest.Id;
+        return (dest.Id, batch.Id);
     }
 
     // ── BuildOrderNumbers 순수·결정성 ─────────────────────────────────────────────
@@ -209,9 +210,9 @@ public class B2cTestDataServiceTests
     {
         await using var tdb = new TestDb();
         var log = new CapturingOperationLogger();
-        long sorterId, pieceId, cellId;
+        long sorterId, batchId, pieceId, cellId;
         await using (var db = tdb.Create())
-            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 3);
+            (sorterId, batchId) = SeedSorter(db, chuteNo: 1, cellCount: 3);
 
         await using (var db = tdb.Create())
         {
@@ -241,7 +242,7 @@ public class B2cTestDataServiceTests
 
         await using (var db = tdb.Create())
         {
-            var res = await new B2cTestDataService(db, log).ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = true });
+            var res = await new B2cTestDataService(db, log).ResetAsync(new B2cResetRequest { BatchId = batchId, Force = true, OperatorName = "관리자" });
             Assert.Equal("S", res.Status);
             Assert.Equal(1, res.Counts!["archivedPieces"]);
             Assert.Equal(1, res.Counts["archivedPieceEvents"]);
@@ -275,18 +276,21 @@ public class B2cTestDataServiceTests
     public async Task Reset_ArchivedSorterCommand_ExcludedFromCellCurrentQty()
     {
         await using var tdb = new TestDb();
-        long sorterId, cellId;
+        long sorterId, batchId, cellId;
         await using (var db = tdb.Create())
-            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 2);
+            (sorterId, batchId) = SeedSorter(db, chuteNo: 1, cellCount: 2);
 
         await using (var db = tdb.Create())
         {
             var assign = db.CellAssignments.First(a => a.Cell.DestinationId == sorterId);
             cellId = assign.CellId;
+            // 배치 스코프 아카이브 대상이 되도록 piece 를 그 배정 오더의 order_item 에 연결(OrderItemId).
+            var item = db.OrderItems.First(i => i.OrderId == assign.OrderId);
             var piece = new Piece
             {
                 PId = 6000, IsActive = true, Barcode = "X", Qty = 2, DestinationId = sorterId,
-                Status = PieceStatus.LOADED, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+                OrderItemId = item.Id, Status = PieceStatus.LOADED,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
             };
             db.Pieces.Add(piece);
             await db.SaveChangesAsync();
@@ -307,7 +311,7 @@ public class B2cTestDataServiceTests
         }
 
         await using (var db = tdb.Create())
-            await new B2cTestDataService(db, new CapturingOperationLogger()).ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = true });
+            await new B2cTestDataService(db, new CapturingOperationLogger()).ResetAsync(new B2cResetRequest { BatchId = batchId, Force = true });
 
         // 아카이브 후: 셀 currentQty = 0(이중 카운트 차단 — 재테스트 시 0부터).
         await using (var db = tdb.Create())
@@ -322,16 +326,20 @@ public class B2cTestDataServiceTests
     public async Task Reset_InFlightGuard_RefusesWithoutForce_DataUntouched()
     {
         await using var tdb = new TestDb();
-        long sorterId, pieceId;
+        long sorterId, batchId, pieceId;
         await using (var db = tdb.Create())
-            sorterId = SeedSorter(db, chuteNo: 1, cellCount: 2);
+            (sorterId, batchId) = SeedSorter(db, chuteNo: 1, cellCount: 2);
 
         await using (var db = tdb.Create())
         {
+            // 배치 오더의 order_item 에 연결된 진행 중(RESERVED) piece — 배치 스코프 in-flight 가드 대상.
+            var order = db.Orders.First(o => o.DestinationId == sorterId);
+            var item  = db.OrderItems.First(i => i.OrderId == order.Id);
             var piece = new Piece
             {
                 PId = 7000, IsActive = true, Barcode = "Y", Qty = 1, DestinationId = sorterId,
-                Status = PieceStatus.RESERVED, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+                OrderItemId = item.Id, Status = PieceStatus.RESERVED,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
             };
             db.Pieces.Add(piece);
             await db.SaveChangesAsync();
@@ -341,7 +349,7 @@ public class B2cTestDataServiceTests
         await using (var db = tdb.Create())
         {
             var res = await new B2cTestDataService(db, new CapturingOperationLogger())
-                .ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = false });
+                .ResetAsync(new B2cResetRequest { BatchId = batchId, Force = false });
             Assert.Equal("F", res.Status);
             Assert.Equal(1, res.Counts!["inFlight"]);
         }
@@ -351,21 +359,21 @@ public class B2cTestDataServiceTests
         await using (var db = tdb.Create())
         {
             var res = await new B2cTestDataService(db, new CapturingOperationLogger())
-                .ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = true });
+                .ResetAsync(new B2cResetRequest { BatchId = batchId, Force = true });
             Assert.Equal("S", res.Status);
         }
         await using (var db = tdb.Create())
             Assert.NotNull(db.Pieces.Single(p => p.Id == pieceId).ArchivedAt);
     }
 
-    // ── 초기화 F: 대상 소터 미존재 ────────────────────────────────────────────────
+    // ── 초기화 F: 대상 배치 미존재 ────────────────────────────────────────────────
     [Fact]
-    public async Task Reset_UnknownSorter_ReturnsF()
+    public async Task Reset_UnknownBatch_ReturnsF()
     {
         await using var tdb = new TestDb();
         await using var db = tdb.Create();
         var res = await new B2cTestDataService(db, new CapturingOperationLogger())
-            .ResetAsync(new B2cResetRequest { SorterChuteNo = 999, Force = false });
+            .ResetAsync(new B2cResetRequest { BatchId = 999999, Force = false });
         Assert.Equal("F", res.Status);
     }
 
@@ -386,7 +394,7 @@ public class B2cTestDataServiceTests
             return b.Options;
         }
 
-        long destId;
+        long batchId;
         await using (var db = new WcsDbContext(Opts(null)))
         {
             db.Database.EnsureCreated();
@@ -397,11 +405,36 @@ public class B2cTestDataServiceTests
             };
             db.Destinations.Add(dest);
             await db.SaveChangesAsync();
-            destId = dest.Id;
+            // 배치 스코프 reset: 배치 + 오더 + order_item + 그 item 에 연결된 진행 중 piece 조성.
+            var batch = new WorkBatch
+            {
+                WorkDate = DateOnly.FromDateTime(DateTime.UtcNow), BatchNo = "TX-B", WaveNo = 1,
+                Status = WorkBatchStatus.RUNNING, OpenedAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            db.WorkBatches.Add(batch);
+            await db.SaveChangesAsync();
+            batchId = batch.Id;
+            var order = new WcsOrder
+            {
+                WorkBatchId = batch.Id, OrderNo = "TX-01", OrderType = OrderType.GENERAL,
+                DestinationId = dest.Id, DestAssignType = DestAssignType.MANUAL, DestAssignedAt = DateTime.UtcNow,
+                Status = OrderStatus.RUNNING, StartedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            db.Orders.Add(order);
+            await db.SaveChangesAsync();
+            var item = new OrderItem
+            {
+                OrderId = order.Id, Barcode = "TX-01", PlannedQty = 1, ReservedQty = 1, SortedQty = 0,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            };
+            db.OrderItems.Add(item);
+            await db.SaveChangesAsync();
             db.Pieces.Add(new Piece
             {
-                PId = 8000, IsActive = true, Barcode = "TX", Qty = 1, DestinationId = destId,
-                Status = PieceStatus.RESERVED, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+                PId = 8000, IsActive = true, Barcode = "TX-01", Qty = 1, DestinationId = dest.Id,
+                OrderItemId = item.Id, Status = PieceStatus.RESERVED,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
             });
             await db.SaveChangesAsync();
         }
@@ -410,7 +443,7 @@ public class B2cTestDataServiceTests
         await using (var db = new WcsDbContext(Opts(capture)))
         {
             var res = await new B2cTestDataService(db, new CapturingOperationLogger())
-                .ResetAsync(new B2cResetRequest { SorterChuteNo = 1, Force = false });
+                .ResetAsync(new B2cResetRequest { BatchId = batchId, Force = false });
             Assert.Equal("F", res.Status);
             Assert.Equal(1, res.Counts!["inFlight"]);
         }

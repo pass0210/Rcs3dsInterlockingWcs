@@ -97,11 +97,11 @@ public class B2cApiTests : IClassFixture<B2bWebApplicationFactory>
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
     }
 
-    // ── reset 대상 0(미존재 소터) → 200 F ─────────────────────────────────────
+    // ── reset 대상 0(미존재 배치) → 200 F ─────────────────────────────────────
     [Fact]
-    public async Task Reset_UnknownSorter_200F()
+    public async Task Reset_UnknownBatch_200F()
     {
-        var res = await _client.PostAsJsonAsync("/api/b2c/test-data/reset", new { sorterChuteNo = 987, force = false });
+        var res = await _client.PostAsJsonAsync("/api/b2c/test-data/reset", new { batchId = 987654, force = false });
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         Assert.Equal("F", (await res.Content.ReadFromJsonAsync<MgmtResp>())!.Status);
     }

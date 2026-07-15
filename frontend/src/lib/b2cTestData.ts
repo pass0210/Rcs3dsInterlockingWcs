@@ -61,9 +61,15 @@ export interface BatchSummary {
   itemTotal: number
 }
 
+/**
+ * 초기화 요청 — ★ S-B2C-UX: 스코프를 **배치(batchId)** 로 재정의(소터 스코프 폐지).
+ *   대상 배치의 오더 piece 를 아카이브·수량 리셋·COMPLETED→RUNNING 재개(백엔드 B2cResetRequest 미러).
+ *   다건은 체크된 batchId 별 순차 호출 + 집계 토스트(force 체이닝). operatorName = 감사 귀속(OQ-3).
+ */
 export interface B2cResetRequest {
-  sorterChuteNo: number
+  batchId: number
   force: boolean
+  operatorName?: string
 }
 
 /** 관리 액션 결과 — ok(= res.ok && status "S") + message + counts(선택). */

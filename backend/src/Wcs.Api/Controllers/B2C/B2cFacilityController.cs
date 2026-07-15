@@ -48,8 +48,12 @@ public sealed class B2cFacilityController : ControllerBase
         [FromQuery] int? take,
         CancellationToken ct)
     {
-        // take clamp(1..500, 기본 200) — 관리 화면 대량 조회 방어(국소 상한).
-        int clamped = take is null or <= 0 ? 200 : Math.Min(take.Value, 500);
+        // ★ S-B2C-UX FIX ITER 2 (Fail-Loud · 침묵 절단 제거): 상한을 GenerateCountMax(=한 배치 생성 상한)로
+        //   올린다. 이전 상한 200/500 은 배치가 최대 1000 오더를 가질 수 있어(생성 폼 plannedQty≤1000·같은
+        //   배치키에 다중 생성 누적) 배치 디테일·미할당/할당 집계·슈트 단위 해제를 조용히 절단했다.
+        //   스케일-세이프: 무한 조회 금지 — GenerateCountMax 로 캡. 프론트가 반환수==상한이면 절단 힌트 표면화.
+        int max = B2cConstants.GenerateCountMax;
+        int clamped = take is null or <= 0 ? max : Math.Min(take.Value, max);
         return Ok(await _svc.GetOrdersAsync(assigned, batchId, clamped, ct));
     }
 

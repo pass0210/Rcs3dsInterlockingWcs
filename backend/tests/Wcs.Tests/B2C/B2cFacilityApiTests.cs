@@ -329,7 +329,8 @@ public class B2cFacilityApiTests : IClassFixture<B2bWebApplicationFactory>
         Assert.Equal(231, sorterChute);
     }
 
-    // ── ★ reset E2E(소터): 생성 → 소터 배정 → IF-05 예약 → reset(force) → 재 IF-05 ───
+    // ── ★ reset E2E(배치 스코프): 생성 → 소터 배정 → IF-05 예약 → reset(force) → 재 IF-05 ───
+    //   S-B2C-UX: reset 은 배치 스코프. 소터에 배정된 오더도 그 오더의 배치를 초기화하면 아카이브·리셋된다.
     [Fact]
     public async Task Sorter_Generate_Assign_IF05_Reset_ReInject()
     {
@@ -337,6 +338,7 @@ public class B2cFacilityApiTests : IClassFixture<B2bWebApplicationFactory>
         long sorterId = SorterId(241);
         await ConfigureCells(sorterId, rows: 1, cols: 1);
         long orderId = await GenerateOneOrder(prefix: "RSE", batch: "RSE-B");
+        long batchId = BatchId("RSE-B");
         await PostMgmt("/api/b2c/facility/orders/assign",
             new { orderId, destinationId = sorterId, cellNo = 1, operatorName = "op" });
 
@@ -344,10 +346,10 @@ public class B2cFacilityApiTests : IClassFixture<B2bWebApplicationFactory>
         Assert.Equal("OK", await PostIf05(pId: 21301, barcode: "RSE-01", qty: 1));
         Assert.Equal(1, ReservedOf("RSE-01"));
 
-        // reset(force — in-flight RESERVED) → 아카이브 + 수량 리셋.
-        var refused = await PostMgmt("/api/b2c/test-data/reset", new { sorterChuteNo = 241, force = false });
+        // reset(force — in-flight RESERVED) → 아카이브 + 수량 리셋. 배치 스코프(batchId)·operatorName 귀속.
+        var refused = await PostMgmt("/api/b2c/test-data/reset", new { batchId, force = false, operatorName = "op" });
         Assert.Equal("F", refused.Status);
-        var reset = await PostMgmt("/api/b2c/test-data/reset", new { sorterChuteNo = 241, force = true });
+        var reset = await PostMgmt("/api/b2c/test-data/reset", new { batchId, force = true, operatorName = "op" });
         Assert.Equal("S", reset.Status);
         Assert.Equal(0, ReservedOf("RSE-01"));
 
@@ -361,6 +363,23 @@ public class B2cFacilityApiTests : IClassFixture<B2bWebApplicationFactory>
         Assert.Equal(2, pieces.Count);   // 하드삭제 0 — 옛 아카이브 1 + 새 활성 1.
         Assert.Equal(1, pieces.Count(p => p.ArchivedAt != null));
         Assert.Equal(1, pieces.Count(p => p.ArchivedAt == null && p.IsActive));
+    }
+
+    // ── ★ FIX ITER 2(침묵 절단 제거): 배치가 과거 상한(200) 초과여도 전량 반환(take 미지정 기본 상한 상향) ──
+    [Fact]
+    public async Task GetOrders_LargeBatch_NotClampedAtLegacyCap()
+    {
+        const int n = 250;   // 과거 기본 상한 200 초과 — 침묵 절단이면 200 만 반환됐을 것.
+        var gen = await _client.PostAsJsonAsync("/api/b2c/test-data/generate",
+            new { workDate = "2026-07-14", batchNo = "BIG-B", waveNo = 1, plannedQty = n, barcodePrefix = "BIG" });
+        Assert.Equal("S", (await gen.Content.ReadFromJsonAsync<MgmtResp>())!.Status);
+        long batchId = BatchId("BIG-B");
+
+        // take 미지정(프론트 기본 경로 시뮬 — 서버 기본 상한 = GenerateCountMax) → 250 전량.
+        var res = await _client.GetAsync($"/api/b2c/facility/orders?batchId={batchId}");
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+        Assert.Equal(n, doc.RootElement.GetArrayLength());
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
@@ -392,6 +411,14 @@ public class B2cFacilityApiTests : IClassFixture<B2bWebApplicationFactory>
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
         return db.Destinations.Single(d => d.ChuteNo == chuteNo && d.DestType == DestType.SORTER_3D).Id;
+    }
+
+    // 배치 대리키 조회(reset 배치 스코프 — batchNo 로 최근 1건).
+    private long BatchId(string batchNo)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+        return db.WorkBatches.OrderByDescending(b => b.Id).First(b => b.BatchNo == batchNo).Id;
     }
 
     // 미할당 오더 1건 생성 후 orderId 반환("{prefix}-{index:D2}").

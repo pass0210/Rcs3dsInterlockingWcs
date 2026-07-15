@@ -1,6 +1,8 @@
-import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Eraser, LayoutGrid, Link2, Pause, Pencil, Play, Plus, Power, PowerOff, RotateCcw, Unlink } from 'lucide-react'
+import {
+  ChevronDown, ChevronRight, Eraser, LayoutGrid, Link2, Pause, Pencil, Play, Plus, Power, PowerOff, Unlink,
+} from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -8,21 +10,20 @@ import { Select } from '@/components/ui/select'
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog'
 import { EmptyRow, ErrorRow, LoadingRow } from '@/components/StateMessage'
 import { useToast } from '@/lib/toast'
-import { cn } from '@/lib/utils'
-import { useDestinations } from '@/lib/queries'
+import { useCells, useDestinations } from '@/lib/queries'
 import type { Destination } from '@/lib/api'
-import { b2cFacility, useFacilityOrders, type FacilityOrder } from '@/lib/b2cFacility'
-import { b2cTestData } from '@/lib/b2cTestData'
+import { b2cFacility, ORDERS_FETCH_MAX, useFacilityOrders, type FacilityOrder } from '@/lib/b2cFacility'
 import { ops } from '@/lib/ops'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// B2cFacilityPage — B2C 설비 관리(2b). 목적지 구성·소터 셀 설정·오더 할당·슈트 제어·재테스트 초기화.
-//   운영자가 브라우저에서 혼합 토폴로지(소터+슈트)를 구성·배정·제어한다. docs/B2C-FACILITY.md.
-//   파괴/변경 작업은 확인 다이얼로그 + 작업자 이름(감사 귀속) + operation_log(백엔드) 전수 기록.
-//   슈트 제어(clear/pause/resume)는 기존 /api/ops 소비(단일 쓰기 큐·절대규칙 #1은 백엔드가 강제).
+// B2cFacilityPage — B2C 설비 관리(목적지 구성·소터 셀 설정·오더 할당·슈트 제어). docs/B2C-FACILITY.md.
+//   ★ S-B2C-UX: 재테스트 초기화(reset)는 **데이터 생성 페이지로 이관**(여기서 제거). 오더 할당은
+//     2패널(좌=배정 대상[슈트 리프 + 소터 셀 드롭다운] · 우=미할당 오더)로 재구성 — 양쪽 체크박스
+//     다중 선택 → 배정(1:1 min(N,M) 인덱스 페어링) / 좌 상단 해제(다건 순차 unassign). 목적지 CRUD·
+//     셀 설정·슈트 제어(clear/pause/resume·활성화)는 유지(OQ-2). 파괴/변경 = ConfirmDialog + 작업자 이름(감사).
 // ═══════════════════════════════════════════════════════════════════════════
 
-// 파괴/변경 확인 액션(ConfirmDialog 소비) — run 은 검증된 작업자 이름을 받아 실행·표면화.
+// 파괴/변경 확인 액션(ConfirmDialog 소비) — run 은 실행·표면화(force 재요청 체이닝 시 pending 교체).
 interface PendingConfirm {
   title: string
   description: ReactNode
@@ -46,11 +47,11 @@ export function B2cFacilityPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [cellTarget, setCellTarget] = useState<Destination | null>(null)
   const [editTarget, setEditTarget] = useState<Destination | null>(null)
-  const [assignTarget, setAssignTarget] = useState<FacilityOrder | null>(null)
 
   const invalidate = useCallback(() => {
     qc.invalidateQueries({ queryKey: ['destinations'] })
     qc.invalidateQueries({ queryKey: ['facility-orders'] })
+    qc.invalidateQueries({ queryKey: ['cells'] })
     qc.invalidateQueries({ queryKey: ['b2c-summary'] })
     qc.invalidateQueries({ queryKey: ['b2c-batches'] })
   }, [qc])
@@ -167,60 +168,6 @@ export function B2cFacilityPage() {
     })
   }
 
-  const requestReset = (d: Destination, force = false) => {
-    const op = requireOperator()
-    if (!op) return
-    setPending({
-      title: force ? '강제 초기화' : '재테스트 초기화',
-      confirmLabel: force ? '강제 초기화' : '초기화',
-      danger: true,
-      description: (
-        <>
-          소터 <b>chuteNo {d.chuteNo}</b> 재테스트 초기화 · 작업자 <b>{op}</b>
-          <ul className="mt-2 list-disc pl-4 text-[12px] leading-relaxed">
-            <li>피스·이력·소터명령 보관 처리(soft-delete)</li>
-            <li>예약/분류 수량 0 리셋 · 완료 오더 재개(오더·셀 배정 보존)</li>
-          </ul>
-          <p className="mt-2 text-offline">이 작업은 되돌릴 수 없습니다{force ? ' (진행 중 피스까지 보관).' : '.'}</p>
-        </>
-      ),
-      run: async () => {
-        const r = await b2cTestData.reset({ sorterChuteNo: d.chuteNo, force })
-        if (r.ok) {
-          toast('success', r.message)
-          invalidate()
-          return
-        }
-        const inFlight = r.counts?.inFlight ?? 0
-        if (!force && inFlight > 0) {
-          requestReset(d, true)
-        } else {
-          toast('error', r.message)
-        }
-      },
-    })
-  }
-
-  const requestUnassign = (o: FacilityOrder) => {
-    const op = requireOperator()
-    if (!op) return
-    setPending({
-      title: '오더 할당 해제',
-      confirmLabel: '해제',
-      danger: true,
-      description: (
-        <>
-          오더 <b>{o.orderNo}</b> 의 목적지 할당을 해제합니다(미시작 오더만 · OQ-3). 작업자 <b>{op}</b>.
-        </>
-      ),
-      run: async () => {
-        const r = await b2cFacility.unassignOrder(o.orderId, op)
-        toast(r.ok ? 'success' : 'error', r.message)
-        if (r.ok) invalidate()
-      },
-    })
-  }
-
   return (
     <div className="flex flex-col gap-4">
       {/* 작업자 이름 + 새 목적지 */}
@@ -276,17 +223,7 @@ export function B2cFacilityPage() {
                       <Badge tone={d.destType === 'SORTER_3D' ? 'accent' : 'neutral'}>{d.destType}</Badge>
                     </td>
                     <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        {!d.isActive && <Badge tone="offline">비활성</Badge>}
-                        {d.paused && <Badge tone="warn">정지</Badge>}
-                        {d.full && <Badge tone="offline">만재</Badge>}
-                        {d.destType === 'SORTER_3D' && (
-                          <Badge tone={d.online ? 'online' : 'offline'}>{d.online ? 'online' : 'offline'}</Badge>
-                        )}
-                        {d.isActive && !d.paused && !d.full && d.destType === 'CHUTE' && (
-                          <Badge tone="online">정상</Badge>
-                        )}
-                      </div>
+                      <DestStatusBadges d={d} />
                     </td>
                     <td className="px-3 py-2 font-mono tabular-nums text-muted">
                       {d.destType === 'SORTER_3D'
@@ -311,15 +248,9 @@ export function B2cFacilityPage() {
                           </>
                         )}
                         {d.destType === 'SORTER_3D' && (
-                          <>
-                            <Button variant="outline" size="sm" onClick={() => setCellTarget(d)}>
-                              <LayoutGrid className="size-3.5" />셀 설정
-                            </Button>
-                            <Button variant="outline" size="sm" onClick={() => requestReset(d)}
-                              className="border-offline/50 text-offline hover:bg-offline/5">
-                              <RotateCcw className="size-3.5" />초기화
-                            </Button>
-                          </>
+                          <Button variant="outline" size="sm" onClick={() => setCellTarget(d)}>
+                            <LayoutGrid className="size-3.5" />셀 설정
+                          </Button>
                         )}
                         {d.isActive ? (
                           <Button variant="outline" size="sm" onClick={() => requestSetActive(d, false)}
@@ -344,10 +275,12 @@ export function B2cFacilityPage() {
         </CardContent>
       </Card>
 
-      {/* 오더 할당 */}
-      <OrderAssignPanel
-        onAssign={(o) => setAssignTarget(o)}
-        onUnassign={requestUnassign}
+      {/* 오더 할당 — 2패널(좌 배정 대상 / 우 미할당 오더) */}
+      <OrderAssign2Panel
+        destinations={destinations}
+        requireOperator={requireOperator}
+        requestConfirm={setPending}
+        invalidate={invalidate}
       />
 
       {/* 확인 다이얼로그(파괴/변경) */}
@@ -385,111 +318,473 @@ export function B2cFacilityPage() {
         operatorName={operatorName}
         onDone={invalidate}
       />
-
-      {/* 오더 할당 다이얼로그 */}
-      <AssignOrderDialog
-        order={assignTarget}
-        destinations={destinations}
-        onClose={() => setAssignTarget(null)}
-        operatorName={operatorName}
-        onDone={invalidate}
-      />
     </div>
   )
 }
 
-// ── 오더 할당 패널(미할당/할당 오더 목록) ─────────────────────────────────────
-function OrderAssignPanel({
-  onAssign,
-  onUnassign,
+// ── 목적지 상태 배지(비활성 우선 표기 — 정지/비활성 혼동 해소, Minor #1/#7) ─────────
+//   비활성이면 '비활성'만(정지·만재·정상 억제) + 소터는 online/offline 하드웨어 상태만 병기.
+function DestStatusBadges({ d }: { d: Destination }) {
+  if (!d.isActive) {
+    return (
+      <div className="flex flex-wrap gap-1">
+        <Badge tone="offline">비활성</Badge>
+        {d.destType === 'SORTER_3D' && (
+          <Badge tone={d.online ? 'online' : 'offline'}>{d.online ? 'online' : 'offline'}</Badge>
+        )}
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {d.paused && <Badge tone="warn">정지</Badge>}
+      {d.full && <Badge tone="offline">만재</Badge>}
+      {d.destType === 'SORTER_3D' && (
+        <Badge tone={d.online ? 'online' : 'offline'}>{d.online ? 'online' : 'offline'}</Badge>
+      )}
+      {!d.paused && !d.full && d.destType === 'CHUTE' && <Badge tone="online">정상</Badge>}
+    </div>
+  )
+}
+
+// ── 배정 대상 키(좌 패널 선택 단위) ──────────────────────────────────────────────
+//   슈트 = 리프(`chute:{destId}`) / 소터 셀 = `cell:{destId}:{cellNo}`. 소터 헤더 자체는 대상 아님.
+type Target = { key: string; destId: number; cellNo?: number }
+function parseTargetKey(key: string): Target {
+  const p = key.split(':')
+  return p[0] === 'chute'
+    ? { key, destId: Number(p[1]) }
+    : { key, destId: Number(p[1]), cellNo: Number(p[2]) }
+}
+
+// ── 오더 할당 2패널 (OQ-4: 좌 배정 대상 ↔ 우 미할당 오더 · min(N,M) 인덱스 페어링) ──
+function OrderAssign2Panel({
+  destinations,
+  requireOperator,
+  requestConfirm,
+  invalidate,
 }: {
-  onAssign: (o: FacilityOrder) => void
-  onUnassign: (o: FacilityOrder) => void
+  destinations: Destination[]
+  requireOperator: () => string | null
+  requestConfirm: (p: PendingConfirm) => void
+  invalidate: () => void
 }) {
-  const [tab, setTab] = useState<'unassigned' | 'assigned'>('unassigned')
-  const ordersQ = useFacilityOrders(tab === 'unassigned' ? false : true, false)
-  const orders = useMemo(() => ordersQ.data ?? [], [ordersQ.data])
+  const { toast } = useToast()
+  const unassignedQ = useFacilityOrders(false, false)
+  const assignedQ = useFacilityOrders(true, false)
+  const unassigned = useMemo(() => unassignedQ.data ?? [], [unassignedQ.data])
+  const assigned = useMemo(() => assignedQ.data ?? [], [assignedQ.data])
+  // Fail-Loud(FIX ITER 2): 반환수가 조회 상한과 같으면 초과분이 목록/집계에서 누락됐을 수 있음.
+  //   특히 할당 목록 절단 시 슈트 단위 해제/현재 배정 카운트가 실제보다 적을 수 있어 경고를 띄운다.
+  const unassignedTruncated = unassigned.length >= ORDERS_FETCH_MAX
+  const assignedTruncated = assigned.length >= ORDERS_FETCH_MAX
+
+  const [checkedTargets, setCheckedTargets] = useState<Set<string>>(() => new Set())
+  const [checkedOrders, setCheckedOrders] = useState<Set<number>>(() => new Set())
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
+  const [assigning, setAssigning] = useState(false)
+
+  // 목적지별 배정 오더(좌 패널 슈트 현재 배정 정보) + (destId,cellNo) → 오더(소터 셀 점유·해제 대상).
+  const assignedByDest = useMemo(() => {
+    const m = new Map<number, FacilityOrder[]>()
+    for (const o of assigned) {
+      if (o.destinationId == null) continue
+      const arr = m.get(o.destinationId)
+      if (arr) arr.push(o)
+      else m.set(o.destinationId, [o])
+    }
+    return m
+  }, [assigned])
+  const orderByCell = useMemo(() => {
+    const m = new Map<string, FacilityOrder>()
+    for (const o of assigned) {
+      if (o.destinationId != null && o.assignedCellNo != null) m.set(`${o.destinationId}:${o.assignedCellNo}`, o)
+    }
+    return m
+  }, [assigned])
+
+  const sortedDests = useMemo(() => [...destinations].sort((a, b) => a.chuteNo - b.chuteNo), [destinations])
+  const chuteNoOf = useCallback(
+    (destId: number) => destinations.find((d) => d.id === destId)?.chuteNo ?? 0,
+    [destinations],
+  )
+
+  // 인덱스 페어링용 안정 정렬 — 대상: (chuteNo, cellNo) / 오더: orderNo.
+  const orderedTargets = useMemo(() => {
+    return [...checkedTargets]
+      .map(parseTargetKey)
+      .sort((a, b) => {
+        const c = chuteNoOf(a.destId) - chuteNoOf(b.destId)
+        return c !== 0 ? c : (a.cellNo ?? -1) - (b.cellNo ?? -1)
+      })
+  }, [checkedTargets, chuteNoOf])
+  const sortedUnassigned = useMemo(
+    () => [...unassigned].sort((a, b) => a.orderNo.localeCompare(b.orderNo)),
+    [unassigned],
+  )
+  const selectedOrders = useMemo(
+    () => sortedUnassigned.filter((o) => checkedOrders.has(o.orderId)),
+    [sortedUnassigned, checkedOrders],
+  )
+
+  const pairCount = Math.min(orderedTargets.length, selectedOrders.length)
+  const canAssign = orderedTargets.length >= 1 && selectedOrders.length >= 1
+
+  const toggleTarget = (key: string) =>
+    setCheckedTargets((prev) => {
+      const n = new Set(prev)
+      if (n.has(key)) n.delete(key)
+      else n.add(key)
+      return n
+    })
+  const toggleOrder = (id: number) =>
+    setCheckedOrders((prev) => {
+      const n = new Set(prev)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
+      return n
+    })
+  const toggleExpand = (destId: number) =>
+    setExpanded((prev) => {
+      const n = new Set(prev)
+      if (n.has(destId)) n.delete(destId)
+      else n.add(destId)
+      return n
+    })
+
+  // ── 배정: 좌 선택 대상 ↔ 우 선택 오더 1:1 인덱스 페어링 min(N,M) · 순차 assign 호출(가드·감사 보존) ──
+  async function doAssign() {
+    const op = requireOperator()
+    if (!op) return
+    const n = pairCount
+    if (n === 0) return
+    setAssigning(true)
+    try {
+      let ok = 0
+      let fail = 0
+      for (let i = 0; i < n; i++) {
+        const t = orderedTargets[i]
+        const o = selectedOrders[i]
+        const r = await b2cFacility.assignOrder({
+          orderId: o.orderId,
+          destinationId: t.destId,
+          cellNo: t.cellNo ?? undefined,
+          operatorName: op,
+        })
+        if (r.ok) ok++
+        else fail++
+      }
+      const remainder = Math.abs(orderedTargets.length - selectedOrders.length)
+      toast(
+        ok > 0 ? 'success' : 'error',
+        `배정 ${ok}건 완료${fail > 0 ? `, 실패 ${fail}건` : ''}${remainder > 0 ? ` (미페어링 ${remainder}건 유지)` : ''}.`,
+      )
+      setCheckedTargets(new Set())
+      setCheckedOrders(new Set())
+      invalidate()
+    } finally {
+      setAssigning(false)
+    }
+  }
+
+  // ── 해제: 체크한 대상(슈트=배정 오더 전부 / 셀=점유 오더)의 미시작 오더 순차 unassign(진행 중 스킵) ──
+  function requestUnassign() {
+    const op = requireOperator()
+    if (!op) return
+    const orderIds: number[] = []
+    const seen = new Set<number>()
+    for (const t of orderedTargets) {
+      if (t.cellNo == null) {
+        for (const o of assignedByDest.get(t.destId) ?? []) {
+          if (!seen.has(o.orderId)) { seen.add(o.orderId); orderIds.push(o.orderId) }
+        }
+      } else {
+        const o = orderByCell.get(`${t.destId}:${t.cellNo}`)
+        if (o && !seen.has(o.orderId)) { seen.add(o.orderId); orderIds.push(o.orderId) }
+      }
+    }
+    if (orderIds.length === 0) {
+      toast('warning', '해제할 배정이 없습니다(선택 대상에 배정된 오더 없음).')
+      return
+    }
+    requestConfirm({
+      title: '오더 배정 해제',
+      confirmLabel: '해제',
+      danger: true,
+      description: (
+        <>
+          선택 대상 <b>{orderedTargets.length}</b>건 · 해제될 오더 <b>{orderIds.length}</b>건 · 작업자 <b>{op}</b>.
+          <p className="mt-2 text-[12px] text-muted">미시작 오더만 해제됩니다(진행 중은 스킵 · OQ-3).</p>
+          <p className="mt-1 text-offline">해제된 오더는 미할당으로 돌아갑니다.</p>
+        </>
+      ),
+      run: async () => {
+        let ok = 0
+        let skipped = 0
+        let fail = 0
+        for (const oid of orderIds) {
+          const r = await b2cFacility.unassignOrder(oid, op)
+          if (r.ok) ok++
+          else if ((r.counts?.reserved ?? 0) > 0 || (r.counts?.sorted ?? 0) > 0) skipped++
+          else fail++
+        }
+        toast(
+          ok > 0 ? 'success' : skipped > 0 ? 'warning' : 'error',
+          `해제 ${ok}건 완료${skipped > 0 ? `, 진행 중 스킵 ${skipped}건` : ''}${fail > 0 ? `, 실패 ${fail}건` : ''}.`,
+        )
+        setCheckedTargets(new Set())
+        invalidate()
+      },
+    })
+  }
+
+  const loading = unassignedQ.isLoading || assignedQ.isLoading
+  const errored = unassignedQ.isError || assignedQ.isError
 
   return (
     <Card className="flex min-w-0 flex-col">
       <CardHeader>
-        <CardTitle>오더 할당</CardTitle>
-        <div className="flex rounded-lg border border-line bg-elevated p-0.5" role="tablist" aria-label="오더 필터">
-          {(['unassigned', 'assigned'] as const).map((t) => (
-            <button
-              key={t}
-              role="tab"
-              aria-selected={tab === t}
-              onClick={() => setTab(t)}
-              className={cn(
-                'rounded-md px-2.5 py-1 text-[12px] font-semibold transition-colors',
-                tab === t ? 'bg-panel text-ink shadow-card' : 'text-muted hover:text-ink',
-              )}
-            >
-              {t === 'unassigned' ? '미할당' : '할당됨'}
-            </button>
-          ))}
+        <CardTitle>오더 할당 (2패널)</CardTitle>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-[12px] text-muted">
+            선택 대상 <b className="text-ink tabular-nums">{checkedTargets.size}</b> · 오더{' '}
+            <b className="text-ink tabular-nums">{checkedOrders.size}</b>
+            {pairCount > 0 && <span className="ml-1.5 text-faint">→ {pairCount}건 배정</span>}
+          </span>
+          <Button variant="solid" size="sm" disabled={!canAssign || assigning} onClick={doAssign}>
+            <Link2 className="size-4" />{assigning ? '배정 중…' : `배정 (${pairCount})`}
+          </Button>
         </div>
       </CardHeader>
-      <CardContent className="min-w-0 overflow-auto p-0">
-        {ordersQ.isLoading ? (
-          <LoadingRow />
-        ) : ordersQ.isError ? (
-          <ErrorRow message={(ordersQ.error as Error)?.message ?? '오더 조회 실패'} />
-        ) : orders.length === 0 ? (
-          <EmptyRow label={tab === 'unassigned' ? '미할당 오더가 없습니다.' : '할당된 오더가 없습니다.'} />
-        ) : (
-          <table className="w-full text-[12px]">
-            <thead className="sticky top-0 bg-panel text-left text-faint">
-              <tr className="border-b border-line">
-                <th className="px-3 py-2 font-medium">오더</th>
-                <th className="px-3 py-2 font-medium">배치</th>
-                <th className="px-3 py-2 font-medium">예약/분류</th>
-                {tab === 'assigned' && <th className="px-3 py-2 font-medium">목적지</th>}
-                <th className="px-3 py-2 font-medium">작업</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line">
-              {orders.map((o) => (
-                <tr key={o.orderId} className="text-ink">
-                  <td className="px-3 py-2 font-mono">{o.orderNo}</td>
-                  <td className="px-3 py-2 text-muted">{o.batchLabel}</td>
-                  <td className="px-3 py-2 font-mono tabular-nums text-muted">
-                    {o.reservedQty} / {o.sortedQty}
-                  </td>
-                  {tab === 'assigned' && (
-                    <td className="px-3 py-2">
-                      {o.destinationChuteNo != null ? (
-                        <span>
-                          {o.destType} #{o.destinationChuteNo}
-                          {o.assignedCellNo != null && <span className="text-faint"> · 셀 {o.assignedCellNo}</span>}
-                        </span>
+      <CardContent>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {/* 좌: 배정 대상(슈트 리프 + 소터 셀) + 상단 해제 */}
+          <div className="min-w-0 rounded-lg border border-line">
+            <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <span className="text-[12px] font-semibold text-ink">배정 대상 (슈트 · 소터 셀)</span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={checkedTargets.size === 0}
+                onClick={requestUnassign}
+                className="border-offline/50 text-offline hover:bg-offline/5"
+              >
+                <Unlink className="size-3.5" />해제 ({checkedTargets.size})
+              </Button>
+            </div>
+            {assignedTruncated && (
+              <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+                배정 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 현재 배정 카운트·슈트 단위 해제가 실제보다 적게 처리될 수 있습니다.
+              </p>
+            )}
+            <div className="max-h-[440px] min-w-0 overflow-auto">
+              {loading ? (
+                <LoadingRow />
+              ) : errored ? (
+                <ErrorRow message="오더 조회 실패" />
+              ) : sortedDests.length === 0 ? (
+                <EmptyRow label="목적지가 없습니다. 먼저 목적지를 생성하세요." />
+              ) : (
+                <table className="w-full text-[12px]">
+                  <thead className="sticky top-0 bg-panel text-left text-faint">
+                    <tr className="border-b border-line">
+                      <th className="w-8 px-3 py-2" />
+                      <th className="px-3 py-2 font-medium">대상</th>
+                      <th className="px-3 py-2 font-medium">상태</th>
+                      <th className="px-3 py-2 font-medium">현재 배정</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {sortedDests.map((d) =>
+                      d.destType === 'CHUTE' ? (
+                        <tr key={`c${d.id}`} className="text-ink">
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="checkbox"
+                              checked={checkedTargets.has(`chute:${d.id}`)}
+                              onChange={() => toggleTarget(`chute:${d.id}`)}
+                              disabled={!d.isActive}
+                              aria-label={`슈트 ${d.chuteNo} 선택`}
+                              className="size-3.5 cursor-pointer accent-[var(--color-brand-active)] disabled:cursor-not-allowed"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5 font-mono tabular-nums">
+                            #{d.chuteNo} <Badge tone="neutral">CHUTE</Badge>
+                          </td>
+                          <td className="px-3 py-1.5"><DestStatusBadges d={d} /></td>
+                          <td className="px-3 py-1.5 text-muted">
+                            <ChuteAssignInfo orders={assignedByDest.get(d.id) ?? []} />
+                          </td>
+                        </tr>
                       ) : (
-                        '—'
-                      )}
-                    </td>
-                  )}
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-1.5">
-                      <Button variant="outline" size="sm" onClick={() => onAssign(o)} disabled={!o.canReassign}
-                        title={o.canReassign ? undefined : '진행 중 오더는 배정/재배정할 수 없습니다(OQ-3).'}>
-                        <Link2 className="size-3.5" />{tab === 'unassigned' ? '배정' : '재배정'}
-                      </Button>
-                      {tab === 'assigned' && (
-                        <Button variant="outline" size="sm" onClick={() => onUnassign(o)} disabled={!o.canReassign}
-                          className="border-offline/50 text-offline hover:bg-offline/5">
-                          <Unlink className="size-3.5" />해제
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+                        <Fragment key={`s${d.id}`}>
+                          <tr onClick={() => toggleExpand(d.id)} className="cursor-pointer text-ink hover:bg-elevated">
+                            <td className="px-3 py-1.5 text-faint">
+                              {expanded.has(d.id) ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono tabular-nums">
+                              #{d.chuteNo} <Badge tone="accent">SORTER_3D</Badge>
+                            </td>
+                            <td className="px-3 py-1.5"><DestStatusBadges d={d} /></td>
+                            <td className="px-3 py-1.5 text-muted tabular-nums">
+                              {d.cellEnabled ?? 0}/{d.cellTotal ?? 0} 셀 · 배정 {assignedByDest.get(d.id)?.length ?? 0}
+                            </td>
+                          </tr>
+                          {expanded.has(d.id) && (
+                            <SorterCellRows
+                              sorter={d}
+                              checkedTargets={checkedTargets}
+                              onToggle={toggleTarget}
+                            />
+                          )}
+                        </Fragment>
+                      ),
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* 우: 미할당 오더 */}
+          <div className="min-w-0 rounded-lg border border-line">
+            <div className="border-b border-line px-3 py-2">
+              <span className="text-[12px] font-semibold text-ink">미할당 오더</span>
+            </div>
+            {unassignedTruncated && (
+              <p className="border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
+                미할당 오더가 조회 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달 — 초과분은 목록에 표시되지 않습니다.
+              </p>
+            )}
+            <div className="max-h-[440px] min-w-0 overflow-auto">
+              {loading ? (
+                <LoadingRow />
+              ) : errored ? (
+                <ErrorRow message="오더 조회 실패" />
+              ) : unassigned.length === 0 ? (
+                <EmptyRow label="미할당 오더가 없습니다." />
+              ) : (
+                <table className="w-full text-[12px]">
+                  <thead className="sticky top-0 bg-panel text-left text-faint">
+                    <tr className="border-b border-line">
+                      <th className="w-8 px-3 py-2" />
+                      <th className="px-3 py-2 font-medium">오더</th>
+                      <th className="px-3 py-2 font-medium">배치</th>
+                      <th className="px-3 py-2 font-medium">예약/분류</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {sortedUnassigned.map((o) => (
+                      <tr key={o.orderId} className="text-ink">
+                        <td className="px-3 py-1.5">
+                          <input
+                            type="checkbox"
+                            checked={checkedOrders.has(o.orderId)}
+                            onChange={() => toggleOrder(o.orderId)}
+                            disabled={!o.canReassign}
+                            aria-label={`오더 ${o.orderNo} 선택`}
+                            title={o.canReassign ? undefined : '진행 중 오더는 배정할 수 없습니다(OQ-3).'}
+                            className="size-3.5 cursor-pointer accent-[var(--color-brand-active)] disabled:cursor-not-allowed"
+                          />
+                        </td>
+                        <td className="px-3 py-1.5 font-mono">{o.orderNo}</td>
+                        <td className="px-3 py-1.5 text-muted">{o.batchLabel}</td>
+                        <td className="px-3 py-1.5 font-mono tabular-nums text-muted">
+                          {o.reservedQty} / {o.sortedQty}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+        <p className="mt-2 text-[11px] text-faint">
+          좌측에서 슈트/소터 셀을, 우측에서 미할당 오더를 각각 체크한 뒤 <b>배정</b>하면 선택 순서대로 1:1(부족분은 미배정 유지)
+          로 배정됩니다. 소터는 행을 눌러 셀을 펼쳐 선택합니다.
+        </p>
       </CardContent>
     </Card>
+  )
+}
+
+// 슈트 현재 배정 요약(오더 수 + 오더번호 발췌).
+function ChuteAssignInfo({ orders }: { orders: FacilityOrder[] }) {
+  if (orders.length === 0) return <span className="text-faint">—</span>
+  const head = orders.slice(0, 3).map((o) => o.orderNo).join(', ')
+  return (
+    <span>
+      {orders.length}건
+      <span className="ml-1 text-faint">{head}{orders.length > 3 ? ' …' : ''}</span>
+    </span>
+  )
+}
+
+// ── 소터 셀 행(드롭다운 펼침 — 각 셀 체크박스 + 점유 오더 표시) ─────────────────────
+function SorterCellRows({
+  sorter,
+  checkedTargets,
+  onToggle,
+}: {
+  sorter: Destination
+  checkedTargets: Set<string>
+  onToggle: (key: string) => void
+}) {
+  const cellsQ = useCells(sorter.id)
+  const cells = useMemo(() => cellsQ.data ?? [], [cellsQ.data])
+
+  if (cellsQ.isLoading)
+    return (
+      <tr>
+        <td colSpan={4} className="px-3 py-2 pl-9 text-[11px] text-faint">셀 불러오는 중…</td>
+      </tr>
+    )
+  if (cellsQ.isError)
+    return (
+      <tr>
+        <td colSpan={4} className="px-3 py-2 pl-9 text-[11px] text-offline">셀 조회 실패</td>
+      </tr>
+    )
+  if (cells.length === 0)
+    return (
+      <tr>
+        <td colSpan={4} className="px-3 py-2 pl-9 text-[11px] text-faint">셀이 없습니다('셀 설정'으로 생성).</td>
+      </tr>
+    )
+
+  return (
+    <>
+      {cells.map((c) => {
+        const key = `cell:${sorter.id}:${c.cellNo}`
+        return (
+          <tr key={key} className="bg-elevated/40 text-ink">
+            <td className="px-3 py-1.5 pl-8">
+              <input
+                type="checkbox"
+                checked={checkedTargets.has(key)}
+                onChange={() => onToggle(key)}
+                disabled={!c.enabled}
+                aria-label={`소터 ${sorter.chuteNo} 셀 ${c.cellNo} 선택`}
+                className="size-3.5 cursor-pointer accent-[var(--color-brand-active)] disabled:cursor-not-allowed"
+              />
+            </td>
+            <td className="px-3 py-1.5 font-mono text-[11px] text-muted" colSpan={2}>
+              └ 셀 {c.cellNo}
+              {!c.enabled && <span className="ml-1 text-faint">(비활성)</span>}
+            </td>
+            <td className="px-3 py-1.5 text-[11px]">
+              {c.assignedOrderNo ? (
+                <span className="text-ink">배정: {c.assignedOrderNo}</span>
+              ) : (
+                <span className="text-faint">비어있음</span>
+              )}
+              {c.currentQty > 0 && <span className="ml-1 text-faint">적재 {c.currentQty}</span>}
+            </td>
+          </tr>
+        )
+      })}
+    </>
   )
 }
 
@@ -573,9 +868,8 @@ function CreateDestinationDialog({
 }
 
 // ── 목적지 수정 다이얼로그(CHUTE floor·workFullQty) ───────────────────────────
-//   백엔드 POST /destinations/{id} 수정 결선(고아 엔드포인트 해소). status 는 제외 —
-//   실 pause/resume(인메모리·IF-08 push 동기)은 행의 정지/재개(=/api/ops)가 정본이므로 여기서 다루지 않는다.
-//   SORTER_3D 는 이 엔드포인트로 수정할 필드(floor NULL·workFullQty 없음)가 없어 수정 버튼을 노출하지 않는다.
+//   백엔드 POST /destinations/{id} 수정 결선. status 는 제외 — 실 pause/resume(인메모리·IF-08 push 동기)은
+//   행의 정지/재개(=/api/ops)가 정본. SORTER_3D 는 수정 필드(floor NULL·workFullQty 없음)가 없어 미노출.
 function EditDestinationDialog({
   dest,
   onClose,
@@ -733,91 +1027,6 @@ function CellConfigDialog({
         <div className="mt-1 flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={busy}>취소</Button>
           <Button type="submit" variant="solid" size="sm" disabled={busy}>{busy ? '설정 중…' : `${total || 0}셀 설정`}</Button>
-        </div>
-      </form>
-    </Dialog>
-  )
-}
-
-// ── 오더 할당 다이얼로그(목적지+셀 선택) ──────────────────────────────────────
-function AssignOrderDialog({
-  order,
-  destinations,
-  onClose,
-  operatorName,
-  onDone,
-}: {
-  order: FacilityOrder | null
-  destinations: Destination[]
-  onClose: () => void
-  operatorName: string
-  onDone: () => void
-}) {
-  const { toast } = useToast()
-  const [destId, setDestId] = useState('')
-  const [cellNo, setCellNo] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const selected = destinations.find((d) => d.id === Number(destId))
-  const isSorter = selected?.destType === 'SORTER_3D'
-  const activeDests = destinations.filter((d) => d.isActive)
-
-  async function submit(e: FormEvent) {
-    e.preventDefault()
-    if (!order) return
-    const did = Number(destId)
-    if (!Number.isInteger(did) || did < 1) {
-      toast('warning', '목적지를 선택하세요.')
-      return
-    }
-    const cell = isSorter && cellNo.trim() !== '' ? Number(cellNo) : undefined
-    setBusy(true)
-    try {
-      const r = await b2cFacility.assignOrder({
-        orderId: order.orderId,
-        destinationId: did,
-        cellNo: cell,
-        operatorName: operatorName.trim() || undefined,
-      })
-      toast(r.ok ? 'success' : 'error', r.message)
-      if (r.ok) {
-        setDestId(''); setCellNo('')
-        onDone()
-        onClose()
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Dialog open={order !== null} onClose={() => { if (!busy) onClose() }} labelledBy="assign-order-title">
-      <form onSubmit={submit} className="flex flex-col gap-3 p-5">
-        <h2 id="assign-order-title" className="text-[15px] font-semibold text-ink">
-          오더 배정 — {order?.orderNo}
-        </h2>
-        <label className="block">
-          <span className="mb-1 block text-[12px] font-medium text-muted">목적지</span>
-          <Select value={destId} onChange={(e) => setDestId(e.target.value)} className="w-full">
-            <option value="">— 선택 —</option>
-            {activeDests.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.destType} #{d.chuteNo}
-                {d.destType === 'SORTER_3D' ? ` (셀 ${d.cellEnabled ?? 0}/${d.cellTotal ?? 0})` : ''}
-              </option>
-            ))}
-          </Select>
-        </label>
-        {isSorter && (
-          <label className="block">
-            <span className="mb-1 block text-[12px] font-medium text-muted">셀 번호(선택 — 미지정 시 셀 미배정)</span>
-            <input value={cellNo} onChange={(e) => setCellNo(e.target.value)} type="number" min={1}
-              className={dlgInput} placeholder="예: 1" />
-          </label>
-        )}
-        <div className="mt-1 flex justify-end gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={busy}>취소</Button>
-          <Button type="submit" variant="solid" size="sm" disabled={busy}>{busy ? '배정 중…' : '배정'}</Button>
         </div>
       </form>
     </Dialog>

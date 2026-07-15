@@ -80,15 +80,23 @@ public sealed class B2cGenerateRequest
     public string BarcodePrefix { get; set; } = string.Empty;
 }
 
-/// <summary>초기화 요청(OQ1 아카이브·OQ2 범위·OQ3 가드). 대상 소터 지정 + force.</summary>
+/// <summary>
+/// 초기화 요청(재테스트 준비) — ★ S-B2C-UX(OQ-1): 스코프를 **배치(work_batch)** 로 재정의.
+///   기존 소터 스코프(sorterChuteNo)는 폐지 — "초기화 = 생성한 배치를 되돌린다"는 도메인 판단과 정합.
+///   대상 배치에 속한 오더(슈트/소터/미할당 무관)의 piece 를 아카이브·수량 리셋·COMPLETED→RUNNING 재개한다.
+///   시맨틱(아카이브 소프트삭제·수량 리셋·오더/배정 보존·in-flight 거부+force·archived-exclusion)은 전부 보존.
+/// </summary>
 public sealed class B2cResetRequest
 {
-    /// <summary>대상 3D 소터 슈트번호(초기화 범위 — OQ2 대상 소터 지정).</summary>
-    [Range(1, B2cConstants.ChuteNoMax, ErrorMessage = "sorterChuteNo must be between 1 and 9999.")]
-    public int SorterChuteNo { get; set; }
+    /// <summary>대상 배치 대리키(work_batch.id · 초기화 범위 — OQ-1 배치 스코프).</summary>
+    [Range(1, long.MaxValue, ErrorMessage = "batchId must be a positive integer.")]
+    public long BatchId { get; set; }
 
     /// <summary>진행 중(in-flight) 작업이 있어도 강제 초기화(OQ3 — 기본 false 거부, UI 경고 후 true 재요청).</summary>
     public bool Force { get; set; }
+
+    /// <summary>작업자 이름(감사 귀속 — OQ-3 · 선택, 공백 허용). operation_log detail 에 기록.</summary>
+    public string? OperatorName { get; set; }
 }
 
 // ── 관리 액션 응답 ({status, message, counts}) ──────────────────────────────────

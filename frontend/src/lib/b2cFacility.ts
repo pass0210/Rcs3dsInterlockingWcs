@@ -11,6 +11,11 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 const BASE = '/api/b2c/facility'
 
+// ★ S-B2C-UX FIX ITER 2: 오더 조회 상한 — 백엔드 B2cConstants.GenerateCountMax(한 배치 생성 상한) 미러.
+//   조회 훅은 항상 이 값을 take 로 명시 전달해 백엔드 기본(과거 200) 침묵 절단을 제거한다. 반환 건수가
+//   이 상한과 같으면(>=) 초과분이 있을 수 있으므로 UI 가 절단 힌트를 띄운다(Fail-Loud). 서버 400 이 최종 권위.
+export const ORDERS_FETCH_MAX = 1000
+
 // ── 응답 형상(백엔드 DTO 미러 · camelCase) ───────────────────────────────────
 export interface FacilityOrder {
   orderId: number
@@ -104,10 +109,11 @@ export interface AssignOrderRequest {
 
 // ── API 표면 ─────────────────────────────────────────────────────────────────
 export const b2cFacility = {
-  orders: (assigned?: boolean, batchId?: number, signal?: AbortSignal) => {
+  orders: (assigned?: boolean, batchId?: number, take?: number, signal?: AbortSignal) => {
     const parts: string[] = []
     if (assigned !== undefined) parts.push(`assigned=${assigned}`)
     if (batchId !== undefined) parts.push(`batchId=${batchId}`)
+    if (take !== undefined) parts.push(`take=${take}`)
     return getJson<FacilityOrder[]>(`/orders${parts.length ? `?${parts.join('&')}` : ''}`, signal)
   },
 
@@ -133,7 +139,22 @@ export const b2cFacility = {
 export function useFacilityOrders(assigned: boolean | undefined, refetchInterval: number | false = false) {
   return useQuery({
     queryKey: ['facility-orders', assigned ?? 'all'],
-    queryFn: ({ signal }) => b2cFacility.orders(assigned, undefined, signal),
+    // take=ORDERS_FETCH_MAX 명시(FIX ITER 2) — 미할당 목록·할당 집계(슈트 단위 해제/카운트)가 200 에서
+    // 침묵 절단되지 않도록. 반환 건수가 상한이면 소비 컴포넌트가 절단 힌트를 표면화.
+    queryFn: ({ signal }) => b2cFacility.orders(assigned, undefined, ORDERS_FETCH_MAX, signal),
+    refetchInterval,
+    placeholderData: keepPreviousData,
+  })
+}
+
+// ★ S-B2C-UX: 데이터 생성 페이지 하단 디테일 그리드 소스 — 선택 배치의 오더/바코드/수량/할당 상태.
+//   `orders?batchId=` 을 그대로 재사용(백엔드 신설 0 · F2). batchId=null 이면 비활성(미선택 상태).
+//   queryKey 는 'facility-orders' 접두 공유 → 배정/해제/초기화의 invalidate 가 함께 갱신한다.
+export function useFacilityBatchOrders(batchId: number | null, refetchInterval: number | false = false) {
+  return useQuery({
+    queryKey: ['facility-orders', 'batch', batchId],
+    queryFn: ({ signal }) => b2cFacility.orders(undefined, batchId!, ORDERS_FETCH_MAX, signal),
+    enabled: batchId !== null,
     refetchInterval,
     placeholderData: keepPreviousData,
   })
