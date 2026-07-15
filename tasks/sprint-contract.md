@@ -1,173 +1,219 @@
-# Sprint Contract — S-UI-LAYOUT (프론트 레이아웃 정리: 뷰포트 맞춤 + 그리드 내부 스크롤 + 3DS 워드 중복 제거)
+# Sprint Contract — S-UI-LAYOUT-FIX
 
-> 작성: Planner Subagent, 2026-07-15. 사용자 지시(3건) 기반. 순수 프론트 스프린트(백엔드/스키마/마이그레이션 0 목표).
-> 베이스: PR #65까지 병합된 develop 위. WHAT만 기술(구현 방식=HOW는 Generator 재량).
-> **이 계약은 Open Questions(§OQ) 사용자 확정 후 착수한다** — 특히 OQ-1(/sorters 운명)·OQ-2(다중 그리드 높이 배분)·OQ-3(b2b 포함 여부)는 스코프를 가르는 결정 사항.
+> PR #66(S-UI-LAYOUT) 병합 후 사용자가 발견한 뷰포트-맞춤 후속 버그 2건 수정.
+> Base: `develop = a088520` (Merge PR #66). 프론트엔드 전용 · 백엔드 diff 0.
+> 작성: Planner Subagent, 2026-07-15. WHAT만 기술(구현 기법=HOW는 Generator 재량).
 
 ---
 
 ## Goal
 
-각 페이지가 데이터량과 무관하게 **뷰포트(브라우저 가시영역) 안에 딱 맞고**, 넘치는 데이터는 **페이지 전체가 아니라 그리드 내부에서만 스크롤**되도록 전 데이터-그리드 페이지의 레이아웃을 일관되게 정리한다. 동시에 `/sorters`(3DS 워드)와 `/ops`(운영 제어)에 **중복 렌더되는 3DS 레지스터 워드 표시를 제거**해 레지스터 값 표시를 `/ops`에만 남기고, 콘텐츠가 빠지는 3DS 워드 메뉴의 라벨·역할을 재정의한다.
+두 페이지의 **낮은 뷰포트**(사용자 실제 화면 높이, ~680–720px)에서의 레이아웃 결함을 근본 수정한다.
+
+1. **B2C 데이터 생성(`/b2c/test-data`)** — 좌측 '데이터 생성' 폼 카드가 상단 영역의 높이를 초과해
+   아래 '배치 상세' 카드 위로 **넘쳐 겹치고(overlap)**, '+ 데이터 생성' 버튼이 배치 상세 카드에 가려/잘린다.
+   상단 영역이 하단과 flex 50/50으로 분할되어 짧은 뷰포트에서 상단이 폼보다 작아지는 것,
+   그리고 배치 상세가 비어 있어도 절반을 점유하는 것이 원인.
+2. **운영 제어(`/ops`)** — WordPanel(3DS 레지스터 워드 D0~D6) + OpsControls 합산 높이가 뷰포트를 초과해
+   **페이지(main) 자체가 아래로 삐져나온다(page-level scroll/overflow)**. 내부 `overflow-auto`(OpsPage.tsx:75)가
+   있으나 짧은 뷰포트에서 단일 내부 스크롤로 갇히지 못한다.
+
+**성공의 정의는 큰 뷰포트가 아니라 낮은 뷰포트에서의 수치 검증이다** (아래 Verification Scenarios).
+이전 스프린트 Evaluator가 큰 뷰포트에서만 `scrollHeight==innerHeight`를 봐서 실제(더 낮은) 뷰포트의
+오버플로/오버랩을 놓친 회귀를 반복하지 않는다.
 
 ---
 
 ## 배경 — 코드 실측(착수 전 확인 완료, load-bearing)
 
-### A. 3DS 레지스터 워드 중복은 "실재"하며 문자 그대로의 중복이다
-- `/sorters`(`frontend/src/pages/SortersPage.tsx`): 소터 `Select` + `ConnBadge` + **`<WordPanel state={wordState} />`** + `<OpLogTail />`.
-- `/ops`(`frontend/src/pages/OpsPage.tsx`): 소터 `Select` + `ReadinessStrip` + `ConnBadge` + **`<WordPanel state={wordState} />`** + `<OpsControls />`.
-- 두 페이지가 **동일한 `WordPanel` 컴포넌트**(`frontend/src/pages/sections/WordPanel.tsx` — "3DS 레지스터 워드" 카드: D0/D1/D2/D3/D5/D6 RegTile + D4 비트램프 + Online)를 그대로 렌더한다. `WordPanel` 임포트처는 정확히 이 두 파일뿐(grep 확인).
-- 즉 `/ops`는 **이미 레지스터 값을 표시**한다. 따라서 요구 2는 "레지스터를 /ops로 이관"이 아니라 **"/sorters에서 WordPanel을 제거(중복 삭제)"** 이다.
-- ★ 리스크 해소: `/ops`의 WordPanel은 이미 `useMonitorState()`(SignalR) + `monitor.sorters.get(destId)`로 완전 결선돼 있다. **이관·이동이 없으므로 새 구독 생성·중복 구독·누수 위험이 애초에 없다** — 한쪽 인스턴스를 삭제할 뿐이다. `useHubLifecycle()`(Layout.tsx)이 앱 수명 동안 연결을 유지하므로 SortersPage에서 WordPanel을 빼도 스트림은 무영향.
-
-### B. `/sorters`에서 WordPanel을 빼면 남는 것
-- 소터 `Select` — **WordPanel의 destId만 구동**했다(OpLogTail은 destId를 쓰지 않음). WordPanel 제거 시 **고아**가 된다.
-- `ConnBadge` — SignalR 연결 상태 배지.
-- `<OpLogTail />`(`frontend/src/pages/sections/OpLogTail.tsx`) — **operation_log 라이브 테일**. 소터 종속 아님(전역). category/level 필터·POLL_CHANGE 옵트인·자동 스크롤·500행 캡·REST 백로그+SignalR append. **앱 전체에서 이 컴포넌트가 사는 유일한 곳이 SortersPage**(grep 확인 — Monitor·Ops에 없음). ⇒ `/sorters`를 통째로 삭제하면 operation_log 테일 기능이 앱에서 사라진다.
-
-### C. 뷰포트/스크롤 현황 — 페이지마다 제각각(이 스프린트가 통일할 "혼재")
-- 높이 체인: `index.css`에 `html, body, #root { height: 100% }` 확립됨. `Layout.tsx`의 `<main className="… flex-1 overflow-auto p-5">`가 **현재 페이지 레벨 스크롤 컨테이너** — 콘텐츠가 넘치면 페이지 전체가 스크롤(사이드바+상단 헤더는 main 밖이라 이미 고정).
-- 페이지별 처리 방식(불일치):
-
-  | 페이지 | 현재 스크롤 처리 | 문제 |
-  |---|---|---|
-  | MonitorPage (3탭: 작업/이동중/분류) | sticky thead 테이블, CardContent `p-0`, **max-height 없음** | 무한 증가 → main(페이지) 스크롤 |
-  | SortersPage | WordPanel(타일, 캡 없음) + OpLogTail(`max-h-[340px]`) | WordPanel 캡 없음 → main 스크롤 |
-  | OpsPage | WordPanel + OpsControls | 내부 스크롤 없음 → 짧은 뷰포트서 main 스크롤 |
-  | B2cDataGenPage (마스터-디테일) | master/detail 그리드 `overflow-auto`, **max-height 없음** | 무한 증가 → main 스크롤 |
-  | B2cFacilityPage (3단 스택 + 2패널) | 목적지 그리드 캡 없음 · 배정 2패널 `max-h-[440px]` 고정px | 혼재·페이지 매우 김 |
-  | LogsPage (b2b, 탭) | `max-h-[calc(100vh-260px)]` 매직넘버 | 헤더 높이 바뀌면 깨짐 |
-  | ComparisonPage (b2b) | `max-h-[calc(100vh-280px)]` 매직넘버 | 동 |
-  | BoxesPage (b2b, 마스터-디테일) | `max-h-[calc(100vh-220px)]` ×2 | 동 |
-  | DataGeneratorPage (b2b, 마스터-디테일) | `max-h-[calc(100vh-220px)]` ×2 | 동 |
-  | SettingsPage (b2b, 인쇄 미리보기) | 데이터 그리드 아님 — 이미 flex/min-h-0 | 대상 아님(후보 제외) |
-
-- 요구 1의 목표 패턴(WHAT): main이 **고정 뷰포트-높이 컨텍스트**를 제공하고(페이지 레벨 스크롤 제거), 각 데이터-그리드 페이지가 **세로 flex 레이아웃**이 되어 헤더/툴바/탭바/필터는 **고정**되고 **그리드 본문만 유일한 스크롤 영역**이 된다(sticky thead는 `ui/table.tsx`에 이미 존재). 매직넘버 `calc(100vh-{220,260,280}px)`와 고정 `max-h-[440px]`/`max-h-[340px]`를 flex 기반(`flex-1 min-h-0`류) 규칙으로 대체. **정확한 Tailwind 클래스·헬퍼 프리미티브 도입 여부는 Generator 재량.**
+- `B2cDataGenPage.tsx:158-159` — 바깥 컬럼에 **두 개의 `flex-1` 형제**(상단 그리드 `min-h-[220px] flex-1`,
+  하단 배치상세 `flex-1`)가 있어 가용 높이를 ~50/50으로 나눈다. 좌측 폼 `Card className="self-start"`(line 161)은
+  **자연 높이(natural)**로 렌더되므로, 짧은 뷰포트에서 상단 영역의 ~50% 몫이 폼보다 작아지면 폼이 클램프되지 않고
+  아래로 **넘쳐 배치상세 카드 위에 페인트**된다 → '+ 데이터 생성' 버튼(line 460)이 겹쳐/잘림.
+- `OpsPage.tsx:75` — 내부 `flex min-h-0 flex-1 flex-col gap-4 overflow-auto`가 단일 스크롤 본문 의도이나,
+  짧은 뷰포트에서 WordPanel+OpsControls 스택이 page-level 오버플로를 일으킨다(단일 내부 스크롤로 못 가둠).
+- 높이 체인은 **이미 정확**: `index.css` html/body/#root=height:100%, `Layout.tsx` main=`flex min-h-0 flex-1 overflow-auto`.
+  → 근본 원인은 **page-local**. 공용 프리미티브 수정 불요.
+- 프런트 테스트 러너 **vitest 미설정**(package.json에 test 스크립트 없음). 스크립트: `typecheck`(tsc --noEmit),
+  `lint`(eslint), `build`(tsc && vite build).
+- 단일 라이트 테마(다크모드 없음). Port source of truth: 리포 루트 `.claude/ports.local.json`.
 
 ---
 
-## Implementation Scope (Generator가 수행할 것 — WHAT)
+## Scope (specific files)
 
-### R1. 뷰포트 맞춤 + 그리드 내부 스크롤 (전 데이터-그리드 페이지)
-- (R1-a) **공통 레이아웃**: `Layout.tsx`의 `main`이 페이지 레벨 스크롤을 유발하지 않고, 자식 페이지에 **뷰포트에 바운드된 높이 컨텍스트**를 제공하도록 조정. 사이드바·상단 헤더 고정은 유지(회귀 0).
-- (R1-b) **페이지 레벨 패턴 적용**: 각 데이터-그리드 페이지를 세로 flex 레이아웃으로 전환 — 페이지 내 **비스크롤 크롬(제목/툴바/탭/필터/상태 배지/액션 버튼)은 고정**, **그리드 본문(테이블 바디)만 overflow 스크롤**. 헤더 행(thead)은 스크롤 중 상단 고정(sticky, 기존 유지).
-- (R1-c) 적용 대상(B2C 필수): `MonitorPage`(+ 3개 섹션 WorkData/InFlight/Sorting), `SortersPage`(R2 재정의 후 형태), `OpsPage`, `B2cDataGenPage`, `B2cFacilityPage`.
-- (R1-d) b2b 페이지(`LogsPage`·`ComparisonPage`·`BoxesPage`·`DataGeneratorPage`) 적용 여부·범위는 **OQ-3**로 확정 후 결정(매직넘버 calc → flex 패턴 대체가 기본 권고안). `SettingsPage`(인쇄 미리보기·비-그리드)는 대상 제외.
-- (R1-e) **다중 그리드 페이지 높이 배분 규칙**은 **OQ-2**로 확정(마스터-디테일=B2cDataGen/Boxes/DataGenerator, 3단 스택+2패널=B2cFacility, 좌우 2패널 각 그리드).
-- (R1-f) **매우 작은 뷰포트 최소 높이**: 그리드 본문이 0으로 붕괴하지 않도록 하한 보장(구체 임계·처리는 OQ-2에 종속 — 하한 미만이면 해당 영역만 스크롤).
-- 데이터량 불변식: 그리드가 **비었을 때·소량일 때** 페이지가 어색하게 늘어나거나 빈 스크롤이 생기지 않고, **넘칠 때** 페이지가 뷰포트를 넘지 않고 그리드 본문만 스크롤된다(적음/넘침 양극단 모두 검증 — §Verification).
+**변경 surface = Web/UI 전용.** (리포는 Full-stack — `frontend/`(React SPA) + `backend/`(ASP.NET Controllers) —
+이지만 이번 스프린트가 만지는 표면은 브라우저 프런트엔드뿐이다. 백엔드/마이그레이션 diff는 **반드시 0**.)
 
-### R2. 3DS 레지스터 워드 표시 중복 제거 (레지스터 값 표시는 /ops에만)
-- (R2-a) `SortersPage`에서 **`<WordPanel />` 제거**. (`/ops`는 이미 WordPanel을 렌더하므로 별도 이관 없음.)
-- (R2-b) WordPanel 제거로 고아가 된 소터 `Select`(destId 구동 전용) 처리 — **OQ-1의 후보에 종속**(제거/유지/이관).
-- (R2-c) `/ops`의 WordPanel·데이터 소스(SignalR 훅)는 **무접촉**(회귀 0). 중복 구독·누수 0(이관이 없으므로 자명하나 Evaluator가 실증).
+### 편집 허용(주 대상)
+- `frontend/src/pages/B2cDataGenPage.tsx` — 버그 (1). 상단(폼+마스터 그리드)/하단(배치 상세) 높이 배분·스크롤 소유권.
+- `frontend/src/pages/OpsPage.tsx` — 버그 (2). 레지스터+제어 스택을 단일 바운드 내부 스크롤로 가둠.
 
-### R3. 3DS 워드 메뉴 이름/역할 재정의 (또는 제거)
-- (R3-a) `Layout.tsx`의 `NAV_SETS.b2c`에서 `/sorters` 항목의 `label`("3DS 워드")·`title`("3DS 워드값")·`subtitle`("D0~D6 레지스터 실시간 관찰"), 및 라우트(App.tsx)·페이지 형태를 **OQ-1 확정안대로** 변경(라벨/역할 재정의 또는 메뉴·라우트 제거).
-- (R3-b) 어느 후보든 **고아 페이지·죽은 라우트·네비에서 도달 불가한 컴포넌트가 남지 않아야** 한다(harness: 발견 가능성·네비 연결 필수).
+### 조건부 편집(엄격히 필요할 때만 · 근거 기록 필수)
+- `frontend/src/pages/sections/WordPanel.tsx`, `frontend/src/pages/sections/OpsControls.tsx`
+  — 페이지 레벨(래퍼 클래스)로 해결 불가할 때만. 내부 로직/데이터 흐름은 무접촉.
 
----
+### 원칙적 off-limits (공용 프리미티브 — 블라스트 반경 큼)
+- `frontend/src/components/Layout.tsx`, `frontend/src/components/ui/card.tsx`, `frontend/src/index.css`
+  — 높이 체인은 이미 정확함이 확인됨. 근본 원인은 page-local. **수정하지 않는다.** 불가피하다고 판단되면
+    Generator는 (a) 왜 page-local로 불가능한지 sprint-log.md에 근거를 기록하고,
+    (b) 회귀 검증 범위를 **10개 페이지 전체**로 확대해야 한다(아래 Regression 참조).
 
-## Explicit Non-Goals / 무접촉 경계 (위반 시 사전 보고)
-- **백엔드 0**: `backend/**` diff 0, 신규 마이그레이션 0. `git diff backend/` 빈 출력이 게이트. `Wcs.PlcGateway`·`Wcs.Core`·실 PLC·사용자 운영 DB 무접촉. API 계약(`/api/v1/*`·`/api/monitor/*`·`/api/ops/*`) 불변.
-- **SignalR/폴링 훅 무변경**: `useMonitorState`/`useHubLifecycle`/`useSorters`/TanStack Query 훅의 동작·구독 로직 변경 금지(레지스터 중복 제거는 UI 컴포넌트 삭제이지 데이터 소스 변경이 아님).
-- **기능/데이터 로직 무변경**: OpsControls의 안전 3종 제어, B2cFacility의 오더 할당·셀 설정, 데이터 생성·초기화, 로그/비교/박스 조회 로직 무변경 — **레이아웃/컨테이너 스크롤만** 손댄다.
-- **디자인 토큰/테마 무변경**: 단일 라이트 테마(다크 N/A). Airbnb 라이트 팔레트·Card/Table 프리미티브 톤 유지. 신규 색·폰트 도입 금지.
-- **공용 그리드 상호작용(S-B2C-GRID-UX) 무회귀**: `useRowSelection`/`context-menu` 드래그 하이라이트·우클릭 4액션·자격 존중이 스크롤 컨테이너 재구성 후에도 정확히 동작(특히 스크롤 발생 시 좌표/드래그 판정·MutationObserver prune).
+### 절대 불변
+- `backend/**` diff 0 (dotnet 프로젝트 무접촉). `frontend/package.json`·`package-lock.json` 무수정
+  (검증용 의존 설치 금지 — Playwright는 MCP 브라우저 도구 사용).
 
 ---
 
-## Open Questions (착수 전 사용자 확정 — 진짜 결정 사항)
+## Constraints (Generator drift 방지 — 반드시 준수)
 
-### OQ-1 ★ `/sorters`(3DS 워드)의 운명 — 3후보 (요구 2·3 스코프를 가름)
-WordPanel 제거 후 SortersPage에 남는 실질 콘텐츠 = **OpLogTail(operation_log 라이브 테일)** + ConnBadge (+ 고아 소터 Select). OpLogTail은 앱 전체에서 여기에만 존재하는 유용한 독립 뷰다.
-
-- **(a) 완전 제거** — 라우트 `/sorters` + NAV 항목 + `SortersPage.tsx` 삭제.
-  - 남는 것: 없음. **이동/보존**: OpLogTail을 옮기지 않으면 **operation_log 테일이 앱에서 소멸**. (옮긴다면 어디로? /monitor 4번째 탭 또는 /ops 하단 — 그러면 그건 (c) 변형.)
-- **(b) 라벨·역할 재정의(권고)** — `/sorters`를 **운영 로그 페이지**로 재정의.
-  - 남는 것: OpLogTail(주 콘텐츠) + ConnBadge(라이브 스트림 상태 근거). **제거**: WordPanel + 고아 소터 Select.
-  - NAV 변경: label "3DS 워드" → 예 **"운영 로그"**/"이벤트 로그"/"동작 로그", title/subtitle 동반 변경(예 subtitle "operation_log 실시간 테일 · category/level 필터").
-- **(c) /ops로 흡수 후 제거** — OpLogTail을 `/ops` 하단(OpsControls 아래)으로 옮기고 `/sorters` 삭제.
-  - 이동: OpLogTail → /ops. **단점**: /ops가 WordPanel+OpsControls+OpLogTail로 길어져 **요구 1(뷰포트 맞춤)과 상충**, 또한 OpLogTail은 소터 비종속인데 /ops는 소터 선택 게이트 뒤에 있어 배치가 어색.
-
-- **Planner 권고 = (b)**. 근거: (1) 진짜 유용한 콘텐츠(operation_log 테일) 보존, (2) 진짜 중복(WordPanel)만 제거, (3) 메뉴에 실질 역할 부여 = 요구 3의 "재정의 또는 제거"에 가장 깔끔한 답, (4) 요구 1(뷰포트 맞춤)과 상충 없음(단일 그리드 페이지로 fit 쉬움). **사용자 확정 필요**: (b) 채택 시 새 메뉴 라벨 문구 지정 요청.
-
-### OQ-2 ★ 뷰포트 맞춤 적용 방식·다중 그리드 높이 배분
-- (2-1) **공통 vs 페이지별**: `Layout.tsx`(main)에서 뷰포트 바운드 컨텍스트만 제공하고 **페이지별로 flex 컬럼 채택**(각 페이지 그리드 구성이 달라 완전 공통 래퍼는 부적합) — 권고. 반복되는 "스크롤 카드" 헬퍼 프리미티브 추출은 Generator 재량(중복 감축 목적일 때만).
-- (2-2) **마스터-디테일**(B2cDataGen: 상단 2열[짧은 폼 + 마스터 그리드] + 하단 디테일 그리드; Boxes/DataGenerator: 좌우 2열 각 그리드): 두 그리드 높이 배분 규칙? 권고안 = 각 그리드 `flex-1 min-h-0`로 가용 높이 균등 분할(짧은 생성 폼은 자연 높이 고정). **사용자 확정**: 균등 vs 마스터 우선(디테일 더 크게) 등.
-- (2-3) **B2cFacilityPage(가장 어려운 페이지)**: 세로 3단(작업자 바 + 목적지 그리드 + 오더 할당 2패널[좌우 2 그리드])이라 한 뷰포트에 다 넣으면 각 영역이 과도하게 작아진다. 후보: (i) 페이지를 뷰포트 캡 + 각 영역 내부 스크롤(영역별 min-height), (ii) **이 페이지만 페이지 스크롤 예외 허용**, (iii) 재구성(탭/접이). Planner 권고 = (i) 시도하되 하한(min-height) 미만이면 (ii)로 폴백. **사용자 확정**: "각 페이지 뷰포트 맞춤"을 이 3단 페이지에도 강제할지, 예외를 둘지.
-- (2-4) **main overflow 정책**: 전 페이지 fit이면 `main`을 overflow-hidden으로 둘 수 있으나, (2-3)에서 페이지 스크롤 예외를 허용하면 main은 페이지가 필요 시 스크롤 가능해야 한다. (2-3) 결정에 종속.
-
-### OQ-3 ★ b2b 페이지도 뷰포트 맞춤 대상인가
-- 사용자는 "각 페이지"라 했다. b2b(`/data-generator`·`/logs`·`/comparison`·`/boxes`)는 **이미** 매직넘버 `calc(100vh-Npx)`로 내부 스크롤 중(목표를 부분 충족하나 헤더 높이 변화에 취약).
-- Planner 권고 = **포함**하되(매직 calc → flex `flex-1 min-h-0` 패턴으로 대체해 일관·견고화), b2b는 별도 토글 모드라 블라스트 반경을 줄이고 싶으면 **후속 단계로 분리** 가능. `SettingsPage`(비-그리드 인쇄 미리보기)는 제외. **사용자 확정**: b2b 포함/제외/후속분리.
-
-### OQ-4 이월 Minor(S-B2C-GRID-UX) 흡수 여부
-- 이월 2건: (1) ContextMenu Tab 미처리(Tab이 메뉴 밖으로 포커스) — 키보드/a11y, 레이아웃 무관 → **defer 권고**. (2) 그리드 컨테이너 tabIndex/role 부재 — a11y; 이 스프린트가 그리드 스크롤 컨테이너를 재구성하므로 **소폭 인접**(같은 컨테이너를 편집) → 저비용 흡수 가능하나 스코프 집중 위해 기본 **defer 권고**. **사용자 확정**: 흡수 여부(기본=둘 다 미접촉, 백로그 유지).
-
----
-
-## Evaluation Criteria (Web/UI 4기준 — 가중치 표기)
-1. **Design Quality (★★★)** — 뷰포트 맞춤 후에도 밀도·여백·계층이 무너지지 않는가. 고정 크롬 ↔ 스크롤 본문 경계가 의도적이고 정돈돼 보이는가(Airbnb 라이트 톤 유지).
-2. **Originality (★★★)** — 매직넘버·고정 px 하드코딩을 flex 기반의 의도적 규칙으로 대체(AI-slop한 임시 `calc()` 남발이 아니라 일관된 시스템). 재사용(중복 스크롤 처리 통일).
-3. **Craft (★★)** — 스크롤 컨테이너 경계 정확성(가로 스크롤 페이지 바디 발생 0, 세로는 그리드 본문에만), sticky thead 유지, 리사이즈 시 무붕괴, 매우 작은/큰 뷰포트 처리, 콘솔 0(React dev warning·pageerror·의도치 않은 4xx/5xx 0).
-4. **Functionality (★★)** — 모든 기존 기능(제어/할당/생성/조회/드래그·우클릭 선택) 무회귀, 레지스터 값은 /ops에서만 관찰 가능, 3DS 워드 메뉴가 OQ-1 확정안대로 도달 가능·역할 명확, operation_log 테일 접근 가능(소멸 아님).
-
----
-
-## Completion Conditions (Evaluator PASS 최소 조건)
-- **정적(fresh·독립 실행)**: `tsc --noEmit` = 0, `eslint .`(warning 포함) = 0, `vite build` = 0(스크래치 outDir, `backend/src/Wcs.Api/wwwroot` 무접촉 `git status` 빈 출력).
-- **회귀·무접촉 게이트**: `dotnet test -c Release` = **360/360 GREEN**(비결정 flake는 clean 재run으로 귀속 — lessons 준수). `git diff --stat backend/` 빈 출력, 신규 마이그레이션 0.
-- **브라우저 실증(Playwright MCP, 포트=`.claude/ports.local.json` 소스)**: §Verification Scenarios 전건을 click-through로 실증(navigate→resize→관찰), 번호 스크린샷 + console.log 첨부. 데이터 **적음/넘침 양극단** 모두에서 페이지가 뷰포트 내에 들어오고 그리드 본문만 스크롤됨을 시각 확인.
-- **콘솔(BLOCKING)**: 내 origin에서 error/warning 0(React dev warning·pageerror·의도치 않은 network 4xx/5xx 0).
-- **핵심 불변식**: 레지스터 값 표시가 `/ops`에만 존재(SortersPage 경로에 WordPanel 부재), 3DS 워드 메뉴가 OQ-1 확정안과 일치, operation_log 테일 접근 가능(OQ-1 (a)에서 이관 결정 시 이관처에서 확인).
-
----
-
-## Parallel Modules
-N/A (단일 모듈). 뷰포트 패턴은 `Layout.tsx`(공통 main)와 각 페이지가 공유하며, R2/R3의 SortersPage·OpsPage·Layout NAV 편집이 R1의 Layout 편집과 같은 파일에 수렴 → 파일 경계 분할 불가. 순차 단일 Generator.
-
-## Evaluation Dimensions
-functional only(단일 차원). UI 레이아웃 리팩터 — 보안/성능 민감 표면 없음. 기본 1/1/1.
+1. **빈 영역이 큰 고정 분율을 점유하지 않는다.** '배치 상세'는 비어 있을 때 50%를 차지하면 안 된다.
+   상단(폼 + 마스터 그리드) 영역은 **폼 카드 자연 높이 이상**으로 보장되어 폼이 하단과 절대 겹치지 않아야 한다.
+   권장 방향(기법은 Generator 재량): 짧은 폼 카드는 **content-natural 높이**, 마스터 그리드가 그 영역의 유연한
+   나머지를 채우며 내부 스크롤, 배치 상세는 **자체 바운드 스크롤**로 남은 높이를 갖는다.
+2. **`/ops`**: 짧은 뷰포트에서 레지스터(WordPanel) + 제어(OpsControls) 스택은 **단일 바운드 내부 스크롤 영역**에
+   담겨 **페이지(main)는 절대 스크롤하지 않는다.** 소터 선택 바는 고정(`shrink-0`) 유지.
+3. **S-UI-LAYOUT 불변식 보존**: header/toolbar = `shrink-0`; 그리드/스크롤 본문 = `flex-1 min-h-0 overflow-auto`;
+   **영역당 스크롤 컨테이너 1개**; `sticky thead` 유지(잘림/이중 스크롤 금지).
+4. 하드코딩 마법값(px 높이 등)은 지양 — 부득이하면 근거 주석. 기존 디자인 톤/색/타이포는 무변경(회귀 0).
 
 ---
 
 ## Detected Project Type: **Full-stack**
-근거(프로젝트 신호): 리포에 브라우저 진입점(`frontend/index.html` + 클라이언트 렌더 트리 `frontend/src/main.tsx`)과 서버측 라우트/컨트롤러(`backend/src/Wcs.Api` ASP.NET MVC Controllers)가 **동시에** 존재 = Full-stack 신호. 단, **이 스프린트의 변경 표면은 클라이언트 렌더 트리에 100% 한정**되며 백엔드 변경 0이 하드 제약(게이트). 아래 슬롯은 이 사실을 반영해 채운다.
 
-### Verification Scenarios (Full-stack 슬롯 — 필수)
+리포 신호: 브라우저 진입점(`frontend/index.html` + `frontend/src/main.tsx`, 클라이언트 렌더 컴포넌트 트리)
+**AND** 서버 라우트/컨트롤러(`backend/src/Wcs.Api` ASP.NET Controllers) 가 같은 리포에 공존 → **Full-stack**.
+단, **이번 스프린트의 change surface 는 Web/UI(프런트엔드) 뿐**이며 backend diff 는 0 이다.
+따라서 Full-stack 슬롯을 채우되 Backend/API 슬롯은 "이번 스프린트 미접촉(N/A)"으로 정직히 표기한다.
 
-**=== 프론트(Web/UI) 시나리오 — 이 스프린트의 주 표면 ===**
+---
 
-- **각 대상 페이지의 기본 상태(뷰포트 맞춤)**:
-  - S1 `/monitor`(3탭 각각): 넘치는 오더/piece/셀 데이터로 채운 상태에서 **페이지가 뷰포트 내에 들어오고 그리드 본문만 세로 스크롤**, 상단 탭바·배치/상태 필터·CardHeader 고정, thead sticky 유지, 페이지 바디 가로 스크롤 0.
-  - S2 `/ops`: 소터 선택 후 WordPanel(레지스터 값 관찰 가능) + OpsControls가 뷰포트에 맞고, 짧은 뷰포트에서도 크롬 붕괴 없이 처리(그리드형 아님이므로 OQ-2 하한 규칙 적용 확인).
-  - S3 `/b2c/test-data`(마스터-디테일): 좌 생성 폼 고정 + 우 마스터 그리드 + 하단 디테일 그리드가 OQ-2 배분대로 각자 내부 스크롤, 페이지 fit.
-  - S4 `/b2c/facility`(3단+2패널): OQ-2(2-3) 확정안대로 fit 또는 예외 처리됨을 실증.
-  - S5 `/sorters`(OQ-1 확정 후 형태): 확정안(예 (b) 운영 로그 페이지)대로 렌더, 레지스터 워드 **부재**, OpLogTail 내부 스크롤·페이지 fit.
-  - (OQ-3 포함 시) S6 `/logs`·`/comparison`·`/boxes`·`/data-generator`: 매직 calc 제거 후 flex 패턴으로 fit + 그리드 내부 스크롤.
-- **이 스프린트가 도입하는 대체 상태(적음/넘침/리사이즈)**:
-  - S7 **데이터 소량**: 각 페이지에서 행이 적을 때 빈 스크롤·과도한 여백·페이지 늘어짐이 없다.
-  - S8 **데이터 넘침**: 대량 행에서 페이지 높이가 뷰포트를 넘지 않고 그리드 본문만 스크롤(스크롤바가 그리드 내부에 생김).
-  - S9 **뷰포트 리사이즈**: 창을 좁게/짧게(예 매우 작은 높이) 리사이즈해도 크롬 고정 + 그리드 본문 스크롤 유지, 하한 미만이면 OQ-2(2-3/1-f) 폴백대로 동작.
-- **관련 empty/error 상태**: S10 각 그리드의 로딩/에러/빈 상태(LoadingRow/ErrorRow/EmptyRow)가 스크롤 컨테이너 재구성 후에도 정상 표시(레이아웃 깨짐 0).
-- **다크 모드**: **N/A** — 프로젝트는 단일 라이트 테마(`index.html` `color-scheme: light`, `index.css` 라이트 단일). 검증 제외 사유 명시.
-- **핵심 상호작용 흐름(이 스프린트가 낳는 사용자 가시 동작)**:
-  - S11 레지스터 값이 **`/ops`에서만** 관찰됨 — `/sorters`(또는 OQ-1 확정 경로)에는 WordPanel이 없음을 네비게이션으로 확인.
-  - S12 3DS 워드 메뉴가 OQ-1/R3 확정안대로 라벨·역할을 가지며 네비에서 도달 가능(고아·죽은 라우트 0).
-  - S13 S-B2C-GRID-UX 그리드 상호작용(드래그 범위 하이라이트·우클릭 4액션·자격 존중)이 **스크롤 발생 상태에서도** 정확 동작(좌표/드래그 판정 무회귀).
+## Evaluation Criteria (Evaluator 판정 기준 + 가중치)
 
-**=== 백엔드(Backend/API) 시나리오 ===**
-- **N/A — 이 스프린트는 백엔드 표면을 건드리지 않는다(하드 제약).** 검증 슬롯 대체물 = **무접촉·무회귀 게이트**: `git diff backend/` 빈 출력 + 신규 마이그레이션 0 + `dotnet test -c Release` 360/360 GREEN(Evaluator 독립 재실행). 엔드포인트·happy path·에러 케이스 신규 시나리오 없음(신규/변경 엔드포인트 0).
+Full-stack → per-layer 적용. 이번 스프린트는 프런트 레이아웃 버그픽스이므로 Web/UI criteria 중심.
 
-**=== 최소 1개 교차-레이어(E2E) 데이터 흐름 시나리오 ===**
-- S14: `Sim3ds`(:sim 포트) + `Wcs.Api`(:api 포트, fresh scratch SQLite·seed) 기동 → 브라우저(:vite)에서 `/ops` 진입 → **실시간 SignalR로 소터 레지스터 값(D0~D6)이 WordPanel에 흐르는 것을 관찰**하면서 뷰포트를 리사이즈 → 라이브 데이터 표시가 유지되며 페이지가 뷰포트에 맞고 크롬 고정이 깨지지 않음을 실증(브라우저↔API↔SignalR↔Sim 전 계층 왕복). 포트는 `.claude/ports.local.json`에서 읽음(하드코딩 금지).
+| # | 기준 | 가중치 | 이번 스프린트 해석 |
+|---|------|--------|--------------------|
+| 1 | **Functionality (viewport-fit 정확성)** | ★★★ (최우선) | 낮은 뷰포트에서 (a) page/main 스크롤 0, (b) 카드 오버랩 0, (c) '+ 데이터 생성' 버튼 완전 가시·클릭 가능, (d) /ops 단일 내부 스크롤. **수치로** 증명. |
+| 2 | **Craft (레이아웃 불변식·회귀 없음)** | ★★★ | S-UI-LAYOUT 불변식(shrink-0 크롬 / flex-1 min-h-0 overflow-auto 본문 / 영역당 스크롤 1개 / sticky thead) 유지. 8개 회귀 페이지 무붕괴. tsc/eslint/build 0. |
+| 3 | **Design Quality (기존 톤 보존)** | ★★ | 기존 순백 라이트 테마·간격·타이포 무변경(레이아웃 fix가 디자인을 바꾸지 않음). |
+| 4 | **Integration / Data-flow 무단절** | ★★ | 레이아웃 변경이 라이브 데이터 렌더(SignalR 워드, 배치/오더 그리드)를 스크롤 영역 안에서 정상 표시함을 유지(cross-layer 무회귀). backend diff 0. |
 
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 4 (Web/UI 기본상태·대체상태·empty/error·핵심흐름 + Backend/API(N/A 게이트) + E2E 교차레이어; 다크모드=N/A 사유명시). All slots filled: yes.
+**Static checks (전 타입 공통, 독립 재실행 필수)**: `npm run typecheck`(tsc --noEmit), `npm run lint`(eslint),
+`npm run build`(tsc && vite build) — 모두 0 error. 프런트 테스트 러너: **vitest 미설정**(package.json에 test 스크립트 없음) →
+sprint-feedback.md에 `not configured`로 기록. backend: `git diff --stat -- backend` 가 공란임을 확인.
 
-## 게이트 확정 (사용자, 2026-07-15 — OQ 최종 답)
-- **OQ-1 = '운영 로그'로 개명 유지**: /sorters에서 WordPanel(D0~D6 레지스터 표시) 삭제 → 페이지엔 OpLogTail(운영 로그 실시간 tail) 유지. NAV 라벨 '3DS 워드' → '운영 로그'(title/subtitle도 로그 기준으로). 라우트 유지(운영 로그가 앱에서 유일하게 여기 존재하므로 페이지 제거 금지). WordPanel은 /ops에만 잔존(useMonitorState 단일 인스턴스). 오펀 소터 Select 정리.
-- **OQ-2 = 공통 레이아웃 일괄**: Layout.tsx main이 뷰포트 바운드 높이 제공 + 각 페이지 = 헤더/필터/툴바 shrink-0 + 그리드 body flex-1 min-h-0 overflow-auto. 현재 max-h/calc/무제한 3종 혼재를 단일 flex 패턴으로 통일. 다중 그리드 페이지(데이터생성 마스터-디테일·설비 3스택+2패널) 높이 배분 규칙 명시, 최소 높이 하한.
-- **OQ-3 = b2b도 포함**: b2b 5페이지의 calc(100vh-N) 매직값을 공통 flex 패턴으로 전환.
-- 백엔드/마이그레이션 0(순수 프론트 — 레지스터 dedup은 컴포넌트 삭제).
+---
+
+## Completion Conditions (Evaluator PASS 최소 조건 — 전부 AND)
+
+두 페이지 각각을 **최소 3개 낮은 뷰포트**(`1366×720`, `1280×680`, `1300×700`)에서 Playwright MCP로 재현하여
+아래를 **수치 증거**(스크린샷 파일 경로 + `browser_evaluate` 반환값 raw)로 뒷받침한다. 큰 뷰포트에서만 통과 = **FAIL**.
+
+- [C1] **B2C — page/main scroll = 0**: 각 뷰포트에서 `<main>` 엘리먼트가 스크롤하지 않는다
+  (`main.scrollHeight <= main.clientHeight + 1`) 그리고 `document.scrollingElement.scrollHeight <= innerHeight + 1`.
+  (내부 그리드/디테일 영역의 `scrollHeight > clientHeight` 는 허용 — 그게 의도된 내부 스크롤.)
+- [C2] **B2C — 카드 오버랩 0**: 폼 카드와 '배치 상세' 카드의 `getBoundingClientRect()`가 세로로 겹치지 않는다
+  (`form.bottom <= detail.top + 1`). 모든 3개 뷰포트에서.
+- [C3] **B2C — '+ 데이터 생성' 버튼 완전 가시 + 클릭 가능**:
+  (i) 버튼 rect 가 뷰포트 안에 완전히 포함(`0 <= top`, `bottom <= innerHeight`) 그리고 어떤 형제 카드에도 가려지지 않음
+  (`document.elementFromPoint(중심좌표)` 가 버튼 자신 또는 그 자식) — 3개 뷰포트 전부;
+  (ii) 실제 `browser_click`으로 클릭이 성립하고(필수값 미입력 시 경고 토스트가 뜨는 것으로 "도달·클릭 가능" 증명) 예외/차단 없음.
+- [C4] **B2C — 빈 배치 상세가 절반을 점유하지 않음**: 배치 미선택(빈) 상태에서 배치 상세 카드 높이가 상단 영역 높이보다
+  작거나 같음(빈 영역 50% 점유 해소를 수치로: `detail.height <= topRegion.height`) 또는 상단이 폼 자연높이 이상임을 확인.
+- [C5] **/ops — page/main scroll = 0**: [C1]과 동일 측정을 `/ops`에 적용. `<main>` 및 document 무스크롤.
+- [C6] **/ops — 단일 바운드 내부 스크롤**: 짧은 뷰포트에서 레지스터+제어 스택을 감싼 스크롤 영역이
+  내부 스크롤을 소유(`region.scrollHeight > region.clientHeight`)하고, **그 영역만** 스크롤 가능(main·body는 불변).
+  소터 선택 바는 스크롤 중에도 위치 고정(`shrink-0` — 내부 영역 스크롤 전/후 바 rect.top 동일).
+- [C7] **/ops — 제어 버튼 도달 가능**: 내부 영역을 끝까지 스크롤하면 OpsControls 마지막 컨트롤('셀 지정' 버튼)이
+  완전 가시·클릭 가능(가려짐 0).
+- [C8] **콘솔 클린(BLOCKING)**: 두 페이지 검증 중 `page.on('console')`+`pageerror` 캡처를
+  `screenshots/{sprint}/console.log`에 저장. React dev-mode warning·pageerror·의도치 않은 4xx/5xx = FAIL.
+- [C9] **회귀 없음(8개 페이지)**: `/monitor`, `/sorters`(운영 로그), `/b2c/facility`, `/data-generator`, `/logs`,
+  `/comparison`, `/boxes`, `/settings` 를 `1280×680`에서 확인 — page-level(main/body) 스크롤 0(각 페이지의
+  내부 스크롤만 허용), 신규 콘솔 오류/오버랩 0. (공용 프리미티브를 만졌다면 10개 전부 재확인.)
+- [C10] **정적 검사 0**: `npm run typecheck`, `npm run lint`, `npm run build` 각각 error 0(fresh 실행 raw 인용).
+- [C11] **backend diff 0**: `git diff --stat -- backend` 공란. `frontend/package.json`·`package-lock.json` 무변경.
+
+> Port source of truth: Evaluator는 네비게이트 전 **`.claude/ports.local.json`**(리포 루트)의 `vite` 포트를 읽어 URL을 구성한다.
+> `localhost:5173` 등 하드코딩 금지. 파일의 sprint 값이 낡았어도 orchestrator가 이번 스프린트로 재기록한 포트를 신뢰.
+
+---
+
+## Parallel Modules
+N/A (single module). 두 파일(B2cDataGenPage, OpsPage)은 파일 경계가 분리되지만, 동일한 S-UI-LAYOUT
+불변식·공용 검증 하니스를 공유하므로 하나의 Generator가 일관되게 처리하는 편이 낫다. 기본 1/1/1.
+
+## Evaluation Dimensions
+functional only (레이아웃/뷰포트-맞춤 단일 차원). 보안·성능 표면 없음 → 단일 Evaluator.
+
+---
+
+## Verification Scenarios (Full-stack · 낮은 뷰포트 · per-page · 수치)
+
+> 공통: Evaluator는 `.claude/ports.local.json`의 vite 포트로 URL 구성. Playwright **MCP** 브라우저 도구 사용
+> (package.json 무수정). 각 뷰포트는 `browser_resize`로 설정. 그리드에 실데이터를 채우려면 backend+sim+seed 기동
+> 권장(인프라 미실행은 스킵 사유 아님 — 필요시 기동). 단, C1–C7의 **핵심 수치 게이트는 빈/에러 그리드에서도 성립**하며
+> 그것이 pass gate다. 스크린샷은 `screenshots/S-UI-LAYOUT-FIX_{YYYYMMDD-HHMMSS}/`에 번호로 저장, 콘솔은 console.log.
+
+### === Full-stack: Applicable Web/UI scenarios (프런트 surface — 이번 스프린트 본체) ===
+
+- **Default state of each surface touched by this sprint**
+  - `/b2c/test-data` 기본 진입(배치 미선택): 좌 폼 카드 + 우 마스터 그리드(상단) + 배치 상세(하단, 빈 EmptyRow).
+    → 각 뷰포트에서 스크린샷 + rect 측정으로 C1/C2/C3/C4 확인.
+  - `/ops` 기본 진입(첫 소터 자동 선택): 소터 선택 바 + WordPanel + OpsControls 스택.
+    → 각 뷰포트에서 C5/C6/C7 확인.
+
+- **Each alternate state the sprint introduces (selected / populated / scrolled)**
+  - `/b2c/test-data` 마스터 그리드에 배치 rows 존재 시: 그리드 본문만 내부 스크롤(sticky thead 유지),
+    상단 영역이 폼 자연높이를 하한으로 유지되어 여전히 오버랩 0(C2).
+  - `/b2c/test-data` 배치 행 선택 시: 하단 배치 상세에 오더 로드 → 상세 본문만 내부 스크롤, page/main 스크롤 여전히 0(C1).
+  - `/ops` 내부 영역을 하단까지 스크롤한 상태: 소터 바 고정(rect.top 불변), '셀 지정' 버튼 가시·클릭(C6/C7).
+
+- **Relevant empty / error state surfaced by this sprint**
+  - `/b2c/test-data` 배치 0건(EmptyRow) — 빈 배치 상세가 절반을 점유하지 않음(C4), 폼 오버랩 0(C2).
+  - `/ops` 소터 미등록(noSorters 분기) — 안내 박스가 page 스크롤을 유발하지 않음(C5).
+
+- **Dark mode variant**
+  - **N/A** — 프로젝트는 단일 라이트 테마(`index.css`: "단일 테마, 다크모드 없음"). 다크 변형 없음.
+
+- **Key interaction flow after the change (이 스프린트가 산출해야 할 사용자 가시 동작)**
+  - B2C: 낮은 뷰포트에서 페이지가 스크롤되지 않고, 폼이 배치 상세를 덮지 않으며, '+ 데이터 생성' 버튼을
+    스크롤 없이 즉시 눌러 생성 플로우(검증 토스트)에 도달할 수 있다. (navigate → resize → rect측정 → click → assert)
+  - /ops: 낮은 뷰포트에서 페이지가 삐져나오지 않고, 소터 바는 고정된 채 레지스터+제어 스택을 내부 스크롤로
+    끝까지 훑어 마지막 제어까지 조작할 수 있다. (navigate → resize → scroll region → rect측정 → assert)
+
+### === Full-stack: Applicable Backend/API scenarios (백엔드 surface) ===
+
+- **N/A — 이번 스프린트는 백엔드를 접촉하지 않는다.** endpoint diff 0, 컨트롤러/마이그레이션 무변경.
+  Evaluator는 회귀 확인용으로 `git diff --stat -- backend` 가 공란임을 증거로 남긴다(C11). (검증 인프라로
+  backend/sim을 기동하는 것은 그리드 데이터 표시용일 뿐 — 서버 로직 검증 대상 아님.)
+
+### === Full-stack: End-to-end data-flow scenario (2+ 레이어 교차) ===
+
+- **레이아웃 fix가 라이브 데이터 흐름을 끊지 않음(cross-layer 무회귀)**: backend + Sim3ds 기동(시드 포함) 상태에서
+  → `/ops`가 PLC→Modbus→SignalR로 흐르는 D0~D6 워드 값을 **내부 스크롤 영역 안에서** 정상 표시·갱신하고
+  스크롤로 전량 접근 가능(데이터 경로 무단절) → `/b2c/test-data`가 API(`/api/b2c/...`)로 받은 배치/오더 rows를
+  **바운드 스크롤 그리드 안에서** 표시하고 상단 폼과 겹치지 않음. 즉 레이아웃 변경 후에도 각 레이어에서 흘러온
+  데이터가 새 스크롤 컨테이너 안에서 온전히 렌더/스크롤됨을 1개 시나리오로 관통 확인.
+
+---
+
+## Regression guard
+
+- 공용 프리미티브(Layout.tsx/card.tsx/index.css)를 **만지지 않으면** 회귀 대상 = 8개 페이지(C9).
+- 공용 프리미티브를 **부득이 만졌다면** 회귀 대상 = **10개 페이지 전부**(두 수정 페이지 포함) 재검증 + 근거 기록.
+- 회귀 판정: 각 페이지 `1280×680`에서 page-level(main/body) 스크롤 0(내부 스크롤만 허용), 콘솔 오류·오버랩 0.
+
+---
+
+## Open Questions
+
+없음. 초점이 좁은 버그픽스이며 관측 가능한 목표가 명확하다(수치 게이트 C1–C11). 기법(정확한 flex/grid 클래스 배치)은
+Generator 재량. 만약 "page 스크롤 0"과 "폼 오버랩 0"을 동시에 만족시키는 것이 특정 극단 뷰포트에서 물리적으로
+불가능하다고 판명되면(예: 폼 자연높이+상세 최소높이 합 > 가용높이) — 낮추지 말고 Generator가 근거와 함께
+orchestrator를 통해 사용자에게 에스컬레이션한다(요구 완화 금지). 목표 뷰포트(≥680px 높이)에서는 성립 가능으로 판단.
+
+---
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios, Applicable Backend/API scenarios, End-to-end data-flow scenario). All slots filled: yes.

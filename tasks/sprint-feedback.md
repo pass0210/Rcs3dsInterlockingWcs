@@ -1,3 +1,47 @@
+# Sprint Feedback — S-UI-LAYOUT-FIX (낮은 뷰포트 폼-오버랩 + /ops 페이지 오버플로 근본수정)
+
+**APPROVED** — Evaluator, 2026-07-15. C1–C11 전부 PASS. 3개 낮은 뷰포트(1366×720·1280×680·1300×700)에서 수치 실증 — 이전 스프린트 회귀(큰 뷰포트만 통과)를 반복하지 않도록 낮은 뷰포트 전수 검증. 정적 0·회귀 0(8페이지)·백엔드 diff 0·package 무변경·콘솔 error/warning/pageerror 0.
+
+핸드오프 마커 = `tasks/sprint-log.md` 말단 `## IMPLEMENTATION COMPLETE — S-UI-LAYOUT-FIX`. HEAD=`a088520`(PR #66 병합 위 미커밋 작업트리, 브랜치 `feat/ui-layout-fix`). 변경 = **프론트 2파일만**(`frontend/src/pages/B2cDataGenPage.tsx`, `frontend/src/pages/OpsPage.tsx`) + tasks docs. 공용 프리미티브(Layout/card/index.css) 무접촉 → 회귀 범위 8페이지 정당(diff --stat로 확인).
+
+## 실측 diff (page-local · 공용 프리미티브 0)
+- B2cDataGenPage: 상단 그리드 `min-h-[220px]` 제거(자동 min-height:auto=폼 자연높이 하한) + 하단 배치상세 Card `min-h-[200px]`→`min-h-0`.
+- OpsPage: 스크롤 본문 div 에 `[&>*]:shrink-0` 추가(스택 카드가 압축돼 2차 스크롤/잘림 지점이 되는 것 잠금 — 영역당 스크롤 1개 불변식).
+
+## 검증 환경(격리 — 사용자/생성자 포트 무접촉)
+- Sim3ds :1512 (TCP, `--transport tcp --port 1512`) · Wcs.Api :5215 (Release, `--urls http://localhost:5215` → 로그 `Now listening on: http://localhost:5215` 확인, 5205 무바인딩) · Vite :5190 (`VITE_API_TARGET=http://localhost:5215 --strictPort`).
+- DB = fresh scratch SQLite `scratchpad/wcs_eval_scratch.db`(`Database:Provider=Sqlite`+`SeedOnStartup=true`), 사용자 실 DB/Azure/실 PLC 무접촉. 소터 destId=6 chuteNo=30 transport=Tcp→Sim :1512 **ONLINE**(로그 확인). 증거 = `screenshots/S-UI-LAYOUT-FIX_20260715-170748/`.
+
+## Completion Conditions C1–C11 (raw 수치)
+
+### /b2c/test-data (3 뷰포트)
+- **[C1] page/main scroll 0 — PASS.** 1366×720: main 657≤clientH 657 · doc 720≤innerH 720. 1280×680: main 617≤617 · doc 680≤680. 1300×700: main 637≤637 · doc 700≤700.
+- **[C2] 카드 오버랩 0 — PASS.** 전 뷰포트 form.bottom=566.25 ≤ detail.top=582.25 (+16 gap).
+- **[C3] '+ 데이터 생성' 버튼 가시+클릭 — PASS.** (i) btn top 464.25 ≥0, bottom 504.25 ≤ innerH(720/680/700 전부), `elementFromPoint(center)`=BUTTON(가려짐 0). (ii) 실 `browser_click` → 검증 토스트 "작업일자·배치명·바코드 접두를 모두 입력하세요." 발생(MutationObserver 캡처), 예외 0·데이터 생성 0(early-return).
+- **[C4] 빈 배치상세 50% 미점유 — PASS.** detail.height ≤ topRegion.height: 1366→117.75≤483.25 · 1280→77.75≤483.25 · 1300→97.75≤483.25. 상단=폼 자연높이(483.25) 하한 유지.
+- **알터네이트(populated)**: SEED 배치 행 선택 → "배치 상세 — SEED #1" 오더 5행 로드, page/main 무스크롤 유지(617≤617·680≤680), 상세 본문 단일 내부 스크롤(sh189/ch32). (04)
+
+### /ops (3 뷰포트, 라이브 소터)
+- **[C5] page/main scroll 0 — PASS.** main.scrollTop=0 · main 657/617/637 ≤ clientH 동일 · doc 720/680/700 ≤ innerH 동일.
+- **[C6] 단일 바운드 내부 스크롤 + 소터바 고정 — PASS.** 스크롤 영역=수정된 div(`overflow-auto [&>*]:shrink-0`) scrollHeight 845 > clientHeight 569/529/549(canScroll). 영역 bottom까지 스크롤(scrollTop 276/316/296=max) 후에도 소터 선택 바 rect.top 83→83 **불변**(shrink-0). main.scrollTop 0 유지.
+- **[C7] 마지막 컨트롤('셀 지정') 도달 — PASS.** 영역 하단 스크롤 후 셀 지정 버튼 완전 가시(1366: top636.25/bot668.25≤720 · 1280: 596.25/628.25≤680 · 1300: 616.25/648.25≤700), `elementFromPoint`=BUTTON. 실 click → 검증 토스트 "셀 번호와 명령 순번을 입력하세요."(PLC 쓰기 0·early-return). 라이브 WordPanel D0~D6+D4 flags + SignalR "실시간 연결됨"(cross-layer 무단절, End-to-end 시나리오).
+
+### 공통
+- **[C8] 콘솔 클린(BLOCKING) — PASS.** 내 세션 전체 error 0 / warning 0 / pageerror 0. info 2건=React DevTools 다운로드 안내(dev 무해). 백엔드 기동으로 SignalR/API 정상 왕복 → spurious 네트워크 에러 0. (`console.log`) 주의: 리포 루트에 남아있던 `screenshots/S-B2C-GRID-UX_20260715-121800/console-all.log`(타 스프린트 :5191 에러)는 내 세션 아님 — 혼입 배제.
+- **[C9] 회귀 8페이지(1280×680) — PASS.** doc/body 스크롤 0 = 전 8페이지(680≤680). main 바운드: /monitor·/sorters·/b2c/facility·/logs·/comparison·/boxes·/settings 617≤617. **/data-generator**: doc 680≤680(body 무스크롤)이나 main sh652>ch617(35px 내부 오버플로) — **DataGeneratorPage.tsx는 이번 스프린트 무접촉**(`git diff --stat` 공란)이므로 pre-existing 베이스라인, 회귀 아님. 신규 콘솔 오류/오버랩 0.
+- **[C10] 정적 검사 0 — PASS.** `npm run typecheck`(tsc --noEmit) exit 0. `npm run lint`(eslint) exit 0. `npm run build`(tsc && vite build, 스크래치 outDir) exit 0 — "✓ built in 6.30s"(경고=선재 chunk>500kB + signalr PURE-annotation, 신규 error 0). wwwroot 무접촉.
+- **[C11] backend diff 0 — PASS.** `git diff --stat -- backend` 공란 · `frontend/package.json`·`package-lock.json` diff 공란 · `backend/src/Wcs.Api/wwwroot` git status 공란(빌드→스크래치).
+
+## 판정
+**모든 C1–C11 = PASS. 이전 스프린트의 "큰 뷰포트만 통과" 실패를 3개 낮은 뷰포트 수치 게이트로 방지 확인.**
+
+**APPROVED**
+
+## 프런트 테스트 러너
+vitest **not configured** (package.json에 test 스크립트 없음 — 계약 명시대로 기록).
+
+---
+
 # Sprint Feedback — S-UI-LAYOUT (뷰포트 맞춤 + 그리드 내부 스크롤 + 3DS 워드 중복 제거)
 
 **APPROVED** — Evaluator, 2026-07-15. 순수 프론트 스프린트. 정적 0·회귀 0·백엔드 diff 0·마이그레이션 0, 전 페이지 브라우저 실증(뷰포트 맞춤·그리드 본문 스크롤·sticky thead·리사이즈), 레지스터 dedup·메뉴 개명 실증, 내 origin 콘솔 error/warning/pageerror 0.
@@ -148,3 +192,22 @@ data-rsid/rseligible로 lazy 소터 셀도 자동 포섭), 리스너/MutationObs
 2. min-height floor 매직값(168/200/260/160/220px 등) 페이지별 산발 — 공유 토큰 2~3개로 정리 후보.
 3. Monitor 섹션 CardContent에 min-w-0 누락(b2b는 있음) — 무해하나 일관성.
 4. (이월) ContextMenu Tab 처리 / 그리드 컨테이너 tabIndex·role.
+
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-15)
+
+**최종: Ready to merge = Yes. Critical 0 · Important 1(I1, 교정완료) · Minor 3.**
+
+강점: 스코프 airtight(코드=2 페이지, 공용 프리미티브·backend 0), 매직 px 제거(추가 아님), fix가 스크린샷으로
+독립 확인됨, master `min-h-0`가 행을 부풀리지 않는 추론 타당, `[&>*]:shrink-0`는 세로축만이라 가로 클리핑 없음.
+
+- **[교정완료] I1** — B2cDataGenPage 상단 grid 주석의 사실 오류(`grid-rows-1`=minmax(auto,1fr) 주장). 실제
+  Tailwind v4 `grid-rows-1`=minmax(0,1fr)이고 높이 하한은 상단 div `min-height:auto`(no min-h-0) × master
+  `min-h-0` × 폼 `self-start`에서 옴. fix-only 사이클로 주석만 교정(런타임 무변경, 정적 0 재확인).
+- **[교정완료] M2** — detail `min-h-0`의 ~620px 페이지-스크롤 전환 임계를 주석에 명시(같은 클러스터에 흡수).
+
+### Minor (비블로킹 — 다음 sprint / 백로그)
+- **M3**: OpsPage `[&>*]:shrink-0` 임의 variant는 주석 충실하나, 자식이 두 Card로 고정이므로 각 Card에 명시
+  `shrink-0`가 더 가독적(선택).
+- **M4**: 비-xl(단일 컬럼) 경로는 회귀 없음이나 주석이 xl 중심 — degradation 경로 무주석(정보성).
+- **[기존 베이스라인·비회귀] /data-generator 1280×680에서 main 내부 35px 오버플로** — DataGeneratorPage.tsx는
+  이 스프린트가 미접촉(diff 0). 도입 아님. 별도 백로그 항목으로 후속 처리.
