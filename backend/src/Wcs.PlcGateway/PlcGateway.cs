@@ -160,6 +160,12 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     private byte       _unitId;        // 버스 멤버일 때 이 슬레이브 주소(큐 라우팅용)
     private bool       _isBusMember;
 
+    // 단일 멤버 버스(solo) 재연결 의미 복원 (S-MULTISORTER-SHARED-BUS Phase 2 — C4 fix).
+    // 버스에 멤버가 이 슬레이브 하나뿐이면 형제가 없어 공유 포트 재연결(reopen)이 안전하고, 그것이
+    // 현행(pre-Phase-2 단독) 복구 경로다. ModbusBus.StartAsync가 멤버 수==1이면 true로 설정한다.
+    // 다중 멤버 버스(≥2)는 false 유지 → read 타임아웃 SOFT·공유 연결 미절단(형제 보호, Phase 1 I1).
+    private bool       _soloBusReconnect;
+
     // ── 폴 사이클 상태 (폴 스레드 단독 소유 — 단독: 자기 폴 루프 / 버스: 버스 폴 루프가 순차 호출) ──
     // B5: 슬레이브별 독립 상태(최신 스냅샷·연속 실패·arming·R_Flag 에지·기동 reconcile)를 인스턴스 필드로.
     private int          _failures;
@@ -239,6 +245,14 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         _clientLock     = sharedLock;
         _ownsClientLock = false;
     }
+
+    /// <summary>
+    /// 이 멤버가 속한 버스가 단일 멤버(solo)인지 설정한다(C4 fix). ModbusBus.StartAsync가 멤버 수를
+    /// 확정한 뒤(AddSlave 완료 후·폴 루프 기동 직전) 호출한다. true면 read 타임아웃/비연결 예외를
+    /// 단독 모드와 동일하게 HARD(재연결/reopen)로 취급 — 형제가 없어 공유 포트 재연결이 안전하고
+    /// 현행(pre-Phase-2 단독) 복구 의미를 보존한다. false(다중 멤버)면 Phase 1 I1(soft·무-churn) 유지.
+    /// </summary>
+    internal void SetSoloBusReconnect(bool solo) => _soloBusReconnect = solo;
 
     // ── 시작·종료 ────────────────────────────────────────────────────────────
 
@@ -396,14 +410,16 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                             || ex.InnerException is System.Net.Sockets.SocketException
                             || ex.InnerException is System.IO.IOException;
 
-            // read 타임아웃 취급:
-            //   단독(_isBusMember==false) — 단일 슬레이브가 자기 포트를 소유하므로 '하드'(현행 보존: 재연결).
-            //   버스(_isBusMember==true)  — '죽은/부재 슬레이브'의 read 타임아웃이므로 SOFT. 그 슬레이브만
-            //     연속 실패 누적으로 OFFLINE 시키되 공유 포트는 절대 끊지 않는다(형제 슬레이브 보호·B5).
-            //     (실 RTU 배치에서 부재 슬레이브는 Modbus 예외 응답이 아니라 무응답=read timeout으로 신호한다.
-            //      이를 '하드'로 처리하면 매 폴 사이클 공유 포트를 close+open 해 모든 형제가 ReadTimeout 동안 정지.)
+            // read 타임아웃 취급 (C4 fix — "포트 독점 소유" 기준):
+            //   포트 독점 소유(단독 _isBusMember==false 또는 단일 멤버 버스 _soloBusReconnect==true) — 형제가
+            //     없어 재연결(reopen)이 안전하고 그것이 현행(pre-Phase-2 단독) 복구 경로다 → 타임아웃 '하드'.
+            //   다중 멤버 버스(_isBusMember && !_soloBusReconnect) — '죽은/부재 슬레이브'의 read 타임아웃이므로
+            //     SOFT. 그 슬레이브만 연속 실패 누적으로 OFFLINE 시키되 공유 포트는 절대 끊지 않는다(형제 보호·B5).
+            //     (실 RTU 배치에서 부재 슬레이브는 Modbus 예외/무응답=read timeout으로 신호. 다중 버스에서 이를
+            //      '하드'로 처리하면 매 폴 공유 포트를 close+open 해 형제가 ReadTimeout 동안 정지 — Phase 1 I1.)
+            bool ownsPortExclusively = !_isBusMember || _soloBusReconnect;
             bool isTimeout = ex is TimeoutException;
-            bool isHardEx  = isConnLevel || (!_isBusMember && isTimeout);
+            bool isHardEx  = isConnLevel || (isTimeout && ownsPortExclusively);
 
             bool shouldGoOffline = _failures >= _opt.OfflineAfterFailures || isHardEx;
 
@@ -436,11 +452,11 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 }
 
                 // 재연결 Disconnect는 락 임계구역 안에서 실행(프레임/버퍼 손상 방지).
-                // 단독 모드: 현행대로 항상 재연결.
-                // 버스 모드(B5): 하드 연결오류(소켓/IO)일 때만 공유 연결을 끊는다 — 한 슬레이브의
+                // 포트 독점 소유(단독·단일 멤버 버스): 현행대로 항상 재연결(reopen) — 현행 복구 의미 보존(C4).
+                // 다중 멤버 버스(B5): 하드 연결오류(소켓/IO)일 때만 공유 연결을 끊는다 — 한 슬레이브의
                 //   soft 실패(Modbus 예외 응답·유닛 타임아웃)로 물리 버스를 끊으면 형제 슬레이브까지
                 //   죽으므로 금지. 이 슬레이브만 OFFLINE 전이하고 공유 연결은 보존한다.
-                if (!_isBusMember || isHardEx)
+                if (ownsPortExclusively || isHardEx)
                 {
                     await _clientLock.WaitAsync(ct).ConfigureAwait(false);
                     try { TryReconnect(); }
