@@ -173,3 +173,236 @@ APPROVED
   테스트서 명시 오버라이드) — Phase 2 DI 결선 시 PlcGatewayOptions/config에서 주입 필요.
 - **[백로그 추적]** 저빈도 E2E testhost teardown/parallel-load flake(S9/IT4b/teardown) — I1과 무관·결정적 회귀 아님.
   13회 중 1회 first-run/JIT 재현(격리 12/12 GREEN). develop 부하하 재현실험 미수행이라 선재 100% 단정 불가 → 추적.
+
+---
+
+# EVALUATION — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, single)
+
+브랜치 `feat/multisorter-shared-bus-p2` · HEAD 36a47bc(= PR#68 Phase 1 병합) · Phase 2 변경은 전부 **working tree**(미커밋).
+빌드/테스트는 ground truth(코드 직독 + fresh 빌드·테스트)로 검증 — Generator 요약 불신.
+
+## 판정: **FAIL** (블로킹 = C4 / ★N=1 설계 검증 = REGRESSION-UNVERIFIED)
+
+전체 완료조건 중 C1·C2·C3(부분)·C5·C6·C7·C8·C9·C10 PASS, **C4 FAIL**. 두 Evaluation Dimension(배선/회귀, 수명/격리)
+코드검사는 통과했으나, ★CRITICAL DESIGN SCRUTINY(N=1-through-bus soft-timeout)를 **latent regression(미검증)**으로 판정.
+
+### 빌드·테스트 (fresh evidence)
+- `dotnet build backend/Wcs.sln -c Release` → **오류 0**. 경고 10개 전부 **선재 NU1903**(SQLitePCLRaw 2.1.10 취약성 advisory,
+  Phase 2 무관). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **372/372 통과, 0 실패, 0 스킵**(367 + 신규 E2EGroupJ 5). raw 원문 보존.
+- 격리·직렬 ≥5회 재실행(flake 귀속): E2EGroupJ **5/5×5회**, MultiSorterSameBusTests **7/7×5회**,
+  PlcGatewayIntegrationTests **10/10×5회**, ScenarioTests **4/4×5회**, MonitorHubTests **5/5×5회**. **flake 0**.
+- 종료 후 testhost/Wcs.Sim3ds/Wcs.Api/vstest 고아 **0**(잔존 dotnet은 MSBuild/Roslyn 빌드서버 노드 — 보존 대상).
+
+### 완료조건별 (raw 근거)
+- **C1 (두 same-bus 소터 엔드투엔드·연결 1개) PASS** — E2EGroupJ `A_SharedBus_TwoSorters_EndToEnd_OneConnection`:
+  `Assert.Single(factory.Buses)`(물리 버스 1개=SharedModbusConnection 1개) + `bus.MemberCount==2` + UnitA·UnitB 포함 +
+  `registry.AllBundles.Count==2`. 두 소터 Online, IF-05 OK×2, SorterCommands COMPLETED≥2, cell.DestinationId destA≠destB(교차 0),
+  RCellNo==CellNo(R_Seq==C_Seq), SignalR relay가 chute30·31 델타 방출. 단언 실질적(비-tautological).
+- **C2 (다른 버스 키 병렬) PASS** — E2EGroupJ `D_MultiPort_DifferentBusKeys_ParallelIndependent`:
+  `factory.Buses.Count==2`·각 `MemberCount==1`·포트 상이·둘 다 Online·COMPLETED≥2. 멀티 포트 회귀 0.
+- **C3 (fail-loud) 부분 PASS** — 시리얼 파라미터 불일치(`C1_...SerialParamMismatch_FailsLoud`: "시리얼 파라미터"+"fail-loud"
+  단언)·중복 UnitId(`C2_...DuplicateUnitId_FailsLoud`: "UnitId"+"중복" 단언) 기동 예외로 거부 확인. SORTER_3D-without-Sorters[]
+  fail-loud 경로 보존(Program.cs L494-504). **미충족: OQ9-i PollIntervalMs 불일치 fail-loud는 구현(Program.cs
+  ValidateBusGroupConsistency L717-724)됐으나 테스트 부재** — E2E 인프라에 induceSerialMismatch/induceDuplicateUnitId만 있고
+  inducePollIntervalMismatch 없음. Minor 검증 갭(계약 Verification이 각 fail-loud 경로 테스트 확인을 요구).
+- **★C4 (N=1 하위호환) FAIL** — appsettings 바이트 동일(diff 0, 기본=N=1·RTU·COM1·UnitId=1) PASS, 단일소터 전제 기존
+  테스트 GREEN PASS. **그러나 C4 마지막 절 "버스 멤버 1개 경로가 현행 폴/재연결/OFFLINE/arming/teardown 의미 보존"
+  미충족.** 아래 설계 검증 참조.
+- **C5 (수명/격리) PASS** — 버스 단위 teardown: StopAsync가 `_buses` 순회 `bus.StopAsync()` 1회(멤버별 아님).
+  ModbusBus.StopAsync 순서 `Writer.TryComplete → cancel → poll/write await → member.StopAsync → _conn.Disconnect`(정합).
+  버스 멤버 번들 `writeQueue: null`(Program.cs L620) → StopPollingAsync의 TryComplete no-op. **per-멤버 drop 경로 봉인**:
+  StartPollingAsync/StopPollingAsync는 dead(PlcPollingHostedAdapter 미등록·registry가 bus.Start/StopAsync만 호출).
+  BusSlaveMaster.Dispose no-op(공유 연결 미절단). 슬레이브별 OFFLINE 독립: E2EGroupJ `B`(N=2, InjectUnresponsive→B만
+  OFFLINE, A Online·핸드셰이크 Success, B 복구) GREEN.
+- **C6 (절대규칙 #1) PASS** — 멤버 EnqueueAsync→`_bus.EnqueueAsync(unitId,...)`→버스 `_writeCh`(SingleReader) 단일 컨슈머.
+  D4 RMW·TgtFloor/CellAssign fresh-read 가드는 멤버 ProcessWriteAsync에 그대로(_clientLock=버스 공유 락 임계구역). Modbus 직접 호출 0.
+- **C7 (회귀 0) PASS** — 위 빌드·테스트·≥5회 근거.
+- **C8 (스코프) PASS** — working diff = Wcs.Api/Program.cs, Wcs.PlcGateway/ModbusBus.cs(가산 오버로드), 신규
+  SharedModbusConnectionFactory.cs, Wcs.Tests(E2EInfrastructure.cs + 신규 E2EGroupJ), docs/SPEC.md + tasks/. **Wcs.Core/Wcs.Data/
+  마이그레이션/frontend/appsettings 변경 0**(appsettings 바이트 동일 확인).
+- **C9 (SPEC §7-A) PASS** — L110 토폴로지 문장이 공유 버스 가능 + fail-loud 목록 + N=1 동치로 갱신됨(diff 확인).
+- **C10 (하드코딩 0) PASS** — 버스 키/정합검사/폴 cadence 전부 SorterConfig·Timing·PlcGatewayOptions 주입. 신규 매직 타이밍 상수 0.
+
+### Dimension 1 (wiring-and-regression) — PASS
+버스 키 그룹핑(BusKeyOf: RTU="RTU|"+PortName대문자 / TCP="TCP|"+Host:Port, 전송을 키에 포함해 교차전송 충돌 방지) 정합.
+그룹당 SharedModbusConnectionFactory.Create→ISharedModbusConnection 1개 + ModbusBus 1개 + 멤버 AddSlave(per-member opt) +
+bus.StartAsync 1회. 예외 시 이미 만든 버스 DisposeAsync로 포트 누수 0. 멀티 포트 회귀·fail-loud(2/3)·N=1 바이트 동일 입증.
+
+### Dimension 2 (lifecycle-and-isolation) — PASS
+공유 연결 1회 Open(BusSlaveMaster.Connect→_conn.Connect 멱등, 첫 멤버 EnsureConnected가 Open)·1회 Dispose(ModbusBus.DisposeAsync→
+_conn.Dispose). teardown 순서 정합·mid-transaction disconnect 불가(poll/write 태스크 join 후 disconnect). AddSlave 오버로드는
+가산적: 기존 `AddSlave(unitId,log)`→`AddSlave(unitId,_opt,log)` 위임(동작 무변경). 폴 cadence·_busLock은 버스 단위 유지, memberOpt는
+멤버 PlcPollingService의 핸드셰이크 Timing/OfflineAfterFailures/WriteTimeoutMs만 오버라이드. 단일슬레이브 락/상태 의미 불변.
+
+## ★ CRITICAL DESIGN SCRUTINY — N=1-through-bus soft-timeout = **REGRESSION (UNVERIFIED)** → C4 FAIL
+
+**사실:**
+1. 운영 기본 appsettings = **N=1·Transport=Rtu·COM1·UnitId=1**(바이트 동일) — 즉 현 현장 배포가 단일 RTU 소터.
+2. Phase 2는 **모든** 소터(N=1 포함)를 ModbusBus 멤버(`_isBusMember=true`)로 라우팅. 운영에 standalone 경로 없음.
+3. PlcGateway.cs PollCycleAsync 분류(L392-407): `isHardEx = isConnLevel || (!_isBusMember && isTimeout)`,
+   재연결 게이트 `if (!_isBusMember || isHardEx)`. 버스 멤버에선 사실상 `isConnLevel`만 hard:
+   - SocketException/IOException(내부 포함) → HARD → 재연결(N=1 버스에서도 **보존**).
+   - **TimeoutException → SOFT → 재연결 안 함**(standalone은 HARD였음 — **변경**).
+   - 기타 비-conn 예외(예: ModbusException CRC/protocol) → SOFT → 재연결 안 함(standalone은 `!_isBusMember`=true라 HARD였음 — **변경**).
+4. 기존 재연결/OFFLINE 테스트(IT4/IT4b)는 Sim 서버 종료(=소켓 refused/reset=SocketException)를 **standalone**
+   `new PlcPollingService(...)` 경로로만 주입. bare-TimeoutException 경로·버스 경로 **미커버**.
+5. 유일한 버스 read-timeout 테스트 MultiSorterSameBus `C3`는 **N=2**(건강한 형제 A가 공유 소켓을 살아있게 유지) —
+   재연결 없는 복구를 입증하나 형제 有 전제. **N=1(형제 無) 버스의 timeout 복구를 검증하는 테스트는 0.**
+
+**판정 근거:**
+- C4 마지막 절이 요구하는 "버스 멤버 1개 경로가 현행 **재연결** 의미 보존"이 객관적으로 **미충족**(timeout·비-conn 예외에서
+  HARD→SOFT로 변경). 기존 단일소터 GREEN 테스트는 standalone 경로를 검증할 뿐, 운영이 실제로 타는 N=1 버스 경로를 검증하지 않음.
+- 실 conn 사멸(소켓 close/reset·IO·시리얼 포트 장치 제거→IOException/SocketException)은 N=1 버스에서도 HARD로 재연결 **보존**되므로
+  가장 흔한 "reopen 필요" 실패는 처리됨. 그러나 **reopen으로만 복구되는데 TimeoutException/비-conn 예외로 표면화되는** 조건
+  (예: RTU 시리얼 프레이밍 desync — 부분프레임 timeout 또는 CRC ModbusException; standalone은 Disconnect로 버퍼 클리어해 재동기)은
+  N=1 버스에서 재연결하지 않아 **영구 OFFLINE 잔류 위험**.
+- "intended+safe"로 인증 불가: 안전성은 (a) FluentModbus 5.3.2가 실 연결사멸을 항상 Socket/IO로 던지고 bare TimeoutException은
+  "전송 생존·응답부재"에만 쓴다는 **미검증 가정**과 (b) RTU desync 자연복구 가정에 의존. **입증 책임(테스트) 미충족** + 대상이
+  **1차 운영 구성(N=1 RTU)**이라 가설적 엣지 아님.
+
+**권고(택1로 해소):**
+- (A·선호) **solo 멤버 버스**(멤버 1개)는 TimeoutException/비-conn 예외를 HARD로 취급(형제 없음 → soft 근거 부재) — standalone
+  재연결 의미 복원. ModbusBus가 멤버에 solo 여부 전달 or 레지스터리가 N=1 그룹은 standalone(비-버스) 경로로 결선.
+- (B) N=1-on-bus read-timeout(및 비-conn 예외) 복구 동치를 입증하는 테스트 추가(재연결 없이 복구됨 or conn사멸은 여전히 재연결).
+
+## Minor (비블로킹)
+- **OQ9-i 검증 갭**: PollIntervalMs 불일치 fail-loud 구현됐으나 테스트 부재(위 C3).
+- Phase 1 코드리뷰 M4(버스 폴 루프 멤버 비-OCE 예외 미가드)·M5(락 안 동기 Connect 블로킹)는 Phase 2에서 미해소 — 후속 유지.
+
+**요약: 배선·격리·회귀·fail-loud(2/3)·스코프·문서·규칙#1 모두 견고(372/372, 격리≥5회 flake 0). 그러나 Phase 2가 N=1
+단일소터(운영 기본)를 버스 멤버로 편입시켜 read-timeout/비-conn 예외의 재연결 의미를 바꿨고 그 경로에 테스트가 0 →
+C4 미충족·latent regression. → FAIL.**
+
+---
+
+# C4 RE-VERIFY — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, focused)
+
+Generator가 C4/N=1 fix 적용. 이전 판정에서 C4 외 전부 PASS였으므로 **C4 델타만** 실 코드 대조 재검증(전 스윕 재수행 아님).
+
+## 판정: **APPROVED** — C4 이제 충족, 회귀 0.
+
+### 1. 예외 분류 4 regime (PlcGateway.cs L406-464, 코드 직독·불리언 환원)
+`ownsPortExclusively = !_isBusMember || _soloBusReconnect` · `isTimeout = ex is TimeoutException` ·
+`isHardEx = isConnLevel || (isTimeout && ownsPortExclusively)` · 재연결 게이트 `if (ownsPortExclusively || isHardEx)`.
+- **standalone**(`!_isBusMember`→owns=T): timeout→isHard=T→재연결. **pre-Phase-2 불변**. ✓
+- **solo bus**(1멤버·`_soloBusReconnect`=T→owns=T): timeout→isHard=T→재연결. **C4 fix 복원**(=standalone). ✓
+- **multi-member**(≥2·`_isBusMember && !_soloBusReconnect`→owns=F): timeout→isHard=F→SOFT, 게이트 `F||F`→**공유연결 미절단**.
+  **Phase 1 I1 불변**(형제 보호). ✓
+- **any + Socket/IOException**(isConnLevel=T→isHard=T): 재연결. 전 모드 보존. ✓
+불리언이 정확히 이 4 regime로 환원됨 — 반전 없음(C4·형제보호 어느 쪽도 재파손 안 됨).
+
+### 2. solo 플래그 설정 (ModbusBus.cs L114-130)
+`StartAsync`: `bool solo = _members.Count == 1; foreach(m) m.SetSoloBusReconnect(solo);` — **AddSlave 완료 후 · 폴 루프
+기동 직전**에 멤버 수 확정. 이후 AddSlave는 `_started` 가드로 금지→런타임 플립 불가. **2멤버 버스는 solo=false**(둘 다 false). ✓
+
+### 3. 신규 solo 복구 테스트 E2EGroupJ.E_SoloBus_ReadTimeout_HardReconnect_Recovers
+- **실 레지스트리 경로**: 단일 소터(시드 chuteNo=30, sharedBusUnits/extras 없음)→`CreateClient()`로 SorterRegistryFactory가
+  1-멤버(solo) 버스 생성. `Assert.Single(Buses)` + `MemberCount==1` 단언.
+- **DI seam 주입**: `injectTimeoutConnection`→테스트가 `ISharedModbusConnectionFactory`(TimeoutInjectingConnectionFactory)를
+  DI 등록→레지스트리가 seam으로 resolve→실 `SharedModbusConnectionFactory.Create(opt)` 출력을 timeout 데코레이터로 감쌈.
+  **실 production 경로 그대로**(seam 미등록 시 DefaultSharedModbusConnectionFactory=정적 위임, 동작 동일).
+- **비-tautological·RED-without-fix**: `SetTimeoutUnit(UnitA)`→`WaitUntil(DisconnectCalls > baseDisc)`+`Assert.True(>base)`.
+  fix 없으면 solo timeout=SOFT→재연결 미발생→Disconnect 불변→WaitUntil 타임아웃·단언 실패. fix 有→HARD→reopen(Disconnect 증가).
+  `SetTimeoutUnit(-1)`→Online 복구 단언. **결정적**(고정 sleep 0, 조건 폴링).
+- **seam 기본 경로 무변경**: production은 `_sp.GetService<ISharedModbusConnectionFactory>() ?? new Default...()`—미등록→정적
+  Create 위임=이전 직접 생성과 바이트 동일. production 동작 변경 0.
+
+### 4. OQ9-i PollIntervalMs fail-loud (신규 C3_SharedBus_PollIntervalMismatch_FailsLoud)
+`inducePollIntervalMismatch`→둘째 멤버 `Sorters:1:PollIntervalMs=77`→ValidateBusGroupConsistency 거부. 예외에 "PollIntervalMs"+
+"fail-loud" 단언·PASS. 이전 검증 갭 해소. 시리얼 불일치(C1)·중복 UnitId(C2) fail-loud 여전히 테스트·PASS.
+
+### 5. 두 regime 동시 pin
+MultiSorter C3(N=2 soft·`DisconnectCalls==0` 무-churn) + E2EGroupJ E(solo HARD·Disconnect 증가) — 대칭 단언으로 soft/hard
+양 regime 고정. 둘 다 GREEN.
+
+### 빌드·테스트 (fresh)
+- `dotnet build -c Release` → 오류 0, 경고 10(선재 NU1903). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **374/374 통과**(372 + 신규 2: E_SoloBus, C3_PollIntervalMismatch).
+- 격리·직렬 ≥5회 count-invariant: E2EGroupJ **7/7×5**, MultiSorterSameBus **7/7×5**, PlcGatewayIntegration **10/10×5**,
+  ScenarioTests **4/4×5**, MonitorHubTests **5/5×5**. flake 0.
+- 스코프 불변: Wcs.Api(Program.cs) + Wcs.PlcGateway(ModbusBus.cs·PlcGateway.cs·SharedModbusConnectionFactory.cs) +
+  Wcs.Tests(E2EInfrastructure.cs·E2EGroupJ) + docs/SPEC.md. **Core/Data/마이그레이션/frontend/appsettings 변경 0**(appsettings 바이트 동일).
+- 종료 후 testhost/Sim/Api 고아 0.
+
+**C4 이제 충족(1-멤버 버스 = standalone 재연결 의미 복원, 실 레지스트리 경로 테스트로 입증)·형제 보호(I1) 불변·회귀 0.
+→ 전 완료조건 PASS.**
+
+APPROVED
+
+---
+
+# CR-I1 RE-VERIFY — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, focused delta)
+
+Generator가 코드리뷰 CR-I1(a·b·c) + M2/M3/M4 적용. 이미 APPROVED된 스프린트의 이 델타만 실 코드 대조 재검증(전 스윕 아님).
+
+## 판정: **여전히 APPROVED** — 검증 fail-loud 확장 정확·M2 teardown 안전·회귀 0.
+
+### 1. CR-I1(a) ReadTimeoutMs/WriteTimeoutMs 정합 검사 (Program.cs L744-754)
+`ValidateBusGroupConsistency`에 `if (cfg.ReadTimeoutMs != first.ReadTimeoutMs || cfg.WriteTimeoutMs != first.WriteTimeoutMs)`
+추가 → LogCritical + throw("연결 타임아웃(ReadTimeoutMs/WriteTimeoutMs) 불일치…fail-loud"). serial/PollInterval과 동일 패턴.
+호출 위치 L516(그룹 루프 build 단계) — **bus.StartAsync(L654) 이전**에 발화(다른 검사와 동일 타이밍). 근거: 공유 클라이언트의
+Read/Write 타임아웃은 버스 단위 1개(그룹 대표값이 실효) → 멤버별 상이 시 조용히 대표가 이기는 대신 fail-loud로 표면화.
+
+### 2. CR-I1(c) 신규 C4_SharedBus_ConnTimeoutMismatch_FailsLoud (E2EGroupJ)
+`induceTimeoutMismatch`→인프라가 **둘째 멤버만** `Sorters:1:ReadTimeoutMs=2000`(멤버0=기본 1000, WriteTimeoutMs 전 슬롯 500 고정)
+→ ReadTimeoutMs만 불일치. `Record.Exception(CreateClient)`가 non-null·"ReadTimeoutMs"+"fail-loud" 단언. **비-tautological**:
+CR-I1 검사 없으면 대표가 조용히 이겨 기동 성공→ex null→Assert.NotNull 실패(RED-without-fix). C1(serial)·C2(dupUnitId)·C3(PollInterval)
+fail-loud 여전히 PASS(E2EGroupJ 8/8).
+
+### 3. CR-I1(b)+M3 주석 (SorterGatewayRegistry.cs L82-87, Program.cs L706-714)
+- 검사 헬퍼 주석: 버스 단위(검사 대상)=serial/PollInterval/Read/WriteTimeout·rep-sourced / per-member(검사 안 함)=
+  RFlagTimeoutMs/CFlagTimeoutMs/RFlagClearConfirmTimeoutMs/OfflineAfterFailures — 코드 실제와 일치.
+- StopPollingAsync 주석: writeQueue=null은 **TryComplete 벡터만** 무력화하나 `_polling.StopAsync()→_master.Disconnect()`
+  (BusSlaveMaster→공유 연결 Disconnect)가 형제를 끊으므로 버스 멤버는 절대 개별 teardown 금지 — 코드 실제(registry가
+  bus.StopAsync만 호출)와 일치. **주석만 변경·동작 0**.
+
+### 4. M2 (teardown-critical — 정밀 검사) — 안전
+- `_buses = buses`가 **StartAsync 루프 이전**(Program.cs L651, 루프 L654)에 게시됨. 확인.
+- (i) **미기동 버스 StopAsync 안전·멱등**: `Interlocked.Exchange(_stopped)` 가드(1회만). `_cts is not null`(미기동=null→cancel 스킵),
+  `_pollTask/_writeTask` null→`.Where(t=>t is not null)`이 걸러 null await 없음(NRE 0). `_writeCh.Writer.TryComplete()`·`_conn.Disconnect()`
+  try/catch·멱등. throw 0.
+- (ii) **부분 기동 시 결정 종료**: StartAsync 루프는 construction try/catch 밖 → bus[1].StartAsync가 던지면 전파되나 `_buses`가
+  이미 게시돼 host StopAsync가 bus[0](기동됨)을 `TryComplete→cancel→join→member.StopAsync→_conn.Disconnect` 순서로 결정 종료
+  (폴 태스크·열린 포트 누수 0). 이전(루프 뒤 게시)이었다면 `_buses`=null→`if(_buses is null) return`으로 bus[0] 누수 — 이 reorder가 그 창을 봉인.
+- (iii) **이중 dispose 없음**: StopAsync 멱등(_stopped), DisposeAsync 내부 StopAsync 재진입은 조기 return. 정상 종료는 bus.StopAsync만
+  (DisposeAsync 아님), construction 실패만 DisposeAsync. member.StopAsync/DisposeAsync도 각자 멱등. Disconnect/Dispose는 try/catch·멱등.
+- reorder가 teardown 레이스/StopAsync-before-StartAsync 해저드 도입 안 함. **실측: 전 스위트·격리 반복 모두 hang/orphan 0**.
+
+### 5. M4 (SharedModbusConnectionFactory.Create) — 확인
+Transport switch가 `(opt.Transport ?? "").Trim().ToUpperInvariant()`로 정규화 — BusKeyOf(`(cfg.Transport ?? "").Trim().ToUpperInvariant()`)와
+일치(" Tcp " 같은 값도 그룹핑-일관 경로). 알 수 없는 값은 여전히 fail-loud.
+
+### 빌드·테스트 (fresh)
+- `dotnet build -c Release` → 오류 0, 경고 10(선재 NU1903). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **375/375 통과**(374 + 신규 1: C4_ConnTimeoutMismatch), 22s, clean exit(hang 0).
+- 격리·직렬 ≥5회 count-invariant, clean exit: E2EGroupJ **8/8×5**, MultiSorterSameBus **7/7×5**, PlcGatewayIntegration **10/10×5**,
+  ScenarioTests **4/4×5**, MonitorHubTests **5/5×5**. flake 0·teardown hang 0·고아(testhost/Sim/Api) 0.
+- 스코프 불변: Wcs.Api(Program.cs·SorterGatewayRegistry.cs) + Wcs.PlcGateway(ModbusBus.cs·PlcGateway.cs·SharedModbusConnectionFactory.cs)
+  + Wcs.Tests(E2EInfrastructure.cs·E2EGroupJ) + docs/SPEC.md. **Core/Data/마이그레이션/frontend/appsettings/Sim3ds 변경 0**.
+
+**CR-I1(a/b/c)·M2·M3·M4 모두 코드 실제와 일치·회귀 0·teardown 안전. 스프린트 APPROVED 유지.**
+
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-16)
+
+**최종: Ready to merge = Yes. Critical 0 · Important 1(CR-I1, 교정+재검증) · Minor 4(M2/M3/M4 교정, M5 백로그).**
+
+강점(적대적 검사): C4 진리표 정합(3모드×3예외, multi가 non-conn 예외도 soft로 공유연결 보존), solo 플래그 메모리
+안전(Task.Run happens-before·write-once-before-start), fail-loud가 버스 기동 전 발화(자원 누수 0·생성자 Open 안 함),
+DI seam 운영 무해(default 위임 verbatim), 버스 레벨 teardown, M7 사실상 해소(SorterConfig에서 시리얼 주입),
+BusKeyOf가 transport 접두(RTU|/TCP|)로 충돌 방지.
+
+- **[교정완료·재검증] CR-I1** — 버스 공유 Read/WriteTimeoutMs가 rep에서 오나 정합 검사 없고 주석은 "WriteTimeoutMs
+  멤버별"이라 거짓. fix: ValidateBusGroupConsistency에 Read/WriteTimeoutMs 추가(불일치 fail-loud), 주석 정정
+  (버스 레벨 = 시리얼·PollInterval·Read/WriteTimeout / per-member = RFlag*·CFlag*·RFlagClearConfirm*·OfflineAfterFailures),
+  신규 C4_SharedBus_ConnTimeoutMismatch_FailsLoud(RED-without-fix). 375/375 GREEN.
+- **[교정완료] M2** — 부분 기동 누수: `_buses` 게시를 StartAsync 루프 이전으로 → bus[1] 실패 시 bus[0] 결정 teardown.
+- **[교정완료] M3** — writeQueue=null이 큐완료 벡터만 무력화하고 Disconnect 반벡터는 형제 절단함을 주석 정정
+  (버스 멤버는 bundle.StopPollingAsync teardown 금지·버스 레벨만). 무동작.
+- **[교정완료] M4** — SharedModbusConnectionFactory.Create Transport에 .Trim() 추가(BusKeyOf 정합).
+
+### Minor (백로그)
+- **M5**(Phase 3/RTU bring-up): RTU `Connect()`가 버스 락 안에서 동기 블로킹·connect-timeout 없음 → 행 포트
+  Open이 버스 전체 스톨. TCP=테스트라 미노출이나 RTU 현장 결선 시 connect-timeout 필요. config 배선이 RTU
+  생성자에 닿았으니 추적.
+- **[이월]** PlcPollingHostedAdapter dead code 정리 / testhost teardown 저빈도 flake 추적.

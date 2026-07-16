@@ -43,6 +43,8 @@ public sealed class SorterSimSlot
     public required int       ChuteNo { get; init; }
     public required int       Port    { get; init; }
     public required SimServer Sim     { get; init; }
+    /// <summary>Modbus 슬레이브 주소. 멀티 포트(기본)=1 / 공유 버스=슬롯별 상이(같은 포트에 unitId로 구분).</summary>
+    public byte UnitId { get; init; } = 1;
     /// <summary>이 소터의 DB destination.id (DB 시드 후 채워짐).</summary>
     public long DestinationId { get; set; }
 }
@@ -62,6 +64,21 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     private readonly int      _initialCurFloor;       // Sim 초기 CurFloor(2=즉시 정렬 / 1=미정렬)
     private readonly int      _rFlagTimeoutMs;
     private readonly int      _sorterObserveIntervalMs;
+
+    // S-MULTISORTER-SHARED-BUS Phase 2 — 공유 버스 모드(한 포트·멀티유닛 Sim 1대에 여러 SORTER_3D를 unitId로 구분).
+    private readonly (int ChuteNo, byte UnitId)[] _sharedBusUnits;
+    private readonly bool _induceSerialMismatch;       // fail-loud 재현(OQ4): 같은 버스 멤버 BaudRate 불일치.
+    private readonly bool _induceDuplicateUnitId;      // fail-loud 재현(OQ11): 같은 버스 UnitId 중복.
+    private readonly bool _inducePollIntervalMismatch; // fail-loud 재현(OQ9-i): 같은 버스 PollIntervalMs 불일치.
+    private readonly bool _induceTimeoutMismatch;      // fail-loud 재현(CR-I1): 같은 버스 Read/WriteTimeoutMs 불일치.
+
+    // C4 fix 테스트 — 실 레지스트리 경로에 read-timeout 주입 데코레이터를 끼운다(솔로 재연결 복구 검증).
+    private readonly bool _injectTimeoutConnection;
+    private readonly object _connLock = new();
+    private readonly List<TimeoutInjectingSharedConnection> _injectedConns = [];
+    /// <summary>주입된 timeout 데코레이터(솔로 재연결 테스트 — 실 레지스트리가 생성).</summary>
+    public IReadOnlyList<TimeoutInjectingSharedConnection> InjectedConnections
+    { get { lock (_connLock) { return _injectedConns.ToList(); } } }
 
     private readonly List<SorterSimSlot> _slots = [];
     private readonly object              _tlLock = new();
@@ -86,13 +103,25 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         int[]?    extraSorterChuteNos     = null,
         int       initialCurFloor         = 2,
         int       rFlagTimeoutMs          = 3000,
-        int       sorterObserveIntervalMs = 30)
+        int       sorterObserveIntervalMs = 30,
+        (int ChuteNo, byte UnitId)[]? sharedBusUnits = null,
+        bool      induceSerialMismatch     = false,
+        bool      induceDuplicateUnitId    = false,
+        bool      inducePollIntervalMismatch = false,
+        bool      induceTimeoutMismatch    = false,
+        bool      injectTimeoutConnection  = false)
     {
-        _rcsBaseUrl              = rcsBaseUrl;
-        _extraSorterChuteNos     = extraSorterChuteNos ?? [];
-        _initialCurFloor         = initialCurFloor;
-        _rFlagTimeoutMs          = rFlagTimeoutMs;
-        _sorterObserveIntervalMs = sorterObserveIntervalMs;
+        _rcsBaseUrl                 = rcsBaseUrl;
+        _extraSorterChuteNos        = extraSorterChuteNos ?? [];
+        _initialCurFloor            = initialCurFloor;
+        _rFlagTimeoutMs             = rFlagTimeoutMs;
+        _sorterObserveIntervalMs    = sorterObserveIntervalMs;
+        _sharedBusUnits             = sharedBusUnits ?? [];
+        _induceSerialMismatch       = induceSerialMismatch;
+        _induceDuplicateUnitId      = induceDuplicateUnitId;
+        _inducePollIntervalMismatch = inducePollIntervalMismatch;
+        _induceTimeoutMismatch      = induceTimeoutMismatch;
+        _injectTimeoutConnection    = injectTimeoutConnection;
 
         _anchor = new Microsoft.Data.Sqlite.SqliteConnection(
             $"Data Source={_dbName};Mode=Memory;Cache=Shared");
@@ -103,6 +132,35 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     /// <summary>실 Sim3ds를 소터 수만큼 기동(동적 포트). 호스트 기동(CreateClient) 전에 호출.</summary>
     public async Task StartSimsAsync()
     {
+        // ── 공유 버스 모드 (S-MULTISORTER-SHARED-BUS Phase 2) ────────────────────
+        // 한 포트에 멀티유닛 SimServer 1대를 세우고, 그 포트를 공유하는 여러 SORTER_3D를 서로 다른
+        // unitId로 배선한다(같은 Host:Port → 같은 TCP 버스 키 → production SorterRegistryFactory가
+        // ModbusBus 1개로 그룹핑). 전송=Tcp(테스트 vehicle — 실 COM1/RTU 금지).
+        if (_sharedBusUnits.Length > 0)
+        {
+            int port = GetFreePort();
+            var unitIds = _sharedBusUnits.Select(u => u.UnitId).ToArray();
+            var simOpt = new SimServer.Options
+            {
+                Host            = "127.0.0.1",
+                Port            = port,
+                TiltDelayMs     = 50,
+                SortDurationMs  = 100,
+                MoveDurationMs  = 80,
+                InitialCurFloor = _initialCurFloor,
+                SimLoopMs       = 10,
+            };
+            var sim = new SimServer(simOpt, unitIds, timelineLog: line =>
+            {
+                lock (_tlLock) { _timeline.Add($"[port{port}] {line}"); }
+            });
+            await sim.StartAsync();
+            foreach (var (chuteNo, unitId) in _sharedBusUnits)
+                _slots.Add(new SorterSimSlot { ChuteNo = chuteNo, Port = port, Sim = sim, UnitId = unitId });
+            return;
+        }
+
+        // ── 멀티 포트 모드(기존 기본) — 소터당 별도 포트·UnitId=1(서로 다른 버스 키 = 독립 병렬) ──
         var chuteNos = new List<int> { DefaultSorterChuteNo };
         chuteNos.AddRange(_extraSorterChuteNos);
 
@@ -124,7 +182,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 lock (_tlLock) { _timeline.Add($"[chute{chuteNo}] {line}"); }
             });
             await sim.StartAsync();
-            _slots.Add(new SorterSimSlot { ChuteNo = chuteNo, Port = port, Sim = sim });
+            _slots.Add(new SorterSimSlot { ChuteNo = chuteNo, Port = port, Sim = sim, UnitId = 1 });
         }
     }
 
@@ -174,6 +232,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
             };
 
             // Sorters[] — 실 Sim 포트별 config 항목(production SorterRegistryFactory가 소비).
+            // 공유 버스 모드: 여러 슬롯이 같은 Host:Port + 서로 다른 UnitId(같은 TCP 버스 키로 그룹핑).
             for (int i = 0; i < _slots.Count; i++)
             {
                 var slot = _slots[i];
@@ -184,6 +243,25 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 dict[$"Sorters:{i}:PollIntervalMs"]       = "30";
                 dict[$"Sorters:{i}:OfflineAfterFailures"] = "3";
                 dict[$"Sorters:{i}:WriteTimeoutMs"]       = "500";
+
+                // UnitId 바인딩(배경 5 — 기존 인프라는 미바인딩이라 전부 기본 1). 멀티 포트=1(바이트 동일),
+                // 공유 버스=슬롯별 상이. fail-loud(OQ11): 중복 유도 시 전부 1로 덮어 같은 버스 UnitId 충돌.
+                byte unitId = _induceDuplicateUnitId ? (byte)1 : slot.UnitId;
+                dict[$"Sorters:{i}:UnitId"] = unitId.ToString();
+
+                // fail-loud(OQ4): 둘째 멤버 BaudRate만 불일치시켜 같은 버스 시리얼 파라미터 충돌 유발.
+                // (TCP에선 실제로 미사용이나 레지스트리 정합 검사 대상 — 실 COM 무접촉으로 재현.)
+                if (_induceSerialMismatch && i > 0)
+                    dict[$"Sorters:{i}:BaudRate"] = "19200";
+
+                // fail-loud(OQ9-i): 둘째 멤버 PollIntervalMs만 불일치시켜 같은 버스 폴 주기 충돌 유발.
+                if (_inducePollIntervalMismatch && i > 0)
+                    dict[$"Sorters:{i}:PollIntervalMs"] = "77";
+
+                // fail-loud(CR-I1): 둘째 멤버 ReadTimeoutMs만 불일치시켜 같은 버스 연결 타임아웃 충돌 유발.
+                // (WriteTimeoutMs는 위에서 전 슬롯 500 고정 → ReadTimeoutMs 기본 1000 vs 2000 불일치로 재현.)
+                if (_induceTimeoutMismatch && i > 0)
+                    dict[$"Sorters:{i}:ReadTimeoutMs"] = "2000";
             }
 
             // ChuteStatePush(확정 와이어 UpdateChuteState) — 가짜 RCS로 결선(발신 활성). null이면 DORMANT.
@@ -202,6 +280,12 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
 
         builder.ConfigureServices(services =>
         {
+            // C4 fix 테스트 — 실 레지스트리가 만드는 공유 연결을 read-timeout 주입 데코레이터로 감싼다.
+            // SorterRegistryFactory는 ISharedModbusConnectionFactory(DI 등록 시)를 사용하므로 실 경로 그대로.
+            if (_injectTimeoutConnection)
+                services.AddSingleton<Wcs.PlcGateway.ISharedModbusConnectionFactory>(
+                    new TimeoutInjectingConnectionFactory(this));
+
             // WcsDbContext → named in-memory SQLite(인스턴스별 Guid).
             var dbDescriptors = services
                 .Where(d => d.ServiceType == typeof(DbContextOptions<WcsDbContext>)
@@ -230,6 +314,11 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
             // 추가 SORTER_3D(다중 소터) — production DbSeeder 변경 금지 → 테스트 측 시드.
             foreach (var chuteNo in _extraSorterChuteNos)
                 SeedExtraSorter(db, chuteNo);
+
+            // 공유 버스 모드의 비-기본(≠30) chuteNo도 테스트 시드(SeedExtraSorter는 idempotent).
+            foreach (var (chuteNo, _) in _sharedBusUnits)
+                if (chuteNo != DefaultSorterChuteNo)
+                    SeedExtraSorter(db, chuteNo);
 
             // 각 슬롯의 DB destination.id를 채운다(테스트가 destId로 단언).
             foreach (var slot in _slots)
@@ -293,8 +382,9 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     public override async ValueTask DisposeAsync()
     {
         // 실 Sim 먼저 종료(소켓 accept 루프 정리) → 베이스(IHost) 종료(소터 폴링 쓰기큐 완료) → 앵커.
-        foreach (var slot in _slots)
-            await slot.Sim.DisposeAsync().ConfigureAwait(false);
+        // 공유 버스 모드는 여러 슬롯이 같은 SimServer를 참조 → Distinct(참조 동일성)로 이중 dispose 방지.
+        foreach (var sim in _slots.Select(s => s.Sim).Distinct())
+            await sim.DisposeAsync().ConfigureAwait(false);
         await base.DisposeAsync().ConfigureAwait(false);
         _anchor.Dispose();
         GC.SuppressFinalize(this);
@@ -335,6 +425,16 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     /// <summary>해당 소터(destId)가 Online인지.</summary>
     public bool IsSorterOnline(long destId) => SorterSnapshot(destId)?.Online ?? false;
 
+    /// <summary>chuteNo로 슬롯 조회(공유 버스 unit 고장주입·라우팅용).</summary>
+    public SorterSimSlot Sorter(int chuteNo) => _slots.First(s => s.ChuteNo == chuteNo);
+
+    /// <summary>
+    /// 구성된 물리 버스 진단(공유 연결/포트/마스터 1개 = 버스 1개).
+    /// 공유 버스 = 버스 1개·멤버 N / 멀티 포트 = 버스 N개·각 멤버 1. "공유 연결 1개" 구조 입증.
+    /// </summary>
+    public IReadOnlyList<SorterRegistryFactory.BusInfo> Buses =>
+        Services.GetRequiredService<SorterRegistryFactory>().Buses;
+
     public static int GetFreePort()
     {
         using var l = new TcpListener(IPAddress.Loopback, 0);
@@ -343,4 +443,60 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         l.Stop();
         return p;
     }
+
+    // ── C4 fix 테스트 지원: read-timeout 주입 공유 연결 데코레이터 + 팩토리 ──────────
+    // MultiSorterSameBus C3(N=2, soft·무-churn)의 대칭 — 솔로(1-멤버 버스)는 read 타임아웃을 HARD로
+    // 처리해 재연결(Connect/Disconnect 증가·reopen)로 복구함을 실 레지스트리 경로에서 입증한다.
+    private sealed class TimeoutInjectingConnectionFactory(E2EWebApplicationFactory owner)
+        : ISharedModbusConnectionFactory
+    {
+        public ISharedModbusConnection Create(PlcTransportOptions opt, Microsoft.Extensions.Logging.ILogger? log = null)
+        {
+            var inner = SharedModbusConnectionFactory.Create(opt, log);
+            var deco  = new TimeoutInjectingSharedConnection(inner);
+            lock (owner._connLock) { owner._injectedConns.Add(deco); }
+            return deco;
+        }
+    }
+}
+
+/// <summary>
+/// 지정 unitId의 read/write를 즉시 TimeoutException으로 만드는 ISharedModbusConnection 데코레이터
+/// (MultiSorterSameBus C3의 공유버스판 — 솔로 재연결 복구 검증용). Connect/Disconnect 호출 수를 계측해
+/// "솔로 타임아웃 → 재연결(reopen)"을 입증한다. 실 소켓은 inner에 위임.
+/// </summary>
+public sealed class TimeoutInjectingSharedConnection(ISharedModbusConnection inner) : ISharedModbusConnection
+{
+    private volatile int _timeoutUnit = -1;   // -1 = 없음
+    private int _connectCalls;
+    private int _disconnectCalls;
+
+    public int ConnectCalls    => Volatile.Read(ref _connectCalls);
+    public int DisconnectCalls => Volatile.Read(ref _disconnectCalls);
+
+    /// <summary>이 unitId의 read/write를 타임아웃시킨다(-1=해제).</summary>
+    public void SetTimeoutUnit(int unitId) => _timeoutUnit = unitId;
+
+    public string BusKey      => inner.BusKey;
+    public bool   IsConnected => inner.IsConnected;
+
+    public void Connect()    { Interlocked.Increment(ref _connectCalls);    inner.Connect(); }
+    public void Disconnect() { Interlocked.Increment(ref _disconnectCalls); inner.Disconnect(); }
+
+    public Task<ushort[]> ReadHoldingRegistersAsync(byte unitId, ushort startAddress, ushort count, CancellationToken ct)
+        => unitId == _timeoutUnit
+            ? throw new TimeoutException($"[test] injected read timeout for unit {unitId}")
+            : inner.ReadHoldingRegistersAsync(unitId, startAddress, count, ct);
+
+    public Task WriteSingleRegisterAsync(byte unitId, ushort address, short value, CancellationToken ct)
+        => unitId == _timeoutUnit
+            ? throw new TimeoutException($"[test] injected write timeout for unit {unitId}")
+            : inner.WriteSingleRegisterAsync(unitId, address, value, ct);
+
+    public Task WriteMultipleRegistersAsync(byte unitId, ushort startAddress, short[] data, CancellationToken ct)
+        => unitId == _timeoutUnit
+            ? throw new TimeoutException($"[test] injected write timeout for unit {unitId}")
+            : inner.WriteMultipleRegistersAsync(unitId, startAddress, data, ct);
+
+    public void Dispose() => inner.Dispose();
 }
