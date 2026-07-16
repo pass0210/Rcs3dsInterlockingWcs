@@ -1,213 +1,408 @@
-# Sprint Feedback — S-UI-LAYOUT-FIX (낮은 뷰포트 폼-오버랩 + /ops 페이지 오버플로 근본수정)
+# Sprint Feedback — S-MULTISORTER-SHARED-BUS (Phase 1)
 
-**APPROVED** — Evaluator, 2026-07-15. C1–C11 전부 PASS. 3개 낮은 뷰포트(1366×720·1280×680·1300×700)에서 수치 실증 — 이전 스프린트 회귀(큰 뷰포트만 통과)를 반복하지 않도록 낮은 뷰포트 전수 검증. 정적 0·회귀 0(8페이지)·백엔드 diff 0·package 무변경·콘솔 error/warning/pageerror 0.
-
-핸드오프 마커 = `tasks/sprint-log.md` 말단 `## IMPLEMENTATION COMPLETE — S-UI-LAYOUT-FIX`. HEAD=`a088520`(PR #66 병합 위 미커밋 작업트리, 브랜치 `feat/ui-layout-fix`). 변경 = **프론트 2파일만**(`frontend/src/pages/B2cDataGenPage.tsx`, `frontend/src/pages/OpsPage.tsx`) + tasks docs. 공용 프리미티브(Layout/card/index.css) 무접촉 → 회귀 범위 8페이지 정당(diff --stat로 확인).
-
-## 실측 diff (page-local · 공용 프리미티브 0)
-- B2cDataGenPage: 상단 그리드 `min-h-[220px]` 제거(자동 min-height:auto=폼 자연높이 하한) + 하단 배치상세 Card `min-h-[200px]`→`min-h-0`.
-- OpsPage: 스크롤 본문 div 에 `[&>*]:shrink-0` 추가(스택 카드가 압축돼 2차 스크롤/잘림 지점이 되는 것 잠금 — 영역당 스크롤 1개 불변식).
-
-## 검증 환경(격리 — 사용자/생성자 포트 무접촉)
-- Sim3ds :1512 (TCP, `--transport tcp --port 1512`) · Wcs.Api :5215 (Release, `--urls http://localhost:5215` → 로그 `Now listening on: http://localhost:5215` 확인, 5205 무바인딩) · Vite :5190 (`VITE_API_TARGET=http://localhost:5215 --strictPort`).
-- DB = fresh scratch SQLite `scratchpad/wcs_eval_scratch.db`(`Database:Provider=Sqlite`+`SeedOnStartup=true`), 사용자 실 DB/Azure/실 PLC 무접촉. 소터 destId=6 chuteNo=30 transport=Tcp→Sim :1512 **ONLINE**(로그 확인). 증거 = `screenshots/S-UI-LAYOUT-FIX_20260715-170748/`.
-
-## Completion Conditions C1–C11 (raw 수치)
-
-### /b2c/test-data (3 뷰포트)
-- **[C1] page/main scroll 0 — PASS.** 1366×720: main 657≤clientH 657 · doc 720≤innerH 720. 1280×680: main 617≤617 · doc 680≤680. 1300×700: main 637≤637 · doc 700≤700.
-- **[C2] 카드 오버랩 0 — PASS.** 전 뷰포트 form.bottom=566.25 ≤ detail.top=582.25 (+16 gap).
-- **[C3] '+ 데이터 생성' 버튼 가시+클릭 — PASS.** (i) btn top 464.25 ≥0, bottom 504.25 ≤ innerH(720/680/700 전부), `elementFromPoint(center)`=BUTTON(가려짐 0). (ii) 실 `browser_click` → 검증 토스트 "작업일자·배치명·바코드 접두를 모두 입력하세요." 발생(MutationObserver 캡처), 예외 0·데이터 생성 0(early-return).
-- **[C4] 빈 배치상세 50% 미점유 — PASS.** detail.height ≤ topRegion.height: 1366→117.75≤483.25 · 1280→77.75≤483.25 · 1300→97.75≤483.25. 상단=폼 자연높이(483.25) 하한 유지.
-- **알터네이트(populated)**: SEED 배치 행 선택 → "배치 상세 — SEED #1" 오더 5행 로드, page/main 무스크롤 유지(617≤617·680≤680), 상세 본문 단일 내부 스크롤(sh189/ch32). (04)
-
-### /ops (3 뷰포트, 라이브 소터)
-- **[C5] page/main scroll 0 — PASS.** main.scrollTop=0 · main 657/617/637 ≤ clientH 동일 · doc 720/680/700 ≤ innerH 동일.
-- **[C6] 단일 바운드 내부 스크롤 + 소터바 고정 — PASS.** 스크롤 영역=수정된 div(`overflow-auto [&>*]:shrink-0`) scrollHeight 845 > clientHeight 569/529/549(canScroll). 영역 bottom까지 스크롤(scrollTop 276/316/296=max) 후에도 소터 선택 바 rect.top 83→83 **불변**(shrink-0). main.scrollTop 0 유지.
-- **[C7] 마지막 컨트롤('셀 지정') 도달 — PASS.** 영역 하단 스크롤 후 셀 지정 버튼 완전 가시(1366: top636.25/bot668.25≤720 · 1280: 596.25/628.25≤680 · 1300: 616.25/648.25≤700), `elementFromPoint`=BUTTON. 실 click → 검증 토스트 "셀 번호와 명령 순번을 입력하세요."(PLC 쓰기 0·early-return). 라이브 WordPanel D0~D6+D4 flags + SignalR "실시간 연결됨"(cross-layer 무단절, End-to-end 시나리오).
-
-### 공통
-- **[C8] 콘솔 클린(BLOCKING) — PASS.** 내 세션 전체 error 0 / warning 0 / pageerror 0. info 2건=React DevTools 다운로드 안내(dev 무해). 백엔드 기동으로 SignalR/API 정상 왕복 → spurious 네트워크 에러 0. (`console.log`) 주의: 리포 루트에 남아있던 `screenshots/S-B2C-GRID-UX_20260715-121800/console-all.log`(타 스프린트 :5191 에러)는 내 세션 아님 — 혼입 배제.
-- **[C9] 회귀 8페이지(1280×680) — PASS.** doc/body 스크롤 0 = 전 8페이지(680≤680). main 바운드: /monitor·/sorters·/b2c/facility·/logs·/comparison·/boxes·/settings 617≤617. **/data-generator**: doc 680≤680(body 무스크롤)이나 main sh652>ch617(35px 내부 오버플로) — **DataGeneratorPage.tsx는 이번 스프린트 무접촉**(`git diff --stat` 공란)이므로 pre-existing 베이스라인, 회귀 아님. 신규 콘솔 오류/오버랩 0.
-- **[C10] 정적 검사 0 — PASS.** `npm run typecheck`(tsc --noEmit) exit 0. `npm run lint`(eslint) exit 0. `npm run build`(tsc && vite build, 스크래치 outDir) exit 0 — "✓ built in 6.30s"(경고=선재 chunk>500kB + signalr PURE-annotation, 신규 error 0). wwwroot 무접촉.
-- **[C11] backend diff 0 — PASS.** `git diff --stat -- backend` 공란 · `frontend/package.json`·`package-lock.json` diff 공란 · `backend/src/Wcs.Api/wwwroot` git status 공란(빌드→스크래치).
-
-## 판정
-**모든 C1–C11 = PASS. 이전 스프린트의 "큰 뷰포트만 통과" 실패를 3개 낮은 뷰포트 수치 게이트로 방지 확인.**
-
-**APPROVED**
-
-## 프런트 테스트 러너
-vitest **not configured** (package.json에 test 스크립트 없음 — 계약 명시대로 기록).
+Evaluator: 단일 (functional-and-regression + concurrency-and-frame-integrity 2축 동시).
+평가일: 2026-07-16. 브랜치: feat/multisorter-shared-bus (HEAD 8c25421, 작업은 전부 워킹트리 미커밋).
+방법: ground-truth git 확인 + 계약/코드 직독 + fresh Release 빌드/테스트(자체 실행) + develop stash 대조.
 
 ---
 
-# Sprint Feedback — S-UI-LAYOUT (뷰포트 맞춤 + 그리드 내부 스크롤 + 3DS 워드 중복 제거)
-
-**APPROVED** — Evaluator, 2026-07-15. 순수 프론트 스프린트. 정적 0·회귀 0·백엔드 diff 0·마이그레이션 0, 전 페이지 브라우저 실증(뷰포트 맞춤·그리드 본문 스크롤·sticky thead·리사이즈), 레지스터 dedup·메뉴 개명 실증, 내 origin 콘솔 error/warning/pageerror 0.
-
-핸드오프 마커 = `tasks/sprint-log.md` 말단(L3732) `## IMPLEMENTATION COMPLETE — S-UI-LAYOUT`. HEAD=`2248f33`(PR #65 병합 위 미커밋 작업트리, 브랜치 `feat/ui-layout`). 변경 = 프론트 15파일 + docs/FRONTEND.md(백엔드/마이그레이션 0). 검증 환경(격리): Sim3ds :1512(TCP) · Wcs.Api :5215(Release·fresh scratch SQLite `wcs-eval.db`·SeedOnStartup·Sorters[0].ChuteNo=30→Sim :1512 ONLINE) · Vite :5190(VITE_API_TARGET=:5215). 포트 5205/1502 미사용(초기 실수로 5205 바인딩 → 즉시 kill 후 `--urls`로 5215 재바인딩·5205 반환). 증거 `screenshots/S-UI-LAYOUT_20260715-145400/`.
-
-## 정적/회귀/무접촉 게이트 (PASS)
-- `tsc --noEmit` = 0 · `eslint .` = 0(warning 포함) · `vite build`(스크래치 outDir) = 0. `backend/src/Wcs.Api/wwwroot` 무접촉(git status backend 빈 출력·전 빌드 후 재확인).
-- `dotnet test -c Release` = **360/360 GREEN**(직렬 실행 `xUnit.parallelizeTestCollections=false …maxParallelThreads=1`, 0 실패·0 스킵·20s·exit 0). 단일 실행에서 결정적 GREEN — 생성자가 보고한 병렬-부하 flake(IT3a_D4_RMW·B2_RealSimServerRtu) 재현 없음(직렬로 회피, lessons 준수).
-- `git diff --stat backend/` 빈 출력 · 신규 마이그레이션 0 · PlcGateway/Core/Data/Sim3ds 소스 무변경. (순수 프론트 계약 준수.)
-
-## 레지스터 dedup + 메뉴 개명 (핵심 불변식 · PASS)
-- grep: `WordPanel` import 는 `OpsPage.tsx` 단 1곳(SortersPage 는 주석만) · `OpLogTail` import 는 `SortersPage.tsx` 단 1곳. 브라우저: `/sorters`에 WordPanel/D-레지스터 타일 **부재**, `/ops`에 `3DS 레지스터 워드` **정확히 1개**.
-- NAV(b2c): `[데이터 생성, 설비 관리, 모니터링, 운영 로그(/sorters), 운영 제어(/ops)]` — `3DS 워드` 소멸·`운영 로그` 존재. `/sorters` 헤더 title=`운영 로그`·subtitle=`operation_log 실시간 테일 · category/level 필터`. 오펀 소터 Select 제거(필터 select 는 category/level 2개뿐). OpLogTail(앱 유일 op-log 뷰) 생존·동작.
-
-## 브라우저 뷰포트 맞춤 실증(각 페이지 docSH==innerH·pageScroll 0·본문만 스크롤)
-- **B2cDataGen(마스터-디테일)**: EVAL-BIG 300오더 → 페이지 fit(900=900), 단일 내부 스크롤=디테일 본문(300행·sh 9334/ch 346). (01)
-- **B2cFacility(3단+2패널·최난)**: 페이지 fit, 3 내부 스크롤 영역(목적지 sh377/ch272·좌 배정대상 sh257/ch169·우 미할당 316행 sh10146/ch180) 분산. (02)
-- **Monitor 작업**: 100행 fit, 그리드 본문만 스크롤(sh4133/ch689) + **sticky thead**: 400px 스크롤 후 thead top=컨테이너 top(191) 유지·position:sticky(table.tsx overflow-x 제거 효과 실증). (03) / **분류**: 셀·적재 2그리드 flex-1 균등(각 342px·min-h 하한). 
-- **/sorters=운영 로그**: WordPanel 부재·OpLogTail 존재. 단축 뷰포트(1280×460)서 op-log 본문 내부 스크롤(sh297/ch258)·페이지 fit(460=460). (04)
-- **/ops=운영 제어**: WordPanel 1개+라이브 SignalR(D0~D6·D5 CurFloor=1·D4 Ready=1·`실시간 연결됨`·소터 chuteNo=30 ONLINE) — 브라우저↔API↔SignalR↔Sim3ds 전계층 왕복(S14). 1280×560 리사이즈서 라이브 데이터·연결 유지+페이지 fit+크롬 고정. (05)
-- **b2b DataGenerator**: EVAL-B2B 300 디테일 fit·내부 스크롤(sh11015/ch738). (06) **Comparison(wide 10열)**: 313행 내부 스크롤(sh11520/ch689)·페이지 **양축** fit(docSW 1440=innerW·가로 페이지 스크롤 0). (07) **Logs/Boxes**: empty-state fit·레거시 고정 max-height 아티팩트 0(calc→flex 확인). **Settings(대상 제외)**: 정상 렌더·회귀 0.
-- 데이터 양극단: 소량(seed·empty)서 조기 스크롤/빈 여백 없음, 넘침(300/313/316)서 페이지 뷰포트 불초과·그리드 본문만 스크롤. 리사이즈(1440×900↔1280×{460,560})서 무붕괴.
-
-## 콘솔(BLOCKING · PASS)
-- 전 세션 error 0 / warning 0 / pageerror 0. info 21건은 전부 React DevTools 다운로드 안내(dev 무해)·일부는 :5191 foreign-origin(불산입, lessons foreign-buffer).
-
-## Minor(비차단 · 백로그 유지)
-- 이월 grid-a11y 2건(ContextMenu Tab·그리드 컨테이너 tabIndex/role) — 계약 OQ-4 기본 defer대로 미접촉. `tasks/todo.md` 백로그 유지 권고.
+## 판정: APPROVED (10/10 조건 PASS, 2 차원 PASS) — 단, 아래 flake 관찰 1건 기록·추적 권고
 
 ---
 
-# Sprint Feedback — S-B2C-GRID-UX (랜딩 정합 + 공용 그리드 상호작용)
+## 스코프 (C9) — PASS
+- 변경(tracked): `backend/src/Wcs.PlcGateway/PlcGateway.cs`, `backend/src/Wcs.Sim3ds/SimServer.cs`,
+  `backend/src/Wcs.Sim3ds/SimTransport.cs` + `tasks/sprint-contract.md`·`tasks/sprint-log.md`(tasks/ 허용).
+- 신규(untracked): `Wcs.PlcGateway/Modbus/SharedModbusConnection.cs`, `Wcs.PlcGateway/ModbusBus.cs`,
+  `Wcs.Sim3ds/SimSlave.cs`, `Wcs.Tests/MultiSorterSameBusTests.cs`.
+- **Wcs.Core·Wcs.Data·마이그레이션·frontend/·Wcs.Api(Program.cs SorterRegistryFactory/SorterConfig/appsettings)
+  변경 0** (git diff --name-only 확인). IModbusMaster.cs·ModbusMasterFactory.cs·HandshakeOrchestrator.cs·
+  Sim3ds Program.cs 무변경 — Generator가 B2 "가산적/시그니처 무파괴" 접근 채택. → 범위 위반 없음.
+- 계약 sprint-contract.md diff(367/219)는 직전 S-UI-LAYOUT-FIX 계약을 본 Phase 1 계약으로 전체 교체한 것 —
+  C1~C10/시나리오 개찬 없음(내가 읽은 계약과 일치). 조작 아님.
 
-**APPROVED (FIX ITER 2 재검증 · 유지)** — Evaluator, 2026-07-15. Step 4.5 코드리뷰 3건(Important 1 + fold 2) 완전 해소·회귀 0·브라우저 실증·콘솔 0. 초회 APPROVED 아래 보존.
+## 빌드 (C8 전반) — PASS
+- `dotnet build backend/Wcs.sln -c Release`: **오류 0**, 경고 12개(전부 선재 NU1903 SQLite CVE). 신규 코드
+  경고 0. develop 베이스라인 빌드도 동일 경고 12개 → 신규 경고 없음.
+
+## 전체 테스트 (C8) — PASS (flake 관찰 기록)
+- feature 전체 스위트: **366/366 통과, 실패 0, 18~20s, EXIT=0 — 6회 연속 클린**(정상 조용한 머신 조건).
+- 통합/취약 클래스 필터(`PlcGatewayIntegration|ScenarioTests|HandshakeResidue|MultiSorterSameBus`, 27개):
+  **5/5 반복 전부 27/27 GREEN(각 6s), 카운트 불변** — S5RSeqMismatch·S9·IT3a·IT4b·teardown 채널경쟁 회귀 0.
+- 신규 MultiSorterSameBus 6개 격리: **6/6 GREEN(6s)**.
+- develop 베이스라인(stash -u로 8c25421 워킹트리): **360/360 GREEN, 17~19s, EXIT=0 — 2/2 클린.**
+  (feature 366 = develop 360 + 신규 6. 카운트 정합.)
+
+### ⚠️ Flake 관찰 (blocking 아님 — 추적 권고)
+- 초기 2회 실행에서 전체 스위트가 **테스트는 전부 통과(16s) 후 testhost가 teardown에서 HANG**
+  (`--blame-hang` 3분 비활성 abort, EXIT=1, `[WcsTeardownGuard] ... SocketException` 로그, 카운트 359로 절단).
+- 귀속: 그 2회는 내가 **동시에 foreground `tasklist` 폴 루프(2s 간격)+Monitor(1s) 부하**를 준 실행(run#1)과
+  그 직후 abort/덤프수집 잔여 프로세스가 경쟁하던 실행(run#2)이었다. **내 간섭을 제거한 뒤 6회 연속 클린**으로
+  재현되지 않음. 증상(E2E 병렬부하 하 teardown SocketException)이 문서화된 **선재 flake 클래스**와 일치
+  (메모리 e2e-parallel-load-surfaces-integration-flakes / testhost-teardown-channel-race / s9-flake).
+- develop도 조용한 조건 2/2 클린 — 부하 하 develop 재현 실험은 미수행(선재 여부 100% 단정 불가). 그러나
+  **feature 코드에 귀속되는 결정적 회귀는 아님**(격리·필터·정상조건 전체 GREEN, 버스 teardown은 Writer.TryComplete
+  보유). → C8/C10 기능 기준 충족. **후속: 이 저빈도 E2E teardown flake는 백로그 추적 유지 권고.**
+
+## 조건별 판정
+
+- **C1 (멀티유닛 Sim ≥2 unitId·독립 뱅크/상태기계; 단일유닛 현행 동일) — PASS.**
+  SimSlave가 `GetHoldingRegisters(UnitId)` 자기 뱅크만·`RegistersChanged`를 `e.UnitIdentifier`로 필터·
+  독립 상태기계(_isSorting/_isMoving)·per-slave volatile 고장주입. 단일유닛 ctor는 `logPrefix=""`로 위임(현행
+  타임라인 문자열 보존). 시나리오(a) 두 슬레이브 Online + 뱅크 독립(Unit(1) Ready=0 → Unit(2) 무영향) 검증.
+  기존 Sim3dsRtu A1~A10·ScenarioTests 전체 GREEN.
+
+- **C2 (마스터/포트 1개 공유, 둘 다 Online, 마스터 1 입증) — PASS.**
+  버스당 `SharedTcpModbusConnection` 1개 + `BusSlaveMaster` 어댑터가 동일 `_conn` 래핑. 시나리오(a)는
+  SharedTcpModbusConnection 1개 생성 + `Bus.Slaves.Count==2` + 둘 다 Online. (OS 소켓수 직접 단언은 없으나
+  버스당 연결 1개가 구조적으로 보장 — 어댑터 Dispose=no-op로 형제 연결 보호.)
+
+- **C3 (버스 폴 주기당 대기 1회, N=2가 1 PollIntervalMs 내 갱신, N×아님) — PASS (코드검사).**
+  `ModbusBus.RunBusPollLoopAsync`: 주기당 `Task.Delay(PollIntervalMs)` **1회** 후 멤버 순회, `PollCycleAsync`에
+  Delay 없음 → 슬레이브별 sleep 0. 구조적으로 N×PollIntervalMs 불가능. **GAP: 전용 타이밍 행위 단언은 테스트에
+  없음**(구조 보장으로 충족; 후속에 타이밍 단언 추가 권고).
+
+- **C4 (동시 핸드셰이크 2슬레이브 ≥20회, R_Seq==자기 C_Seq, 교차 0) — PASS.**
+  시나리오(b) 20회 WhenAll 동시 트리거, 매회 `SentCSeq==ReceivedRSeq`(슬레이브별)·R_CellNo 각자값 단언.
+  전체·격리 실행 전부 GREEN. 버스 락(공유 `_busLock`)이 프레임 교차 차단.
+
+- **C5 (슬레이브 격리: B 실패 시 B만 상태전이, A Online+Success) — PASS.**
+  (c1) InjectNoResponse→B RFlagTimeout·A Online+Success·B도 폴응답 유지. (c2) InjectUnresponsive
+  (서버 ServerDeviceFailure=soft)→B만 OFFLINE·A Online+Success·B 복구. 코드: per-slave 상태 필드,
+  `PollCycleAsync` catch에서 `if(!_isBusMember||isHardEx)`로 **soft 실패는 공유연결 미절단**(형제 보호).
+
+- **C6 (절대규칙 #1: 인터리브 쓰기 D4 RMW 비트보존·C 교차오염 0·단일 큐 경유) — PASS.**
+  (e) 두 슬레이브 인터리브 CellAssign → 각자 C값(11/101, 22/202)·C_Flag=1·**Ready 비트 보존** 단언.
+  코드: 버스 단일 쓰기 채널(SingleReader) + 컨슈머가 unitId 라우팅 → `ProcessWriteAsync`/`RmwD4LockedAsync`가
+  공유 버스락 단일 임계구역에서 read+write 원자수행. grep: Modbus 마스터 호출부는 PlcGateway(큐/락 내부)·
+  SharedModbusConnection·마스터 구현·테스트뿐 — 핸들러/서비스/핸드셰이크 직접호출 0.
+
+- **C7 (서로 다른 버스 병렬) — PASS.** (d) 포트 2개·독립 SharedTcpModbusConnection/ModbusBus 2개, 둘 다
+  Online+Success, portA≠portB. 멀티포트 회귀 0.
+
+- **C8 (빌드 클린 + 전체 GREEN, 취약 ≥5회 귀속) — PASS.** 위 참조(366/366 6회 클린, 필터 5/5×27, develop 2/2).
+  ⚠️ 초기 2회 teardown hang은 평가환경 간섭+선재 flake로 귀속(위 flake 관찰).
+
+- **C9 (스코프) — PASS.** 위 스코프 절 참조.
+
+- **C10 (하드코딩 0, teardown 결정성, 고아 0) — PASS.** 신규 타이밍/포트/유닛 전부 옵션·인자 주입
+  (PlcGatewayOptions·SimOpt·unitIds). `ModbusBus.StopAsync`가 `_writeCh.Writer.TryComplete()` 선호출 →
+  parked ReadAllAsync 결정 종료. 실행 후 testhost/Sim/Api 고아 **0** 확인. (flake성 teardown hang은 위 관찰.)
+
+## 차원 판정
+- **차원 1 (functional-and-regression) — PASS.** 시나리오(a)(d)(e)+C1~C3·C7~C10 충족, 전체 0회귀(정상조건 6/6).
+- **차원 2 (concurrency-and-frame-integrity) — PASS (코드 직접검사).**
+  · 버스 락 = **동일 공유 `_busLock` 인스턴스**가 poll-read(`PollCycleAsync` L315)·write(`ProcessWriteAsync`
+    L551)·D4 RMW(`RmwD4LockedAsync`, ProcessWrite 임계구역 내)·재연결(`TryReconnect` L437)에 모두 적용
+    (`ConfigureForBus`가 자기 락 폐기→공유 락 대체). **락 밖 프레임 연산 없음.**
+  · per-slave OFFLINE 독립: 상태 전부 인스턴스 필드(_failures/_online/_latest/_prevRFlag/_prevSnap/
+    _startupReconciled), 공유 실패 카운터 없음; soft 실패는 공유연결 미절단; catch는 슬레이브별 scope.
+  · D4 RMW 원자성/비트보존: read+write 동일 임계구역(테스트 e로 Ready 보존·C 교차오염 0 입증).
+  · 절대규칙 #1: 모든 쓰기 버스 단일 큐 컨슈머 경유(EnqueueAsync 버스 라우팅), 직접 Modbus 우회 0.
+  · 같은-슬레이브 동시 핸드셰이크 out-of-scope(OQ6) 준수; 시나리오(b)는 서로 다른 두 슬레이브.
+  (참고 switch default: 최초 리뷰 시 default 없음 관찰 → I1에서 log-only default 추가로 해소, 아래 M2 참조.)
 
 ---
 
-## FIX ITER 2 재검증 (Step 4.5 코드리뷰 3건 · PASS) — 2026-07-15
+## I1 RE-VERIFY (2026-07-16, Evaluator — I1 델타만 재검증, C1~C10 스윕은 유지)
+Generator가 I1(공유 버스 슬레이브 read-timeout 격리) 수정 적용. HEAD 8c25421 위 미커밋. 스코프 불변
+(PlcGateway.cs+SimServer.cs+SimTransport.cs+신규 4파일, tasks/ 외 코드 변경 없음). 세 주장 모두 실제 코드로 확인:
 
-핸드오프 마커 = `tasks/sprint-log.md` L3705 말단 `## IMPLEMENTATION COMPLETE — FIX ITER 2 (S-B2C-GRID-UX · Step 4.5 코드리뷰 3건)`. HEAD=`9c6f63a`(불변·미커밋). 변경 파일 = `useRowSelection.ts`(FIX1·2·3) + `B2cFacilityPage.tsx`(FIX2 소터행 결선). 검증 환경(격리): Sim3ds :1512 · Wcs.Api :5215(Release·fresh scratch SQLite `wcs-eval2.db`·seed·Sorters[0].ChuteNo=30) · Vite :5190. 증거 `screenshots/S-B2C-GRID-UX_20260715-121800/07-fixiter2-g3-drag-highlight-menu.png` + console-fixiter2.log.
+- **M1 (예외 분류·재연결 게이트) — CONFIRM 정확.** `PollCycleAsync` catch(PlcGateway.cs L392~448):
+  `isConnLevel = Socket/IOException(+inner)`; `isTimeout = ex is TimeoutException`;
+  `isHardEx = isConnLevel || (!_isBusMember && isTimeout)`; 재연결 게이트 `if (!_isBusMember || isHardEx)`.
+  · **버스 모드 + TimeoutException**: isHardEx = false||(false&&true)=false → 게이트 false → **공유 연결 Disconnect
+    안 함**(anti-churn). B는 `_failures >= OfflineAfterFailures`(3회 누적)로 OFFLINE 전이(soft 경로). ✓
+  · **버스 모드 + Socket/IOException**: isConnLevel=true → isHardEx=true → 게이트 true → 공유 연결 drop+reopen(정당). ✓
+  · **단독 모드 + TimeoutException**: isHardEx = false||(true&&true)=true → 즉시 OFFLINE + 재연결. **현행 보존(불변).** ✓
+  (게이트 `!_isBusMember||isHardEx`는 버스 모드에서 `isConnLevel`로 환원 — 논리 반전/누락 없음.)
 
-### 정적/회귀/무접촉 (PASS)
-- tsc 0 · eslint 0 · vite build 0(스크래치 outDir·wwwroot 무접촉). `git diff backend/` 빈 출력 · 신규 마이그레이션 0.
-- `dotnet test -c Release`: **run1 = 실패 2/통과 358**(`S5RSeqMismatchTests.S5_RSeqMismatch_AlarmAndSorterCommandMismatch` 외 1) → **clean 재run = 360/360 GREEN(실패 0)**. 귀속: (1) 백엔드 byte-identical(diff 0)이라 프론트 변경이 백엔드 Modbus 시나리오 테스트를 논리적으로 깨뜨릴 수 없음, (2) S5 는 타이밍-취약 핸드셰이크 시나리오(lessons: S9 flake·testhost-teardown·e2e-parallel-load), run1 시 잔여 testhost 프로세스 2개 존재. → **비결정 flake, 회귀 아님**.
+- **M2 (ProcessWriteAsync default) — CONFIRM 무-throw.** L623~627 default는 `_log.LogError(...)` + `break`만.
+  throw 없음 → HandleWriteAsync가 잡아 잘못 OFFLINE 시키는 경로 없음(주석에 사유 명시). ✓
 
-### FIX 1 (Important) — 전역 stuck user-select 방지 (브라우저 실증 · PASS)
-- 코드: `beginDragVisual`/`endDragVisual` 를 `dragVisualRef` 로 멱등화 + `onMove` 에 `e.buttons===0 → onUp()` 조기 종료.
-- 실증(합성 PointerEvent, G3): (a) 정상 드래그 중 `body.userSelect='none'` → **창 밖 릴리스 누락(pointerup 미발화) 후 buttons=0 재진입 이동 → '' 복원**(before '' / during 'none' / after ''). (b) 회귀 근원 경로: stuck('none') 상태에서 **복구 없이 새 드래그 → clean pointerup → '' 복원**(멱등 begin 이 오염된 'none' 을 prevUserSelect 로 재저장하지 않음 — verdict "RESTORED, no corruption"). "리로드까지 영구 잠김" 제거 확정.
+- **신규 테스트 C3_SlaveReadTimeout_OnlyBOffline_SharedConnNotChurned_AOnlineAndRecovers — CONFIRM 강함.**
+  (a) `TimeoutInjectingConnection` 데코레이터가 B(unit2) read/write에 **실 `TimeoutException` throw**(soft Modbus 예외 아님, L400-401). ✓
+  (b) B OFFLINE 단언(L346-347). ✓  (c) A Online 유지 + 핸드셰이크 Success·`SentCSeq==ReceivedRSeq`(L350-354). ✓
+  (d) **anti-churn 핵심 단언**: baseline `DisconnectCalls==0` → 타임아웃 주입 후 ~13폴 경과(PollForDuration 400ms)
+      → `Assert.Equal(discBaseline, conn.DisconnectCalls)`(L359) = 계측된 부작용에 대한 hard equality(버그 시 매 폴
+      Disconnect로 급증했을 값이 0 유지). 비-tautological. ✓
+  (e) 타임아웃 해제 후 B가 **재연결 없이**(Disconnect 여전히 0) Online 복구(L362-365). ✓
 
-### FIX 2 (fold) — 소터 펼침 행 드래그-후 오발화 방지 (브라우저 실증 · PASS)
-- 코드: 선택-`draggedRef` 재사용(stale 회귀) 폐기 → 자기 이동거리 기반 `expandableRowProps`(pointerdown 좌표 기록 → click 이동 ≥4px 면 억제) 신설, `B2cFacilityPage` 소터 헤더행에 결선.
-- 실증(assign-panel 소터 헤더행 정확 타겟팅): (A) **타행(chute) 드래그 직후 소터행 정당 클릭 → 펼침(3셀)** — 생성자가 자가-발견한 stale-flag 오억제 회귀 수정 확인. (B) **소터행에서 드래그 → 토글 안 됨(3셀 유지)**. (C) 드래그 직후 소터행 정당 클릭 → 접힘(0셀). 정당 클릭은 항상 토글·실제 드래그만 억제.
+### 재실행 raw (클린 머신·간섭 없음)
+- 빌드 Release: 오류 0, 경고 10(전부 선재 NU1903). 
+- 전체 스위트: **367/367 GREEN, 19s, EXIT=0, 클린 종료(hang 없음)** — 367 = 366 + 신규 C3.
+- 취약필터(PlcGatewayIntegration|ScenarioTests|HandshakeResidue|MultiSorterSameBus, **28개** = 27+C3):
+  **13회 중 12회 28/28 GREEN(각 7s)**. 1회(최초 빌드 직후 첫 실행)만 27/28(1 실패) — 이후 12회 재현 안 됨.
+- 신규 C3 격리 **12/12 GREEN(각 ~800ms)** → 그 1 실패는 **C3 아님**. 실패 테스트명 재현 실패로 미포착이나,
+  최초-실행/JIT 콜드스타트에서만 1회 발현·이후 12회 클린 → **문서화된 선재 저빈도 flake 클래스(S9/IT4b/teardown,
+  s9-flake·e2e-parallel-load)에 귀속**. I1 델타(코드/신규 C3)에 귀속되는 결정적 회귀 아님.
+- 단독 `PlcGatewayIntegration` 격리 **10/10 GREEN(2s)** — 단독 경로 불변 입증.
+- 실행 후 testhost/Sim/Api 고아 **0**. 스코프 불변(코드 = PlcGateway+Sim3ds+Tests만).
 
-### FIX 3 (fold) — "전체 해제" 완결성 (브라우저 실증 · PASS)
-- 코드: `uncheckAll` = `setChecked(new Set())`(소유 Set 전량 클리어). `checkAll` 은 렌더+자격 유지(불변).
-- 실증(G2): ①전체 선택(8=활성슈트5+enabled셀3, chute:5 제외) → **소터 접기(셀 DOM 0·`선택 대상` 카운트 8 유지=접힌 셀 Set 잔존 재현)** → **전체 해제 → 선택 대상 0** → 재펼침 시 3셀 전부 uncheck. 접힌 소터 셀까지 완전 클리어 확정.
-
-### 회귀 (핵심 UX 무손상 · PASS)
-- 드래그 범위 하이라이트(G3 3행 7·8·9 연속) → 우클릭 ③ 선택된 행 체크 = **하이라이트와 정확 일치**(match). 메뉴 4항목·자격 존중(전체선택(9)·chute:5 제외)·Escape 닫힘 정상.
-- 콘솔: 내 origin(:5190) error/warning **0**(현재 네비 0/0, 전세션 덤프 180 error/warning 전부 :5191 foreign-origin — 불산입).
-
-### 미접촉 (지시대로)
-- 나머지 2 Minor(ContextMenu Tab 처리·컨테이너 tabIndex/role)는 조정자 백로그 지시대로 미접촉 — 확인. 비차단.
-
----
-
-## 초회 APPROVED (S-B2C-GRID-UX 전체) — Evaluator, 2026-07-15. 순수 프론트 스프린트. 정적/회귀 0, 백엔드 diff 0·마이그레이션 0, 브라우저 클릭스루로 R1~R4 및 V1~V9 전 시나리오 실증, 내 origin 콘솔 0.
-
-핸드오프 마커 = `tasks/sprint-log.md` 말단 `## IMPLEMENTATION COMPLETE — S-B2C-GRID-UX`. HEAD=`9c6f63a`(PR #64 병합 위 미커밋 작업트리). 브랜치 `feat/b2c-grid-ux`.
-검증 환경(격리): Sim3ds :1512(TCP) · Wcs.Api :5215(Release·fresh scratch SQLite `wcs-eval.db`·SeedOnStartup·Sorters[0].ChuteNo=30 소터=Sim :1512) · Vite :5190(VITE_API_TARGET=:5215). 포트: 5205/1502 미사용. 증거 `screenshots/S-B2C-GRID-UX_20260715-121800/`.
-
----
-
-## 정적 / 회귀 / 무접촉 게이트 (fresh·격리 · PASS)
-
-- **tsc --noEmit = 0** (frontend, fresh).
-- **eslint . = 0** (warning 포함 0).
-- **vite build = 0** — 스크래치 outDir(`scratchpad/vite-out`)로 산출, `backend/src/Wcs.Api/wwwroot` **무접촉**(`git status wwwroot` 빈 출력 재확인). 1851 modules, exit 0.
-- **dotnet test -c Release = 360/360 GREEN** (실패 0·건너뜀 0·21s). 경고=선재 NU1903(SQLitePCLRaw) 뿐 — 회귀 0.
-- **무접촉 경계**: `git diff --stat backend/` 빈 출력 · `git status --short backend/` 빈 출력 → 백엔드/서비스/스키마 diff 0, **신규 마이그레이션 0**(순수 프론트 계약 준수). Wcs.PlcGateway/Wcs.Core 무접촉.
-
-## 재사용 / 아키텍처 (코드 판독 · PASS · 사용자 R3 핵심)
-
-- 드래그/메뉴 로직이 **단일 훅 `frontend/src/lib/useRowSelection.ts` + 단일 프리미티브 `frontend/src/components/ui/context-menu.tsx`** 로 통일. 5개 그리드 전부 소비만(중복 로직 0).
-- 각 그리드가 **자기 체크 Set 계속 소유**(브리지 패턴): G1 `setChecked`(number) · G2 `setCheckedTargets`(string) · G3 `setCheckedOrders`(number) · b2b `setSummaryChecked`(string)·`setDetailChecked`(number). 체크 모델 재작성 0(최소 침습).
-- 기존 S-B2B-2c 페인트-선택(드래그/Shift/Ctrl·`onSelectExact`/`selectDetailExact`) 통합 모델로 **완전 제거**(잔존 참조 0 — grep 확인, tsc 0).
-- DOM 기반(`data-rsid`/`data-rseligible`) 설계 → 지연 로딩 셀(G2 소터) 자동 포함·OQ-1 로드행 한정 구조 충족. 이벤트 정리: window 리스너 useEffect cleanup + MutationObserver 콜백 ref 대칭 해제(누수 0). react-refresh 규칙 청정(훅 파일=훅만, 컴포넌트 파일=컴포넌트만).
-
-## 브라우저 클릭스루 — 전 시나리오 (fresh evidence · PASS)
-
-- **V1 랜딩**: `/`→(b2c)`/b2c/test-data`(데이터 생성·G1 3배치 렌더) · B2B 탭→`/data-generator` · b2b 모드 `/`→`/data-generator`(ModeHome). `homePathFor` 단일 소스 3경로 정합. `[01-v1-b2c-landing-datagen.png]`
-- **V4 컨텍스트 메뉴 4항목 — 5개 그리드 전부**: aria-label 별 확인 — b2b `배치 요약 메뉴`·`상세 바코드 메뉴` / G1 `생성 결과 배치 메뉴` / G2 `배정 대상 메뉴` / G3 `미할당 오더 메뉴`. 첫 활성항목 자동 포커스([active]), 하이라이트 0이면 ③④ disabled. `[02·06]`
-- **V3 드래그 범위 하이라이트**: 실 PointerEvent(down→move>임계→move) — b2b Detail 4행(idx1..4=id 2,1,8,6)·G1 2행·G3 3행 연속 하이라이트. **체크와 시각/상태 분리**(하이라이트 시 checked=[]). 드래그 중 `document.body.style.userSelect='none'`, pointerup 후 `''` 복원(OQ-2). `[03-b2b-detail-drag-highlight-4rows.png]`
-- **V5 메뉴 액션 + 자격**: ③선택행 체크(b2b Detail·G3) = 하이라이트 집합과 **정확히 일치**. ①전체 선택(G1·b2b Summary) = 전 행 체크 + 헤더 체크박스 on. **G2 자격 존중**: 비활성 chute:5(deactivate로 준비, `data-rseligible=0`·개별 체크박스 disabled)는 `전체 선택 (5)`에서 **제외**(chute 1,2,3,4,7만 체크, chute:5 미체크). `[04-g2-selectall-skips-inactive-chute.png]`
-- **V8 공존**: G1 행 클릭→디테일 로드(EVAL-A 바코드) 정상 · **드래그 후 click 억제**(드래그로 하이라이트해도 디테일 미로드) · G2 소터 행 클릭→셀 3개 펼침(cell:6:1~3, 지연 렌더가 선택에 자동 참여) · 기존 액션 버튼 카운트 반영(G1 `초기화 (3)`·b2b `수신 초기화 (2)`·G3 `배정 (3)`).
-- **V9 교차레이어**: G3 드래그+③로 오더 3건 체크 → 배정 → `/api/b2c/facility/orders/assign` 왕복 → **미할당 19→16·배정 4→7**(API 재확인). refetch 후 사라진 오더의 하이라이트·체크 **prune**(OQ-4). (참고: 배정은 기존 `작업자 이름` 필수 게이트 — 공백 시 정상 차단, 회귀 아님.) `[05-v9-facility-after-assign.png]`
-- **V6 빈 그리드**: 배치 0(bizDay 2020-01-01) b2b Summary 우클릭 → 메뉴 4항목(③④ disabled)·`전체 선택` no-op(행 0·크래시 0).
-- **OQ-3**: 그리드 본문 밖 우클릭 = `contextmenu` defaultPrevented=false·커스텀 메뉴 미개방(네이티브 유지). 본문 안은 메뉴 개방(대체). → 본문 한정 확정.
-- **OQ-4**: 필터 변경(b2b Detail 바코드 필터 입력) → 하이라이트 전체 리셋([]), 체크는 유지. refetch(V9) → 사라진 id prune. → id-키 정책 확정.
-- **a11y**: 메뉴 role=menu/menuitem, 첫 항목 포커스, disabled 항목 포커스/실행 제외, **Escape로 닫힘**(실증). R4 충족.
-- **V7 다크모드 = N/A**(단일 라이트 테마) — 라이트에서 하이라이트(teal 좌측 바)/체크(파랑) 대비 양호(스크린샷 확인).
-
-## 콘솔 (BLOCKING · PASS)
-
-- **내 origin(:5190) = error/warning 0**. 현재 네비게이션 쿼리 0/0, 전 세션 덤프(`console-all.log`) 168 error/warning **전부 `:5191`(생성자 포트) 참조 = foreign-origin 잔류**(영속 브라우저 프로필). 계약상 타 포트 잔류는 불산입.
-- 생성자가 보고한 hook-order `TypeError`(`updateCallback`→`useRowSelection.ts:262`)는 스택이 `localhost:5191`(생성자 HMR live-edit) — **fresh load 아님**. 나는 동일 컴포넌트(B2cDataGenPage/useRowSelection)를 :5190 fresh 로드로 드래그·클릭·메뉴·전체선택까지 집중 조작했고 error 0. HMR Fast-Refresh 아티팩트로 귀속(운영/신규마운트 무영향).
+**I1 재검증 결론: 수정 로직 정확(anti-churn·단독 불변), 신규 C3 anti-churn 단언 강함, 전체 스위트 GREEN.
+→ 스프린트 APPROVED 유지.** (관찰: C3 외 필터 1/13 first-run 실패는 선재 flake로 귀속; C3의 타이밍은
+12/12 격리로 안정 확인. 저빈도 E2E flake 백로그 추적 권고는 이전대로 유효.)
 
 ---
 
-## Minor (비차단 — todo 등록 권고, 후속)
+APPROVED
 
-- (없음 — 계약 요구/게이트 전부 충족. 후속 강화 아이디어: G2/G3 useRowSelection 에 resetKey 미전달 — 현재 route unmount + refetch prune 으로 충분하나, 스코프 필터가 추가되면 명시 resetKey 검토.)
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-16)
 
-## Code Review Pass (Step 4.5 — 독립 리뷰 + fix iter 2, 2026-07-15)
+**최종: Ready to merge = Yes (Phase 1). Critical 0 · Important 1(I1, 교정+재검증 완료) · Minor 6.**
 
-**최종: Ready to merge = Yes** (초판 "With fixes" → Important 1 + Minor 2 fix 후 Evaluator 재검증 APPROVED 유지).
+강점(적대적 검사): 버스당 단일 `_busLock`이 poll-read·write·D4 RMW·재연결 전부에 적용(락 밖 프레임 연산 0),
+가산적 seam(IModbusMaster/Factory/HandshakeOrchestrator 무파괴), D4 RMW 원자성 구조 보장, per-slave 상태
+인스턴스 필드 격리, teardown 순서 정합(TryComplete→Cancel→join→Disconnect), 단일슬레이브 하위호환(추출·비재작성).
 
-강점(리뷰): 단일 useRowSelection 훅 + 단일 ContextMenu 프리미티브가 5그리드에 중복 0으로 결선(DOM-driven
-data-rsid/rseligible로 lazy 소터 셀도 자동 포섭), 리스너/MutationObserver 누수 0·attr 미관찰로 피드백루프
-차단·1000행 O(n) prune, 클릭↔드래그 억제·좌우버튼 분리 견고, ContextMenu portal/clamp/dismiss/키보드 완비,
-랜딩 단일소스·리다이렉트 루프 없음, b2b paint-select 잔재 0.
+- **[교정완료·재검증] I1** — 버스 모드에서 `TimeoutException`을 hard로 분류해 죽은 슬레이브 1개가 매 주기 공유
+  연결을 drop+reopen하며 형제 스톨. 실 RTU 죽은 슬레이브 신호=read 타임아웃인데 TCP 테스트는 soft 예외라 못 잡음.
+  fix: `isConnLevel`(Socket/IO)만 공유연결 drop, 버스 timeout=soft(슬레이브만 OFFLINE), standalone 불변.
+  신규 C3 테스트가 DisconnectCalls==0 hard-equality로 anti-churn 단언. 367/367 GREEN.
+- **[교정완료] M2** — ProcessWriteAsync switch에 log-only `default:`(throw 아님 — throw면 HandleWriteAsync가 잘못 OFFLINE).
 
-- **[해소] Important — 창밖 드래그 해제 시 userSelect 전역 고착**: onMove e.buttons===0 미스드릴리스 감지 +
-  beginDragVisual 멱등(dragVisualRef) — 손상값 재저장 방지. OQ-2 자기 관심사.
-- **[해소] Minor — 소터 부모행 드래그 종료 오펼침**: movement-based 가드(expandableRowProps). 첫 시도의
-  stale-flag 회귀(진짜 클릭 오억제)를 브라우저 테스트로 잡아 이동거리 기반으로 재설계.
-- **[해소] Minor — "전체 해제" 접힌 셀 잔존**: uncheckAll이 Set 전체 클리어(checkAll은 렌더+eligible 유지).
+### Minor (비블로킹 — 백로그/Phase 2)
+- **M3**: `EnqueueReconcileClearR` 버스 경로가 teardown 레이스 시 ChannelClosedException 미관측 가능(`_ = WriteAsync`).
+  → ModbusBus에 `TryEnqueue` 노출 권고(저확률).
+- **M4**: 버스 폴 루프가 멤버 `PollCycleAsync` 비-OCE 예외 미가드 — 한 멤버 예외가 전 슬레이브 폴 중단 가능.
+  → 멤버별 `catch(Exception){log;continue;}` 하드닝 권고.
+- **M5**(Phase 2): `Connect()`가 버스 락 안에서 동기 블로킹 — 행 TCP connect(OS ~21s, connect-timeout 없음)가
+  버스 전체 스톨. 현장 RTU 결선 시 connect-timeout 필요.
+- **M6**: C3(주기당 1회 대기)는 구조 보장이나 전용 타이밍 단언 테스트 부재 → 후속 추가 권고.
+- **M7**(Phase 2): SharedModbusConnection의 readTimeout/baud/parity가 C# 기본인자(既 마스터와 동일 패턴,
+  테스트서 명시 오버라이드) — Phase 2 DI 결선 시 PlcGatewayOptions/config에서 주입 필요.
+- **[백로그 추적]** 저빈도 E2E testhost teardown/parallel-load flake(S9/IT4b/teardown) — I1과 무관·결정적 회귀 아님.
+  13회 중 1회 first-run/JIT 재현(격리 12/12 GREEN). develop 부하하 재현실험 미수행이라 선재 100% 단정 불가 → 추적.
 
-### Minor (비블로킹 — 다음 sprint / todo 등재)
-1. ContextMenu Tab 미처리(Escape/Arrow/Home/End만) — Tab 시 메뉴 뒤로 포커스 이동. 표준 메뉴 close/trap 폴리시.
-2. 그리드 컨테이너 tabIndex/role 부재 — 키보드 메뉴열기(Shift+F10)가 자식 체크박스 포커스 시에만 동작. R4 최소요건은 충족.
+---
 
-## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-15)
+# EVALUATION — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, single)
 
-**최종: Ready to merge = Yes. Critical 0 · Important 0 · Minor 5.**
+브랜치 `feat/multisorter-shared-bus-p2` · HEAD 36a47bc(= PR#68 Phase 1 병합) · Phase 2 변경은 전부 **working tree**(미커밋).
+빌드/테스트는 ground truth(코드 직독 + fresh 빌드·테스트)로 검증 — Generator 요약 불신.
 
-강점(리뷰·전 페이지 concrete 검증): table.tsx overflow-x 제거가 sticky thead 재부모화하면서도 넓은 표
-(3-way 비교 등) 가로 스크롤 유지(CSS 커플링으로 단일 컨테이너가 양축 처리) / flex min-h-0 체인 전
-스크롤 조상에 완비(0-collapse 없음·narrow 폴백 도달가능) / WordPanel dedup 무-dangling(useHubLifecycle가
-연결 소유) / useRowSelection이 elementFromPoint+capture scroll이라 새 컨테이너서 스크롤 무관 정확 / 메뉴
-개명 완결 / 백엔드 diff 0.
+## 판정: **FAIL** (블로킹 = C4 / ★N=1 설계 검증 = REGRESSION-UNVERIFIED)
 
-- **[정리완료] 옛 라벨 잔재 3건**(App.tsx:29 주석·B2B-DATAGEN.md:244·FRONTEND.md:12) — orchestrator가 커밋 전 텍스트만 수정(로직 0).
+전체 완료조건 중 C1·C2·C3(부분)·C5·C6·C7·C8·C9·C10 PASS, **C4 FAIL**. 두 Evaluation Dimension(배선/회귀, 수명/격리)
+코드검사는 통과했으나, ★CRITICAL DESIGN SCRUTINY(N=1-through-bus soft-timeout)를 **latent regression(미검증)**으로 판정.
 
-### Minor (비블로킹 — 다음 sprint / todo 등재)
-1. SortersPage 상단 span "실시간 operation_log 이벤트 스트림"이 OpLogTail 카드 제목과 중복 — 정리 후보.
-2. min-height floor 매직값(168/200/260/160/220px 등) 페이지별 산발 — 공유 토큰 2~3개로 정리 후보.
-3. Monitor 섹션 CardContent에 min-w-0 누락(b2b는 있음) — 무해하나 일관성.
-4. (이월) ContextMenu Tab 처리 / 그리드 컨테이너 tabIndex·role.
+### 빌드·테스트 (fresh evidence)
+- `dotnet build backend/Wcs.sln -c Release` → **오류 0**. 경고 10개 전부 **선재 NU1903**(SQLitePCLRaw 2.1.10 취약성 advisory,
+  Phase 2 무관). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **372/372 통과, 0 실패, 0 스킵**(367 + 신규 E2EGroupJ 5). raw 원문 보존.
+- 격리·직렬 ≥5회 재실행(flake 귀속): E2EGroupJ **5/5×5회**, MultiSorterSameBusTests **7/7×5회**,
+  PlcGatewayIntegrationTests **10/10×5회**, ScenarioTests **4/4×5회**, MonitorHubTests **5/5×5회**. **flake 0**.
+- 종료 후 testhost/Wcs.Sim3ds/Wcs.Api/vstest 고아 **0**(잔존 dotnet은 MSBuild/Roslyn 빌드서버 노드 — 보존 대상).
 
-## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-15)
+### 완료조건별 (raw 근거)
+- **C1 (두 same-bus 소터 엔드투엔드·연결 1개) PASS** — E2EGroupJ `A_SharedBus_TwoSorters_EndToEnd_OneConnection`:
+  `Assert.Single(factory.Buses)`(물리 버스 1개=SharedModbusConnection 1개) + `bus.MemberCount==2` + UnitA·UnitB 포함 +
+  `registry.AllBundles.Count==2`. 두 소터 Online, IF-05 OK×2, SorterCommands COMPLETED≥2, cell.DestinationId destA≠destB(교차 0),
+  RCellNo==CellNo(R_Seq==C_Seq), SignalR relay가 chute30·31 델타 방출. 단언 실질적(비-tautological).
+- **C2 (다른 버스 키 병렬) PASS** — E2EGroupJ `D_MultiPort_DifferentBusKeys_ParallelIndependent`:
+  `factory.Buses.Count==2`·각 `MemberCount==1`·포트 상이·둘 다 Online·COMPLETED≥2. 멀티 포트 회귀 0.
+- **C3 (fail-loud) 부분 PASS** — 시리얼 파라미터 불일치(`C1_...SerialParamMismatch_FailsLoud`: "시리얼 파라미터"+"fail-loud"
+  단언)·중복 UnitId(`C2_...DuplicateUnitId_FailsLoud`: "UnitId"+"중복" 단언) 기동 예외로 거부 확인. SORTER_3D-without-Sorters[]
+  fail-loud 경로 보존(Program.cs L494-504). **미충족: OQ9-i PollIntervalMs 불일치 fail-loud는 구현(Program.cs
+  ValidateBusGroupConsistency L717-724)됐으나 테스트 부재** — E2E 인프라에 induceSerialMismatch/induceDuplicateUnitId만 있고
+  inducePollIntervalMismatch 없음. Minor 검증 갭(계약 Verification이 각 fail-loud 경로 테스트 확인을 요구).
+- **★C4 (N=1 하위호환) FAIL** — appsettings 바이트 동일(diff 0, 기본=N=1·RTU·COM1·UnitId=1) PASS, 단일소터 전제 기존
+  테스트 GREEN PASS. **그러나 C4 마지막 절 "버스 멤버 1개 경로가 현행 폴/재연결/OFFLINE/arming/teardown 의미 보존"
+  미충족.** 아래 설계 검증 참조.
+- **C5 (수명/격리) PASS** — 버스 단위 teardown: StopAsync가 `_buses` 순회 `bus.StopAsync()` 1회(멤버별 아님).
+  ModbusBus.StopAsync 순서 `Writer.TryComplete → cancel → poll/write await → member.StopAsync → _conn.Disconnect`(정합).
+  버스 멤버 번들 `writeQueue: null`(Program.cs L620) → StopPollingAsync의 TryComplete no-op. **per-멤버 drop 경로 봉인**:
+  StartPollingAsync/StopPollingAsync는 dead(PlcPollingHostedAdapter 미등록·registry가 bus.Start/StopAsync만 호출).
+  BusSlaveMaster.Dispose no-op(공유 연결 미절단). 슬레이브별 OFFLINE 독립: E2EGroupJ `B`(N=2, InjectUnresponsive→B만
+  OFFLINE, A Online·핸드셰이크 Success, B 복구) GREEN.
+- **C6 (절대규칙 #1) PASS** — 멤버 EnqueueAsync→`_bus.EnqueueAsync(unitId,...)`→버스 `_writeCh`(SingleReader) 단일 컨슈머.
+  D4 RMW·TgtFloor/CellAssign fresh-read 가드는 멤버 ProcessWriteAsync에 그대로(_clientLock=버스 공유 락 임계구역). Modbus 직접 호출 0.
+- **C7 (회귀 0) PASS** — 위 빌드·테스트·≥5회 근거.
+- **C8 (스코프) PASS** — working diff = Wcs.Api/Program.cs, Wcs.PlcGateway/ModbusBus.cs(가산 오버로드), 신규
+  SharedModbusConnectionFactory.cs, Wcs.Tests(E2EInfrastructure.cs + 신규 E2EGroupJ), docs/SPEC.md + tasks/. **Wcs.Core/Wcs.Data/
+  마이그레이션/frontend/appsettings 변경 0**(appsettings 바이트 동일 확인).
+- **C9 (SPEC §7-A) PASS** — L110 토폴로지 문장이 공유 버스 가능 + fail-loud 목록 + N=1 동치로 갱신됨(diff 확인).
+- **C10 (하드코딩 0) PASS** — 버스 키/정합검사/폴 cadence 전부 SorterConfig·Timing·PlcGatewayOptions 주입. 신규 매직 타이밍 상수 0.
 
-**최종: Ready to merge = Yes. Critical 0 · Important 1(I1, 교정완료) · Minor 3.**
+### Dimension 1 (wiring-and-regression) — PASS
+버스 키 그룹핑(BusKeyOf: RTU="RTU|"+PortName대문자 / TCP="TCP|"+Host:Port, 전송을 키에 포함해 교차전송 충돌 방지) 정합.
+그룹당 SharedModbusConnectionFactory.Create→ISharedModbusConnection 1개 + ModbusBus 1개 + 멤버 AddSlave(per-member opt) +
+bus.StartAsync 1회. 예외 시 이미 만든 버스 DisposeAsync로 포트 누수 0. 멀티 포트 회귀·fail-loud(2/3)·N=1 바이트 동일 입증.
 
-강점: 스코프 airtight(코드=2 페이지, 공용 프리미티브·backend 0), 매직 px 제거(추가 아님), fix가 스크린샷으로
-독립 확인됨, master `min-h-0`가 행을 부풀리지 않는 추론 타당, `[&>*]:shrink-0`는 세로축만이라 가로 클리핑 없음.
+### Dimension 2 (lifecycle-and-isolation) — PASS
+공유 연결 1회 Open(BusSlaveMaster.Connect→_conn.Connect 멱등, 첫 멤버 EnsureConnected가 Open)·1회 Dispose(ModbusBus.DisposeAsync→
+_conn.Dispose). teardown 순서 정합·mid-transaction disconnect 불가(poll/write 태스크 join 후 disconnect). AddSlave 오버로드는
+가산적: 기존 `AddSlave(unitId,log)`→`AddSlave(unitId,_opt,log)` 위임(동작 무변경). 폴 cadence·_busLock은 버스 단위 유지, memberOpt는
+멤버 PlcPollingService의 핸드셰이크 Timing/OfflineAfterFailures/WriteTimeoutMs만 오버라이드. 단일슬레이브 락/상태 의미 불변.
 
-- **[교정완료] I1** — B2cDataGenPage 상단 grid 주석의 사실 오류(`grid-rows-1`=minmax(auto,1fr) 주장). 실제
-  Tailwind v4 `grid-rows-1`=minmax(0,1fr)이고 높이 하한은 상단 div `min-height:auto`(no min-h-0) × master
-  `min-h-0` × 폼 `self-start`에서 옴. fix-only 사이클로 주석만 교정(런타임 무변경, 정적 0 재확인).
-- **[교정완료] M2** — detail `min-h-0`의 ~620px 페이지-스크롤 전환 임계를 주석에 명시(같은 클러스터에 흡수).
+## ★ CRITICAL DESIGN SCRUTINY — N=1-through-bus soft-timeout = **REGRESSION (UNVERIFIED)** → C4 FAIL
 
-### Minor (비블로킹 — 다음 sprint / 백로그)
-- **M3**: OpsPage `[&>*]:shrink-0` 임의 variant는 주석 충실하나, 자식이 두 Card로 고정이므로 각 Card에 명시
-  `shrink-0`가 더 가독적(선택).
-- **M4**: 비-xl(단일 컬럼) 경로는 회귀 없음이나 주석이 xl 중심 — degradation 경로 무주석(정보성).
-- **[기존 베이스라인·비회귀] /data-generator 1280×680에서 main 내부 35px 오버플로** — DataGeneratorPage.tsx는
-  이 스프린트가 미접촉(diff 0). 도입 아님. 별도 백로그 항목으로 후속 처리.
+**사실:**
+1. 운영 기본 appsettings = **N=1·Transport=Rtu·COM1·UnitId=1**(바이트 동일) — 즉 현 현장 배포가 단일 RTU 소터.
+2. Phase 2는 **모든** 소터(N=1 포함)를 ModbusBus 멤버(`_isBusMember=true`)로 라우팅. 운영에 standalone 경로 없음.
+3. PlcGateway.cs PollCycleAsync 분류(L392-407): `isHardEx = isConnLevel || (!_isBusMember && isTimeout)`,
+   재연결 게이트 `if (!_isBusMember || isHardEx)`. 버스 멤버에선 사실상 `isConnLevel`만 hard:
+   - SocketException/IOException(내부 포함) → HARD → 재연결(N=1 버스에서도 **보존**).
+   - **TimeoutException → SOFT → 재연결 안 함**(standalone은 HARD였음 — **변경**).
+   - 기타 비-conn 예외(예: ModbusException CRC/protocol) → SOFT → 재연결 안 함(standalone은 `!_isBusMember`=true라 HARD였음 — **변경**).
+4. 기존 재연결/OFFLINE 테스트(IT4/IT4b)는 Sim 서버 종료(=소켓 refused/reset=SocketException)를 **standalone**
+   `new PlcPollingService(...)` 경로로만 주입. bare-TimeoutException 경로·버스 경로 **미커버**.
+5. 유일한 버스 read-timeout 테스트 MultiSorterSameBus `C3`는 **N=2**(건강한 형제 A가 공유 소켓을 살아있게 유지) —
+   재연결 없는 복구를 입증하나 형제 有 전제. **N=1(형제 無) 버스의 timeout 복구를 검증하는 테스트는 0.**
+
+**판정 근거:**
+- C4 마지막 절이 요구하는 "버스 멤버 1개 경로가 현행 **재연결** 의미 보존"이 객관적으로 **미충족**(timeout·비-conn 예외에서
+  HARD→SOFT로 변경). 기존 단일소터 GREEN 테스트는 standalone 경로를 검증할 뿐, 운영이 실제로 타는 N=1 버스 경로를 검증하지 않음.
+- 실 conn 사멸(소켓 close/reset·IO·시리얼 포트 장치 제거→IOException/SocketException)은 N=1 버스에서도 HARD로 재연결 **보존**되므로
+  가장 흔한 "reopen 필요" 실패는 처리됨. 그러나 **reopen으로만 복구되는데 TimeoutException/비-conn 예외로 표면화되는** 조건
+  (예: RTU 시리얼 프레이밍 desync — 부분프레임 timeout 또는 CRC ModbusException; standalone은 Disconnect로 버퍼 클리어해 재동기)은
+  N=1 버스에서 재연결하지 않아 **영구 OFFLINE 잔류 위험**.
+- "intended+safe"로 인증 불가: 안전성은 (a) FluentModbus 5.3.2가 실 연결사멸을 항상 Socket/IO로 던지고 bare TimeoutException은
+  "전송 생존·응답부재"에만 쓴다는 **미검증 가정**과 (b) RTU desync 자연복구 가정에 의존. **입증 책임(테스트) 미충족** + 대상이
+  **1차 운영 구성(N=1 RTU)**이라 가설적 엣지 아님.
+
+**권고(택1로 해소):**
+- (A·선호) **solo 멤버 버스**(멤버 1개)는 TimeoutException/비-conn 예외를 HARD로 취급(형제 없음 → soft 근거 부재) — standalone
+  재연결 의미 복원. ModbusBus가 멤버에 solo 여부 전달 or 레지스터리가 N=1 그룹은 standalone(비-버스) 경로로 결선.
+- (B) N=1-on-bus read-timeout(및 비-conn 예외) 복구 동치를 입증하는 테스트 추가(재연결 없이 복구됨 or conn사멸은 여전히 재연결).
+
+## Minor (비블로킹)
+- **OQ9-i 검증 갭**: PollIntervalMs 불일치 fail-loud 구현됐으나 테스트 부재(위 C3).
+- Phase 1 코드리뷰 M4(버스 폴 루프 멤버 비-OCE 예외 미가드)·M5(락 안 동기 Connect 블로킹)는 Phase 2에서 미해소 — 후속 유지.
+
+**요약: 배선·격리·회귀·fail-loud(2/3)·스코프·문서·규칙#1 모두 견고(372/372, 격리≥5회 flake 0). 그러나 Phase 2가 N=1
+단일소터(운영 기본)를 버스 멤버로 편입시켜 read-timeout/비-conn 예외의 재연결 의미를 바꿨고 그 경로에 테스트가 0 →
+C4 미충족·latent regression. → FAIL.**
+
+---
+
+# C4 RE-VERIFY — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, focused)
+
+Generator가 C4/N=1 fix 적용. 이전 판정에서 C4 외 전부 PASS였으므로 **C4 델타만** 실 코드 대조 재검증(전 스윕 재수행 아님).
+
+## 판정: **APPROVED** — C4 이제 충족, 회귀 0.
+
+### 1. 예외 분류 4 regime (PlcGateway.cs L406-464, 코드 직독·불리언 환원)
+`ownsPortExclusively = !_isBusMember || _soloBusReconnect` · `isTimeout = ex is TimeoutException` ·
+`isHardEx = isConnLevel || (isTimeout && ownsPortExclusively)` · 재연결 게이트 `if (ownsPortExclusively || isHardEx)`.
+- **standalone**(`!_isBusMember`→owns=T): timeout→isHard=T→재연결. **pre-Phase-2 불변**. ✓
+- **solo bus**(1멤버·`_soloBusReconnect`=T→owns=T): timeout→isHard=T→재연결. **C4 fix 복원**(=standalone). ✓
+- **multi-member**(≥2·`_isBusMember && !_soloBusReconnect`→owns=F): timeout→isHard=F→SOFT, 게이트 `F||F`→**공유연결 미절단**.
+  **Phase 1 I1 불변**(형제 보호). ✓
+- **any + Socket/IOException**(isConnLevel=T→isHard=T): 재연결. 전 모드 보존. ✓
+불리언이 정확히 이 4 regime로 환원됨 — 반전 없음(C4·형제보호 어느 쪽도 재파손 안 됨).
+
+### 2. solo 플래그 설정 (ModbusBus.cs L114-130)
+`StartAsync`: `bool solo = _members.Count == 1; foreach(m) m.SetSoloBusReconnect(solo);` — **AddSlave 완료 후 · 폴 루프
+기동 직전**에 멤버 수 확정. 이후 AddSlave는 `_started` 가드로 금지→런타임 플립 불가. **2멤버 버스는 solo=false**(둘 다 false). ✓
+
+### 3. 신규 solo 복구 테스트 E2EGroupJ.E_SoloBus_ReadTimeout_HardReconnect_Recovers
+- **실 레지스트리 경로**: 단일 소터(시드 chuteNo=30, sharedBusUnits/extras 없음)→`CreateClient()`로 SorterRegistryFactory가
+  1-멤버(solo) 버스 생성. `Assert.Single(Buses)` + `MemberCount==1` 단언.
+- **DI seam 주입**: `injectTimeoutConnection`→테스트가 `ISharedModbusConnectionFactory`(TimeoutInjectingConnectionFactory)를
+  DI 등록→레지스트리가 seam으로 resolve→실 `SharedModbusConnectionFactory.Create(opt)` 출력을 timeout 데코레이터로 감쌈.
+  **실 production 경로 그대로**(seam 미등록 시 DefaultSharedModbusConnectionFactory=정적 위임, 동작 동일).
+- **비-tautological·RED-without-fix**: `SetTimeoutUnit(UnitA)`→`WaitUntil(DisconnectCalls > baseDisc)`+`Assert.True(>base)`.
+  fix 없으면 solo timeout=SOFT→재연결 미발생→Disconnect 불변→WaitUntil 타임아웃·단언 실패. fix 有→HARD→reopen(Disconnect 증가).
+  `SetTimeoutUnit(-1)`→Online 복구 단언. **결정적**(고정 sleep 0, 조건 폴링).
+- **seam 기본 경로 무변경**: production은 `_sp.GetService<ISharedModbusConnectionFactory>() ?? new Default...()`—미등록→정적
+  Create 위임=이전 직접 생성과 바이트 동일. production 동작 변경 0.
+
+### 4. OQ9-i PollIntervalMs fail-loud (신규 C3_SharedBus_PollIntervalMismatch_FailsLoud)
+`inducePollIntervalMismatch`→둘째 멤버 `Sorters:1:PollIntervalMs=77`→ValidateBusGroupConsistency 거부. 예외에 "PollIntervalMs"+
+"fail-loud" 단언·PASS. 이전 검증 갭 해소. 시리얼 불일치(C1)·중복 UnitId(C2) fail-loud 여전히 테스트·PASS.
+
+### 5. 두 regime 동시 pin
+MultiSorter C3(N=2 soft·`DisconnectCalls==0` 무-churn) + E2EGroupJ E(solo HARD·Disconnect 증가) — 대칭 단언으로 soft/hard
+양 regime 고정. 둘 다 GREEN.
+
+### 빌드·테스트 (fresh)
+- `dotnet build -c Release` → 오류 0, 경고 10(선재 NU1903). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **374/374 통과**(372 + 신규 2: E_SoloBus, C3_PollIntervalMismatch).
+- 격리·직렬 ≥5회 count-invariant: E2EGroupJ **7/7×5**, MultiSorterSameBus **7/7×5**, PlcGatewayIntegration **10/10×5**,
+  ScenarioTests **4/4×5**, MonitorHubTests **5/5×5**. flake 0.
+- 스코프 불변: Wcs.Api(Program.cs) + Wcs.PlcGateway(ModbusBus.cs·PlcGateway.cs·SharedModbusConnectionFactory.cs) +
+  Wcs.Tests(E2EInfrastructure.cs·E2EGroupJ) + docs/SPEC.md. **Core/Data/마이그레이션/frontend/appsettings 변경 0**(appsettings 바이트 동일).
+- 종료 후 testhost/Sim/Api 고아 0.
+
+**C4 이제 충족(1-멤버 버스 = standalone 재연결 의미 복원, 실 레지스트리 경로 테스트로 입증)·형제 보호(I1) 불변·회귀 0.
+→ 전 완료조건 PASS.**
+
+APPROVED
+
+---
+
+# CR-I1 RE-VERIFY — S-MULTISORTER-SHARED-BUS (Phase 2) · 2026-07-16 (Evaluator, focused delta)
+
+Generator가 코드리뷰 CR-I1(a·b·c) + M2/M3/M4 적용. 이미 APPROVED된 스프린트의 이 델타만 실 코드 대조 재검증(전 스윕 아님).
+
+## 판정: **여전히 APPROVED** — 검증 fail-loud 확장 정확·M2 teardown 안전·회귀 0.
+
+### 1. CR-I1(a) ReadTimeoutMs/WriteTimeoutMs 정합 검사 (Program.cs L744-754)
+`ValidateBusGroupConsistency`에 `if (cfg.ReadTimeoutMs != first.ReadTimeoutMs || cfg.WriteTimeoutMs != first.WriteTimeoutMs)`
+추가 → LogCritical + throw("연결 타임아웃(ReadTimeoutMs/WriteTimeoutMs) 불일치…fail-loud"). serial/PollInterval과 동일 패턴.
+호출 위치 L516(그룹 루프 build 단계) — **bus.StartAsync(L654) 이전**에 발화(다른 검사와 동일 타이밍). 근거: 공유 클라이언트의
+Read/Write 타임아웃은 버스 단위 1개(그룹 대표값이 실효) → 멤버별 상이 시 조용히 대표가 이기는 대신 fail-loud로 표면화.
+
+### 2. CR-I1(c) 신규 C4_SharedBus_ConnTimeoutMismatch_FailsLoud (E2EGroupJ)
+`induceTimeoutMismatch`→인프라가 **둘째 멤버만** `Sorters:1:ReadTimeoutMs=2000`(멤버0=기본 1000, WriteTimeoutMs 전 슬롯 500 고정)
+→ ReadTimeoutMs만 불일치. `Record.Exception(CreateClient)`가 non-null·"ReadTimeoutMs"+"fail-loud" 단언. **비-tautological**:
+CR-I1 검사 없으면 대표가 조용히 이겨 기동 성공→ex null→Assert.NotNull 실패(RED-without-fix). C1(serial)·C2(dupUnitId)·C3(PollInterval)
+fail-loud 여전히 PASS(E2EGroupJ 8/8).
+
+### 3. CR-I1(b)+M3 주석 (SorterGatewayRegistry.cs L82-87, Program.cs L706-714)
+- 검사 헬퍼 주석: 버스 단위(검사 대상)=serial/PollInterval/Read/WriteTimeout·rep-sourced / per-member(검사 안 함)=
+  RFlagTimeoutMs/CFlagTimeoutMs/RFlagClearConfirmTimeoutMs/OfflineAfterFailures — 코드 실제와 일치.
+- StopPollingAsync 주석: writeQueue=null은 **TryComplete 벡터만** 무력화하나 `_polling.StopAsync()→_master.Disconnect()`
+  (BusSlaveMaster→공유 연결 Disconnect)가 형제를 끊으므로 버스 멤버는 절대 개별 teardown 금지 — 코드 실제(registry가
+  bus.StopAsync만 호출)와 일치. **주석만 변경·동작 0**.
+
+### 4. M2 (teardown-critical — 정밀 검사) — 안전
+- `_buses = buses`가 **StartAsync 루프 이전**(Program.cs L651, 루프 L654)에 게시됨. 확인.
+- (i) **미기동 버스 StopAsync 안전·멱등**: `Interlocked.Exchange(_stopped)` 가드(1회만). `_cts is not null`(미기동=null→cancel 스킵),
+  `_pollTask/_writeTask` null→`.Where(t=>t is not null)`이 걸러 null await 없음(NRE 0). `_writeCh.Writer.TryComplete()`·`_conn.Disconnect()`
+  try/catch·멱등. throw 0.
+- (ii) **부분 기동 시 결정 종료**: StartAsync 루프는 construction try/catch 밖 → bus[1].StartAsync가 던지면 전파되나 `_buses`가
+  이미 게시돼 host StopAsync가 bus[0](기동됨)을 `TryComplete→cancel→join→member.StopAsync→_conn.Disconnect` 순서로 결정 종료
+  (폴 태스크·열린 포트 누수 0). 이전(루프 뒤 게시)이었다면 `_buses`=null→`if(_buses is null) return`으로 bus[0] 누수 — 이 reorder가 그 창을 봉인.
+- (iii) **이중 dispose 없음**: StopAsync 멱등(_stopped), DisposeAsync 내부 StopAsync 재진입은 조기 return. 정상 종료는 bus.StopAsync만
+  (DisposeAsync 아님), construction 실패만 DisposeAsync. member.StopAsync/DisposeAsync도 각자 멱등. Disconnect/Dispose는 try/catch·멱등.
+- reorder가 teardown 레이스/StopAsync-before-StartAsync 해저드 도입 안 함. **실측: 전 스위트·격리 반복 모두 hang/orphan 0**.
+
+### 5. M4 (SharedModbusConnectionFactory.Create) — 확인
+Transport switch가 `(opt.Transport ?? "").Trim().ToUpperInvariant()`로 정규화 — BusKeyOf(`(cfg.Transport ?? "").Trim().ToUpperInvariant()`)와
+일치(" Tcp " 같은 값도 그룹핑-일관 경로). 알 수 없는 값은 여전히 fail-loud.
+
+### 빌드·테스트 (fresh)
+- `dotnet build -c Release` → 오류 0, 경고 10(선재 NU1903). NEW 경고 0.
+- `dotnet test backend/Wcs.sln -c Release` → **375/375 통과**(374 + 신규 1: C4_ConnTimeoutMismatch), 22s, clean exit(hang 0).
+- 격리·직렬 ≥5회 count-invariant, clean exit: E2EGroupJ **8/8×5**, MultiSorterSameBus **7/7×5**, PlcGatewayIntegration **10/10×5**,
+  ScenarioTests **4/4×5**, MonitorHubTests **5/5×5**. flake 0·teardown hang 0·고아(testhost/Sim/Api) 0.
+- 스코프 불변: Wcs.Api(Program.cs·SorterGatewayRegistry.cs) + Wcs.PlcGateway(ModbusBus.cs·PlcGateway.cs·SharedModbusConnectionFactory.cs)
+  + Wcs.Tests(E2EInfrastructure.cs·E2EGroupJ) + docs/SPEC.md. **Core/Data/마이그레이션/frontend/appsettings/Sim3ds 변경 0**.
+
+**CR-I1(a/b/c)·M2·M3·M4 모두 코드 실제와 일치·회귀 0·teardown 안전. 스프린트 APPROVED 유지.**
+
+## Code Review Pass (Step 4.5 — 독립 리뷰, 2026-07-16)
+
+**최종: Ready to merge = Yes. Critical 0 · Important 1(CR-I1, 교정+재검증) · Minor 4(M2/M3/M4 교정, M5 백로그).**
+
+강점(적대적 검사): C4 진리표 정합(3모드×3예외, multi가 non-conn 예외도 soft로 공유연결 보존), solo 플래그 메모리
+안전(Task.Run happens-before·write-once-before-start), fail-loud가 버스 기동 전 발화(자원 누수 0·생성자 Open 안 함),
+DI seam 운영 무해(default 위임 verbatim), 버스 레벨 teardown, M7 사실상 해소(SorterConfig에서 시리얼 주입),
+BusKeyOf가 transport 접두(RTU|/TCP|)로 충돌 방지.
+
+- **[교정완료·재검증] CR-I1** — 버스 공유 Read/WriteTimeoutMs가 rep에서 오나 정합 검사 없고 주석은 "WriteTimeoutMs
+  멤버별"이라 거짓. fix: ValidateBusGroupConsistency에 Read/WriteTimeoutMs 추가(불일치 fail-loud), 주석 정정
+  (버스 레벨 = 시리얼·PollInterval·Read/WriteTimeout / per-member = RFlag*·CFlag*·RFlagClearConfirm*·OfflineAfterFailures),
+  신규 C4_SharedBus_ConnTimeoutMismatch_FailsLoud(RED-without-fix). 375/375 GREEN.
+- **[교정완료] M2** — 부분 기동 누수: `_buses` 게시를 StartAsync 루프 이전으로 → bus[1] 실패 시 bus[0] 결정 teardown.
+- **[교정완료] M3** — writeQueue=null이 큐완료 벡터만 무력화하고 Disconnect 반벡터는 형제 절단함을 주석 정정
+  (버스 멤버는 bundle.StopPollingAsync teardown 금지·버스 레벨만). 무동작.
+- **[교정완료] M4** — SharedModbusConnectionFactory.Create Transport에 .Trim() 추가(BusKeyOf 정합).
+
+### Minor (백로그)
+- **M5**(Phase 3/RTU bring-up): RTU `Connect()`가 버스 락 안에서 동기 블로킹·connect-timeout 없음 → 행 포트
+  Open이 버스 전체 스톨. TCP=테스트라 미노출이나 RTU 현장 결선 시 connect-timeout 필요. config 배선이 RTU
+  생성자에 닿았으니 추적.
+- **[이월]** PlcPollingHostedAdapter dead code 정리 / testhost teardown 저빈도 flake 추적.

@@ -79,7 +79,12 @@ public sealed class SorterBundleHandle
     /// <summary>소터 폴링 서비스 시작 (PlcPollingHostedAdapter에서 호출).</summary>
     public Task StartPollingAsync(CancellationToken ct) => _polling.StartAsync(ct);
 
-    /// <summary>소터 폴링 서비스 종료 (PlcPollingHostedAdapter에서 호출).</summary>
+    /// <summary>
+    /// 소터 폴링 서비스 종료 (독립 소터/PlcPollingHostedAdapter에서 호출).
+    /// ⚠ 공유 버스(ModbusBus) 멤버 번들에는 이것을 호출하면 안 된다: writeQueue=null이라 아래 TryComplete는
+    ///   무동작이지만, 이어지는 _polling.StopAsync() → _master.Disconnect()(BusSlaveMaster → 공유 연결 Disconnect)가
+    ///   형제 슬레이브의 연결까지 끊는다. 공유 버스 teardown은 버스 단위(ModbusBus.StopAsync) 1회로만 한다.
+    /// </summary>
     public Task StopPollingAsync()
     {
         // 쓰기 큐 채널을 먼저 완료 → 쓰기 컨슈머가 결정적으로 종료(빈 채널 취소 경쟁 회피).
