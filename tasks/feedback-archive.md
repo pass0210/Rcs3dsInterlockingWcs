@@ -593,3 +593,15 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - Minor: 없음. 이월 grid-a11y 2건(ContextMenu Tab·컨테이너 tabIndex/role)은 계약 OQ-4 defer대로 미접촉(백로그 유지).
 - [CODE-REVIEW] sprint=S-UI-LAYOUT critical=0 major=0 minor=5(라벨잔재3 정리) iter=1
 - [CODE-REVIEW] sprint=S-UI-LAYOUT-FIX critical=0 major=0 important=1(I1 comment,fixed) minor=3 iter=2(impl+fix-only)
+
+## S-MULTISORTER-SHARED-BUS (Phase 1: 통신계층 공유버스 메커니즘 + 멀티유닛 Sim + 통합테스트) — APPROVED (2026-07-16, Evaluator, 1 iteration to pass)
+스코프 Wcs.PlcGateway+Wcs.Sim3ds+Wcs.Tests(+tasks docs)만. HEAD 8c25421 위 미커밋 워킹트리, 브랜치 feat/multisorter-shared-bus.
+신규: `SharedModbusConnection.cs`(ISharedModbusConnection+SharedTcp/Rtu+BusSlaveMaster 어댑터), `ModbusBus.cs`(버스조정자), `SimSlave.cs`(멀티유닛 슬레이브), `MultiSorterSameBusTests.cs`(6). 변경: PlcGateway.cs·SimServer.cs·SimTransport.cs.
+- **설계**: Generator가 계약 B2 "가산적/시그니처 무파괴" 채택 — IModbusMaster·ModbusMasterFactory·HandshakeOrchestrator·Sim3ds Program.cs **무변경**(fake ~20개 연쇄수정 회피). 공유연결 1개 위 per-slave `BusSlaveMaster` 어댑터가 unitId per-call 라우팅. `PlcPollingService._clientLock`을 `ConfigureForBus`로 **버스 공유 `_busLock`으로 승격**, StartAsync는 버스모드시 자체 폴/쓰기 루프 미기동(버스가 단일 폴루프+단일 쓰기컨슈머 구동).
+- **빌드**: Release 오류0·경고12(전부 선재 NU1903). develop 동일 경고12 → 신규경고0.
+- **테스트**: feature 전체 **366/366 GREEN 18~20s 6회 연속 클린**; 취약필터(PlcGatewayIntegration|ScenarioTests|HandshakeResidue|MultiSorterSameBus,27) **5/5×27 GREEN 6s 카운트불변**; MultiSorter 격리 6/6. develop 베이스(stash -u) **360/360 GREEN 2/2 클린**(366=360+6 정합).
+- **차원2(동시성/프레임무결성) 코드검사**: 동일 공유 `_busLock`이 poll-read(PollCycleAsync)·write(ProcessWriteAsync)·D4 RMW(RmwD4Locked)·재연결(TryReconnect) 전부에 적용 — **락 밖 프레임 연산 0**. per-slave OFFLINE 독립(상태 인스턴스필드·공유실패카운터 없음, `if(!_isBusMember||isHardEx)`로 soft실패는 공유연결 미절단→형제 보호). D4 RMW read+write 동일 임계구역(테스트e Ready보존·C 교차오염0). 절대규칙#1 모든 쓰기 버스 단일큐 경유(grep: 핸들러/서비스 직접 Modbus 0).
+- **핵심 시나리오 근거**: InjectUnresponsive=서버 ServerDeviceFailure(soft ModbusException, SocketException/TimeoutException 아님)→B만 OFFLINE·공유연결 보존·A 무영향·복구(c2). InjectNoResponse=상태기계 동결(폴응답 지속)→RFlagTimeout·Online유지(c1). 동시핸드셰이크 20회 SentCSeq==ReceivedRSeq 교차0(b).
+- **⚠️ Flake 관찰(추적권고, blocking 아님)**: 초기 2회 전체스위트가 테스트 전통과(16s) 후 testhost teardown HANG(blame-hang abort·`[WcsTeardownGuard] SocketException`·카운트359로 절단). 그 2회는 내가 준 동시 부하(foreground tasklist루프+Monitor)·abort덤프 잔여경쟁 실행 → 간섭제거 후 6/6 클린 재현안됨. 문서화된 선재 flake 클래스(e2e-parallel-load / testhost-teardown-channel-race / s9-flake)와 증상 일치. feature 결정적 회귀 아님(버스 teardown Writer.TryComplete 보유). develop 부하하 재현실험 미수행 → 선재여부 100% 단정불가·백로그 추적 권고.
+- **Minor(관찰만)**: (1) C3 버스폴 주기당대기1회는 코드로 구조보장이나 전용 타이밍 행위단언 테스트 없음(후속 추가 권고). (2) ProcessWriteAsync switch에 default 없음(선재·develop 동일, 닫힌 PlcWrite 계층이라 무해).
+- [CODE-REVIEW] sprint=S-MULTISORTER-SHARED-BUS-P1 critical=0 important=1(I1 timeout-isolation,fixed+reverified) minor=6(M2 fixed) iter=2(impl+I1-fix)
