@@ -30,3 +30,7 @@ tasks/evidence/
 .playwright-mcp/
 # MCP 설정 — 개발자별 로컬(커밋 안 함)
 .mcp.json
+
+# 협력사(비에텔) RCS-WES API 문서 — 벤더 프로토콜 원본 + 우리 요청서(로컬 전용·커밋 안 함)
+docs/RCS-WES-API-KR.md
+docs/RCS-WES-API-REQUEST-KR.md

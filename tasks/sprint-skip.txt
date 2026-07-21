@@ -1,9 +1,12 @@
-Trivial change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config).
+Trivial/config change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config).
 
-작업: chore/gitignore-mcp — .mcp.json GitHub 미추적 + gitignore
-날짜: 2026-07-21
-사유: 코드 로직 변경 0. 사용자 요청으로 .mcp.json(로컬 Playwright MCP 설정)을 git 추적 해제
-      (`git rm --cached .mcp.json`, 로컬 파일 유지) + .gitignore에 추가. 개발자별 로컬 설정이라 레포에서 제외.
-스코프: .mcp.json(untrack) + .gitignore(1줄) 만.
-참고: 사용자가 원래 scripts/·tasks/·TASKS.md도 후보로 언급했으나, 이들은 README/CLAUDE 참조·3-Tier 기록이라
-      추적 유지하기로 확정(2026-07-21). .mcp.json만 처리.
+작업: feat/rcs-wes-request-doc — 비에텔 RCS-WES API 문서 gitignore
+날짜: 2026-07-22
+사유: 코드 로직 변경 0. 협력사(비에텔)에 보낼 RCS-WES 추가 API 요청서를 로컬로 작성하고,
+      벤더 참고본 + 요청서 두 문서를 .gitignore에 추가(GitHub 미노출 — 벤더 프로토콜 IP).
+      - docs/RCS-WES-API-KR.md (다른 업체 RCS-WES 프로토콜 참고본, 미추적)
+      - docs/RCS-WES-API-REQUEST-KR.md (우리 요청서, 로컬 산출물 — 비에텔에 직접 전달)
+스코프: .gitignore(2줄) 만 커밋. 요청서 문서 자체는 커밋하지 않음(로컬 전용).
+요청서 내용: 참고 프로토콜에서 #3 도착보고·#6 목적지조회(RCS발신)·#12 구역상태변경요청(우리 슈트상태 전송) 제외,
+      나머지(#1·2·4·5·7·8·9·10·11·13) full-table + 신규 2건(파킹존 도착 보고·통합 지시). 층=inductionNo로 WES 내부
+      산출(API에 floor 필드 없음).
