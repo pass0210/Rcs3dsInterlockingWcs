@@ -28,3 +28,5 @@ tasks/evidence/
 
 # Playwright MCP 세션 잔여물
 .playwright-mcp/
+# MCP 설정 — 개발자별 로컬(커밋 안 함)
+.mcp.json

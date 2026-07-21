@@ -1,18 +1,9 @@
-Docs-only change — 3-Tier skip (CLAUDE.md 예외: "Documentation-only changes").
+Trivial change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config).
 
-스프린트: S-DOCS-AUDIT-E (README IF-08 폐지 와이어 서술 정정)
+작업: chore/gitignore-mcp — .mcp.json GitHub 미추적 + gitignore
 날짜: 2026-07-21
-사유: 코드/설정/마이그레이션 변경 0. README.md의 IF-08 서술만 현행 코드에 맞게 정정 — 협력사 오도 제거.
-  - 기존: "IF-08 목적지 상태 푸시 · 키=chuteNo · 단일 ready"(= PR #59 이전 destination-status 와이어).
-  - 정정: 현행 코드는 UpdateChuteState 푸시(next_state 3=받을 수 있음 / 2=받을 수 없음, snake_case
-    {chute_numbers[],next_states[]}). 폐지 와이어 2종(deposit-permission 폴링 · 단일-ready destination-status)
-    모두 폐지 명시.
-  - 미구현 양층(per-floor 호스트 등)은 README에 넣지 않음(현행 코드=단일 운영층이라 넣으면 오히려 오도).
-
-스코핑: README·CLAUDE.md·docs 전수 grep. 인터페이스 문서(SPEC·wcs_rcs_interface·master_spec 등)는 이미
-  폐지 표기 완료(직전 스프린트). api-spec-ko/PROGRAM_STRUCTURE/DEPLOY/FRONTEND 무관. CLAUDE.md는 이미 "IF-08 상태 푸시" 현행.
-
-검증: 문서-only(`git diff -- backend/ frontend/ appsettings*.json` 공란).
-
-관련 발견(미수정·별도): README line 34 "소터마다 독립 번들(포트당 1대)"는 멀티소터 공유버스(PR #68/#69) 병합
-  이후 부정확 — 이번 스코프(IF-08) 밖이라 미수정, 사용자 판단 시 후속.
+사유: 코드 로직 변경 0. 사용자 요청으로 .mcp.json(로컬 Playwright MCP 설정)을 git 추적 해제
+      (`git rm --cached .mcp.json`, 로컬 파일 유지) + .gitignore에 추가. 개발자별 로컬 설정이라 레포에서 제외.
+스코프: .mcp.json(untrack) + .gitignore(1줄) 만.
+참고: 사용자가 원래 scripts/·tasks/·TASKS.md도 후보로 언급했으나, 이들은 README/CLAUDE 참조·3-Tier 기록이라
+      추적 유지하기로 확정(2026-07-21). .mcp.json만 처리.
