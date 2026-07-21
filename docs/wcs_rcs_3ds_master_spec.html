@@ -183,10 +183,10 @@
     <table>
       <tr><th style="width:90px">IF</th><th style="width:150px">이름</th><th style="width:160px">구간 / 방향</th><th>요약</th></tr>
       <tr><td><code>IF-05</code></td><td>인덕션 투입 + 목적지 조회</td><td><span class="tag api">RCS → WCS</span></td><td>라인 투입 기록(추적 시작) + 목적지(chuteNo)·수량 판정 + 예약 차감 <b>(IF-16 통합)</b></td></tr>
-      <tr><td><code>IF-08</code></td><td>3DS 상태 알림(푸시)</td><td><span class="tag api">WCS → RCS</span></td><td>목적지(슈트/소터) 상태 변경 시 푸시 — <b>단일 ready</b>(OK/NG), 키=chuteNo. RCS가 ready로 투입 판단</td></tr>
-      <tr><td><code>IF-09</code></td><td>도착 보고</td><td><span class="tag api">RCS → WCS</span></td><td>AGV가 슈트 도착 알림 → WCS가 3DS 수용 준비(층은 WCS 내부)</td></tr>
+      <tr><td><code>IF-08</code></td><td>3DS 상태 알림(푸시 · UpdateChuteState)</td><td><span class="tag api">WCS → RCS</span></td><td>목적지(슈트/소터) 상태 변경 시 <code>next_state</code>(3=수용/2=불가)를 <b>목적지 층별 호스트</b>로 푸시. RCS가 <code>3</code>일 때 투입 판단</td></tr>
+      <tr><td><code>IF-09</code></td><td>도착 보고</td><td><span class="tag api">RCS → WCS</span></td><td>AGV가 슈트 도착 알림 → WCS가 도착만 기록(<b>층 필드 없음</b> · 정렬은 IF-05 시점에 이미 수행)</td></tr>
       <tr><td><code>IF-10</code></td><td>투입 보고</td><td><span class="tag api">RCS → WCS</span></td><td>틸트 보고(슈트/3D 공통)</td></tr>
-      <tr><td><code>IF-06</code></td><td>3DS 상태 조회</td><td><span class="tag plc">WCS → PLC</span></td><td>Ready/CurFloor 등 — IF-08 상태 푸시 산출용</td></tr>
+      <tr><td><code>IF-06</code></td><td>3DS 상태 조회</td><td><span class="tag plc">WCS → PLC</span></td><td>Ready/CurFloor 등 — IF-08 상태 푸시(층별 호스트) 산출용</td></tr>
       <tr><td><code>IF-11</code></td><td>셀 지정</td><td><span class="tag plc">WCS → PLC</span></td><td>적재할 셀 지정(영역 C 핸드셰이크)</td></tr>
       <tr><td><code>IF-12</code></td><td>적재 완료</td><td><span class="tag plc">PLC → WCS</span></td><td>적재 결과 통지(영역 R 핸드셰이크)</td></tr>
       <tr><td>—</td><td>슈트 상태 / 만재 / 일시정지·해제</td><td><span class="tag api">운영</span></td><td>슈트 운영 이벤트(가용/만재/정지)</td></tr>
@@ -199,11 +199,11 @@
     <table>
       <tr><th style="width:90px">IF</th><th>요청(req)</th><th>응답(res)</th></tr>
       <tr><td><code>IF-05</code></td><td>pId · agvNo · barcode · inductionNo · qty · timeStamp</td><td>result · chuteNo (+ 예약/수량)</td></tr>
-      <tr><td><code>IF-08</code> (WCS→RCS 푸시)</td><td>chuteNo · ready · timeStamp</td><td>result(OK)</td></tr>
+      <tr><td><code>IF-08</code> (WCS→RCS 푸시)</td><td>{chute_numbers[], next_states[]} → 층별 호스트(1층 …151:3000·2층 …152:3000)</td><td>{flag, result[]}</td></tr>
       <tr><td><code>IF-09</code></td><td>pId · chuteNo · agvNo · timeStamp</td><td>result(OK)</td></tr>
       <tr><td><code>IF-10</code></td><td>pId · barcode · chuteNo · agvNo</td><td>OK</td></tr>
     </table>
-    <div class="note">필드명 정리: <code>destId→chuteNo</code>, <code>bizDay·batch</code> 제거, <code>destType</code> 제거, <code>agvFloor</code> 제거(층은 agvNo의 층 / CurFloor로 판정). <b>응답 reason은 RCS로 보내지 않는다</b> — WCS가 piece_event에 기록(RCS는 IF-05 <code>result</code>만 수신). IF-08은 가부 조회가 아니라 <b>상태 푸시</b>(§06)이며, §05 사유는 WCS 내부 판정·로깅용.</div>
+    <div class="note">필드명 정리: <code>destId→chuteNo</code>, <code>bizDay·batch</code> 제거, <code>destType</code> 제거, <code>agvFloor</code> 제거. <b>목표 층 F는 IF-05 요청 <code>inductionNo</code>→<code>InductionFloorMap</code>으로 파생</b>(과거 "agvNo의 층"·"운영 2층 고정" 폐지 — 2026-07-21). IF-09에는 층 필드가 없다. <b>응답 reason은 RCS로 보내지 않는다</b> — WCS가 piece_event에 기록(RCS는 IF-05 <code>result</code>만 수신). IF-08은 가부 조회가 아니라 <b>상태 푸시</b>(§06 · 층별 호스트)이며, §05 사유는 WCS 내부 판정·로깅용.</div>
   </section>
 
   <section id="s5">
@@ -212,7 +212,7 @@
     <table>
       <tr><th style="width:190px">WCS 사유(내부)</th><th style="width:130px">RCS 수신</th><th>동작</th></tr>
       <tr><td><code>NORMAL</code></td><td><span class="pill go">OK · chuteNo</span></td><td>전량이 한 곳에 들어감 → 그 목적지로 진행</td></tr>
-      <tr><td><code>BUSY</code> (분류 중·이동 중)</td><td><span class="pill go">OK · chuteNo</span></td><td>일시적 → <b>그 목적지로 보냄</b>. 도착(IF-09) 후 소터가 IF-08 상태에서 ready가 되면 투입</td></tr>
+      <tr><td><code>BUSY</code> (분류 중·이동 중)</td><td><span class="pill go">OK · chuteNo</span></td><td>일시적 → <b>그 목적지로 보냄</b>. 그 목적지가 IF-08 상태에서 열림(<code>3</code>)이 되면 투입(도착 IF-09 후 틸트)</td></tr>
       <tr><td><code>FULL / PAUSED</code> (목적지 타입별)</td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span> / <span class="pill go">OK</span></td><td><b>슈트</b>: full/paused여도 <b>IF-05는 OK</b>(보내고 대기 — readiness는 IF-08 푸시로 별도 전달). <b>3D 소터</b>: <code>PAUSED</code>면 NG(예외 없이 차단), 셀 기준(<code>SorterCanAcceptBarcode</code>)으로 못 받으면 NG(FULL); OFFLINE은 IF-05에서 보지 않는다(셀이 있으면 도착 후 푸시 <code>ready</code> 대기)</td></tr>
       <tr><td><code>OVER</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>전량이 한 곳(슈트/3D 한 셀)에 안 들어감 → 전량 가능할 때까지 AGV 대기</td></tr>
       <tr><td><code>COMPLETED / NO_DEST / OFFLINE</code></td><td><span class="pill ng">NG</span> <span class="pill wait">대기</span></td><td>보낼 곳 없음 → AGV 대기(이동 안 함). OFFLINE은 대체 3D/보류</td></tr>
@@ -222,14 +222,14 @@
 
   <section id="s6">
     <h2><span class="n">06</span> 목적지 상태 알림 (IF-08) — WCS → RCS 푸시</h2>
-    <p>기존 투입 가부 조회(RCS 폴링)를 <b>폐지</b>하고, <b>WCS가 목적지 상태를 변경 시마다 RCS로 푸시</b>한다. 키는 <code>chuteNo</code> — <b>일반 슈트와 3D 소터 슈트를 동일 인터페이스로</b> 알린다. 페이로드는 <b>단일 <code>ready</code></b> 하나(<code>chuteNo · ready · timeStamp</code>). <b>RCS는 층도 사유도 모르고 ready만 본다</b> — true면 투입, false면 대기. ready 산출: <b>일반 슈트</b> = <code>!full && !paused</code>(WCS가 만재/정지 관리) · <b>소터 슈트</b> = <code>online·!full·!paused·Ready=1·CurFloor=2</code>. 이로써 RCS가 <b>만재·정지 슈트엔 틸트하지 않는다</b>.</p>
+    <p>기존 투입 가부 조회(RCS 폴링)를 <b>폐지</b>하고, <b>WCS가 목적지 상태를 변경 시마다 RCS로 푸시</b>한다(<code>PUT /api/UpdateChuteState</code>). <b>일반 슈트와 3D 소터 슈트를 동일 인터페이스로</b> 알린다. <b>상태가 바뀐 목적지의 층으로 라우팅</b> — 층별 수신 호스트(1층 <code>192.168.0.151:3000</code>·2층 <code>192.168.0.152:3000</code>)로 <code>next_state</code>(<b>3</b>=받을 수 있음/<b>2</b>=받을 수 없음)를 보낸다. <b>층은 페이로드가 아니라 수신 호스트로 전달</b>된다. 수용 산출: <b>일반 슈트</b> = <code>!full && !paused</code>이면 자기 층 호스트에 <code>3</code> · <b>소터 슈트</b>(정렬로 두 층 겸용) = <code>online·!full·!paused·Ready=1·CurFloor==F</code>이면 <b>F층 호스트에 <code>3</code></b>, 다른 층 호스트엔 사실상 <code>2</code>(그 층엔 지금 서비스 안 함). 셀 만재는 push에 반영 안 함(IF-05 dispatch에서 차단). 이로써 RCS가 <b>만재·정지·미정렬 슈트엔 틸트하지 않는다</b>. <b>기동 시</b>엔 전 목적지의 현재 상태를 <b>1회 부트스트랩 푸시</b>한다(<code>DestinationStatusPusher.StartAsync</code>) — <b>소터는 두 층 호스트 모두</b>에 발신(현재 CurFloor 호스트=<code>3</code> 수용 시 / 다른 층 호스트=<code>2</code>; CurFloor에서도 미수용이면 둘 다 <code>2</code>), <b>고정 슈트는 자기 층 호스트 1곳</b>. 이후로는 전이 시에만 푸시한다(<b>부트스트랩·전이 동일 규칙</b>).</p>
     <table>
       <tr><th style="width:260px">푸시 상태</th><th style="width:170px">RCS 해석</th><th>동작</th></tr>
-      <tr><td><code>ready=true</code> (OK)</td><td><span class="pill ok">수용 가능</span></td><td>RCS 투입(틸트)</td></tr>
-      <tr><td><code>ready=false</code> (NG)</td><td><span class="pill wait">대기</span></td><td>지금 받을 수 없음(분류·이동 중·만재·정지·오프라인) — 다음 푸시에서 ready 시 투입</td></tr>
-      <tr><td><code>full</code> / <code>paused</code> / <code>online=false</code></td><td><span class="pill ng">소터 차단</span></td><td>대기 — 해소 푸시까지 보류</td></tr>
+      <tr><td><code>next_state=3</code> (수용 가능)</td><td><span class="pill ok">수용 가능</span></td><td>RCS 투입(틸트)</td></tr>
+      <tr><td><code>next_state=2</code> (수용 불가)</td><td><span class="pill wait">대기</span></td><td>지금 받을 수 없음(분류·이동 중·미정렬·만재·정지·오프라인) — 다음 <code>3</code> 푸시에서 투입</td></tr>
+      <tr><td><code>full</code> / <code>paused</code> / <code>online=false</code></td><td><span class="pill ng">소터 차단</span></td><td>대기 — 해소 푸시(<code>3</code>)까지 보류</td></tr>
     </table>
-    <div class="note"><b>도착 보고(IF-09) → 3DS 정렬(2층 고정)</b> — RCS가 AGV를 슈트에 도착시키면 <code>IF-09</code>(pId·chuteNo·agvNo)를 보내고, WCS가 3DS를 <b>2층(운영 고정층)</b>으로 정렬한다(<code>TgtFloor=2</code> D6, §07, ==0일 때만 씀). 정렬돼 ready가 되면 IF-08로 알리고 RCS가 투입. <b>RCS는 층을 모르고 ready만 받는다</b> — 층은 WCS↔3DS 내부 사정.</div>
+    <div class="note"><b>3DS 정렬은 IF-05 시점(인덕션 파생 층 F)</b> — WCS가 IF-05 요청 <code>inductionNo</code>로 층 F를 파생하고, 소터 목적지면 <b>도착 전에</b> 3DS를 F층으로 정렬한다(<code>TgtFloor=F</code> D6, §07, ==0일 때만 씀). 정렬돼 F층 수용 가능이 되면 IF-08로 <b>F층 호스트</b>에 <code>3</code>을 푸시하고 RCS가 투입. <b>도착 보고(IF-09)</b>(pId·chuteNo·agvNo)는 도착 기록만 하며 <b>층 필드가 없다</b>(과거 "IF-09가 2층 고정 정렬을 트리거"는 폐지 — 2026-07-21). 층은 페이로드가 아니라 IF-08 수신 호스트로 전달된다.</div>
   </section>
 
   <section id="s7">
@@ -238,31 +238,32 @@
       <tr><th style="width:130px">영역</th><th>워드/비트</th><th style="width:140px">방향</th><th>설명</th></tr>
       <tr><td>셀 지정 (C) · IF-11</td><td><code>C_CellNo</code>(D0) · <code>C_Seq</code>(D1) · <code>C_Flag</code>(D4.0)</td><td><span class="tag plc">WCS→PLC</span></td><td>WCS가 셀 지정 후 C_Flag=1</td></tr>
       <tr><td>적재 완료 (R) · IF-12</td><td><code>R_CellNo</code>(D2) · <code>R_Seq</code>(D3) · <code>R_Flag</code>(D4.1)</td><td><span class="tag plc">PLC→WCS</span></td><td>PLC가 적재 후 R_Flag=1</td></tr>
-      <tr><td>상태 · 층</td><td><code>Ready</code>(D4.2) · <code>CurFloor</code>(D5) · <code>TgtFloor</code>(D6)</td><td><span class="tag plc">WCS read / write</span></td><td>Ready(0=분류 중→BUSY) · 현재 층(1/2) · 목표 층(0=없음)</td></tr>
+      <tr><td>상태 · 층</td><td><code>Ready</code>(D4.2) · <code>CurFloor</code>(D5) · <code>TgtFloor</code>(D6)</td><td><span class="tag plc">WCS read / write</span></td><td>Ready(0=분류 중→BUSY) · 현재 정렬된 층(1/2, 그 층에서만 수용) · 목표 층 <b>F(1/2, 인덕션 파생)</b>(0=없음)</td></tr>
     </table>
     <h3>핸드셰이크 규칙</h3>
     <ol class="hs">
       <li><b>쓰기 전 해당 Flag=0 확인</b> — 아직 안 읽힌 값을 덮어쓰지 않도록(C_Flag / R_Flag 각각).</li>
       <li><b>C 영역</b>: <span class="w">WCS</span>가 C_Flag=0일 때 C값 쓰고 C_Flag=1 → <span class="s">PLC</span>가 C값 읽고 <b>C_CellNo·C_Seq·C_Flag=0 클리어</b> 후 적재.</li>
-      <li><b>R 영역</b>: <span class="s">PLC</span>가 R_Flag=0일 때 R값 쓰고 R_Flag=1 → <span class="w">WCS</span>가 R값 읽고 <code>R_Seq==C_Seq</code> 대사 후 <b>R_CellNo·R_Seq·R_Flag=0 클리어</b>.</li>
-      <li><b>층 폐루프(2층 고정)</b>: WCS가 <code>TgtFloor==0</code>이고 (<b>CurFloor≠2</b> 또는 <b>분류 중</b>)일 때 <code>TgtFloor=2</code> 쓰기 → 2층 아니면 이동, 분류 중이면 분류 후 2층 복귀 → 도착 시 PLC가 CurFloor 기입(<b>TgtFloor 유지</b>) → WCS가 CurFloor=2 확인되면 ready 산출. <code>TgtFloor</code>는 <b>분류 시작(BUSY 진입) 시 0으로 클리어</b>. TgtFloor≠0이면 덮어쓰지 않아 핑퐁 차단. ※ 메커니즘은 다층 가능하나 운영은 2층 고정.</li>
+      <li><b>R 영역</b>: <span class="s">PLC</span>가 R_Flag=0일 때 R값 쓰고 R_Flag=1 → <span class="w">WCS</span>가 R값 읽고 <code>R_Seq==C_Seq</code> 대사·<b>틸트 시각(tiltedAt) 기록</b> — 단 <b>즉시 클리어하지 않고 <code>Ready==1</code>(복귀 완료) 시점에</b> <b>R_CellNo·R_Seq·R_Flag=0 클리어 + 복귀 시각(returnedAt) 기록</b>(R_Flag==1 관측 시 이미 Ready==1이면 즉시). 목적: 분류 시작~복귀 완료 소요 측정. 3시각(<code>depositedAt</code>=IF-10 투입·<code>tiltedAt</code>=R_Flag=1·<code>returnedAt</code>=Ready 0→1)은 <code>sorter_command</code> 신규 컬럼(마이그레이션=코드 스프린트).</li>
+      <li><b>층 폐루프(인덕션 파생 층 F · 소터별 FIFO 큐)</b>: IF-05는 소터 피스를 <b>소터별 pending-floor 큐(FIFO · IF-05 순서)</b>에 enqueue만 한다. WCS는 <b><code>TgtFloor==0</code>을 관측</b>하고 (<b>CurFloor≠F</b> 또는 <b>분류 중</b>)일 때 <b>큐 머리 피스의 층 F</b>를 <code>TgtFloor</code>에 쓴다 → F층 아니면 이동, 분류 중이면 분류 후 F층 복귀 → 도착 시 PLC가 CurFloor=F 기입(<b>TgtFloor 유지</b>) → WCS가 CurFloor==F 확인되면 그 층 수용 산출. <code>TgtFloor</code>는 <b>분류 시작(BUSY 진입) 시 PLC가 0으로 클리어</b> → WCS가 그 <code>TgtFloor==0</code>을 관측해 <b>큐의 다음 층을 즉시 기입</b>하고 소터가 그 층으로 <b>복귀</b>("타겟층을 순서대로" · 층은 큐가 공급하고 쓰기는 게이트로 트리거 — sort-completion 이벤트 아님 · 머리 pop 시점 세부는 코드 스프린트 확정). TgtFloor≠0이면 덮어쓰지 않아 핑퐁 차단. ※ 층 F=인덕션 파생(2026-06-22 "운영 2층 고정" 폐지 — 2026-07-21).</li>
     </ol>
-    <div class="note">“쓰는 쪽은 Flag=0 확인 후 쓰고 1, 읽는 쪽은 읽고 0.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭. 틸트 낙하 대기는 <b>PLC가 N초 지연</b>으로 처리(WCS 측 지연 없음). <b>모든 레지스터는 Holding Register</b>(읽기 FC03 · 쓰기 FC06/16)이고 <code>C_Flag</code>·<code>R_Flag</code>·<code>Ready</code>는 워드 <b>D4의 비트0·1·2</b>다 — 한 비트만 바꿀 땐 D4 read-modify-write(상대 비트 보존). 주소는 3DS 제공 맵(D0~D4) + 층 신설(D5·D6).</div>
+    <div class="note">“쓰는 쪽은 Flag=0 확인 후 쓰고 1, 읽는 쪽은 읽고 0.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭(단 <b>R 클리어는 <code>Ready==1</code>(복귀 완료) 게이트</b> — 위 R 영역 규칙). 틸트 낙하 대기는 <b>PLC가 N초 지연</b>으로 처리(WCS 측 지연 없음). <b>모든 레지스터는 Holding Register</b>(읽기 FC03 · 쓰기 FC06/16)이고 <code>C_Flag</code>·<code>R_Flag</code>·<code>Ready</code>는 워드 <b>D4의 비트0·1·2</b>다 — 한 비트만 바꿀 땐 D4 read-modify-write(상대 비트 보존). 주소는 3DS 제공 맵(D0~D4) + 층 신설(D5·D6).</div>
+    <div class="note"><b>기동/재시작 클리어(에러 복구 · 2026-07-21).</b> 기동 시(에러 재시작 포함) WCS는 <b>자신이 쓰는 레지스터만 0으로 클리어</b>한다 — <code>C_CellNo</code>(D0)·<code>C_Seq</code>(D1)·<code>C_Flag</code>(D4.0)·<code>R_CellNo</code>(D2)·<code>R_Seq</code>(D3)·<code>R_Flag</code>(D4.1)·<code>TgtFloor</code>(D6). <b><code>Ready</code>(D4.2)·<code>CurFloor</code>(D5)는 건드리지 않는다</b>(PLC 소유·읽기 전용). D4는 <b>비트 0·1만 0으로 지우는 RMW</b>(비트 2 <code>Ready</code> 보존). 이 클리어는 <b>IF-08 부트스트랩 전체 상태 푸시(§06)보다 먼저</b> 실행 — 재시작 후 잔류 핸드셰이크·목표층 없이 깨끗하게 시작한다.</div>
   </section>
 
   <section id="s8">
     <h2><span class="n">08</span> 핵심 플로우</h2>
     <div class="flow">
-      <span class="st">① 인덕션·목적지 조회</span><span class="ar">→</span>
-      <span class="st">② 도착 보고(IF-09) → 3DS 정렬(2층)</span><span class="ar">→</span>
-      <span class="st">③ 3DS 상태 푸시 → RCS 투입 판단</span><span class="ar">→</span>
+      <span class="st">① 인덕션·목적지 조회(IF-05) → 층 F 파생·F층 정렬</span><span class="ar">→</span>
+      <span class="st">② 3DS 상태 푸시(IF-08 · F층 호스트) → RCS 투입 판단</span><span class="ar">→</span>
+      <span class="st">③ 도착 보고(IF-09 · 층 없음)</span><span class="ar">→</span>
       <span class="st">④ 투입(슈트/3D 공통)</span>
     </div>
     <ol>
-      <li><b>① 인덕션·목적지 조회</b> — 스캔(qty) → (판독 실패 시 NO_READ·재스캔/리젝트) → <code>IF-05</code>(라인 투입 기록 + 목적지·수량 판정) → OK·chuteNo(NORMAL·BUSY) / NG·대기(FULL·PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE).</li>
-      <li><b>② 도착 보고</b> — <code>IF-09</code>: AGV가 슈트 도착 → WCS가 3DS를 2층(고정)으로 정렬(<code>TgtFloor=2</code>, ==0일 때).</li>
-      <li><b>③ 목적지 상태 알림</b> — <code>IF-08</code>: WCS가 목적지(슈트/소터) 상태 변경 시마다 RCS로 푸시(<b>단일 ready</b>, OK/NG · 키=chuteNo). RCS는 ready=true일 때 투입, 아니면 대기.</li>
-      <li><b>④ 투입</b> — <code>IF-10</code> 투입 보고 → <code>IF-11</code> 셀 지정(C_Flag=0 확인 후 1) → PLC가 C 읽고 초기화 → 적재(R_Flag=0 확인 후 1) → WCS R_Flag 폴링 → R 읽고 초기화. 이후 <b>분류 후 복귀</b>(TgtFloor 층으로 이동 → 도착 시 CurFloor 기입).</li>
+      <li><b>① 인덕션·목적지 조회</b> — 스캔(qty) → (판독 실패 시 NO_READ·재스캔/리젝트) → <code>IF-05</code>(라인 투입 기록 + 목적지·수량 판정). 이 시점에 WCS가 <code>inductionNo</code>→층 F를 파생하고 소터면 그 피스를 <b>소터별 FIFO 큐</b>에 넣는다 — <code>TgtFloor</code>에는 <b>큐 머리 층</b>을 게이트 허용(<code>==0</code>) 시 기입(순서대로, §07). → OK·chuteNo(NORMAL·BUSY) / NG·대기(FULL·PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE).</li>
+      <li><b>② 목적지 상태 알림</b> — <code>IF-08</code>: WCS가 목적지(슈트/소터) 상태 변경 시마다 RCS로 푸시(<code>next_state</code> 3/2 · <b>층별 호스트</b>). 소터가 F층 정렬·수용 가능이면 F층 호스트에 <code>3</code>. RCS는 그 목적지가 <code>3</code>(열림)일 때 투입, 아니면 대기 — <b>미수용 AGV는 목적지 앞이 아니라 파킹존에서 대기</b>하다 열림(<code>3</code>) 수신 시 목적지로 이동.</li>
+      <li><b>③ 도착 보고</b> — <code>IF-09</code>: (파킹존→)목적지 도착 시 → WCS는 도착만 기록(<b>층 필드 없음</b> · 정렬은 ①에서 이미 수행). <b>미개방 목적지에선 ②의 열림 푸시가 이 도착보다 먼저</b>다(이미 열림이면 직행).</li>
+      <li><b>④ 투입</b> — <code>IF-10</code> 투입 보고 → <code>IF-11</code> 셀 지정(C_Flag=0 확인 후 1) → PLC가 C 읽고 초기화 → 적재(R_Flag=0 확인 후 1) → WCS R_Flag 폴링 → R 읽고 초기화. 이후 <b>분류 후 복귀</b>: 분류 시작 시 PLC가 TgtFloor=0 클리어 → WCS가 <code>TgtFloor==0</code> 관측 시 큐 다음 층 기입 → 소터 그 층으로 이동·도착 시 CurFloor 기입.</li>
     </ol>
   </section>
 
@@ -273,7 +274,7 @@
       <tr><td>NO_READ (판독 실패)</td><td>RCS 내부 재스캔 또는 리젝트. IF-05 대상 아님</td></tr>
       <tr><td>OVER (전량 불가)</td><td>NG → 전량 가능할 때까지 AGV 대기</td></tr>
       <tr><td>막힘 (FULL/PAUSED/BUSY/OFFLINE)</td><td>IF-05/IF-08에서 처리. OFFLINE은 대체 3D/보류</td></tr>
-      <tr><td>2층 미정렬</td><td>WCS가 <code>TgtFloor=2</code> 이동 명령 → CurFloor=2까지 ready=false 푸시(IF-08), 정렬되면 ready=true</td></tr>
+      <tr><td>F층 미정렬</td><td>WCS가 <code>TgtFloor=F</code> 이동 명령(IF-05 시점) → CurFloor==F까지 그 층 호스트에 <code>2</code>(불가) 푸시(IF-08), 정렬되면 <code>3</code></td></tr>
       <tr><td>핸드셰이크 타임아웃</td><td>R_Flag 5s 초과 → 알람·상태 재확인. <code>R_Seq≠C_Seq</code> → 유실/중복</td></tr>
     </table>
   </section>
@@ -282,7 +283,7 @@
     <h2><span class="n">10</span> 확정 사항 (PLC 협의 완료)</h2>
     <ul>
       <li><b>PLC가 주는 상태 = 수용 가능 여부(Ready=D4.2)</b> — <code>Ready=0</code>은 <b>분류 중 또는 이동 중</b>(둘 다 받을 수 없음). <b>FULL(만재)·PAUSED(일시정지)·OFFLINE</b>은 <b>WCS가 판단</b>한다(만재=예약/수량, 일시정지=운영 상태, OFFLINE=폴 타임아웃). BUSY/FULL 구분용 별도 PLC 비트는 두지 않는다.</li>
-      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠2 또는 분류 중) · 항상 2</b> — <code>TgtFloor==0</code>이고 2층이 아니거나 분류 중(BUSY)이면 <code>TgtFloor=2</code>를 써서 2층으로 이동/복귀시킨다(운영 2층 고정). 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작 시 <code>TgtFloor=0</code> 클리어</b>. FULL/PAUSED/OFFLINE은 쓰지 않고 대기.</li>
+      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠F 또는 분류 중) · 인덕션 파생 층 F</b> — <code>TgtFloor==0</code>이고 F층이 아니거나 분류 중(BUSY)이면 <code>TgtFloor=F</code>를 써서 F층으로 이동/복귀시킨다(층 F=IF-05 <code>inductionNo</code> 파생 · <b>2026-06-22 "운영 2층 고정" 폐지 — 2026-07-21</b>). 쓰기 트리거는 IF-05 목적지 조회 시점. 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작 시 <code>TgtFloor=0</code> 클리어</b>. FULL/PAUSED/OFFLINE은 쓰지 않고 대기.</li>
       <li><b>플래그 위치 확정</b> — <code>C_Flag</code>=D4.0 · <code>R_Flag</code>=D4.1 · <code>Ready</code>=D4.2 (3DS 맵). 같은 워드(D4)라 한 비트만 바꿀 땐 read-modify-write.</li>
     </ul>
   </section>
@@ -302,7 +303,7 @@
       <li><b>단방향 호출.</b> 5종 엔드포인트 모두 RCS → WCS다(<code>unprocessed</code>는 GET, 나머지는 POST). WCS → RCS 상태 푸시(IF-08)가 없다.</li>
       <li><b>실패 분기는 <code>status</code>로.</b> 클라이언트는 HTTP 상태 코드가 아니라 응답 <code>status</code>(S/F) 필드로 처리 성부를 판단한다.</li>
     </ul>
-    <div class="note b2b"><b>B2B는 3DS Modbus/핸드셰이크와 무관 — 본 파트는 REST API만 다룬다.</b> B2B는 <b>§07 PLC 레지스터</b>(C/R/Ready·D0~D6)·<b>§08 핸드셰이크</b>·<b>IF-06(상태 조회)·IF-11(셀 지정)·IF-12(적재 완료)</b>·<b>층 정렬(2층 고정)</b>·<b>IF-08 상태 푸시</b>·<b>목적지 판정</b>의 대상이 <b>전혀 아니다</b>. 이 섹션들은 모두 Part I · B2C(3D 소터) 전용이며, B2B는 순수 REST API 5종만으로 동작한다.</div>
+    <div class="note b2b"><b>B2B는 3DS Modbus/핸드셰이크와 무관 — 본 파트는 REST API만 다룬다.</b> B2B는 <b>§07 PLC 레지스터</b>(C/R/Ready·D0~D6)·<b>§08 핸드셰이크</b>·<b>IF-06(상태 조회)·IF-11(셀 지정)·IF-12(적재 완료)</b>·<b>층 정렬(인덕션 파생 층)</b>·<b>IF-08 상태 푸시</b>·<b>목적지 판정</b>의 대상이 <b>전혀 아니다</b>. 이 섹션들은 모두 Part I · B2C(3D 소터) 전용이며, B2B는 순수 REST API 5종만으로 동작한다.</div>
   </section>
 
   <section id="b2b-2">

@@ -49,7 +49,8 @@
   updated_at, row_version
   · 슈트 목적지는 DEPOSITED 종료, 3D만 CELL_ASSIGNED→LOADED 진행
 - `piece_event` — id, piece_id FK, event_type('IF05_REQ','IF05_RES','IF08_REQ','IF08_RES','IF10_REQ','IF10_RES','DECISION'), reason NULL, payload_json nvarchar(max), client_ts varchar NULL, at(UTC)
-- `sorter_command` — id, piece_id FK, cell_id FK, c_seq, cell_no(스냅샷), c_written_at, r_seq NULL, r_cell_no NULL, r_flag_at NULL, status CHECK('SENT','COMPLETED','MISMATCH','TIMEOUT') · 재시도=새 행
+- `sorter_command` — id, piece_id FK, cell_id FK, c_seq, cell_no(스냅샷), c_written_at, r_seq NULL, r_cell_no NULL, r_flag_at NULL, **deposited_at NULL, tilted_at NULL, returned_at NULL**(신규 3종 — 2026-07-21), status CHECK('SENT','COMPLETED','MISMATCH','TIMEOUT') · 재시도=새 행
+  · **처리시각 3종(`depositedAt`/`tiltedAt`/`returnedAt`)**: `deposited_at`=3DS 투입(IF-10 투입 보고 시점) · `tilted_at`=셀 틸트(R_Flag==1 관측; 기존 `r_flag_at`과 동일 시점) · `returned_at`=복귀 완료(Ready 0→1, R 영역 클리어 시점). 세 시각으로 투입→틸트→복귀 소요를 계측. **마이그레이션(3 컬럼 신설)은 코드 스프린트.** R 클리어를 Ready==1까지 지연하는 새 핸드셰이크 타이밍이 `returned_at`을 채운다(SPEC §4).
 - `plc_event` — id, kind CHECK('REG_CHANGE','WRITE','ONLINE','OFFLINE'), register varchar('D0'~'D6','D4.0'…), old_val, new_val, at(UTC)
 - `alarm` — id, code('R_SEQ_MISMATCH','RFLAG_TIMEOUT','OFFLINE',…), severity('INFO','WARN','ERROR'), piece_id FK NULL, message, raised_at, acked_at NULL
 - `destination_event` — id, destination_id FK, event_type CHECK('CLEARED','FULL_QTY_CHANGED','CLOSED','PAUSED','RESUMED'),

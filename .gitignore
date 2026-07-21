@@ -22,6 +22,7 @@ backend/src/Wcs.Api/wwwroot/
 
 # 평가 산출물(스크린샷 증거 — 커밋 안 함)
 screenshots/
+portfolio-screenshots/
 tasks/evidence/
 .claude/
 
