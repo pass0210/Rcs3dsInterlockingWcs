@@ -1,14 +1,18 @@
 Docs-only change — 3-Tier skip (CLAUDE.md 예외: "Documentation-only changes").
 
-스프린트: S-DOCS-TWO-FLOOR (양층 제어 전환 문서화)
+스프린트: S-DOCS-TWO-FLOOR (양층 제어 전환 + 제어 로직 문서화)
 날짜: 2026-07-21
-사유: 코드/설정/마이그레이션 변경 0. RCS↔WCS↔3DS 인터페이스 문서 9종(SPEC.md, wcs_rcs_interface(.html/_kr),
-      wcs_3ds_interface.html, wcs_3ds_unified_sequence.html, wcs_rcs_3ds_master_spec.html,
-      API-RCS-DEPLOYED(-KR).md, UpdateChuteState_API_EN.md) + 시퀀스 다이어그램만 수정.
-      "운영 2층 고정" → 인덕션 파생 양층 제어로 스펙 전환(2026-06-22 결정 supersede).
+사유: 코드/설정/마이그레이션 변경 0. RCS↔WCS↔3DS 인터페이스 문서 + 시퀀스 다이어그램 + ERD만 수정.
+  - "운영 2층 고정" → 인덕션 파생 양층 제어 전환(2026-06-22 결정 supersede).
+  - 추가 제어 로직 2건 문서화: (1) R 클리어를 Ready==1일 때만(+ sorter_command에 depositedAt/tiltedAt/
+    returnedAt 3시각 — 분류 시작~복귀 처리시간), (2) 재시작 시 WCS 쓰기 레지스터(C·R·TgtFloor) 클리어.
 
-검증: 문서-only라 빌드/테스트 대상 아님. `git diff -- backend/ frontend/ appsettings*.json` 공란 확인.
-      시퀀스 다이어그램(mermaid)은 실렌더로 arrow↔map 배선(24↔24)·팝업·렌더링(잘림/여백) 검증.
+수정 문서: SPEC.md, ERD.md, wcs_rcs_interface(.html/_kr), wcs_3ds_interface.html, wcs_3ds_unified_sequence.html,
+  wcs_rcs_3ds_master_spec.html, API-RCS-DEPLOYED(-KR).md, UpdateChuteState_API_EN.md.
 
-실제 양층 제어 코드 구현은 별도 3-Tier 스프린트로 진행(InductionFloorMap·소터별 FIFO 큐·TgtFloor 층-파라미터화·
-IF-08 층별 호스트 라우팅·IF-09 층 제거). 이 문서가 그 기준선.
+검증: 문서-only라 빌드/테스트 대상 아님(`git diff -- backend/ frontend/ appsettings*.json` 공란).
+  시퀀스 다이어그램(mermaid) 실렌더로 arrow↔map 배선(24↔24)·팝업·렌더링(잘림/여백/클로저) 검증.
+
+실제 양층 제어 + 위 2건 코드 구현은 별도 3-Tier 스프린트(InductionFloorMap·소터별 FIFO 큐·TgtFloor 층-
+파라미터화·IF-08 층별 호스트·IF-09 층 제거·R-clear-at-Ready+3시각(sorter_command 마이그레이션)·재시작 클리어).
+이 문서가 그 기준선.

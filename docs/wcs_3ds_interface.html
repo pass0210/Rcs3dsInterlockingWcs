@@ -155,9 +155,10 @@
     <h3>R 영역 — 적재 완료 (PLC → WCS)</h3>
     <ol class="hs">
       <li><span class="s">PLC</span>: <code>R_Flag==0</code> 확인 → 적재 결과 <code>R_CellNo</code>·<code>R_Seq</code> 쓰기 → <code>R_Flag=1</code></li>
-      <li><span class="w">WCS</span>: <code>R_Flag</code> 폴링 → 1이면 <code>R_CellNo</code>·<code>R_Seq</code> 읽기 → <b><code>R_Seq == C_Seq</code> 대사</b>(유실·중복 검출) → <code>R_CellNo·R_Seq·R_Flag = 0</code> 클리어</li>
+      <li><span class="w">WCS</span>: <code>R_Flag</code> 폴링 → 1이면 <code>R_CellNo</code>·<code>R_Seq</code> 읽기 → <b><code>R_Seq == C_Seq</code> 대사</b>(유실·중복 검출) · <b>틸트 시각 기록</b> → <b>클리어는 즉시가 아니라 <code>Ready==1</code>(복귀 완료) 시점</b>에 <code>R_CellNo·R_Seq·R_Flag = 0</code> + 복귀 시각 기록(R_Flag==1 때 이미 Ready==1이면 즉시)</li>
     </ol>
-    <div class="note"><b>요약</b> — “쓰는 쪽은 Flag=0 확인 후 쓰고 1로 set, 읽는 쪽은 읽고 0으로 clear.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭. <code>C_Flag</code>(D4.0)·<code>R_Flag</code>(D4.1)는 같은 워드 D4의 비트이므로, set/clear 시 D4를 읽어 해당 비트만 바꿔 다시 쓴다(read-modify-write · 상대 플래그 비트 보존).</div>
+    <div class="note"><b>요약</b> — “쓰는 쪽은 Flag=0 확인 후 쓰고 1로 set, 읽는 쪽은 읽고 0으로 clear.” C는 WCS가 쓰고 PLC가 클리어, R은 PLC가 쓰고 WCS가 클리어 — 대칭(단 <b>R 클리어는 <code>Ready==1</code> 게이트</b>, 아래). <code>C_Flag</code>(D4.0)·<code>R_Flag</code>(D4.1)는 같은 워드 D4의 비트이므로, set/clear 시 D4를 읽어 해당 비트만 바꿔 다시 쓴다(read-modify-write · 상대 플래그 비트 보존).</div>
+    <div class="note warn"><b>R 클리어 = <code>Ready==1</code> 게이트 · 처리시각 3종(2026-07-21).</b> R_Flag==1에서 WCS는 읽고 대사·<b>틸트 시각(tiltedAt)</b>만 기록하고, <b>복귀 완료(Ready 0→1) 시점에 R을 클리어하며 복귀 시각(returnedAt)</b>을 기록한다 — 분류 시작~복귀 완료 전체 소요를 계측하기 위함. 세 시각 <code>depositedAt</code>(3DS 투입=IF-10)·<code>tiltedAt</code>(셀 틸트=R_Flag==1)·<code>returnedAt</code>(복귀 완료=Ready 0→1)은 <code>sorter_command</code> 신규 컬럼(마이그레이션=코드 스프린트).</div>
   <h3 style="margin-top:18px">타이밍 차트 ① — 셀 지정 → 적재 완료 (C/R 핸드셰이크)</h3>
     <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
     <svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:740px;height:auto">
@@ -181,7 +182,7 @@
       <text class="ph" x="434" y="23" text-anchor="middle">② PLC 읽고 클리어</text>
       <text class="ph" x="590" y="23" text-anchor="middle">③ N초 → 적재</text>
       <text class="ph" x="746" y="23" text-anchor="middle">④ PLC 통지</text>
-      <text class="ph" x="902" y="23" text-anchor="middle">⑤ WCS 읽고 클리어</text>
+      <text class="ph" x="902" y="23" text-anchor="middle">⑤ WCS 읽음 (클리어=복귀 후)</text>
       <line class="g" x1="200" y1="32" x2="200" y2="262"/><line class="g" x1="356" y1="32" x2="356" y2="262"/><line class="g" x1="512" y1="32" x2="512" y2="262"/><line class="g" x1="668" y1="32" x2="668" y2="262"/><line class="g" x1="824" y1="32" x2="824" y2="262"/><line class="g" x1="980" y1="32" x2="980" y2="262"/>
       <text class="lbl" x="190" y="74" text-anchor="end">C_CellNo·C_Seq</text><text class="adr" x="190" y="86" text-anchor="end">D0 · D1</text>
       <text class="lbl" x="190" y="125" text-anchor="end">C_Flag</text><text class="adr" x="190" y="137" text-anchor="end">D4.0</text>
@@ -199,7 +200,7 @@
       <li><b>② PLC 읽고 클리어</b> — PLC가 <code>C_Flag=1</code> 보고 C 값 읽음 → <code>C_CellNo·C_Seq·C_Flag=0</code> 클리어</li>
       <li><b>③ N초 → 적재</b> — PLC가 N초 대기(틸트 낙하 안착) 후 지정 셀에 적재</li>
       <li><b>④ PLC 통지</b> — <code>R_Flag==0</code> 확인 → <code>R_CellNo·R_Seq</code> 쓰기 → <code>R_Flag=1</code></li>
-      <li><b>⑤ WCS 읽고 클리어</b> — WCS가 <code>R_Flag</code> 폴링 → R 값 읽고 <code>R_Seq==C_Seq</code> 대사 → <code>R_CellNo·R_Seq·R_Flag=0</code> 클리어</li>
+      <li><b>⑤ WCS 읽음 (클리어=복귀 후)</b> — WCS가 <code>R_Flag</code> 폴링 → R 값 읽고 <code>R_Seq==C_Seq</code> 대사 · 틸트 시각 기록. <b>클리어(<code>R_CellNo·R_Seq·R_Flag=0</code>)는 <code>Ready==1</code>(복귀 완료) 시점</b>에 하며 복귀 시각을 기록(위 note)</li>
     </ol>
   </section>
 

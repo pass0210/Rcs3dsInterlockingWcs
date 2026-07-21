@@ -92,8 +92,10 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
 C(셀 지정): WCS가 C_Flag==0 확인 → C_CellNo·C_Seq 쓰기 → C_Flag=1
             → PLC가 C_Flag=1 감지 → C 읽기 → 읽은 직후 C_CellNo·C_Seq·C_Flag=0 클리어 → (틸트 낙하 N초는 PLC 지연) → 적재
 R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=1
-            → WCS가 R_Flag 폴링(100ms, 타임아웃=분류 최대 소요+여유) → R 읽기 → R_Seq==C_Seq 대사(유실·중복 검출, 불일치=알람)
-            → R_CellNo·R_Seq·R_Flag=0 클리어
+            → WCS가 R_Flag 폴링(100ms, 타임아웃=분류 최대 소요+여유) → R 읽기 → R_Seq==C_Seq 대사(유실·중복 검출, 불일치=알람) + **틸트 시각(tiltedAt) 기록**
+            → **R은 R_Flag==1 즉시 클리어하지 않는다.** **Ready==1(복귀 완료) 시점에** R_CellNo·R_Seq·R_Flag=0 클리어 + **복귀 시각(returnedAt) 기록**. (R_Flag==1 관측 시 이미 Ready==1이면 즉시 클리어.) 목적: **분류 시작~복귀 완료 전체 소요 측정**.
+
+**sorter_command 처리시각 3종(신규 컬럼 — 마이그레이션은 코드 스프린트):** `depositedAt`(3DS 투입 = IF-10 투입 보고 시점) · `tiltedAt`(셀 틸트 = R_Flag==1 관측 시점) · `returnedAt`(복귀 완료 = Ready 0→1, R 영역 클리어 시점). 세 시각으로 투입→틸트→복귀 구간 소요를 계측한다. → ERD.md `sorter_command`.
 
 ### 4-A. R단계 잔류 대사 (arming) — S-HANDSHAKE-RESIDUE (감사 A-1 해소)
 R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 관찰 보장) 기반**이다. 0을 관찰한 이후의 R_Flag==1 상승만 자기 응답으로 수용 → 에지 감지와 등가.
@@ -103,6 +105,9 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
   - R_Flag==0 확인 대기 상한 = `Timing:RFlagClearConfirmTimeoutMs`(appsettings — 고정 금지). 초과 시(ClearR 미반영 — PLC 무ack 등) **C를 기입하지 않고** `RFlagResidueTimeout`으로 종결(더티 진행 금지). 대기 중 OFFLINE 감지도 명확 종결.
 - **기동 시(첫 유효 폴)**: 게이트웨이가 첫 Online 폴에서 R_Flag==1이면 PLC 기동 잔류로 간주 → **ClearR 큐 투입**(단일 큐) + WARN 로그 + operation_log 기록. 기동 잔류는 그 응답의 대기자가 없고 C_Seq도 리셋 상태이므로, 유지하면 후속 전 건이 "직전 응답"을 오소비하는 off-by-one 연쇄를 낳는다 → 클리어가 정당한 복구.
 - 배경: 레벨 읽기는 직전 건/PLC 기동 잔류 R_Flag=1을 새 건의 응답으로 오소비 → 허위 RSEQ_MISMATCH가 매 건 한 칸씩 밀리며 자가지속(현장 2026-07-06 5연쇄 실측). arming + 기동 reconcile로 근본 차단.
+
+### 4-B. 기동/재시작 레지스터 클리어 (에러 복구 — 2026-07-21)
+에러로 인한 재시작 등 **기동 시 WCS는 자신이 쓰는 레지스터만 0으로 클리어**한다 — `C_CellNo`(D0)·`C_Seq`(D1)·`C_Flag`(D4.0)·`R_CellNo`(D2)·`R_Seq`(D3)·`R_Flag`(D4.1)·`TgtFloor`(D6). **`Ready`(D4.2)·`CurFloor`(D5)는 건드리지 않는다**(PLC 소유·읽기 전용). D4는 한 워드라 **비트 0·1만 0으로 지우는 read-modify-write**(비트 2 `Ready` 보존)로 수행한다. 이 클리어는 **IF-08 부트스트랩 전체 상태 푸시(§2-A·§5-A)보다 먼저** 실행한다. 목적: 재시작 후 잔류 핸드셰이크·목표층 없이 깨끗한 상태로 시작(에러 복구). (§4-A의 R_Flag 잔류 reconcile와 정합 — 기동 클리어가 R_Flag 잔류도 함께 0으로 지운다.)
 
 ## 5. 타이밍 기본값 (전부 appsettings — 현장 조정)
 폴 주기 100~200ms · IF-08 재호출 500ms(RCS측) · R_Flag 폴 100ms · R_Flag 타임아웃 = 분류최대+여유(고정 5s 금지)
