@@ -10,6 +10,25 @@ Updates the state of one or more chutes to **Pause** or **Manual Open**.
 
 ---
 
+## Per-floor host routing
+
+WCS runs one push channel **per floor** and sends each `UpdateChuteState` call to the RCS host of the
+destination's floor:
+
+| Floor | RCS receiving host |
+|---|---|
+| Floor 1 | `http://192.168.0.151:3000` |
+| Floor 2 | `http://192.168.0.152:3000` |
+
+- The path (`PUT /api/UpdateChuteState`) and the payload (`{chute_numbers[], next_states[]}`) are
+  **identical on both hosts** — the floor is conveyed only by which host receives the call.
+- A **3D sorter serves both floors by aligning**. While it is aligned and ready for floor *F*, the
+  **floor-*F* host** receives `next_state=3` (can receive) for that chute and the **other floor's host**
+  receives `next_state=2` (cannot — the sorter is not serving that floor now).
+- A **fixed (non-3D) chute** is pushed only to **its own floor's host**.
+
+---
+
 ## Request
 
 ### Headers

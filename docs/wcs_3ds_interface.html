@@ -136,8 +136,8 @@
       <tr><td><code>R_Seq</code></td><td>D3</td><td>HR</td><td><span class="tag pw">PLC write</span></td><td>처리한 순번 (= 받은 C_Seq)</td></tr>
       <tr><td><code>R_Flag</code></td><td>D4.1</td><td>HR 비트</td><td><span class="tag pw">PLC set</span> / <span class="tag rd">WCS clear</span></td><td>워드 D4의 비트1 · 1=PLC가 씀 · 0=WCS가 읽고 클리어</td></tr>
       <tr><td rowspan="3">상태·층</td><td><code>Ready</code></td><td>D4.2</td><td>HR 비트</td><td><span class="tag rd">WCS read</span></td><td>워드 D4의 비트2 · 1=받을 수 있음(정지·비분류) / 0=<b>분류 중 또는 이동 중</b>(받을 수 없음 → BUSY). FULL·PAUSED·OFFLINE은 WCS가 판단</td></tr>
-      <tr><td><code>CurFloor</code></td><td>D5</td><td>HR</td><td><span class="tag pw">PLC write</span> / <span class="tag rd">WCS read</span></td><td>3D 현재 층 (1 / 2)</td></tr>
-      <tr><td><code>TgtFloor</code></td><td>D6</td><td>HR</td><td><span class="tag wr">WCS write</span></td><td>목표 층(이동 명령). 0 = 없음</td></tr>
+      <tr><td><code>CurFloor</code></td><td>D5</td><td>HR</td><td><span class="tag pw">PLC write</span> / <span class="tag rd">WCS read</span></td><td>3D <b>현재 정렬된 층</b> (1 / 2) — 소터 한 대가 정렬로 두 층을 겸하며, <b>CurFloor 층에서만 수용</b></td></tr>
+      <tr><td><code>TgtFloor</code></td><td>D6</td><td>HR</td><td><span class="tag wr">WCS write</span></td><td>목표 층 <b>F(1/2, 인덕션 파생)</b>(이동 명령). 0 = 없음. IF-05 시점에 F 기입(과거 "항상 2" 폐지 — 2026-07-21)</td></tr>
     </table>
     <div class="note"><b>D4 = 플래그·상태 워드</b> — 비트0 <code>C_Flag</code> · 비트1 <code>R_Flag</code> · 비트2 <code>Ready</code> · 비트3~ 예비. 한 비트만 바꿀 땐 D4를 읽어 해당 비트만 수정 후 다시 쓰기(read-modify-write). 주소는 <b>3DS 제공 맵(D0~D4)</b> 기준이며, 층(<code>D5</code>·<code>D6</code>)은 본 협의로 신설.</div>
   </section>
@@ -205,19 +205,19 @@
 
   <section id="s4">
     <h2><span class="n">4</span> 층 제어 (폐루프)</h2>
-    <div class="note"><b>운영 2층 고정</b> — 3DS 담당 협의로 <b>항상 2층으로 정렬 요청</b>한다(<code>TgtFloor</code>에 늘 <b>2</b>를 쓴다). 메커니즘은 1·2층 모두 지원하나 운영은 2층 고정. RCS 인터페이스(IF-08)에는 층을 노출하지 않고 <b>단일 ready</b>만 보낸다(층은 WCS↔3DS 내부).
-    <p>AGV가 슈트에 도착하면 RCS가 <b>도착 보고(IF-09)</b>를 보내고, WCS가 3DS를 <b>2층(고정)</b>으로 정렬한다(<code>TgtFloor=2</code>). 소터가 2층 정렬·정지·수용 가능하면 <b>단일 ready</b>를 <b>IF-08 상태 알림</b>으로 RCS에 푸시한다(RCS는 층을 모름).</p>
+    <div class="note"><b>인덕션 기반 2층(1·2층) 제어</b> — 목표 층 <b>F</b>는 <b>인덕션 번호에서 파생</b>한다(설정 <code>InductionFloorMap</code>: inductionNo→floor). <code>TgtFloor</code>에는 상수 2가 아니라 <b>인덕션 파생 층 F(1/2)</b>를 쓴다. 소터 <b>한 대가 정렬로 두 층을 겸하며</b>, <code>CurFloor</code>는 현재 정렬된 층이고 <b>그 층에서만 수용</b> 가능하다. <b>2026-06-22 "운영 2층 고정(항상 2)" 결정은 폐지(2026-07-21).</b>
+    <p>층은 <b>인덕션 스캔 시점(IF-05 목적지 조회)</b>에 확정되므로, WCS는 <b>IF-05 시점</b>에 3DS를 층 F로 정렬한다(<code>TgtFloor=F</code>, 게이트 통과 시 — 도착 전 선정렬). <b>과거 IF-09 도착 트리거는 폐지</b>. 소터가 <b>F층 정렬·정지·수용 가능</b>하면 <b>IF-08 상태 알림</b>을 <b>F층 호스트</b>로 푸시한다(1층 <code>192.168.0.151:3000</code>·2층 <code>192.168.0.152:3000</code>). 층은 페이로드에 없고 <b>수신 호스트로 라우팅</b>된다.</p>
     <ol class="hs">
-      <li><span class="w">WCS</span>: 폴링으로 <code>CurFloor</code>(D5)·<code>Ready</code>(D4.2)를 읽어 <b>수용 가능 여부(ready)</b>를 산출 — 기준은 <b>CurFloor=2 & Ready=1</b> (<code>Ready=0</code> = 분류 중 <b>또는 이동 중</b>)</li>
-      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + <b>2층 정렬</b>(<code>CurFloor=2</code>) → <code>ready=true</code> → RCS가 투입</li>
-      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + <b>2층 아님</b> → <code>ready=false</code> → WCS가 <code>TgtFloor=2</code> 쓰기(아래)</li>
-      <li><b>분류 중 또는 이동 중</b>(<code>Ready=0</code>) → <code>ready=false</code>. 분류 중이면 곧 끝나므로 아래 조건으로 <code>TgtFloor=2</code>를 미리 써 둔다(이동 중이면 이미 설정됨)</li>
-      <li><b>TgtFloor 쓰기 조건</b> — <code>TgtFloor==0</code> 이고 (<b>CurFloor≠2</b> 또는 <b>분류 중</b>)이면 <span class="w">WCS</span>가 <code>TgtFloor</code>(D6)=<b>2</b>를 쓴다 → 2층 아니면 이동, 분류 중이면 <b>분류를 마친 뒤 2층 복귀</b></li>
-      <li><span class="s">PLC</span>: <code>TgtFloor</code>(=2) 층으로 이동(또는 분류 후 복귀) → <b>도착하면</b> <code>CurFloor</code>(D5)=2 기입 (<code>TgtFloor</code>는 <b>유지</b>)</li>
-      <li><span class="s">PLC</span>: <b>분류를 시작할 때</b>(Ready=0 진입) <code>TgtFloor</code>=0 클리어 — 도착 즉시 비우면 곧바로 다시 써져 <b>왕복</b>할 수 있어, 분류 시작까지 2층(TgtFloor=2)을 붙들어 둔다</li>
+      <li><span class="w">WCS</span>: 폴링으로 <code>CurFloor</code>(D5)·<code>Ready</code>(D4.2)를 읽어 <b>층 F 수용 가능 여부(ready)</b>를 산출 — 기준은 <b>CurFloor=F & Ready=1</b> (<code>Ready=0</code> = 분류 중 <b>또는 이동 중</b>)</li>
+      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + <b>F층 정렬</b>(<code>CurFloor=F</code>) → <code>ready=true</code> → RCS가 투입</li>
+      <li><b>분류 중 아님</b>(<code>Ready=1</code>) + <b>F층 아님</b> → <code>ready=false</code> → WCS가 <code>TgtFloor=F</code> 쓰기(아래)</li>
+      <li><b>분류 중 또는 이동 중</b>(<code>Ready=0</code>) → <code>ready=false</code>. 분류 중이면 곧 끝나므로 아래 조건으로 <code>TgtFloor=F</code>를 미리 써 둔다(이동 중이면 이미 설정됨)</li>
+      <li><b>TgtFloor 쓰기 조건</b> — <code>TgtFloor==0</code> 이고 (<b>CurFloor≠F</b> 또는 <b>분류 중</b>)이면 <span class="w">WCS</span>가 <code>TgtFloor</code>(D6)=<b>F</b>를 쓴다 → F층 아니면 이동, 분류 중이면 <b>분류를 마친 뒤 F층 복귀</b></li>
+      <li><span class="s">PLC</span>: <code>TgtFloor</code>(=F) 층으로 이동(또는 분류 후 복귀) → <b>도착하면</b> <code>CurFloor</code>(D5)=F 기입 (<code>TgtFloor</code>는 <b>유지</b>)</li>
+      <li><span class="s">PLC</span>: <b>분류를 시작할 때</b>(Ready=0 진입) <code>TgtFloor</code>=0 클리어 — 도착 즉시 비우면 곧바로 다시 써져 <b>왕복</b>할 수 있어, 분류 시작까지 F층(TgtFloor=F)을 붙들어 둔다</li>
     </ol>
-    <div class="note warn"><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠2 또는 분류 중) · 항상 2</b> — 이전 명령이 진행 중(TgtFloor≠0)이면 덮어쓰지 않아 <b>핑퐁(왕복)을 차단</b>하고, 2층이 아니거나 분류 중이면 <code>TgtFloor=2</code>를 써서 2층으로 이동/복귀시킨다. 도착 시엔 <span class="s">PLC</span>가 <code>CurFloor</code>만 기입하고(<code>TgtFloor</code> 유지), <b>분류 시작 시(BUSY 진입) <code>TgtFloor</code>=0 클리어</b>. <b>FULL·PAUSED·OFFLINE</b>은 장기 차단이라 <b>쓰지 않고 대기</b>한다.</div>
-  <h3 style="margin-top:18px">타이밍 차트 ② — 2층 정렬 · 분류 중 아님 (2층 아님 → 2층 이동 → ready)</h3>
+    <div class="note warn"><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠F 또는 분류 중) · 인덕션 파생 층 F</b> — 이전 명령이 진행 중(TgtFloor≠0)이면 덮어쓰지 않아 <b>핑퐁(왕복)을 차단</b>하고, F층이 아니거나 분류 중이면 <code>TgtFloor=F</code>를 써서 F층으로 이동/복귀시킨다. <b>쓰기 트리거는 IF-05 목적지 조회 시점</b>(인덕션에서 F 확정). 도착 시엔 <span class="s">PLC</span>가 <code>CurFloor</code>만 기입하고(<code>TgtFloor</code> 유지), <b>분류 시작 시(BUSY 진입) <code>TgtFloor</code>=0 클리어</b>. <b>FULL·PAUSED·OFFLINE</b>은 장기 차단이라 <b>쓰지 않고 대기</b>한다.</div>
+  <h3 style="margin-top:18px">타이밍 차트 ② — F층 정렬 · 분류 중 아님 (F층 아님 → F층 이동 → ready · F=인덕션 파생)</h3>
     <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
     <svg viewBox="0 0 1000 268" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:740px;height:auto">
       <style>
@@ -237,7 +237,7 @@
       <rect x="395" y="10" width="195" height="18" rx="5" fill="#DDF3EA"/>
       <rect x="590" y="10" width="195" height="18" rx="5" fill="#DDF3EA"/>
       <rect x="785" y="10" width="195" height="18" rx="5" fill="#FCEBDD"/>
-      <text class="ph" x="297" y="23" text-anchor="middle">① 감시 · 2층 아님</text>
+      <text class="ph" x="297" y="23" text-anchor="middle">① 감시 · F층 아님</text>
       <text class="ph" x="492" y="23" text-anchor="middle">② 3D 이동 중</text>
       <text class="ph" x="687" y="23" text-anchor="middle">③ 도착 · CurFloor 기입</text>
       <text class="ph" x="882" y="23" text-anchor="middle">④ 정렬 완료 · ready</text>
@@ -247,11 +247,11 @@
       <text class="lbl" x="190" y="182" text-anchor="end">TgtFloor</text><text class="adr" x="190" y="194" text-anchor="end">D6</text>
       <text class="lbl" x="190" y="228" text-anchor="end">ready</text>
       <polyline class="dig" points="200,48 395,48 395,68 590,68 590,48 980,48"/><text class="lo" x="206" y="44">1 = 받을 수 있음</text><text class="lo" x="492" y="90" text-anchor="middle">0 = 이동 중(받을 수 없음)</text>
-      <rect x="200" y="114" width="195" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="297" y="131" text-anchor="middle">1</text>
+      <rect x="200" y="114" width="195" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="297" y="131" text-anchor="middle">≠F</text>
       <rect x="395" y="114" width="195" height="28" rx="6" fill="#F4F5FB" stroke="#C7CBF7" stroke-width="1.2" stroke-dasharray="4 3"/><text class="busv" x="492" y="131" text-anchor="middle" fill="#94A3B8">이동 중</text>
-      <rect x="590" y="114" width="390" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="785" y="131" text-anchor="middle">2</text>
+      <rect x="590" y="114" width="390" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="785" y="131" text-anchor="middle">F</text>
       <line class="idle" x1="200" y1="186" x2="360" y2="186"/><text class="lo" x="280" y="183" text-anchor="middle">0</text>
-      <rect x="360" y="172" width="620" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="670" y="189" text-anchor="middle">2  (고정 · 분류 시작 시 0으로 클리어)</text>
+      <rect x="360" y="172" width="620" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv" x="670" y="189" text-anchor="middle">F  (인덕션 파생 · 분류 시작 시 0으로 클리어)</text>
       <text class="warn" x="297" y="232" text-anchor="middle">ready=false</text>
       <text class="warn" x="492" y="232" text-anchor="middle">ready=false (이동 중)</text>
       <text class="ok" x="882" y="232" text-anchor="middle">ready = true</text>
@@ -259,12 +259,12 @@
     </svg>
     </div>
     <ol>
-      <li><b>① 2층 아님</b> — WCS가 <code>CurFloor</code>(=1)·<code>Ready</code> 읽음. 2층이 아니라 <code>ready=false</code>, <code>TgtFloor==0</code>이므로 <b>2 기입</b></li>
-      <li><b>② 이동 중</b> — 3D가 2층으로 이동. 이동 중엔 <code>Ready=0</code>이라 받을 수 없음 → <code>ready=false</code>. <code>TgtFloor≠0</code>이라 덮어쓰지 않음(핑퐁 차단). WCS가 상태 감시 지속</li>
-      <li><b>③ 도착</b> — PLC가 <code>CurFloor=2</code> 기입 (<code>TgtFloor</code>는 유지). <code>TgtFloor</code>는 도착이 아니라 <b>분류 시작 시</b> 0으로 클리어 — 도착 즉시 비우면 곧바로 다시 써져 왕복하기 때문</li>
-      <li><b>④ ready</b> — <code>CurFloor==2</code> &amp; <code>Ready=1</code> → <code>ready=true</code> → 상태 푸시(IF-08) → RCS 투입</li>
+      <li><b>① F층 아님</b> — WCS가 <code>CurFloor</code>(≠F)·<code>Ready</code> 읽음. F층이 아니라 <code>ready=false</code>, <code>TgtFloor==0</code>이므로 <b>F 기입</b>(트리거=IF-05 인덕션 파생 층)</li>
+      <li><b>② 이동 중</b> — 3D가 F층으로 이동. 이동 중엔 <code>Ready=0</code>이라 받을 수 없음 → <code>ready=false</code>. <code>TgtFloor≠0</code>이라 덮어쓰지 않음(핑퐁 차단). WCS가 상태 감시 지속</li>
+      <li><b>③ 도착</b> — PLC가 <code>CurFloor=F</code> 기입 (<code>TgtFloor</code>는 유지). <code>TgtFloor</code>는 도착이 아니라 <b>분류 시작 시</b> 0으로 클리어 — 도착 즉시 비우면 곧바로 다시 써져 왕복하기 때문</li>
+      <li><b>④ ready</b> — <code>CurFloor==F</code> &amp; <code>Ready=1</code> → <code>ready=true</code> → 상태 푸시(IF-08, F층 호스트) → RCS 투입</li>
     </ol>
-  <h3 style="margin-top:18px">타이밍 차트 ③ — 2층 정렬 · <b>분류 중</b> (TgtFloor=2 선기입 → 분류 끝 → 2층 복귀 → ready)</h3>
+  <h3 style="margin-top:18px">타이밍 차트 ③ — F층 정렬 · <b>분류 중</b> (TgtFloor=F 선기입 → 분류 끝 → F층 복귀 → ready · F=인덕션 파생)</h3>
     <div style="background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:8px 0;box-shadow:var(--sh-sm);overflow-x:auto">
     <svg viewBox="0 0 1000 268" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:760px;height:auto">
       <style>
@@ -285,7 +285,7 @@
       <rect x="512" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
       <rect x="668" y="10" width="156" height="18" rx="5" fill="#DDF3EA"/>
       <rect x="824" y="10" width="156" height="18" rx="5" fill="#FCEBDD"/>
-      <text class="ph3" x="278" y="23" text-anchor="middle">① 분류 중·2층 아님</text>
+      <text class="ph3" x="278" y="23" text-anchor="middle">① 분류 중·F층 아님</text>
       <text class="ph3" x="434" y="23" text-anchor="middle">② 분류 진행</text>
       <text class="ph3" x="590" y="23" text-anchor="middle">③ 분류 끝 → 이동</text>
       <text class="ph3" x="746" y="23" text-anchor="middle">④ 도착·ready</text>
@@ -296,11 +296,11 @@
       <text class="lbl3" x="190" y="182" text-anchor="end">TgtFloor</text><text class="adr3" x="190" y="194" text-anchor="end">D6</text>
       <text class="lbl3" x="190" y="228" text-anchor="end">ready</text>
       <polyline class="dig3" points="200,68 668,68 668,48 824,48 824,68 980,68"/><text class="lo3" x="206" y="64">0 = 분류 중·이동 중</text><text class="lo3" x="746" y="44" text-anchor="middle">1 = 받을 수 있음</text><text class="lo3" x="902" y="64" text-anchor="middle">0 = 새 분류</text>
-      <rect x="200" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="356" y="131" text-anchor="middle">1</text>
+      <rect x="200" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="356" y="131" text-anchor="middle">≠F</text>
       <rect x="512" y="114" width="156" height="28" rx="6" fill="#F4F5FB" stroke="#C7CBF7" stroke-width="1.2" stroke-dasharray="4 3"/><text class="busv3" x="590" y="131" text-anchor="middle" fill="#94A3B8">이동 중</text>
-      <rect x="668" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="824" y="131" text-anchor="middle">2</text>
+      <rect x="668" y="114" width="312" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="824" y="131" text-anchor="middle">F</text>
       <line class="idle3" x1="200" y1="186" x2="280" y2="186"/><text class="lo3" x="240" y="183" text-anchor="middle">0</text>
-      <rect x="280" y="172" width="544" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="552" y="189" text-anchor="middle">2  (고정 · 분류 중 선기입)</text>
+      <rect x="280" y="172" width="544" height="28" rx="6" fill="#EEF0FE" stroke="#6366F1" stroke-width="1.4"/><text class="busv3" x="552" y="189" text-anchor="middle">F  (인덕션 파생 · 분류 중 선기입)</text>
       <line class="idle3" x1="824" y1="186" x2="980" y2="186"/><text class="lo3" x="902" y="183" text-anchor="middle">0</text>
       <text class="warn3" x="278" y="232" text-anchor="middle">ready=false</text>
       <text class="warn3" x="434" y="232" text-anchor="middle">ready=false</text>
@@ -311,10 +311,10 @@
     </svg>
     </div>
     <ol>
-      <li><b>① 분류 중·2층 아님</b> — WCS가 <code>Ready=0</code>(분류 중)·<code>CurFloor</code>(=1) 읽음. <code>ready=false</code>, 2층이 아니고 분류 중이라 <code>TgtFloor==0</code>이므로 <b>2를 미리 기입</b></li>
-      <li><b>② 분류 진행</b> — 3D가 분류를 계속. <code>TgtFloor=2</code> 유지(≠0이라 덮어쓰지 않음). <code>ready=false</code>, WCS 상태 감시 지속</li>
-      <li><b>③ 분류 끝 → 이동</b> — 분류가 끝나면 <code>TgtFloor=2</code>를 따라 2층으로 <b>복귀(이동)</b>하는 동안엔 <code>Ready=0</code>(이동 중엔 받을 수 없음) → <code>ready=false</code></li>
-      <li><b>④ 도착·ready</b> — 도착하면 PLC가 <code>CurFloor=2</code> 기입(<code>TgtFloor</code> 유지)하고 <code>Ready</code> 0→1(이제 정지·수용 가능). 2층 정렬 → <code>ready=true</code> → 상태 푸시(IF-08)</li>
+      <li><b>① 분류 중·F층 아님</b> — WCS가 <code>Ready=0</code>(분류 중)·<code>CurFloor</code>(≠F) 읽음. <code>ready=false</code>, F층이 아니고 분류 중이라 <code>TgtFloor==0</code>이므로 <b>F를 미리 기입</b>(트리거=IF-05 인덕션 파생 층)</li>
+      <li><b>② 분류 진행</b> — 3D가 분류를 계속. <code>TgtFloor=F</code> 유지(≠0이라 덮어쓰지 않음). <code>ready=false</code>, WCS 상태 감시 지속</li>
+      <li><b>③ 분류 끝 → 이동</b> — 분류가 끝나면 <code>TgtFloor=F</code>를 따라 F층으로 <b>복귀(이동)</b>하는 동안엔 <code>Ready=0</code>(이동 중엔 받을 수 없음) → <code>ready=false</code></li>
+      <li><b>④ 도착·ready</b> — 도착하면 PLC가 <code>CurFloor=F</code> 기입(<code>TgtFloor</code> 유지)하고 <code>Ready</code> 0→1(이제 정지·수용 가능). F층 정렬 → <code>ready=true</code> → 상태 푸시(IF-08, F층 호스트)</li>
       <li><b>⑤ 투입 → 분류 시작</b> — AGV 투입(IF-10) 후 3DS가 새 분류를 시작(<code>Ready</code> 1→0). 이때 PLC가 <code>TgtFloor=0</code> 클리어 — <b>도착 즉시가 아니라 분류 시작 시</b> 비워 그 사이 성급한 재기입(왕복)을 막는다</li>
     </ol>
   </section>
@@ -323,7 +323,7 @@
     <h2><span class="n">5</span> 타이밍 <span style="font-size:11px;color:var(--ink-faint);font-weight:500">(임의 표준 — 현장 조정)</span></h2>
     <table>
       <tr><th style="width:220px">항목</th><th style="width:120px">값</th><th>비고</th></tr>
-      <tr><td>IF-08 상태 알림</td><td>변경 시</td><td>3DS 상태(<b>단일 ready</b>, OK/NG) 변경 시 WCS가 RCS로 푸시 — full/paused/online은 ready에 접힘</td></tr>
+      <tr><td>IF-08 상태 알림</td><td>변경 시</td><td>3DS 수용 상태 변경 시 WCS가 RCS로 푸시 — <b>목적지 층별 호스트</b>(1층 <code>192.168.0.151:3000</code>·2층 <code>192.168.0.152:3000</code>)로 라우팅. 소터(두 층 겸용)는 현재 <code>CurFloor</code>의 층 호스트에 수용(<code>3</code>), 다른 층 호스트엔 비수용(<code>2</code>). full/paused/online은 상태에 접힘(셀 만재는 IF-05에서 차단)</td></tr>
       <tr><td>R_Flag 폴링 / 타임아웃</td><td><code>100 ms</code> / <b>분류 최대 소요 + 여유</b></td><td>적재(분류) 완료 대기 — 분류는 5초 이상 걸릴 수 있어 그에 맞춰 설정(고정 5초 ✕). 분류 중(<code>Ready=0</code>)엔 정상 대기, 초과 시 알람</td></tr>
       <tr><td>틸트 낙하 대기</td><td><code>PLC N초</code></td><td><b>PLC가 처리</b> — 값 읽어도 N초 지연 후 분류/이동(WCS 측 지연 없음)</td></tr>
       <tr><td>WCS API 타임아웃</td><td><code>3 s</code></td><td>RCS↔WCS API 응답 한계</td></tr>
@@ -335,7 +335,7 @@
     <h2><span class="n">6</span> 확정 사항 (결정됨)</h2>
     <ul>
       <li><b>PLC가 주는 상태 = 수용 가능 여부(Ready=D4.2)</b> — <code>Ready=0</code>은 <b>분류 중 또는 이동 중</b>(둘 다 받을 수 없음). <b>FULL(만재)·PAUSED(일시정지)·OFFLINE</b>은 <b>WCS가 판단</b>한다(만재=예약/수량, 일시정지=운영 상태, OFFLINE=폴 타임아웃). BUSY/FULL 구분용 별도 PLC 비트는 두지 않는다.</li>
-      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠2 또는 분류 중) · 항상 2</b> — <code>TgtFloor==0</code>이고 2층이 아니거나 분류 중(BUSY)이면 <code>TgtFloor=2</code>를 써서 2층으로 이동/복귀시킨다(<b>운영 2층 고정</b>). 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작(BUSY 진입) 시 <code>TgtFloor</code>=0 클리어</b>. FULL/PAUSED/OFFLINE은 쓰지 않고 대기. RCS엔 단일 ready만 노출(층은 WCS↔3DS 내부).</li>
+      <li><b>TgtFloor 쓰기 = <code>0</code>일 때 + (CurFloor≠F 또는 분류 중) · 인덕션 파생 층 F</b> — <code>TgtFloor==0</code>이고 F층이 아니거나 분류 중(BUSY)이면 <code>TgtFloor=F</code>를 써서 F층으로 이동/복귀시킨다(<b>층 F=인덕션 파생; 2026-06-22 "운영 2층 고정" 폐지 — 2026-07-21</b>). 쓰기 트리거는 <b>IF-05 목적지 조회 시점</b>. 진행 중(≠0)엔 덮어쓰지 않아 핑퐁 차단. 도착 시엔 CurFloor만 기입(TgtFloor 유지), <b>분류 시작(BUSY 진입) 시 <code>TgtFloor</code>=0 클리어</b>. FULL/PAUSED/OFFLINE은 쓰지 않고 대기. IF-08 push는 <b>층별 호스트</b>로 라우팅(층은 페이로드에 없음).</li>
     </ul>
   </section>
 
