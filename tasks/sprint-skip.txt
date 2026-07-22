@@ -1,9 +1,10 @@
-Trivial/config change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config).
+Trivial/config change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config·문서).
 
-작업: chore/gitignore-req-formats — RCS-WCS 요청서 HTML·PDF gitignore
+작업: chore/rcs-doc-wcs-rename — 비에텔 요청서 파일명 WES→WCS 통일
 날짜: 2026-07-22
-사유: 코드 로직 변경 0. 비에텔 전달용 RCS-WCS 요청서를 MD 외에 HTML·PDF 형식으로도 로컬 생성
-      (docs/RCS-WES-API-REQUEST-KR.html, .pdf). 벤더 프로토콜 IP·로컬 전용이므로 .gitignore에 추가.
-      - HTML: 자립적(외부 CDN 0)·인쇄 친화 CSS·한글 시스템 폰트. MD 12개 API + 용어 + 협의 필요 + 결과코드표 1:1.
-      - PDF: 위 HTML을 Chrome 헤드리스 print-to-pdf로 생성(%PDF-1.4, 462KB).
-스코프: .gitignore(2줄 추가: .html·.pdf) 만 커밋. 요청서 3형식(md/html/pdf) 파일 자체는 미커밋(로컬 전달용).
+사유: 코드 로직 변경 0. 비에텔 전달용 RCS-WCS 요청서 파일명을 실제 방향(당사=WCS)에 맞게
+      RCS-WES-API-REQUEST-KR.* → RCS-WCS-API-REQUEST-KR.* (md/html/pdf)로 변경.
+      벤더 프로토콜 원본은 상대사 명칭이라 docs/RCS-WES-API-KR.md 그대로 유지.
+      (문서 본문에는 모든 API 요청·응답 예시를 우리 데이터 기준으로 추가 — 로컬 파일이라 미커밋)
+스코프: .gitignore(요청서 3형식 항목 WES→WCS 이름 갱신)만 커밋.
+      요청서 3형식(md/html/pdf) 파일 자체는 로컬 전달용·gitignore·미커밋.
