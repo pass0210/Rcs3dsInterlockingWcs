@@ -1,12 +1,9 @@
 Trivial/config change — 3-Tier skip (CLAUDE.md 예외: 사소 변경/config).
 
-작업: feat/rcs-wes-request-doc — 비에텔 RCS-WES API 문서 gitignore
+작업: chore/gitignore-req-formats — RCS-WCS 요청서 HTML·PDF gitignore
 날짜: 2026-07-22
-사유: 코드 로직 변경 0. 협력사(비에텔)에 보낼 RCS-WES 추가 API 요청서를 로컬로 작성하고,
-      벤더 참고본 + 요청서 두 문서를 .gitignore에 추가(GitHub 미노출 — 벤더 프로토콜 IP).
-      - docs/RCS-WES-API-KR.md (다른 업체 RCS-WES 프로토콜 참고본, 미추적)
-      - docs/RCS-WES-API-REQUEST-KR.md (우리 요청서, 로컬 산출물 — 비에텔에 직접 전달)
-스코프: .gitignore(2줄) 만 커밋. 요청서 문서 자체는 커밋하지 않음(로컬 전용).
-요청서 내용: 참고 프로토콜에서 #3 도착보고·#6 목적지조회(RCS발신)·#12 구역상태변경요청(우리 슈트상태 전송) 제외,
-      나머지(#1·2·4·5·7·8·9·10·11·13) full-table + 신규 2건(파킹존 도착 보고·통합 지시). 층=inductionNo로 WES 내부
-      산출(API에 floor 필드 없음).
+사유: 코드 로직 변경 0. 비에텔 전달용 RCS-WCS 요청서를 MD 외에 HTML·PDF 형식으로도 로컬 생성
+      (docs/RCS-WES-API-REQUEST-KR.html, .pdf). 벤더 프로토콜 IP·로컬 전용이므로 .gitignore에 추가.
+      - HTML: 자립적(외부 CDN 0)·인쇄 친화 CSS·한글 시스템 폰트. MD 12개 API + 용어 + 협의 필요 + 결과코드표 1:1.
+      - PDF: 위 HTML을 Chrome 헤드리스 print-to-pdf로 생성(%PDF-1.4, 462KB).
+스코프: .gitignore(2줄 추가: .html·.pdf) 만 커밋. 요청서 3형식(md/html/pdf) 파일 자체는 미커밋(로컬 전달용).
