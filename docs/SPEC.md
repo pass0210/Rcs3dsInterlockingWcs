@@ -71,8 +71,35 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
 - **write-in-order**: WCS는 **큐 머리 피스의 층 F**만 TgtFloor에 쓴다 — 게이트(`TgtFloor==0 && (CurFloor!=F || Ready==0)`) 허용 시에만. TgtFloor≠0(머리 피스 정렬/분류 중)이면 쓰지 않고 **큐 머리는 대기**.
 - **gate 관측 → 복귀**: WCS는 **`TgtFloor==0`을 계속 관측**한다(기존 `DepositDecider` 게이트 `write = TgtFloor==0 ? floor : null`). 분류 시작(Ready 1→0) 시 PLC가 TgtFloor=0으로 클리어하는 순간 WCS가 **큐에 대기 중인 다음 층을 즉시 TgtFloor에 기입**하고, 소터는 free해지면 그 층으로 **복귀**(이동)해 도착 시 PLC가 CurFloor를 기입한다. 즉 쓰기는 **`TgtFloor==0` 게이트 관측으로 트리거**되고 층은 **큐가 공급**한다(sort-completion 이벤트가 아님). "정렬해 둔 F로 자동 복귀"(옛 2층 고정)가 아니라 **큐가 주는 층으로의 복귀**다. 큐가 비면 미기입·현 CurFloor에서 idle. 이렇게 층을 **한 번에 하나씩 FIFO 순서**로 수용한다. IF-08 층별 호스트 push는 소터가 각 큐 피스의 층으로 복귀해 감에 따라 그 CurFloor를 따라간다.
 - **AGV 측 동작(RCS · 참고)**: 이 큐는 **WCS가 소터를 어느 층으로 정렬·open push할지(순서)**를 지배할 뿐, AGV가 소터 앞에 물리적으로 줄 서는 게 아니다. IF-05 OK 후 AGV는 목적지로 출발하되 **미수용(BUSY·타 층 정렬·FULL·PAUSED·미개방)이면 목적지에서 대기하지 않고 파킹존으로 우회**한다. WCS가 그 층 목적지에 **IF-08 `next_state=3`(열림)**을 푸시하면 RCS가 주차된 AGV를 목적지로 보낸다 → **IF-09 도착 보고 → IF-10 투입**. 따라서 **미개방 목적지에선 IF-08 열림 푸시가 IF-09 도착보다 먼저**다(열림 푸시=출발 신호). 도착 시점에 이미 열려 있으면 파킹 없이 직행.
-- **미확정(코드 스프린트에서 확정)**: 쓰기 트리거는 **`TgtFloor==0` 게이트 관측**으로 확정(위). 다만 소터 큐에서 **머리 피스를 정확히 언제 pop**하는지(예: 분류 시작 관측 시)와 큐 자료구조·동시성 세부는 코드 스프린트에서 결정.
-- **현행 코드 갭**: 현재 코드는 **상태 없는 게이트만**(스냅샷 기반 `DepositDecider`) 있고 **큐가 없다** — 이 pending-floor 큐는 코드 스프린트에서 신설할 컴포넌트다.
+- **확정(2026-07-22 · S-TWO-FLOOR-CONTROL A 구현, pop 기준 I-1 재설계 2026-07-23)**:
+  - **큐 머리 pop 시점 = 분류 사이클 완료**(소터별 `Ready 1→0→1` = 한 피스 분류 완료)마다 큐 머리 1건.
+    도착(`CurFloor==F`) 즉시가 아니다 — 그래야 큐 `[A,A,B]`(같은 층 A 연속 2 + B)에서 소터가 **A 2건이
+    모두 분류 완료될 때까지 A에 머문 뒤** B로 이동해 2번째 A-AGV 고립을 막는다. 분류-제자리(`Ready 1→0`
+    시점 CurFloor == 완료 시점 CurFloor)만 pop하고, 정렬 이동(CurFloor 변화)에 의한 `Ready 0→1`은 pop하지
+    않는다. **스톨 방지 재조정**: 구 "머리 F==CurFloor 즉시 소비" 엣지는 제거(그게 조기 pop 버그의 원인).
+    머리 F==CurFloor면 그 피스의 분류를 기다렸다 pop한다 — 각 enqueue 피스에는 대응 분류(IF-10)가 반드시
+    오므로 정상 흐름은 무-stall(미투하 abandonment는 파킹존 D 스코프). 기입은 유휴(`Ready=1`)·`CurFloor!=F`
+    에서만 하여 분류 중 선기입에 의한 분류+이동 융합(사이클 감지 파손)을 방지.
+  - **미매핑 inductionNo = Fail Loud**: `InductionFloorMap`에 없는 inductionNo가 IF-05 소터 목적지로 오면
+    **NG 응답 + 경고 로그(operation_log `IF05_NO_FLOOR`)**, 소터로 보내지 않음. 조용한 통과·기본층 폴백 금지.
+  - **연속 동일층 = 피스마다 1건씩 stack**(dedupe 안 함). FIFO 순서 유지. 같은 층이 연달아 기입될 소지는
+    없다(각 피스는 자기 분류 사이클 완료 시 pop되고, 머리 F==CurFloor면 애초에 기입 안 함). pre-arrival
+    창에서 재기입을 막는 것은 게이트가 아니라 **쓰기큐 컨슈머의 fresh-read `D6!=0` skip**(절대규칙 #2 —
+    `PlcGateway.ProcessWriteAsync` SetTgtFloor 케이스가 기입 직전 D6를 fresh FC03로 재확인해 ≠0이면 스킵)
+    이므로 무변화 폴 write 폭주 없음.
+  - **큐 자료구조·동시성**: 소터(destination.id)별 FIFO 큐(`SorterPendingFloorQueues` — 소터마다
+    `ConcurrentQueue<int>`). 다중 AGV IF-05 동시 enqueue(생산자 다수) vs 관측 루프
+    (`SorterFloorReturnService`) 단일 소비자(TryPeek/TryPop). 관측 주기는 appsettings
+    `Wcs:SorterFloorReturn:ObserveIntervalMs`(하드코딩 금지).
+  - **인메모리 큐 — 재시작 복원 미구현(I-3, Sub-Sprint C 이연)**: pending-floor 큐는 인메모리라 WCS
+    재시작 시 in-flight 큐 항목이 유실된다. 재시작 시 레지스터/큐 복원은 **Sub-Sprint C(재시작 클리어·복원)**
+    에서 처리한다(§4-B 기동 클리어와 함께). A 스코프에선 문서화만.
+- **소터 readiness(CurFloor 기준)**: `DestinationStatusService.ComputeSorter`는 단일 운영층 고정 비교를
+  폐지하고 **CurFloor를 목표 층으로 주입**해 `ready = online && Ready==1`로 산출한다(현재 정렬된 층에서만
+  ready). dual-host 층별 발신 라우팅은 후속 서브 스프린트 B.
+- **~~현행 코드 갭~~ (해소됨 — A 구현)**: pending-floor 큐(`SorterPendingFloorQueues`) + 관측 루프
+  (`SorterFloorReturnService`) 신설 완료. IF-09 정렬 트리거 제거(도착 기록만). 층 파생은 순수 함수
+  `Wcs.Core.InductionFloorMap.DeriveFloor`(맵은 호출자 주입).
 
 ## 3. API (WCS=서버, RCS=클라이언트, 응답 3s 한계)
 공통 필드: pId(int 1~30000, RCS 부여), agvNo, barcode, inductionNo, chuteNo, qty, timeStamp("yyyy-MM-dd HH:mm:ss" 로컬)
@@ -130,7 +157,7 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
 - **전송(S-SIM3DS-RTU)**: Sim3ds는 `Transport=Tcp`(기본·현행 :1502 보존) 또는 `Rtu`(현장 리허설·RS-485)로 기동. 레지스터 맵·에코 지연·C_Flag 자체 클리어·ClearR까지 R 유지·잔류 프리셋 의미는 전송 무관 동일. 설정은 `appsettings.Sim3ds.json`(기본값) + 환경변수(`SIM3DS_*`) + CLI(`--transport rtu --port COMx …`). → **실 PLC 없이 WCS↔Sim RTU 리허설 절차·시리얼 페어 준비법: [docs/RTU-REHEARSAL.md](RTU-REHEARSAL.md)**
 
 ## 7. 미확정 사항 (구현 중 추측 금지 — 기록·질문)
-- 목표 층 F **산출 방법 확정(2026-07-21)**: 요청 `inductionNo`→`InductionFloorMap`(inductionNo→floor). 과거 "agvNo→agvFloor 매핑"·"운영 2층 고정(항상 2)"은 **폐지**. **매핑 값**만 현장 확정 — 설정 결선은 코드 스프린트.
+- 목표 층 F **산출 방법 확정(2026-07-21) · 설정 결선 완료(2026-07-22 · A 구현)**: 요청 `inductionNo`→`InductionFloorMap`(inductionNo→floor). 과거 "agvNo→agvFloor 매핑"·"운영 2층 고정(항상 2)"은 **폐지**. appsettings `Wcs:InductionFloorMap` 결선 완료(순수 함수 `Wcs.Core.InductionFloorMap.DeriveFloor` — 맵 호출자 주입). **매핑 값**만 현장 확정(placeholder `{"1":1,"2":2}`). **미매핑 inductionNo = Fail Loud**(NG + `IF05_NO_FLOOR` 경고 — 조용한 통과·기본층 폴백 금지).
 - RCS Q1~Q7 회신 대기(HTTP 클라이언트 사양, pId 초기화 정책, 인증 등)
 - PLC측: Ready=0에 이동 중 포함 / TgtFloor 분류 시작 클리어 — 3DS 담당 확정 대기
 - R_Flag 타임아웃 실측값은 현장 실측 후 appsettings 조정

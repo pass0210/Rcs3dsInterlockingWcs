@@ -203,6 +203,9 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
 // PUSH 테스트 (확정 와이어 UpdateChuteState — 가짜 RCS 수신 본문 입증)
 // ════════════════════════════════════════════════════════════════════════════
 
+// [Collection("RealSimSerial")] — push-결정성(정확 push 카운트) 테스트를 무거운 실-Sim 테스트와 동일
+//   직렬 컬렉션에 편입(병렬 CPU 경합 flake 제거 — S-TWO-FLOOR-CONTROL A flake-fix, SorterPushOperationalTests 동형).
+[Collection("RealSimSerial")]
 public class RcsPushTests
 {
     private readonly ITestOutputHelper _out;
@@ -261,24 +264,26 @@ public class RcsPushTests
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
         _ = factory.CreateClient();  // 호스트 기동(HostedService StartAsync 실행)
 
-        // 부트스트랩: 활성 목적지 전부 1회 발신 — 슈트 1~5(chuteNo 1~5) + PAUSED(chuteNo 6) + 소터(chuteNo 30)
-        // = 7개. 각 chuteNo가 정확히 1건씩 수신될 때까지 대기.
-        await WaitUntilAsync(() => rcs.All.Count >= 7, 8000, "부트스트랩 7목적지 발신 수신");
+        // 부트스트랩: 활성 목적지 전부 1회 발신 — 슈트 1~5(chuteNo 1~5) + PAUSED(chuteNo 6) + 소터(chuteNo 30).
+        // 각 chuteNo가 최종 수용상태로 정착할 때까지 대기(소터는 offline→online 전이로 push 수가 1~2 가변이라
+        // 총 count가 아니라 목적지별 최종값으로 단언 — 인덕션 기반 2층 제어에서 소터는 online·Ready=1 → 3).
+        int[] chuteNos = { 1, 2, 3, 4, 5, 6, factory.SorterChuteNo };
+        await WaitUntilAsync(() => chuteNos.All(c => rcs.CountFor(c) >= 1), 8000, "부트스트랩 전 목적지 발신 수신");
 
-        // 무변화 안정 — 7건에서 더 늘지 않음(폴마다 폭주 0)
-        await WaitUntilExactAsync(() => rcs.All.Count, 7, stableCount: 6, timeoutMs: 4000,
-            msg: "부트스트랩 후 무변화 안정");
+        // 슈트 1~5 = NORMAL·비만재 → 3 / chuteNo 6 = PAUSED → 2 / 소터 30 = online·Ready=1 → 3(CurFloor 기준).
+        await WaitUntilAsync(() => rcs.LastFor(1) is { Ready: true }, 5000, "슈트1 정착 = 3");
+        await WaitUntilAsync(() => rcs.LastFor(6) is { Ready: false }, 5000, "슈트6(PAUSED) 정착 = 2");
+        await WaitUntilAsync(() => rcs.LastFor(factory.SorterChuteNo) is { Ready: true }, 5000, "소터 정착 = 3(online·Ready=1)");
 
-        // 슈트 1~5 = NORMAL·비만재 → next_state 3 / chuteNo 6 = PAUSED → 2 / 소터 30 = 미정렬(CurFloor=1≠2) → 2.
-        Assert.Equal(1, rcs.CountFor(1));
+        // 정적 NORMAL 슈트(1)는 상태 변화가 없으므로 폴마다 폭주 0 — 정확히 1건 유지(폭주 회귀 방지).
+        await WaitUntilExactAsync(() => rcs.CountFor(1), 1, stableCount: 6, timeoutMs: 4000, "슈트1 무변화 폴 폭주 0");
+
         var c1 = rcs.LastFor(1)!;
         Assert.Equal(new[] { 3 }, c1.NextStates);   // NORMAL 슈트 1 → 수용가능(3)
+        Assert.Equal(1, rcs.CountFor(1));
 
-        Assert.Equal(1, rcs.CountFor(6));
         Assert.Equal(new[] { 2 }, rcs.LastFor(6)!.NextStates);   // PAUSED 슈트 6 → 불가(2)
-
-        Assert.Equal(1, rcs.CountFor(factory.SorterChuteNo));
-        Assert.Equal(new[] { 2 }, rcs.LastFor(factory.SorterChuteNo)!.NextStates);   // 미정렬 소터 → 2
+        Assert.Equal(new[] { 3 }, rcs.LastFor(factory.SorterChuteNo)!.NextStates);   // 소터 online·Ready=1 → 3
 
         // ── 와이어 형태 정합(VS-9) ──────────────────────────────────────────────
         Assert.Equal("PUT", c1.Method);   // ★ PUT(positive).
@@ -300,7 +305,7 @@ public class RcsPushTests
         Assert.Equal(1, c1.ChuteNumbers[0]);
         Assert.Contains(c1.NextStates[0], new[] { 2, 3 });
 
-        _out.WriteLine($"[PUSH6_7] 부트스트랩 7건 수신 · 와이어 PUT snake_case 단건 {{2,3}}: {c1.RawBody}");
+        _out.WriteLine($"[PUSH6_7] 부트스트랩 전 목적지 수신(소터=3·PAUSED=2) · 와이어 PUT snake_case 단건 {{2,3}}: {c1.RawBody}");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -353,33 +358,33 @@ public class RcsPushTests
 
         int sorterChute = factory.SorterChuteNo;
 
-        // 부트스트랩: 소터 미정렬(CurFloor=1≠운영층2) → next_state 2, 1건
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 1, 8000, "부트스트랩 소터 수신");
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 1, stableCount: 6, timeoutMs: 4000,
-            "무변화 폴 다수에도 소터 발신 1건 유지(폭주 0)");
-        Assert.Equal(new[] { 2 }, rcs.LastFor(sorterChute)!.NextStates);
+        // 부트스트랩: 소터 online·Ready=1 → 운영 ready=true(next_state 3, CurFloor 기준 — 인덕션 기반 2층 제어).
+        //   offline→online 전이 흡수(부트스트랩 push 수 1~2 가변) → "ready=true 정착 + baseline" 방식으로 견고화.
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 8000, "부트스트랩 소터 ready=true(3)");
+        int baseline = rcs.CountFor(sorterChute);
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseline, stableCount: 6, timeoutMs: 4000,
+            "무변화 폴 다수에도 소터 발신 폭주 0");
+        Assert.Equal(new[] { 3 }, rcs.LastFor(sorterChute)!.NextStates);
 
-        // 2→3: 운영층 정렬(CurFloor=2·Ready=1) → next_state 3
-        factory.FakeMaster.SetReady(true);
-        factory.FakeMaster.SetCurFloor(2);
-        factory.FakeMaster.SetTgtFloor(0);
-        await WaitForSnapshotAsync(factory, s => s.Online && s.CurFloor == 2 && s.Ready, 5000);
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 2, 5000, "소터 2→3 발신");
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 2, stableCount: 6, timeoutMs: 4000,
-            "2→3 후 무변화 폴 다수에도 2건 유지(폭주 0·핵심)");
-        Assert.Equal(new[] { 3 }, rcs.LastFor(sorterChute)!.NextStates);   // 정렬 완료 → 3
-
-        // 3→2: 분류 시작(Ready 1→0) → next_state 2
+        // 3→2: 분류 시작(Ready 1→0 = busy) → next_state 2
         factory.FakeMaster.SetReady(false);
         await WaitForSnapshotAsync(factory, s => s.Online && !s.Ready, 5000);
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 3, 5000, "소터 3→2 발신");
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 3, stableCount: 6, timeoutMs: 4000,
-            "3→2 후 안정(중복 0)");
+        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= baseline + 1, 5000, "소터 3→2 발신");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseline + 1, stableCount: 6, timeoutMs: 4000,
+            "3→2 후 무변화 폴 다수에도 폭주 0(핵심)");
         Assert.Equal(new[] { 2 }, rcs.LastFor(sorterChute)!.NextStates);   // 분류 시작 → 2
 
-        // 총 3건(부트스트랩 1 + 전이 2). 무변화 폴 N회에도 폭주 0.
-        Assert.Equal(3, rcs.CountFor(sorterChute));
-        _out.WriteLine($"[PUSH2_3] 소터 분류 사이클 전이당 1건·폭주 0 — 총 {rcs.CountFor(sorterChute)}건");
+        // 2→3: 분류 완료(Ready 0→1) → next_state 3
+        factory.FakeMaster.SetReady(true);
+        await WaitForSnapshotAsync(factory, s => s.Online && s.Ready, 5000);
+        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= baseline + 2, 5000, "소터 2→3 발신");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseline + 2, stableCount: 6, timeoutMs: 4000,
+            "2→3 후 안정(중복 0)");
+        Assert.Equal(new[] { 3 }, rcs.LastFor(sorterChute)!.NextStates);   // 분류 완료 → 3
+
+        // 전이당 정확히 1건(폭주 0). 총 = baseline + 2.
+        Assert.Equal(baseline + 2, rcs.CountFor(sorterChute));
+        _out.WriteLine($"[PUSH2_3] 소터 분류 사이클(Ready 1↔0) 전이당 1건·폭주 0 — 총 {rcs.CountFor(sorterChute)}건");
     }
 
     // ════════════════════════════════════════════════════════════════════════

@@ -24,6 +24,7 @@ namespace Wcs.Tests;
 // 각 [Fact]는 fresh SimWebApplicationFactory(자체 포트·Sim·DB·인메모리 상태) — 테스트 간 격리.
 // (SimWebApplicationFactory는 ScenarioTests.cs에 정의된 것을 재사용.)
 // ════════════════════════════════════════════════════════════════════════════
+[Collection("RealSimSerial")]
 public class OpsControllerTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;
@@ -316,31 +317,31 @@ public class OpsControllerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task IF09_AutoAlign_WritesTgtFloor_EvenWhenReadyZero_NoRegression()
+    public async Task QueueDrivenAlign_WritesTgtFloor_WhenIdle_ToQueuedFloor()
     {
         long sorterId = SorterId();
-        int sorterChuteNo;
-        using (var db = _factory!.CreateDbScope())
-            sorterChuteNo = db.Destinations.First(d => d.Id == sorterId).ChuteNo;
 
-        // 소터를 BUSY(Ready==0)로 몬다. 자동 IF-09 정렬은 Ready==0·TgtFloor==0에서 운영층 복귀를
-        // 선기입해야 한다(DepositDecider — Ready==0 의도적 기입). 컨슈머 fresh-read 가드는 TgtFloor만
-        // 보고 Ready를 보지 않으므로 이 자동/공유 경로는 무회귀여야 한다.
-        _factory!.Sim.SetReady(false);
+        // 인덕션 기반 2층 제어 + pop 기준 I-1 재설계(2026-07-23): 정렬 트리거가 IF-05 큐 enqueue + 관측 루프.
+        // 관측 루프는 **유휴(Ready=1)·CurFloor!=머리층**에서만 TgtFloor를 기입한다(분류 중 Ready==0 선기입은
+        // 폐지 — 분류+이동 융합으로 사이클 감지가 깨지는 것 방지). 소터별 단일 쓰기 큐 경유(직접 Modbus 0)·
+        // 컨슈머 fresh-read 핑퐁 가드 불변.
         await WaitUntilAsync(
-            () => _factory!.SorterSnapshot() is { Ready: false, Online: true, TgtFloor: 0 },
-            4000, "소터 Ready=0·TgtFloor=0");
+            () => _factory!.SorterSnapshot() is { Ready: true, Online: true, TgtFloor: 0, CurFloor: 2 },
+            4000, "소터 유휴(Ready=1)·TgtFloor=0·CurFloor=2");
 
-        // IF-09 도착 보고 → 3D 소터면 AlignSorterToOperationalFloor(자동, 공유 컨슈머 case) 발동.
-        var resp = await _client!.PostAsJsonAsync("/api/v1/arrival-report",
-            new { pId = 1, chuteNo = sorterChuteNo, agvNo = 1, timeStamp = (string?)null });
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        // IF-05(소터 목적지, inductionNo=3 → 층 1 ≠ 현재 CurFloor 2) → 그 소터 큐에 F=1 enqueue.
+        var if05 = await _client!.PostAsJsonAsync("/api/v1/destination-query",
+            new { pId = 1, agvNo = 1, barcode = "TEST-BARCODE-3", inductionNo = 3, qty = 1, timeStamp = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, if05.StatusCode);
+        var if05Body = await if05.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("OK", if05Body.GetProperty("result").GetString());
 
-        // 운영층(2)로 정렬 쓰기가 통과 → Sim D6=2 기입(Ready==0에도 자동 정렬 무회귀).
-        await WaitUntilAsync(() => _factory!.Sim.ReadSnapshot().TgtFloor == 2, 4000, "자동 IF-09 정렬 D6=2(Ready==0)");
+        // 관측 루프가 유휴 시 큐 머리 F=1을 게이트 통과 기입 → 단일 쓰기 큐 → Sim D6=1(직접 Modbus 0).
+        await WaitUntilAsync(() => _factory!.Sim.ReadSnapshot().TgtFloor == 1, 5000, "큐 구동 정렬 D6=1(유휴 기입)");
+        // PLC_WRITE/SET_TGTFLOOR operation_log(컨슈머 EmitWrite에서만 발화) = 컨트롤러 직접 Modbus 호출 부재 증거.
         await WaitUntilAsync(() => HasOpLog(OperationLogCategory.PLC_WRITE, "SET_TGTFLOOR"),
-            4000, "PLC_WRITE/SET_TGTFLOOR(자동 경로)");
-        _out.WriteLine("[IF-09/auto] Ready==0에서도 자동 정렬 TgtFloor=2 기입 — 공유 컨슈머 case 무회귀");
+            4000, "PLC_WRITE/SET_TGTFLOOR(큐 구동 경로)");
+        _out.WriteLine("[큐 구동 정렬] 유휴(Ready=1) 시 큐 머리 층 F=1 기입 — 관측 루프·단일 쓰기 큐");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -129,8 +129,13 @@ public class SimWebApplicationFactory : WebApplicationFactory<Program>
                 ["Timing:RFlagPollMs"]           = GwOpt.RFlagPollMs.ToString(),
                 ["Timing:RFlagTimeoutMs"]        = GwOpt.RFlagTimeoutMs.ToString(),
                 ["Timing:CFlagTimeoutMs"]        = GwOpt.CFlagTimeoutMs.ToString(),
-                // 운영층 — 재설계 2층 고정 정렬(설정 경유, 하드코딩 금지)
+                // 운영층 — 레거시 참조값(정렬은 인덕션 파생 큐 구동)
                 ["Wcs:OperationalFloor"]         = "2",
+                // 인덕션 기반 2층 제어: inductionNo=1·2 → 층 2(S1이 CurFloor=2 정렬을 기대 — 관측 루프가 큐 F=2 구동).
+                //   inductionNo=3 → 층 1(OpsControllerTests가 CurFloor(2)≠F(1) 이동을 유발해 Ready==0 선기입 검증).
+                ["Wcs:InductionFloorMap:1"]      = "2",
+                ["Wcs:InductionFloorMap:2"]      = "2",
+                ["Wcs:InductionFloorMap:3"]      = "1",
             });
         });
 
@@ -239,6 +244,7 @@ public class SimWebApplicationFactory : WebApplicationFactory<Program>
 /// 전환: 구 IF-08 폴링 단계 삭제 → IF-09 도착 보고로 대체. 핸드셰이크 DB 단언은 유지.
 /// PASS = sorter_command 1행 status=COMPLETED, R_Seq==C_Seq.
 /// </summary>
+[Collection("RealSimSerial")]
 public class S1NormalHandshakeTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;
@@ -367,6 +373,7 @@ public class S1NormalHandshakeTests : IAsyncLifetime
 /// DB 단언 없음 — 게이트웨이 동작(TgtFloor·D6 쓰기 이력·경합)을 타임라인·스냅샷으로 입증.
 /// 재설계: agvFloor 비교 → operationalFloor(2) 비교, WRONG_FLOOR → NotAligned, .Allowed → .Ready.
 /// </summary>
+[Collection("RealSimSerial")]
 public class S234_9GatewayScenarioTests : IAsyncLifetime
 {
     // 운영층 — 재설계 기준값(테스트 상수). production은 appsettings Wcs:OperationalFloor.
@@ -725,6 +732,7 @@ public class S234_9GatewayScenarioTests : IAsyncLifetime
 /// 전환: IF-08 폴링 단계 삭제 — IF-05 → IF-09 → IF-10 흐름. 핸드셰이크 DB 단언 유지.
 /// PASS = alarm 1행(code=R_SEQ_MISMATCH) + sorter_command status=MISMATCH.
 /// </summary>
+[Collection("RealSimSerial")]
 public class S5RSeqMismatchTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;
@@ -842,6 +850,7 @@ public class S5RSeqMismatchTests : IAsyncLifetime
 /// 전환: IF-08 폴링 단계 삭제 — IF-05 → IF-09 → IF-10. 핸드셰이크 DB 단언 유지.
 /// PASS = alarm 1행(code=RFLAG_TIMEOUT) + sorter_command status=TIMEOUT. 재시도 없음(1행).
 /// </summary>
+[Collection("RealSimSerial")]
 public class S6RFlagTimeoutTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;
@@ -933,6 +942,7 @@ public class S6RFlagTimeoutTests : IAsyncLifetime
 /// S7: OFFLINE 전이당 정확히 1건 alarm, ONLINE 복구 후 재전이도 1건.
 /// 게이트웨이 OFFLINE 이벤트 경로(IF-08 폐지와 무관) — 무변경 유지.
 /// </summary>
+[Collection("RealSimSerial")]
 public class S7OfflineAlarmTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;

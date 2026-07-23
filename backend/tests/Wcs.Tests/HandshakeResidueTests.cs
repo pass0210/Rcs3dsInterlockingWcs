@@ -25,6 +25,7 @@ namespace Wcs.Tests;
 //   S5 확인 타임아웃 종결     S6 진짜 무응답 타임아웃 회귀
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public sealed class HandshakeResidueTests
 {
     private readonly ITestOutputHelper _out;

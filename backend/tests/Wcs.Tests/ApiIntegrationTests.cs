@@ -484,24 +484,24 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // IF-09 arrival-report — 3D 소터 도착 → 운영층(2) 정렬 (구 VS-3 WrongFloor 재타겟)
-    // 미정렬(CurFloor=1·TgtFloor=0) 소터에 도착 → TgtFloor=2(운영층) 쓰기 큐 관찰.
-    // WRONG_FLOOR 개념 소멸 → 운영층 고정 정렬로 전환.
+    // IF-09 arrival-report — 정렬 트리거 제거(인덕션 기반 2층 제어, 2026-07-21).
+    // IF-09는 도착 기록만 하고 TgtFloor를 쓰지 않는다(정렬은 IF-05 enqueue + 관측 루프로 이동).
+    // 미정렬(CurFloor=1) 소터에 IF-09 도착 → TgtFloor 쓰기 0건(이중 기입 경합 차단).
     // ════════════════════════════════════════════════════════════════════════
 
     [Fact]
-    public async Task If09_Sorter3dArrival_NotAligned_WritesOperationalFloor()
+    public async Task If09_Sorter3dArrival_NoAlignmentTrigger_TgtFloorUnchanged()
     {
-        // 사전조건: Ready=1, CurFloor=1(운영층 2와 다름 → 미정렬), TgtFloor=0 → 정렬 쓰기 조건 충족
+        // 사전조건: Ready=1, CurFloor=1(미정렬), TgtFloor=0. 구 모델이면 IF-09가 TgtFloor=2를 썼다.
         _factory.FakeMaster.SetReady(true);
         _factory.FakeMaster.SetCurFloor(1);
         _factory.FakeMaster.SetTgtFloor(0);
 
-        // 폴링이 미정렬·TgtFloor=0 상태를 스냅샷에 반영할 때까지 대기
         await WaitForSnapshotAsync(_factory,
             snap => snap.Ready && snap.CurFloor == 1 && snap.TgtFloor == 0, 5000);
 
-        // IF-09 도착 보고 (chuteNo=30 → SORTER_3D)
+        // IF-09 도착 보고 (chuteNo=30 → SORTER_3D). 이 팩토리는 관측 루프 미기동(null-hosted 제거)이라
+        // IF-05 enqueue도 여기선 쓰기를 만들지 않는다 → IF-09 자체가 정렬을 트리거하지 않음을 입증.
         var req  = new { pId = 3101, chuteNo = 30, agvNo = 1, timeStamp = (string?)null };
         var resp = await _client.PostAsJsonAsync("/api/v1/arrival-report", req);
 
@@ -510,23 +510,20 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         Assert.NotNull(body);
         Assert.Equal("OK", body.Result);
 
-        // 운영층(2) 정렬 — 큐 처리는 background이므로 폴링 대기
-        await WaitForRegisterAsync(_factory, RegisterMap.TgtFloor, 2, timeoutMs: 3000);
-        Assert.Equal(2, _factory.FakeMaster.GetTgtFloor());
-        _out.WriteLine($"[IF-09] 3D 도착 → TgtFloor={_factory.FakeMaster.GetTgtFloor()} (운영층 정렬)");
-
-        // 복원
-        _factory.FakeMaster.SetTgtFloor(0);
+        // IF-09는 정렬 트리거 아님 — 500ms 동안 TgtFloor=0 유지(쓰기 0건).
+        await Task.Delay(500);
+        Assert.Equal(0, _factory.FakeMaster.GetTgtFloor());
+        _out.WriteLine($"[IF-09] 미정렬 소터 도착 → TgtFloor 쓰기 0건(정렬 트리거 제거) (={_factory.FakeMaster.GetTgtFloor()})");
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // IF-09 arrival-report — 이미 운영층 정렬됨(CurFloor=2·Ready=1) → 추가 쓰기 0
+    // IF-09 arrival-report — 이미 정렬됨(CurFloor=2·Ready=1)에도 IF-09 → 쓰기 0(불변).
     // ════════════════════════════════════════════════════════════════════════
 
     [Fact]
     public async Task If09_Sorter3dArrival_AlreadyAligned_NoWrite()
     {
-        // 사전조건: Ready=1, CurFloor=2(운영층 일치), TgtFloor=0 → 정렬 불필요(이미 운영층)
+        // 사전조건: Ready=1, CurFloor=2, TgtFloor=0.
         _factory.FakeMaster.SetReady(true);
         _factory.FakeMaster.SetCurFloor(2);
         _factory.FakeMaster.SetTgtFloor(0);
@@ -538,10 +535,10 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         var resp = await _client.PostAsJsonAsync("/api/v1/arrival-report", req);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        // 이미 정렬 → TgtFloor 쓰기 없음. 500ms 동안 TgtFloor=0 유지 확인.
+        // IF-09는 정렬 트리거 아님 → TgtFloor 쓰기 없음. 500ms 동안 TgtFloor=0 유지.
         await Task.Delay(500);
         Assert.Equal(0, _factory.FakeMaster.GetTgtFloor());
-        _out.WriteLine($"[IF-09] 이미 운영층 정렬 → TgtFloor 쓰기 0건 (={_factory.FakeMaster.GetTgtFloor()})");
+        _out.WriteLine($"[IF-09] 이미 정렬 소터 도착 → TgtFloor 쓰기 0건 (={_factory.FakeMaster.GetTgtFloor()})");
 
         // 복원
         _factory.FakeMaster.SetCurFloor(1);
@@ -1443,6 +1440,7 @@ public class P2bMultiSorterTests
 // PlcGatewayIntegrationTests.cs의 SimServer 패턴 참조 (포트 분리, IAsyncLifetime).
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class P2bSimHandshakeTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _out;
@@ -1517,8 +1515,11 @@ public class P2bSimHandshakeTests : IAsyncLifetime
         await _pollingA.StartAsync(CancellationToken.None);
         await _pollingB.StartAsync(CancellationToken.None);
 
-        await WaitUntilAsync(() => _pollingA!.Latest.Online, 2000, "소터A Online");
-        await WaitUntilAsync(() => _pollingB!.Latest.Online, 2000, "소터B Online");
+        // 실 Modbus TCP 첫 폴 Online 대기 — 병렬 테스트 부하(소켓/CPU 경합)에서 첫 폴 지연이 있어
+        // 형제 online-wait(E2E·Scenario 5000ms)와 동급으로 넉넉히(기존 2000ms는 부하 시 flake — 교훈
+        // e2e-parallel-load-surfaces-integration-flakes). 폴 성공 시 즉시 반환하므로 정상 경로 무지연.
+        await WaitUntilAsync(() => _pollingA!.Latest.Online, 5000, "소터A Online");
+        await WaitUntilAsync(() => _pollingB!.Latest.Online, 5000, "소터B Online");
     }
 
     private static async Task WaitUntilAsync(Func<bool> cond, int timeoutMs, string msg, int pollMs = 20)

@@ -148,7 +148,13 @@ public sealed class EfOrderRepository : IOrderRepository
             var block = availability(destId.Value, destApiType.Value);
             if (block != DestinationBlock.None)
             {
-                var blockReason = block == DestinationBlock.Full ? "FULL" : "PAUSED";
+                var blockReason = block switch
+                {
+                    DestinationBlock.Full     => "FULL",
+                    DestinationBlock.Paused   => "PAUSED",
+                    DestinationBlock.Unmapped => "NO_FLOOR",   // 미매핑 inductionNo(층 파생 불가) — fail-loud.
+                    _                         => "PAUSED",
+                };
                 RecordDenied(pId, agvNo, barcode, inductionNo, qty, blockReason,
                     clientTs, effective, item, dest);
                 return ("NG", null, blockReason, destApiType, null);

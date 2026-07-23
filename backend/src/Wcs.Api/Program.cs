@@ -169,6 +169,15 @@ builder.Services.AddSingleton<IHostedService>(sp =>
 // scoped WcsDbContext는 IServiceScopeFactory(싱글톤)로 스코프 생성해 취득(확정3 — captive 회피).
 builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
 
+// ── 인덕션 기반 2층 제어 (S-TWO-FLOOR-CONTROL A) — 소터별 pending-floor 큐 + 관측 루프 ──
+// 큐(상태): IF-05가 목표 층 F를 소터별 FIFO에 enqueue. 관측 루프(트리거): TgtFloor==0 관측 시
+//   큐 머리 F를 DepositDecider(순수) 게이트로 소터별 단일 쓰기 큐(SetTgtFloor)에 기입, CurFloor==F
+//   도착 시 pop(폐루프). 절대규칙 #1(단일 쓰기 큐)·#3(WCS 클리어 금지) 준수.
+// 하스티드 등록은 람다(ImplementationType=null) — 테스트 팩토리의 "null-hosted 제거" 패턴과 정합.
+builder.Services.AddSingleton<SorterPendingFloorQueues>();
+builder.Services.AddSingleton<SorterFloorReturnService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SorterFloorReturnService>());
+
 // ── IDestinationControlService — B2C 운영자 런타임 PAUSED/RESUMED 전이 (S-F3a) ──
 // OpsController(/api/ops/destinations/{id}/pause|resume)가 소비. DB Status 전이 + destination_event
 // (operatorId) + CHUTE 인메모리 반영(ChuteCapacityService)을 한 단위로 수행. PLC 쓰기 없음(Q3 LOCK).

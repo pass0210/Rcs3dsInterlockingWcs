@@ -23,6 +23,7 @@ namespace Wcs.Tests;
 //     (d) 서로 다른 버스(엔드포인트 2개) 병렬 ONLINE·Success(멀티 포트 회귀 0).
 //     (e) 절대규칙 #1 — 두 슬레이브에 인터리브 쓰기, D4 RMW 비트 보존·C 영역 교차 오염 0.
 // ════════════════════════════════════════════════════════════════════════════
+[Collection("RealSimSerial")]
 public sealed class MultiSorterSameBusTests : IAsyncDisposable
 {
     private readonly ITestOutputHelper _out;

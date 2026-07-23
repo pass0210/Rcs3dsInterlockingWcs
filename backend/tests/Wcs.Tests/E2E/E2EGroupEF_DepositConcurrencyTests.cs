@@ -20,6 +20,7 @@ namespace Wcs.Tests.E2E;
 //   ⚠ E6(콜백 throw 셀 누수)은 정상 경로 누수 0만 단언 + 재현 곤란 → finding(M5 이연).
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class E2EGroupEF_DepositConcurrencyTests
 {
     private readonly ITestOutputHelper _out;
@@ -448,16 +449,17 @@ public class E2EGroupEF_DepositConcurrencyTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // F6: push 전이 동시 관찰 → 전이당 1건. GT: FakeChuteStateServer.CountFor 전이당 정확히 1(16스레드 동시).
-    //   소터 ready 전이(미정렬→정렬)를 운영층 정렬로 유발하고, 동시 관찰에도 전이당 1건 멱등.
-    //   (기존 VS9a·PUSH4 패턴 — 실 Sim 정렬 전이로 재현.)
+    // F6: push 전이 관찰 → 전이당 1건(폭주 0). GT: FakeChuteStateServer.CountFor 전이당 정확히 1.
+    //   인덕션 기반 2층 제어(2026-07-21): ready는 CurFloor 기준(online·Ready=1)이므로 "미정렬=not ready"가
+    //   폐지됐다. 운영상태 전이는 Ready 비트(분류/이동 = busy)로 발생한다 → Sim.SetReady로 유발.
+    //   관찰 주기 다수에도 전이당 1건 멱등(폭주 0).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task F6_PushTransition_ConcurrentObserve_ExactlyOnePerTransition()
     {
-        // 미정렬(층1)로 시작 → 부트스트랩 push ready=false. 그 후 정렬 유발 → ready=true 전이 1건.
+        // online·Ready=1(층2) → 부트스트랩 ready=true. 그 후 Ready 1→0 전이(busy)로 ready=false 1건.
         var rcs = await FakeChuteStateServer.StartAsync();
-        var factory = new E2EWebApplicationFactory(rcsBaseUrl: rcs.BaseUrl, initialCurFloor: 1);
+        var factory = new E2EWebApplicationFactory(rcsBaseUrl: rcs.BaseUrl, initialCurFloor: 2);
         await factory.StartSimsAsync();
         await using var _f = factory;
         await using var _r = rcs;
@@ -466,25 +468,22 @@ public class E2EGroupEF_DepositConcurrencyTests
 
         int sorterChute = factory.PrimarySorter.ChuteNo;
         long destId = factory.PrimarySorter.DestinationId;
-        using var client = factory.CreateClient();
 
-        // 부트스트랩: 미정렬 소터 → ready=false 1건 수신·안정.
-        await E2EWait.UntilAsync(() => rcs.CountFor(sorterChute) >= 1, 8000, "부트스트랩 소터 push");
-        await E2EWait.UntilExactAsync(() => rcs.CountFor(sorterChute), rcs.CountFor(sorterChute), stableCount: 6, timeoutMs: 4000, "부트스트랩 안정");
+        // 부트스트랩: online·Ready=1 소터 → ready=true 정착.
+        await E2EWait.UntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 8000, "부트스트랩 소터 ready=true");
         int baseline = rcs.CountFor(sorterChute);
-        Assert.False(rcs.LastFor(sorterChute)!.Ready, "미정렬 → ready=false");
+        await E2EWait.UntilExactAsync(() => rcs.CountFor(sorterChute), baseline, stableCount: 6, timeoutMs: 4000, "부트스트랩 안정");
 
-        // 정렬 유발: IF-05 → IF-09(도착) → 운영층 정렬(CurFloor 1→2) → ready=true 전이.
-        await MultiAgvDriver.RunOneAsync(client,
-            new AgvJob(25801, 1, "TEST-BARCODE-3", sorterChute, DoDeposit: false));
-        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CurFloor: 2, Ready: true }, 5000, "운영층 정렬");
+        // Ready 1→0 전이(분류/이동 시작 = busy) 유발 → ready=false 전이.
+        factory.PrimarySorter.Sim.SetReady(false);
+        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { Online: true, Ready: false }, 5000, "Ready 1→0");
 
-        // 정렬 후 ready=true 전이 정확히 1건(관찰 주기 다수에도 폭주 0 — 전이당 1건 멱등).
-        await E2EWait.UntilAsync(() => rcs.CountFor(sorterChute) >= baseline + 1, 5000, "ready=true 전이 push");
+        // 전이 정확히 1건(관찰 주기 다수에도 폭주 0 — 전이당 1건 멱등).
+        await E2EWait.UntilAsync(() => rcs.CountFor(sorterChute) >= baseline + 1, 5000, "ready=false 전이 push");
         await E2EWait.UntilExactAsync(() => rcs.CountFor(sorterChute), baseline + 1, stableCount: 8, timeoutMs: 4000,
-            "정렬 전이 정확히 1건(폭주 0)");
-        Assert.True(rcs.LastFor(sorterChute)!.Ready, "정렬 완료 → ready=true");
-        _out.WriteLine($"[F6] 소터 정렬 전이 → push 정확히 1건(부트{baseline}+전이1=총 {rcs.CountFor(sorterChute)}건)");
+            "운영상태 전이 정확히 1건(폭주 0)");
+        Assert.False(rcs.LastFor(sorterChute)!.Ready, "busy(Ready==0) → ready=false");
+        _out.WriteLine($"[F6] 소터 Ready 전이 → push 정확히 1건(부트{baseline}+전이1=총 {rcs.CountFor(sorterChute)}건)");
     }
 
     // ════════════════════════════════════════════════════════════════════════
