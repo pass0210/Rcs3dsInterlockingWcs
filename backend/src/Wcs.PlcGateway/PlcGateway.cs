@@ -278,7 +278,14 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
 
         if (_cts is not null)
-            await _cts.CancelAsync().ConfigureAwait(false);
+        {
+            // teardown 경쟁 방어: 종료 순서(호스트 dispose·형제 정리)에 따라 _cts가 이미 dispose된 뒤
+            // CancelAsync가 호출되면 ObjectDisposedException이 폴 스레드 밖으로 새어 testhost/서비스를
+            // 종료시킬 수 있다. SorterFloorReturnService·DestinationStatusPusher와 동일 패턴으로 흡수한다
+            // (쓰기 큐 경로·취소 의미 불변 — 취소 자체는 어차피 이미 dispose로 종결됨).
+            try { await _cts.CancelAsync().ConfigureAwait(false); }
+            catch (ObjectDisposedException) { /* 이미 dispose됨(teardown 경쟁) */ }
+        }
 
         foreach (var t in new[] { _pollTask, _writeTask }.Where(t => t is not null))
         {

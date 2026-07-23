@@ -60,7 +60,8 @@ public sealed class SorterSimSlot
 public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     private readonly int[]    _extraSorterChuteNos;   // 시드 chuteNo=30 외에 추가할 SORTER_3D chuteNo들
-    private readonly string?  _rcsBaseUrl;            // 가짜 RCS base URL(발신 수신). null이면 발신 비활성(DORMANT).
+    private readonly string?  _rcsBaseUrl;            // 가짜 RCS base URL(레거시 단일 호스트). null이면 발신 비활성(DORMANT).
+    private readonly IReadOnlyDictionary<int, string>? _floorHosts;  // S-TWO-FLOOR-CONTROL B — 층→호스트 맵(제공 시 층별 라우팅).
     private readonly int      _initialCurFloor;       // Sim 초기 CurFloor(2=즉시 정렬 / 1=미정렬)
     private readonly int      _rFlagTimeoutMs;
     private readonly int      _sorterObserveIntervalMs;
@@ -114,9 +115,11 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         bool      inducePollIntervalMismatch = false,
         bool      induceTimeoutMismatch    = false,
         bool      injectTimeoutConnection  = false,
-        IReadOnlyDictionary<int, int>? inductionFloorMap = null)
+        IReadOnlyDictionary<int, int>? inductionFloorMap = null,
+        IReadOnlyDictionary<int, string>? floorHosts = null)
     {
         _rcsBaseUrl                 = rcsBaseUrl;
+        _floorHosts                 = floorHosts;
         _extraSorterChuteNos        = extraSorterChuteNos ?? [];
         _initialCurFloor            = initialCurFloor;
         _rFlagTimeoutMs             = rFlagTimeoutMs;
@@ -276,10 +279,16 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                     dict[$"Sorters:{i}:ReadTimeoutMs"] = "2000";
             }
 
-            // ChuteStatePush(확정 와이어 UpdateChuteState) — 가짜 RCS로 결선(발신 활성). null이면 DORMANT.
-            if (_rcsBaseUrl is not null)
+            // ChuteStatePush(확정 와이어 UpdateChuteState) — 가짜 RCS로 결선(발신 활성). 아무것도 없으면 DORMANT.
+            //   S-TWO-FLOOR-CONTROL B: floorHosts 제공 시 층→호스트 맵으로(층별 라우팅). 아니면 레거시 BaseUrl.
+            if (_floorHosts is not null || _rcsBaseUrl is not null)
             {
-                dict["Wcs:ChuteStatePush:BaseUrl"]                 = _rcsBaseUrl;
+                if (_floorHosts is not null)
+                    foreach (var (floor, host) in _floorHosts)
+                        dict[$"Wcs:ChuteStatePush:FloorHosts:{floor}"] = host;
+                else
+                    dict["Wcs:ChuteStatePush:BaseUrl"] = _rcsBaseUrl;
+
                 dict["Wcs:ChuteStatePush:RetryCount"]              = "3";
                 dict["Wcs:ChuteStatePush:RetryBaseDelayMs"]        = "30";
                 dict["Wcs:ChuteStatePush:RetryMaxDelayMs"]         = "120";

@@ -137,7 +137,8 @@ public sealed class B2cFacilityService : IB2cFacilityService
             if (destType == DestType.CHUTE)
             {
                 _chuteCapacity.EnsureChuteRegistered(dest.Id, workFull, isActive: true, isPaused: false);
-                _pusher.RegisterDestination(dest.Id, dest.ChuteNo, DestType.CHUTE);
+                // floor 전달 — 층별 IF-08 push 라우팅 키(신설 슈트가 층을 가지면 그 층 호스트로).
+                _pusher.RegisterDestination(dest.Id, dest.ChuteNo, DestType.CHUTE, dest.Floor);
             }
             // SORTER_3D: 폴링/핸드셰이크는 기동 시 appsettings Sorters[] ∩ DB 로 구성 →
             //   런타임 신설 소터는 **재기동 + appsettings 항목** 후에야 폴링 시작(DB 레코드 수준까지만 즉시 반영).
