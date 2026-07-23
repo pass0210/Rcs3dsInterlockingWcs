@@ -406,3 +406,237 @@ BusKeyOf가 transport 접두(RTU|/TCP|)로 충돌 방지.
   Open이 버스 전체 스톨. TCP=테스트라 미노출이나 RTU 현장 결선 시 connect-timeout 필요. config 배선이 RTU
   생성자에 닿았으니 추적.
 - **[이월]** PlcPollingHostedAdapter dead code 정리 / testhost teardown 저빈도 flake 추적.
+
+---
+
+# EVALUATION — S-TWO-FLOOR-CONTROL 서브 스프린트 A (인덕션 기반 2층 제어) · 2026-07-22 (Evaluator, single / functional)
+
+브랜치 `feat/two-floor-control-a` · HEAD `7525e6f` · 변경은 전부 **working tree**(미커밋). Generator 요약·sprint-log
+주장 불신 — git ground truth + 코드 직독 + fresh 빌드/테스트 자체 실행으로 검증. sprint-log `## IMPLEMENTATION
+COMPLETE — S-TWO-FLOOR-CONTROL 서브 스프린트 A`(L4105) 마커 존재 확인(그 위 멀티소터 마커와 구별).
+
+## 판정: **FAIL** — 유일 블로커 = 완료조건 "dotnet test 전체 GREEN(≥5회 반복 안정 — flake 없음)" 미충족.
+
+절대규칙·아키텍처·시나리오·스코프는 전부 PASS(아래 상세). **단 전체 스위트 5회 반복에서 1회 flake** → 완료조건이
+명시적으로 요구하는 "flake 없음"을 못 넘어 FAIL. flake는 결정적 회귀가 아니라 **병렬-부하 표면화 타이밍 flake**이며,
+Generator가 이번 스프린트에서 도입한 flake-fix(RealSimSerialCollection)가 **불완전**한 것이 원인.
+
+### 빌드 (PASS) — fresh evidence
+- `dotnet build backend/Wcs.sln` → **오류 0 · 경고 10**(전부 선재 NU1903 SQLitePCLRaw CVE — base develop 부채, NEW 0).
+
+### 전체 테스트 5회 반복 (FAIL — 1/5 flake)
+`dotnet test backend/Wcs.sln --no-build`, 매 run 전 testhost/Sim3ds kill. raw 요약:
+- run 1: **실패! 실패 1, 통과 394, 전체 395** — `SorterPushOperationalTests.VS9a_Sorter_OperationalTransition_ConcurrentObserve_ExactlyOncePush [FAIL]`
+  · 오류: `WaitUntilExact 타임아웃(5000ms): 동시 16관찰에도 운영상태 전이당 정확히 1건(중복 0) (현재=5, 기대=3)`
+- run 2: 통과! 395/395 · run 3: 통과! 395/395 · run 4: 통과! 395/395 · run 5: 통과! 395/395
+- **flake율 1/5.** (Generator 주장 "395/395 · 19연속 GREEN"은 내 머신에서 재현 안 됨.)
+
+### flake 귀속 (격리 재실행 — 결정적 vs 병렬부하 구분)
+- `SorterPushOperationalTests` 단독 필터 **6/6 GREEN(각 8/8, ~4s)** — 격리에선 완전 안정.
+- 결론: **결정적 버그 아님. 병렬-부하 표면화 타이밍 flake**(교훈 e2e-parallel-load-surfaces-integration-flakes /
+  s9-flake-under-e2e-load 클래스와 정확히 일치). VS9a는 `DestinationStatusPusher` 주기 관찰 타이머 하에서 **정확
+  push 카운트**(`baseline+1`)를 단언하는데, 동시에 병렬 실행되는 무거운 실-Sim E2E 클래스들의 CPU 경합 지터로
+  스냅샷-read 레이스가 나 push 카운트가 초과(현재=5)됨.
+
+### 근본 원인 = 이번 스프린트 flake-fix의 불완전성 (블로커의 소유권이 이 스프린트에 있음)
+- 신규 `backend/tests/Wcs.Tests/RealSimSerialCollection.cs`(`[CollectionDefinition(DisableParallelization=true)]`)로
+  무거운 실-Sim 클래스 15개에 `[Collection("RealSimSerial")]`를 붙여 **그들끼리는** 직렬화했으나,
+  **push-결정성 테스트군은 그 컬렉션에서 제외**됨:
+  · `backend/tests/Wcs.Tests/SorterPushOperationalTests.cs:39` — 클래스에 `[Collection]` 애트리뷰트 **없음**(병렬 풀 잔류).
+    실패 테스트 = `SorterPushOperationalTests.cs:385` VS9a, 문제 단언 = `SorterPushOperationalTests.cs:417-419`
+    (`WaitUntilExactAsync(..., baseline + 1, stableCount:8)` + `Assert.Equal(baseline+1, ...)`).
+  · `backend/tests/Wcs.Tests/RcsPushTests.cs` — 동일 push-결정성 패밀리인데 역시 `[Collection("RealSimSerial")]` 없음(같은 위험군).
+- 즉 무거운 실-Sim 테스트는 서로 직렬화됐지만, **여전히 비-컬렉션 Fake 테스트(push-결정성군)와는 병렬로 경합**한다.
+  이번 스프린트가 실-Sim E2E(E2EGroupK 2개 신규 포함)를 추가해 총 병렬 CPU 부하를 늘렸고, 그 경합이 push-결정성
+  테스트에서 flake로 표면화된다. → 스프린트의 flake-fix가 실제 flake 소스를 못 덮음(불완전).
+
+### 요구 조치 (택1 — HOW는 Generator 결정)
+- (A·권장·기존 패턴과 정합) `SorterPushOperationalTests.cs`와 `RcsPushTests.cs` 클래스에
+  `[Collection("RealSimSerial")]`를 부여해 무거운 실-Sim 테스트와 **동시 실행되지 않게** 직렬화한다
+  (이번 스프린트가 이미 채택한 mitigation을 push-결정성군까지 완결).
+- (B) VS9a의 정확-카운트 대기를 `DestinationStatusPusher` 주기 타이머(SorterObserveIntervalMs) 하에서도 견고하도록
+  재설계. 단 "전이당 정확히 1건(중복 0)"이 이 테스트의 목적이므로 카운트를 느슨히(`>=`) 하면 검증 의미가 사라짐 →
+  (A)가 더 깨끗.
+- 조치 후 **전체 스위트 ≥5회 재실행해 flake 0** 확인(격리 GREEN만으로는 불충분 — 부하 하 전체 실행이 판정 기준).
+
+---
+
+## 이하 항목은 전부 PASS (블로커 해소 시 재검증 불요 — flake만 고치면 됨)
+
+### 절대규칙 (코드 직독 — 테스트 통과로 추론 아님)
+- **#8 Wcs.Core 의존성 0 — PASS.** `Wcs.Core.csproj`에 PackageReference/ProjectReference **0**(SDK 기본만).
+  `InductionFloorMap.DeriveFloor`(맵 호출자 주입·미매핑=null)·`DepositDecider.Decide`(순수 게이트) 둘 다 I/O·DI·EF 유입 0.
+- **#1 TgtFloor 기입은 소터별 단일 쓰기 큐로만 — PASS.** grep 전수: TgtFloor 쓰기 경로는
+  `SorterFloorReturnService.cs:207 bundle.EnqueueSetTgtFloorAsync` → `SorterGatewayRegistry.cs:57-58
+  _polling.EnqueueAsync(new PlcWrite.SetTgtFloor(...))` → 컨슈머 `PlcGateway.cs:582-599`가 유일 실 Modbus write.
+  API 핸들러/서비스의 직접 Modbus write **0**(OpsController도 동일 큐 경유). 관측 루프는 fire-and-forget이나
+  `.ContinueWith(IsFaulted 로깅)`으로 예외 미삼킴.
+- **#2 핑퐁 차단 + 컨슈머 fresh-read 재확인 — PASS.** DepositDecider가 `TgtFloor!=0`이면 write=null(코드 L51/59).
+  컨슈머 `PlcGateway.cs:588-595`가 쓰기 직전 D6를 fresh FC03로 재읽어 `!=0`이면 스킵(스냅샷 stale 무관 결정적 차단).
+- **#3 WCS는 TgtFloor 클리어 안 함 — PASS.** 전 코드에서 D6에 0을 쓰는 경로 **0**(grep 확인). 컨슈머는 floor(1/2)만
+  기입. K1/K2 E2E가 `Assert.DoesNotContain(Timeline, D6 "→0")`로 실증(E2EGroupK L66·L150).
+- **SorterFloorReturnService 동시성/격리/teardown — PASS.**
+  · 큐 = `ConcurrentQueue`(다생산자 IF-05 enqueue) + 관측 루프 단일 소비자(TryPeek→TryPop 사이 타 소비자 없음).
+    단위 테스트 `ConcurrentEnqueue_SingleConsumer_NoLoss`(8×250=2000 손실 0) GREEN.
+  · 관측 루프 예외 격리: 소터별 `try{ObserveSorter}catch{log}`(L154-161) + 루프 레벨 catch(L164-169), OCE는 rethrow/break.
+    한 소터 예외가 형제·루프를 안 죽임.
+  · `StopAsync` 결정적: `Interlocked.Exchange(_stopped)` 멱등 + `CancelAsync`(ObjectDisposed catch) + loopTask await
+    (OCE/Exception 흡수) — teardown 채널 경쟁(교훈 testhost-teardown) 방어.
+  · 무변화 폴 write 폭주: 큐 빔→즉시 return(L179), OFFLINE→skip(L185), CurFloor==f→pop만(L189). 스냅샷-lag 구간의
+    중복 SetTgtFloor enqueue는 컨슈머 fresh-read 게이트에서 no-op으로 흡수(실 PLC write는 1회) — 폭주 아님(bounded·멱등).
+
+### 계약 시나리오 (자동 테스트 + 실 Sim3ds 크로스레이어)
+- IF-05 inductionNo→F 파생 + 소터 큐 enqueue(F=1·F=2) — E2EGroupK K1 Theory(초기2→F1, 초기1→F2) GREEN. RcsController.cs:76·128 결선.
+- 미매핑 inductionNo → NG + `IF05_NO_FLOOR` WARN(RcsController.cs:100-108), 소터로 안 보냄(DbRepositories.cs blockReason "NO_FLOOR"→RecordDenied→NG,
+  enqueue는 result=="OK" 게이트라 미도달). 단위 `DeriveFloor_UnmappedInduction_ReturnsNull` GREEN. (조용한 통과·기본층 폴백 아님.)
+- IF-09 → 도착 기록만, 정렬 트리거 0 — `AlignSorterToOperationalFloor` 제거. 재작성된 ApiIntegration `If09_..._NoAlignmentTrigger_TgtFloorUnchanged`
+  (500ms TgtFloor=0 유지 단언) GREEN. K2가 정렬을 IF-05+관측 루프로 구동해 이중기입 경합 없음 실증.
+- TgtFloor==0 관측 → 큐 머리 F 기입 → Sim3ds CurFloor=F 복귀 — K1 폐루프(HTTP↔큐↔Modbus↔Sim↔DB, operation_log SET_TGTFLOOR floor=F 영속) GREEN, 1층·2층 둘 다.
+- FIFO 순서(1,2,1) 한 번에 하나씩 + pop-on-arrival(CurFloor==F) 폐루프 + 큐머리==CurFloor 즉시소비 — K2 GREEN(마지막 CurFloor=1, D6 기입에 1·2 모두 등장).
+- FULL/PAUSED/OFFLINE enqueue·기입 안 함 — IF-05 availability가 NG로 차단(enqueue 미도달), 관측 루프는 DepositDecider hold/offline 게이트. DepositDecider F=1 Hold/Offline 미기입 테스트 GREEN.
+- 위생 회귀(pId·barcode·qty 상한 400) 보존.
+
+### 스코프 (B/C/D 미침범) — PASS
+- `git diff --stat develop` 상 마이그레이션 프로젝트(Wcs.Migrations.SqlServer/Sqlite) **변경 0**, untracked 마이그레이션 파일 0.
+- IF-08 층별 호스트 라우팅/dual-host(B): `ChuteStatePushOptions`는 단일 `BaseUrl` 그대로(불변). R-clear@Ready/3시각/sorter_command(C)·파킹존(D) 무접촉.
+
+### DepositDeciderTests / 테스트 변경 정당성 (gutting 아님)
+- DepositDeciderTests: 기존 Row1-7·C1-3(OperFloor=2) 유지 + FloorParam_F1_* 6종 추가(+61 라인, 가산적).
+- VS-2 "misalign" InlineData 제거는 정당: ready가 CurFloor 기준이 되어 "미정렬(CurFloor≠운영층)"은 더 이상 not-ready 케이스가 아님(그 층에서 ready). Ready==0(busy) 케이스는 유지.
+- E2EInfrastructure 기본 inductionMap `{1:2,2:2}`로 기존 E2E 동작(induction=1→층2) 보존, K 테스트만 커스텀 맵 주입. 정당.
+
+### Minor (비블로킹 — 다음 스프린트 전 todo 등재 권고)
+- "큐 머리 F가 이미 현재 CurFloor면 즉시 pop"(확정 결정 #2 스톨방지 엣지) 직접 단언 단위 테스트 부재 — 로직은 SorterFloorReturnService.cs:189 존재하고 K2 흐름에서 간접 커버되나 전용 케이스(induction이 현재층으로 매핑) 추가 권고.
+
+**결론: 설계·절대규칙·시나리오·스코프 견고. 유일 블로커 = 전체 스위트 1/5 flake(VS9a, 병렬부하 표면화) — 이번 스프린트
+flake-fix(RealSimSerialCollection)가 push-결정성 테스트군을 누락한 불완전성. 그 2개 클래스 직렬화(또는 VS9a 하드닝) 후
+전체 ≥5회 flake 0 재확인 필요. → FAIL.**
+
+---
+
+# FIX ITER 1 RE-VERIFY — S-TWO-FLOOR-CONTROL 서브 스프린트 A · 2026-07-22 (Evaluator, focused delta)
+
+Generator가 권장안 A 적용. **flake 블로커 델타만** 재검증(전 스윕 재수행 아님 — 1차에서 flake 외 전부 PASS였으므로).
+
+## 판정: **APPROVED** — flake 블로커 해소(6/6 GREEN), 프로덕션 무변경, VS9a 단언 미완화.
+
+### 1. fix 델타 (코드 직독)
+- `SorterPushOperationalTests.cs:43` + `RcsPushTests.cs:208`에 `[Collection("RealSimSerial")]` 클래스 부여
+  (설명 주석 동반). push-결정성 테스트를 무거운 실-Sim 테스트와 **동일 직렬 컬렉션**에 편입 → 병렬 CPU 경합 제거.
+- **프로덕션 무변경**: `git diff --stat develop -- backend/src/` 8파일 라인수 1차 리뷰와 **byte-identical**
+  (RcsController 122·WcsOptions 54·Program 9·DbRepositories 8·Repositories 3·DestinationStatusService 15·
+  appsettings 8·DepositDecider 35). 마이그레이션 무접촉. HEAD 불변(7525e6f).
+- **VS9a 단언 미완화**: `SorterPushOperationalTests.cs:422-424` 여전히 strict exact-count
+  (`WaitUntilExactAsync(..., baseline+1, stableCount:8)` + `Assert.Equal(baseline+1, ...)`).
+  직렬화로 경합을 제거해 strict 단언이 통과하게 한 것 — 카운트를 느슨히 한 것이 **아님**(gutting 아님).
+
+### 2. flake 재검증 (fresh evidence — 6회 반복, 클린 환경)
+- 재실행 전 고아 dotnet/testhost/vstest/Sim3ds 전수 kill(1차 반복 시 mid-run testhost kill이 dotnet 드라이버를
+  고아화해 17개 누적 → CPU 기아로 1런 hang된 것을 격리·해소. **코드 결함 아님 — 평가 하네스 아티팩트**).
+- `dotnet test backend/Wcs.sln --no-build` **6회 순차**(각 run 전 testhost/Sim kill, per-run 160s timeout guard):
+  · RUN1 통과 395/395 (65s) · RUN2 통과 395/395 (66s) · RUN3 통과 395/395 (68s)
+  · RUN4 통과 395/395 (67s) · RUN5 통과 395/395 (67s) · RUN6 통과 395/395 (66s)
+  - **6/6 GREEN · rc=0 · FAIL 블록 0 · flake 0 · hang 0.** 카운트 불변(395=이전 375+신규 20).
+- 격리 재확인(1차): SorterPushOperationalTests 단독 6/6 GREEN. → 직렬 편입 후 부하 하 전체 6/6도 안정 = flake 근본 제거.
+- 빌드: 재컴파일(attribute 반영) 오류 0.
+
+### 결론
+1차 FAIL의 유일 블로커(전체 스위트 flake)가 해소됐고, fix는 테스트 attribute 전용(프로덕션·판정로직·단언강도 불변).
+1차에서 PASS 판정한 절대규칙(#1 단일 쓰기 큐·#2 fresh-read 핑퐁·#3 클리어 0·#8 Core 순수)·시나리오(K1/K2 폐루프·
+미매핑 fail-loud·IF-09 정렬 트리거 제거·ready=CurFloor)·스코프(마이그레이션/IF-08/파킹존 무접촉)는 프로덕션
+무변경이므로 유효. → **APPROVED.**
+
+APPROVED
+
+---
+
+# FIX ITER 2 RE-VERIFY — S-TWO-FLOOR-CONTROL 서브 스프린트 A · 2026-07-23 (Evaluator, focused delta)
+
+Step 4.5 코드리뷰 발견 **I-1**(도착-pop의 [A,A,B] 조기 pop → 2번째 동일층 AGV 고립) fix. 로직 변경이므로
+flake뿐 아니라 I-1 정합성·절대규칙·회귀·스코프까지 직독+실행 재검증. HEAD 불변(7525e6f).
+
+## 판정: **APPROVED** — I-1 정합·회귀 0·절대규칙 불변·flake 0. ⚠️ **단, pop 트리거가 사용자 확정 결정 #2에서 변경됨 → 사용자 인지 권고**(아래 NOTE).
+
+### 1. I-1 fix 코드 직독 (SorterFloorReturnService.cs — 유일 프로덕션 변경)
+- pop 트리거를 **도착(CurFloor==F) → 분류 사이클(Ready 1→0→1) 단위**로 변경. 소터별 `ObserveState`(PrevReady·
+  CycleStartFloor) 추가(관측 루프 단일 스레드 전용 — 락 불요, 실제 단일 스레드 순회 확인).
+- 로직(L216-233): Ready 1→0에 `CycleStartFloor=CurFloor` 기록 → Ready 0→1에 **`CycleStartFloor==CurFloor`(제자리
+  분류, 이동 아님) && `head==CurFloor`**일 때만 머리 1건 pop. 정렬 이동에 의한 0→1은 pop 안 함(피스 소비 아님).
+- 구 "머리 F==CurFloor 즉시 소비" 엣지 **제거**([A,A,B] 조기 pop 버그 근원). 기입은 **유휴(Ready=1)·CurFloor!=head
+  에서만**(L236) — 분류 중(Ready=0) 선기입 폐지(분류+이동 융합으로 사이클 감지 깨짐 방지).
+- **[A,A,B]=큐[1,1,2]·소터 1층 트레이스**(직접 검증): 큐 유지 → A1 분류(Ready 1→0→1 제자리) pop 1→[1,2]·소터 1층
+  유지 → A2 분류 pop→[2]·유휴 시 D6=2 기입→2층 이동(이 0→1은 CycleStartFloor(1)≠CurFloor(2)라 pop 안 함) →
+  B 분류 pop→[]. **2번째 A-AGV 미고립·중복/누락 pop 0.** stall: 각 enqueue엔 대응 IF-10 분류가 오므로 정상흐름 무-stall
+  (미투하 abandonment는 파킹존 D 스코프 — 명시).
+
+### 2. K3 신규 테스트 (강함·non-tautological — 코드+실행)
+`K3_MultiAgv_SameFloorConsecutive_ThenOther_HoldsFloorUntilBothClassified`(실 Sim3ds, `[Collection("RealSimSerial")]`):
+- 큐 [1,1,2] enqueue 후 `UntilExactAsync(Count==3, stableCount:6)` — **조기 pop 0 실증**(구 즉시-pop이면 즉시 [2]로 드레인 → RED).
+- A1 분류 COMPLETED≥1 → `Count==2`([1,2], 1건만 pop) + `CurFloor==1 stableCount:6`(B 이동 안 함) + `D6→2 기입 0`.
+- A2 분류 COMPLETED≥2 → CurFloor==2 이동. B 분류 → 큐 빔. 절대규칙 #3 `DoesNotContain D6→0`.
+- 5회 반복 전부 GREEN → 사이클 감지(Ready 전이 샘플링, 관측 30ms ≪ 분류 Ready=0 창)가 누락/중복 없이 안정.
+
+### 3. 회귀 (직독 + 실행)
+- K1(1·2층 폐루프)·K2(FIFO 1→2→1) 5회 전부 GREEN — idle-only 기입이 폐루프를 깨지 않음(정렬 이동은 유휴 시 기입 후
+  이동, 도착 후 분류 시 pop).
+- OpsController 재작성 **정당(마스킹 아님)**: 구 `IF09_AutoAlign_...EvenWhenReadyZero`(Ready==0 선기입) → 신
+  `QueueDrivenAlign_WritesTgtFloor_WhenIdle`(Ready=1·CurFloor 2≠head 1 → IF-05 enqueue F=1 → 유휴 기입 D6=1).
+  실 Sim D6=1 레지스터 값 + PLC_WRITE/SET_TGTFLOOR operation_log(컨슈머 EmitWrite = 컨트롤러 직접 Modbus 부재 증거)로
+  **실 쓰기 발생을 단언**(약화 아님). 새 idle-only 모델을 정확히 반영.
+
+### 4. 절대규칙 재확인 (쓰기 타이밍 변경에도 불변)
+- **#1**: 기입 여전히 `bundle.EnqueueSetTgtFloorAsync`(L251) 단일 쓰기 큐만. 직접 Modbus 0.
+- **#2**: DepositDecider(순수) `git diff` **byte-identical**(변경 0) — TgtFloor==0 게이트 불변. 컨슈머 fresh-read(PlcGateway.cs:588-595) 불변.
+  idle-only 기입은 오히려 더 보수적(Ready=0 선기입 제거).
+- **#3**: D6=0 쓰기 경로 0 유지 — K1/K2/K3 `DoesNotContain D6→0` 실증.
+- **#8**: DepositDecider·층 파생 순수 함수 불변(diff 0). pop 로직은 서비스(트리거)에만.
+
+### 5. 스코프 (B/C/D·마이그레이션 무접촉)
+- 프로덕션 변경 = `SorterFloorReturnService.cs`(untracked) **단 1파일**. 8개 tracked 프로덕션 파일 diff-stat이 1차 리뷰와
+  **byte-identical**(RcsController 122·WcsOptions 54·Program 9·DbRepositories 8·Repositories 3·DestinationStatusService 15·
+  appsettings 8·DepositDecider 35) — 이번 iter는 이들 무접촉. 신규 마이그레이션 파일 0. IF-08 호스트·파킹존 무접촉.
+- I-3(인메모리 큐 재시작 유실) = Sub-Sprint C 이연·SPEC §2-C 문서화만(코드 0). I-2/M-2 = Minor 등재만.
+
+### 6. flake (fresh evidence — 5회, 클린 환경)
+- 고아 dotnet/testhost/vstest/Sim 전수 kill → 재빌드 0 error → 각 run 전 testhost/Sim kill + per-run 170s timeout guard,
+  각 run 자연 완료(mid-run kill 없음 → 드라이버 고아화 0).
+- `dotnet test backend/Wcs.sln --no-build` **5회**: RUN1 396/396(69s) · RUN2 396/396(67s) · RUN3 396/396(67s) ·
+  RUN4 396/396(65s) · RUN5 396/396(63s). **5/5 GREEN · rc=0 · FAIL 블록 0 · flake 0 · hang 0.** (396 = iter-1 395 + K3.)
+
+## ⚠️ NOTE (사용자 인지 권고 — 블로커 아님)
+pop 트리거가 **사용자 확정 결정 #2(2026-07-22)**의 문언("큐 머리 pop = CurFloor==F 도착 확인 시 … 머리 F==현재
+CurFloor면 즉시 소비")에서 **분류 사이클(Ready 1→0→1) 단위 pop**으로 변경됐다. 이는 코드리뷰 I-1이 확정 #2의
+즉시-pop 엣지를 [A,A,B] 조기 pop 버그로 판정해 나온 정정이며, 사용자 **의도**(폐루프·한 번에 하나·고립 방지)를 더
+충실히 구현한다(SPEC §2-C가 M-1로 갱신됨). Step 4.5 코드리뷰가 사내 절차로 승인한 설계 정정이나, 사용자-게이트
+결정을 변경한 것이므로 **오케스트레이터가 확정 #2 변경(및 SPEC §2-C 갱신)을 사용자에게 고지**할 것을 권고한다.
+(구현 자체는 정합·검증 완료 — 승인 보류 사유 아님.)
+
+## Minor (비블로킹 — 다음 스프린트 전 todo)
+- 사이클 감지가 관측-루프 **샘플링 기반**(Ready 1→0→1 에지) — Ready=0 창 < 관측 주기면 에지 유실 위험. 현장(150ms·초 단위
+  분류)·테스트(30ms) 5회 안정이나, 극단적으로 빠른 분류/느린 관측에선 이론적 유실 가능. Sub-Sprint C(핸드셰이크 타이밍)에서
+  에지 유실 방어(예: 사이클 진행 플래그) 검토 권고.
+- I-3(인메모리 큐 재시작 유실) Sub-Sprint C 이연 확인 — 재시작 시 미소비 큐 유실(운영 재기동 시 미정렬 소터 잔존 가능).
+
+**결론: I-1(분류사이클 pop) 정합·K3 강함·회귀 0·절대규칙 불변·스코프 tight·5/5 flake 0. → APPROVED.
+단 pop 트리거의 확정 #2 대비 변경은 사용자 고지 권고(NOTE).**
+
+APPROVED
+
+---
+
+## S-TWO-FLOOR-CONTROL A — 코드리뷰(Step 4.5) Minor 이연 (다음 스프린트, 코드 변경 금지)
+
+FIX ITER 2에서 I-1(분류사이클 pop)·M-1(문구 정정)·I-3(재시작 복원 문서화)는 처리. 아래 2건은 Minor로 등재만:
+
+- **[I-2 · 성능·다음 스프린트(B 후보)]** `SorterFloorReturnService.ObserveSorter`가 정렬 기입이 필요한 소터
+  (Ready=1·CurFloor!=머리층·큐 비지 않음)마다 매 관측 주기 `IDestinationStatusService.Compute`(scoped
+  WcsDbContext 스코프 생성 + paused/SorterFull 다중 쿼리)를 호출한다. 정렬 대기 창(짧음)에만 발생하고
+  정상 정렬 완료 후엔 호출 0(CurFloor==F면 조기 return)이라 현 부하는 낮으나, 소터 수·정렬 빈도 증가 시
+  비용. **B에서 dual-host 발신(DestinationStatusPusher도 매 주기 Compute)과 함께 hold 산출 캐싱/공유로
+  정리 후보.** (I-1 재설계로 기입은 유휴 시에만 → Compute 호출은 이전보다 오히려 감소.)
+- **[M-2 · 정리·다음 스프린트]** 일부 E2E 테스트 대기 람다가 `factory.SorterSnapshot(destId)`를 한 조건 안에서
+  2회 이상 읽는다(스냅샷 이중 읽기 — 관측 무해하나 일관성상 1회 캡처 권장). production 아님·테스트 전용.
+
+### 델타 재리뷰(코드리뷰) Minor — 후속 등재
+- [C 스코프] 사이클 감지가 샘플링 기반(Ready=0 창 < ObserveIntervalMs면 에지 유실 → under-pop/stall만, over-pop 불가). C에서 (a) `ObserveIntervalMs << 최소 분류시간` 불변식 문서화 + (b) fail-loud 스톨 감지기(head 불변 && 유휴 && TgtFloor==0 N틱 → WARN) 추가 검토. 현재 유실 시 silent.
+- [문서 sync] SPEC §2-A 표 row4 / §2-C가 "TgtFloor==0 관측 트리거"로 서술돼 있으나 실제 관측 루프는 유휴(Ready=1)에서만 기입. DepositDecider row4(Ready=0) write는 이제 소비처 없음(dead output). SPEC 표에 "관측 루프는 유휴에서만 기입" 반영 권고(동작 이상 아님).
