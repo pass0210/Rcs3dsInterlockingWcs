@@ -12,7 +12,9 @@
 1. **PLC 쓰기는 단일 큐(Channel) 하나로만** 직렬화한다. API 핸들러가 Modbus를 직접 호출하지 않는다.
    D4는 플래그/상태가 한 워드에 있어 비트 수정 시 read-modify-write(RMW)가 필요하고, 동시 쓰기는 경합을 일으킨다.
 2. **TgtFloor(D6)는 `TgtFloor==0`일 때만 쓴다.** 조건: `TgtFloor==0 && (층 다름 || Ready==0)`.
-   진행 중(≠0)엔 절대 덮어쓰지 않는다(핑퐁 차단). FULL/PAUSED/OFFLINE이면 쓰지 않는다.
+   진행 중(≠0)엔 절대 덮어쓰지 않는다(핑퐁 차단). PAUSED/OFFLINE이면 쓰지 않는다.
+   **FULL(만재)은 IF-05 dispatch(수용 판정)에서만 차단**하고, 관측 루프의 물리 정렬 기입(D6)은 막지 않는다
+   (이미 수용 확정된 큐 피스의 고립 방지 — S-TWO-FLOOR-CONTROL B 결정 2026-07-23).
 3. **WCS는 TgtFloor를 절대 클리어하지 않는다.** 클리어는 PLC가 분류 시작(Ready 1→0) 시점에 수행
    (도착 시엔 CurFloor만 기입, TgtFloor 유지 — 도착 즉시 비우면 재기입 왕복 발생).
 4. **Ready(D4.2) 의미**: 1=받을 수 있음(정지·비분류) / 0=분류 중 **또는 이동 중**(둘 다 BUSY).
