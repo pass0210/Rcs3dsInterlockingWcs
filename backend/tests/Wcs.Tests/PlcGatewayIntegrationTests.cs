@@ -14,6 +14,7 @@ namespace Wcs.Tests;
 /// IT-1~IT-5 전부 자동화(수동 1회성 아님).
 /// 결정적 설계: 고정 sleep 없음, 폴링/대기로 동기화, 임의 포트, 서버 기동 완료 후 연결.
 /// </summary>
+[Collection("RealSimSerial")]
 public class PlcGatewayIntegrationTests : IAsyncLifetime
 {
     // ── 공유 인프라 ──────────────────────────────────────────────────────────

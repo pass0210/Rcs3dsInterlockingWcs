@@ -19,6 +19,7 @@ namespace Wcs.Tests.E2E;
 // 고장주입은 실 SimServer(InjectRSeqOverride·InjectRFlagDelayMs·InjectNoResponse·StopAsync).
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class E2EGroupCD_AlignHandshakeTests
 {
     private readonly ITestOutputHelper _out;

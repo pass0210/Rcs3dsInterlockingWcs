@@ -9,11 +9,35 @@ namespace Wcs.Api;
 public sealed record WcsOptions
 {
     /// <summary>
-    /// 3D 소터 운영층(고정 정렬 대상). AGV는 항상 이 층에서 수령하므로
-    /// IF-09 도착 시 WCS가 소터를 이 층으로 정렬한다. 기본 2층.
-    /// 절대규칙 #7: 하드코딩 금지 — 설정에서 읽는다.
+    /// 3D 소터 운영층(레거시 단일 층). 인덕션 기반 2층 제어(2026-07-21)로 대체됐다 — 목표 층 F는
+    /// 이제 <see cref="InductionFloorMap"/>에서 파생하며, 이 값은 더 이상 정렬 트리거에 쓰이지 않는다
+    /// (하위호환·문서 참조용으로 남김). 절대규칙 #7: 하드코딩 금지 — 설정에서 읽는다.
     /// </summary>
     public int OperationalFloor { get; init; } = 2;
+
+    /// <summary>
+    /// 인덕션 번호 → 목표 층(F) 맵 (appsettings "Wcs:InductionFloorMap", 예 {"1":1,"2":1,"3":2}).
+    /// IF-05가 요청 inductionNo로 목표 층 F(1/2)를 파생하는 근거(§2-A·§3·§5-A). 하드코딩 금지(절대규칙 #7).
+    /// 키는 JSON 문자열(설정 바인딩 제약) — <see cref="FloorByInduction"/>가 int 키 맵으로 변환한다.
+    /// 미매핑 inductionNo는 fail-loud(NG 응답 + 경고 로그) — 조용한 통과·기본층 폴백 금지(확정 결정 2026-07-22).
+    /// </summary>
+    public Dictionary<string, int> InductionFloorMap { get; init; } = new();
+
+    /// <summary>
+    /// <see cref="InductionFloorMap"/>(문자열 키)을 int 키 맵으로 변환한 읽기 전용 뷰.
+    /// Wcs.Core.InductionFloorMap.DeriveFloor(순수)에 주입한다. 파싱 불가 키는 건너뛴다(무시).
+    /// </summary>
+    public IReadOnlyDictionary<int, int> FloorByInduction
+    {
+        get
+        {
+            var result = new Dictionary<int, int>(InductionFloorMap.Count);
+            foreach (var (key, floor) in InductionFloorMap)
+                if (int.TryParse(key, out var inductionNo))
+                    result[inductionNo] = floor;
+            return result;
+        }
+    }
 
     /// <summary>
     /// IF-05/IF-10 요청 qty 상한(입력 위생 — S-CLEANUP-FIELD D-4).
@@ -42,6 +66,30 @@ public sealed record WcsOptions
     /// 하드코딩 금지(절대규칙 #7) — appsettings "Wcs:OpsLimits"에서 읽는다.
     /// </summary>
     public OpsWriteLimits OpsLimits { get; init; } = new();
+
+    /// <summary>
+    /// 소터별 pending-floor 큐 관측 루프(SorterFloorReturnService) 타이밍 — 인덕션 기반 2층 제어.
+    /// TgtFloor==0 관측 주기 등. 하드코딩 금지(절대규칙 #7) — appsettings "Wcs:SorterFloorReturn".
+    /// </summary>
+    public SorterFloorReturnOptions SorterFloorReturn { get; init; } = new();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SorterFloorReturnOptions — 소터별 pending-floor 큐 관측 루프 타이밍 (Wcs:SorterFloorReturn).
+//
+// 인덕션 기반 2층 제어(2026-07-21): IF-05가 소터별 큐에 목표 층 F를 enqueue하면, 이 루프가
+//   각 소터 스냅샷의 TgtFloor==0을 이 주기로 관측해 큐 머리 층 F를 게이트 통과 시 기입(SetTgtFloor).
+//   폴 주기와 동급 권장. 하드코딩 금지(절대규칙 #7).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>appsettings.json "Wcs:SorterFloorReturn" 섹션 — 큐 관측 루프 타이밍.</summary>
+public sealed record SorterFloorReturnOptions
+{
+    /// <summary>
+    /// 큐 관측 주기(ms). 각 소터의 TgtFloor==0을 이 주기로 관측해 큐 머리 층 F 기입/pop을 수행한다.
+    /// ≤0이면 최소 1로 클램프. 기본 150ms(폴 주기 동급).
+    /// </summary>
+    public int ObserveIntervalMs { get; init; } = 150;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

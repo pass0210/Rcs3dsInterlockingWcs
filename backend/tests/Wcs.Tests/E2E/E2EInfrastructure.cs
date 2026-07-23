@@ -65,6 +65,10 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     private readonly int      _rFlagTimeoutMs;
     private readonly int      _sorterObserveIntervalMs;
 
+    // 인덕션 기반 2층 제어: inductionNo→floor 맵. 기본은 1→2·2→2(기존 E2E는 induction=1로 층2 정렬 기대).
+    // 폐루프 1↔2 테스트는 커스텀 맵({1:1,2:2})을 주입해 induction 1→층1·2→층2를 구동한다.
+    private readonly IReadOnlyDictionary<int, int> _inductionFloorMap;
+
     // S-MULTISORTER-SHARED-BUS Phase 2 — 공유 버스 모드(한 포트·멀티유닛 Sim 1대에 여러 SORTER_3D를 unitId로 구분).
     private readonly (int ChuteNo, byte UnitId)[] _sharedBusUnits;
     private readonly bool _induceSerialMismatch;       // fail-loud 재현(OQ4): 같은 버스 멤버 BaudRate 불일치.
@@ -109,13 +113,15 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         bool      induceDuplicateUnitId    = false,
         bool      inducePollIntervalMismatch = false,
         bool      induceTimeoutMismatch    = false,
-        bool      injectTimeoutConnection  = false)
+        bool      injectTimeoutConnection  = false,
+        IReadOnlyDictionary<int, int>? inductionFloorMap = null)
     {
         _rcsBaseUrl                 = rcsBaseUrl;
         _extraSorterChuteNos        = extraSorterChuteNos ?? [];
         _initialCurFloor            = initialCurFloor;
         _rFlagTimeoutMs             = rFlagTimeoutMs;
         _sorterObserveIntervalMs    = sorterObserveIntervalMs;
+        _inductionFloorMap          = inductionFloorMap ?? new Dictionary<int, int> { [1] = 2, [2] = 2 };
         _sharedBusUnits             = sharedBusUnits ?? [];
         _induceSerialMismatch       = induceSerialMismatch;
         _induceDuplicateUnitId      = induceDuplicateUnitId;
@@ -227,9 +233,15 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 ["Timing:RFlagPollMs"]    = "20",
                 ["Timing:RFlagTimeoutMs"] = _rFlagTimeoutMs.ToString(),
                 ["Timing:CFlagTimeoutMs"] = "2000",
-                // 운영층 — 2층 고정 정렬(설정 경유, 하드코딩 금지 — 절대규칙 #7)
+                // 운영층 — 레거시 참조값(정렬은 인덕션 파생 큐 구동 — 절대규칙 #7)
                 ["Wcs:OperationalFloor"]  = "2",
+                // 소터 pending-floor 큐 관측 주기(폐루프 트리거) — 폴 주기 동급으로 빠르게.
+                ["Wcs:SorterFloorReturn:ObserveIntervalMs"] = "30",
             };
+
+            // 인덕션 기반 2층 제어: inductionNo→floor 맵 결선(테스트별 커스텀 — 폐루프 1↔2 구동).
+            foreach (var (induction, floorNo) in _inductionFloorMap)
+                dict[$"Wcs:InductionFloorMap:{induction}"] = floorNo.ToString();
 
             // Sorters[] — 실 Sim 포트별 config 항목(production SorterRegistryFactory가 소비).
             // 공유 버스 모드: 여러 슬롯이 같은 Host:Port + 서로 다른 UnitId(같은 TCP 버스 키로 그룹핑).

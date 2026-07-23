@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 using Wcs.Core;
 using Wcs.Data;
 
@@ -97,25 +96,22 @@ public interface IDestinationStatusService
 
 /// <summary>
 /// IDestinationStatusService 구현 — full/ready 산출의 단일 지점.
-/// 운영층(OperationalFloor)은 설정값 주입(하드코딩 금지 — 절대규칙 #7).
+/// 소터 ready는 **CurFloor 기준**(현재 정렬된 층에서만 ready) — 인덕션 기반 2층 제어(2026-07-21).
 /// </summary>
 public sealed class DestinationStatusService : IDestinationStatusService
 {
     private readonly IChuteCapacityService  _capacity;
     private readonly ISorterGatewayRegistry _sorterRegistry;
     private readonly IServiceScopeFactory   _scopeFactory;
-    private readonly int                    _operationalFloor;
 
     public DestinationStatusService(
         IChuteCapacityService    capacity,
         ISorterGatewayRegistry   sorterRegistry,
-        IServiceScopeFactory     scopeFactory,
-        IOptions<WcsOptions>     options)
+        IServiceScopeFactory     scopeFactory)
     {
         _capacity         = capacity;
         _sorterRegistry   = sorterRegistry;
         _scopeFactory     = scopeFactory;
-        _operationalFloor = options.Value.OperationalFloor;
     }
 
     /// <inheritdoc/>
@@ -248,8 +244,11 @@ public sealed class DestinationStatusService : IDestinationStatusService
             return new DestinationReadiness(Ready: false, Full: false, Paused: false, Online: false, DenyReason.Offline);
 
         var snap = bundle.Latest;
-        // DepositDecider(순수)로 정렬·준비 산출 — full/paused와 합성 전 재료.
-        var decision = DepositDecider.Decide(snap, _operationalFloor, WcsHold.None);
+        // DepositDecider(순수)로 준비 산출 — 목표 층 = **현재 CurFloor**(인덕션 기반 2층 제어·§2-A).
+        // "현재 정렬된 층에서만 ready" — 단일 운영층 고정 비교(폐지) 대신 CurFloor를 목표로 주입하면
+        // decision.Ready = online && Ready==1 이 된다(CurFloor==CurFloor 자명). 소터가 어느 층에
+        // 정렬돼 있든 그 층에서 받을 수 있으면 ready. (dual-host 층별 발신 라우팅은 후속 서브 스프린트 B.)
+        var decision = DepositDecider.Decide(snap, snap.CurFloor, WcsHold.None);
         bool online = snap.Online;
 
         // ── DB 조회: paused(destination 상태) + full(셀 작업수량 산출) ─────────────

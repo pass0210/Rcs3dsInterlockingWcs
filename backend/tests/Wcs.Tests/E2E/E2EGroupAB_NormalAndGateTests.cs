@@ -21,6 +21,7 @@ namespace Wcs.Tests.E2E;
 // piece·alarm·셀수량). 인메모리 카운터 단독 0.
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class E2EGroupAB_NormalAndGateTests
 {
     private readonly ITestOutputHelper _out;

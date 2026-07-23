@@ -143,6 +143,67 @@ public class DepositDeciderTests
         Assert.False(d.WriteTgtFloor);
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // 층 파라미터화(F=1/2) — 인덕션 기반 2층 제어(2026-07-21). 목표 층 F가 상수 2가 아니라
+    // 큐/인덕션 공급값이어도 게이트·핑퐁 차단·Hold/Offline 미기입이 불변임을 F=1로 재검증.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // F=1 · 층 다름(CurFloor=2) · TgtFloor==0 → NOT_ALIGNED + 1층 정렬 기입(쓰는 값이 F=1).
+    [Fact]
+    public void FloorParam_F1_NotAligned_TgtZero_WritesFloor1()
+    {
+        var d = DepositDecider.Decide(Snap(ready: true, cur: 2, tgt: 0), floor: 1, WcsHold.None);
+        Assert.False(d.Ready);
+        Assert.Equal(DenyReason.NotAligned, d.Reason);
+        Assert.True(d.WriteTgtFloor);
+        Assert.Equal(1, d.TgtFloorValue);   // 상수 2가 아니라 파라미터 F=1을 기입.
+    }
+
+    // F=1 · CurFloor==1 · Ready=1 → Ready(그 층에서 수용 가능), 쓰기 없음.
+    [Fact]
+    public void FloorParam_F1_AtFloor1_IsReady()
+    {
+        var d = DepositDecider.Decide(Snap(ready: true, cur: 1, tgt: 0), floor: 1, WcsHold.None);
+        Assert.True(d.Ready);
+        Assert.Equal(DenyReason.None, d.Reason);
+        Assert.False(d.WriteTgtFloor);
+    }
+
+    // F=1 · 핑퐁 차단 — 미정렬이지만 TgtFloor≠0(진행 중)이면 덮어쓰지 않음(F 무관 불변).
+    [Fact]
+    public void FloorParam_F1_NotAligned_TgtBusy_NoOverwrite()
+    {
+        var d = DepositDecider.Decide(Snap(ready: true, cur: 2, tgt: 1), floor: 1, WcsHold.None);
+        Assert.False(d.Ready);
+        Assert.Equal(DenyReason.NotAligned, d.Reason);
+        Assert.False(d.WriteTgtFloor);
+    }
+
+    // F=1 · Ready=0 · TgtFloor==0 → BUSY + 1층 복귀 선기입(F=1).
+    [Fact]
+    public void FloorParam_F1_Busy_TgtZero_PrewritesFloor1()
+    {
+        var d = DepositDecider.Decide(Snap(ready: false, cur: 2, tgt: 0), floor: 1, WcsHold.None);
+        Assert.False(d.Ready);
+        Assert.Equal(DenyReason.Busy, d.Reason);
+        Assert.True(d.WriteTgtFloor);
+        Assert.Equal(1, d.TgtFloorValue);
+    }
+
+    // F=1 · FULL/PAUSED/OFFLINE → TgtFloor 미기입(F 무관 불변).
+    [Theory]
+    [InlineData(true,  WcsHold.Full)]
+    [InlineData(true,  WcsHold.Paused)]
+    [InlineData(false, WcsHold.None)]   // Offline
+    public void FloorParam_F1_HoldOrOffline_NoWrite(bool online, WcsHold hold)
+    {
+        // Ready=0·TgtFloor==0(쓰기 조건 충족)이어도 Hold/Offline이 선행 차단.
+        var snap = Snap(ready: false, cur: 2, tgt: 0, online: online);
+        var d = DepositDecider.Decide(snap, floor: 1, hold);
+        Assert.False(d.Ready);
+        Assert.False(d.WriteTgtFloor);
+    }
+
     // 와이어 포맷 — 내부 사유 문자열 고정(RCS 미전송, piece_event 기록용)
     [Fact]
     public void Wire_Strings_AreStable()
