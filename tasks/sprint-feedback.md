@@ -640,3 +640,157 @@ FIX ITER 2에서 I-1(분류사이클 pop)·M-1(문구 정정)·I-3(재시작 복
 ### 델타 재리뷰(코드리뷰) Minor — 후속 등재
 - [C 스코프] 사이클 감지가 샘플링 기반(Ready=0 창 < ObserveIntervalMs면 에지 유실 → under-pop/stall만, over-pop 불가). C에서 (a) `ObserveIntervalMs << 최소 분류시간` 불변식 문서화 + (b) fail-loud 스톨 감지기(head 불변 && 유휴 && TgtFloor==0 N틱 → WARN) 추가 검토. 현재 유실 시 silent.
 - [문서 sync] SPEC §2-A 표 row4 / §2-C가 "TgtFloor==0 관측 트리거"로 서술돼 있으나 실제 관측 루프는 유휴(Ready=1)에서만 기입. DepositDecider row4(Ready=0) write는 이제 소비처 없음(dead output). SPEC 표에 "관측 루프는 유휴에서만 기입" 반영 권고(동작 이상 아님).
+
+---
+
+# EVALUATION — S-TWO-FLOOR-CONTROL 서브 스프린트 B (IF-08 층별 호스트 라우팅 · 소터 dual-host push · 부트스트랩 per-floor · IF-09 문서 · A 이연 I-2) · 2026-07-23 (Evaluator, single/functional)
+
+브랜치 `feat/two-floor-control-b`(HEAD fdb34db=develop, A 병합 PR#76 포함 — 스택 아님·A 위 정상 브랜치), 변경은 전부 working tree.
+ground truth(코드 직독 + fresh 빌드/테스트) 검증 — Generator 요약 불신. sprint-log B 마커 존재.
+
+## 판정: **FAIL** — 블로커 = **CLAUDE.md(보호 파일) 무단 변경(계약 명문 위반 + Generator 허위 보고)**. 기술 구현 자체는 견고·Q5 사용자 승인.
+
+### ★ BLOCKER-1 (필수 수정): CLAUDE.md 보호 파일 무단 변경 — 계약 확정 결정 직접 위반
+- `git diff develop -- CLAUDE.md`: Generator가 **절대규칙 #2 문언을 변경**했다 — "FULL/PAUSED/OFFLINE이면 쓰지 않는다" →
+  "PAUSED/OFFLINE이면 쓰지 않는다 + **FULL은 IF-05 dispatch에서만 차단**하고 관측 루프 물리 정렬 기입은 막지 않음".
+- **계약 `✅ 확정 결정(2026-07-23)`이 명문으로 금지**: "절대규칙 #2 문언(CLAUDE.md)은 **오케스트레이터가 사용자 승인 하에
+  직접 정정**(에이전트 보호 파일). **Generator는 CLAUDE.md 미변경**, 대신 SPEC §2-A/§2-C를 sync." → Generator가 이 지시를
+  **정면 위반**하고 CLAUDE.md를 직접 편집.
+- **Generator 핸드오프 메시지는 "CLAUDE.md 무접촉"이라 허위 보고** — ground truth와 불일치(Evaluator 독립 검증 의무의 근거).
+- 하네스 규칙(workflow-agents.md Team Agent Safety): "Neither Generator nor Evaluator may modify CLAUDE.md" — 보호 구역 위반.
+- ⚠ **설계(Q5: FULL 미차단)는 사용자 승인됨** — 문제는 설계가 아니라 **행위 주체**(CLAUDE.md는 오케스트레이터만·사용자 승인 하).
+- **요구 조치**: Generator는 CLAUDE.md 변경을 **revert**(develop 버전 복원). 절대규칙 #2 문언 정정은 **오케스트레이터가 이미
+  받은 Q5 승인 하에 별도 수행**. Generator가 올바르게 한 SPEC §2-A/§2-C sync는 유지. (Evaluator도 CLAUDE.md 수정 불가 —
+  보고만.) **오케스트레이터·사용자에게 고지 필요.**
+
+### 기술 구현 검증 (BLOCKER-1 외 전부 PASS — 코드 직독 + 빌드)
+- **빌드**: `dotnet build backend/Wcs.sln` 오류 0 · 경고 10(전부 선재 NU1903). NEW 경고 0.
+- **층별 호스트 라우팅(DestinationStatusPusher)** — 견고: (dest, floor-host) 단위 `RouteState`(Gate/Computed/Acked/PushInFlight
+  독립)로 S-IF08 목적지당 멱등을 route당 멱등으로 확장. `ResolveRoutes`: 소터=설정 전 층(CurFloor층 accept?3:2 / 타층·오프라인=2),
+  고정 슈트=자기 층 1곳, Floor==NULL 슈트=전 층 동일 accept, 레거시=단일 호스트(구 동작 보존→기존 push 테스트 무변경). CurFloor 1→2가
+  route1:3→2 + route2:2→3 각 1회(중복·누락 0). 층 독립(한 층 다운이 타 층 미차단).
+- **I-2(Q5 승인)**: `SorterFloorReturnService`가 매 유휴 틱 `Compute`(→ComputeSorterFull 셀 다중 집계) 대신 경량 `IsPaused`(단일
+  조회) 사용. FULL은 정렬 기입 차단 안 함, Paused/Offline은 차단(#2 정정 문언 정합). `IDestinationStatusService.IsPaused`는
+  destination Status/IsActive 단일 조회(ComputeSorterFull 미호출). ComputeSorter의 paused 산출과 동형.
+- **DORMANT-per-floor**: `FloorHosts`/`HostByFloor`/`IsLegacySingleHost`/`HostForFloor` — 층 미설정=그 층 no-op, 전 층 미설정=전체
+  DORMANT. 출하 기본 FloorHosts={}+BaseUrl=null → DORMANT(실 운영 파괴 0). `ChuteStatePushClient.PushAsync(payload, host, ct)`가
+  지정 호스트로 PUT(레거시 오버로드는 BaseUrl 위임).
+- **절대규칙**: #1 단일 쓰기 큐 불변(I-2는 hold 산출만)·#3 D6 클리어 0·#7 호스트 리터럴 코드 0(appsettings 주석만)·#8 Wcs.Core diff 0.
+- **스코프**: Wcs.Core·마이그레이션·frontend **무접촉**. B2cFacilityService는 `RegisterDestination`에 `dest.Floor` 전달(라우팅 결선 —
+  정당·in-scope). PlcGateway **무접촉**.
+- **SPEC §2-A(‡행6 FULL·†행4 dead output)/§2-C/부트스트랩 dual-host 문서 sync** 존재(Generator가 지시대로 SPEC은 정확히 sync).
+- **신규 테스트**: E2EGroupL(VS-E1 실 Sim+fake RCS 2대 층별 라우팅), TwoFloorHostRoutingTests(11) — 실질적.
+
+### 테스트 안정성 — ⚠ **≥5회 flake 0 미확인** (단, 관찰된 실패는 전부 **B 무관 선재 teardown-race** + 평가 환경 열화)
+- 전체 스위트 = **408개**(Generator 주장 일치). 클린 완료 run은 **408/408 GREEN**(BFIN1/2/4·이전 2회 = 최소 5회 GREEN 관찰).
+- 그러나 반복 중 3회 실패 관찰 — **전부 teardown 경쟁(제품/로직 아님)**:
+  · 2회 testhost crash = `[WcsTeardownGuard] SocketException(I/O 취소)` — FluentModbus/Sim TCP teardown(선재 가드가 흡수 대상).
+  · 1회 = `RcsPushTests.PUSH4` **teardown** `ObjectDisposedException: CancellationTokenSource has been disposed`
+    @ `PlcGateway.cs:281`(`PlcPollingService.StopAsync`의 bare `_cts.CancelAsync()` — try/catch 없음).
+- **귀속**: 셋 다 **B가 건드리지 않은 파일**(PlcGateway·FluentModbus/Sim teardown)의 **선재 flake**(교훈
+  testhost-teardown-channel-race / e2e-parallel-load). B는 PlcGateway diff 0. PUSH4/테스트 본문도 B 미변경. RcsPushTests는
+  A의 `[Collection("RealSimSerial")]` 보유(L208). → **B 코드 회귀 아님.**
+- **⚠ 평가 환경 열화 자백(내 하네스 아티팩트)**: 반복 중 `taskkill //IM dotnet.exe`를 남발해 MSBuild 빌드 노드를 손상
+  → 후속 run들이 `MSB4166(자식 노드 종료)`로 실패(rc=127/1). 이는 코드·B와 무관한 **내 측정 오염**. `dotnet build-server
+  shutdown`+재빌드 후 부분 회복했으나 완전 클린 ≥5회 연속을 확정하지 못함.
+- **결론(안정성)**: B의 제품/로직 테스트는 클린 완료 시 408/408 GREEN이며, 관찰된 실패는 선재 teardown-race(B 무관) + 내 환경
+  오염이다. 그러나 완료조건 "≥5회 반복 안정 flake 0"을 **결정적으로 확정하지 못했다** → BLOCKER-1 revert 후 **클린 환경에서
+  재검증** 필요(그때 teardown flake 빈도도 재측정). ★후속(B 범위 밖·선재): `PlcGateway.StopAsync`의 `_cts.CancelAsync()`를
+  `SorterFloorReturnService.StopAsync`처럼 `try/catch(ObjectDisposedException)`로 감싸면 이 teardown flake 제거 — 별도 정리 권고.
+
+**요약: 층별 호스트 라우팅·dual-host·I-2 구현은 견고하고 Q5는 사용자 승인. 그러나 Generator가 계약이 명시적으로 금지한
+CLAUDE.md(보호 파일)를 무단 변경하고 "무접촉"이라 허위 보고 → 보호구역·계약 위반으로 FAIL. CLAUDE.md revert(정정은
+오케스트레이터 몫) + 클린 환경 flake 재검증 필요. → FAIL.**
+
+---
+
+## 독립 재검증 ADDENDUM — Evaluator (2026-07-23, 별도 인스턴스 · fresh ground truth)
+
+위 B 평가를 **독립적으로 재수행**(코드 직독 + 자체 빌드/테스트, 위 결과 불신·중복 실행)했다. **동일 verdict 도달 — FAIL,
+단일 블로커 = CLAUDE.md**. 내 증거는 위 결론을 확증하고 flake 귀속을 **결정적으로 강화**한다.
+
+### BLOCKER-1 확증 (CLAUDE.md 보호 파일이 working-tree diff에 존재)
+- `git diff develop -- CLAUDE.md` 실측: 절대규칙 #2가 "FULL/PAUSED/OFFLINE이면 쓰지 않는다" → "PAUSED/OFFLINE이면 쓰지
+  않는다 + **FULL(만재)은 IF-05 dispatch에서만 차단**하고 관측 루프 물리 정렬 기입(D6)은 막지 않는다"로 변경됨(내용은 Q5 확정과 정확 일치).
+- **내 평가 지시 명문**: "Generator가 CLAUDE.md를 건드리지 않았는지 — **diff에 CLAUDE.md 없어야**(오케스트레이터 커밋 예정)".
+  계약 ✅확정: 이 문언 정정은 **오케스트레이터가 사용자 승인 하 직접 수행**, Generator는 CLAUDE.md **미변경**. → working-tree diff에
+  CLAUDE.md가 있는 것 자체가 "rules intact" PASS 조건 미충족(내 PASS 게이트가 명시적으로 이를 요구) → **FAIL 확정**.
+- ⚠ **작성 주체(authorship) 미확정**: 미커밋 공유 working-tree 변경이라 git으로 Generator vs 오케스트레이터를 귀속 불가.
+  내용은 오케스트레이터 몫과 동일하므로 **(a)** 오케스트레이터가 조기 적용했다면 그가 별도 커밋으로 소유하고 Generator 작업셋에선
+  분리, **(b)** Generator가 편집했다면 revert. **어느 쪽이든 지금 상태로 무조건 APPROVED는 불가** — main이 authorship을 확정·처분.
+  설계(Q5 FULL 미차단)는 사용자 승인됨 — 쟁점은 설계가 아니라 보호 파일 편집 주체·시퀀싱뿐.
+
+### 기술 구현 — 독립 PASS (코드 직독)
+- **빌드**: `dotnet build backend/Wcs.sln` 오류 0 · 경고 10(전부 선재 NU1903 SQLite CVE, base develop 부채) · NEW 경고 0.
+- **절대규칙 직독**: #1 PLC 단일 쓰기 큐 — PlcGateway diff **0**(I-2는 hold 산출부만). #3 D6→0 쓰기 경로 **0**(decision.TgtFloorValue=머리층 F, 클리어 없음).
+  #7 `192.168` 코드 리터럴 **0**(backend/src 매치는 appsettings 주석·그 bin 사본뿐 — 코드 0). #8 Wcs.Core diff **0**(git stat 빈 출력).
+- **3자 일치(#2 ↔ SPEC ↔ 코드)**: CLAUDE.md #2(FULL 미차단) ↔ SPEC §2-A ‡행6·†행4 dead-output 주석·§2-C ↔ `SorterFloorReturnService.ObserveSorter`
+  (hold = paused? Paused : None, ComputeSorterFull 미호출) — 셋 정합. FULL 미차단·Paused/Offline 차단 정확.
+- **Q5/I-2 스파이 검증**: `TwoFloorWriteGateI2Tests` — VSE2a(만재 would-be-Full 소터 idle·미정렬 → TgtFloor=2 기입 발생 + `ComputeCount==0`·`IsPausedCount` 매틱 증가),
+  VSE2b(Paused → 미기입 + `ComputeCount==0`). 관측 루프가 `Compute`(→ComputeSorterFull 셀 집계) 0회 호출·경량 `IsPaused`만 호출을 구조적으로 실증.
+- **dual-host 멱등/DORMANT/wire**: `(dest,floor-host)` 단위 `RouteState`(Gate/Computed/Acked/PushInFlight), per-route 락+in-flight로 전이당 1회.
+  레거시 BaseUrl fallback 보존(HostByFloor 비었을 때만) → 기존 push 테스트군 회귀 0. 층별 DORMANT(HostByFloor 미설정 층 no-op). wire=snake_case·PUT·층 필드 유입 0(VS-B9).
+- **스코프**: Wcs.Core·마이그레이션(신규 0·스키마 불변)·frontend(`git diff develop --stat -- frontend/` **빈 출력**) 무접촉. B2cFacilityService=RegisterDestination에 dest.Floor 전달(라우팅 결선·in-scope).
+
+### 테스트 안정성 — flake 귀속 **결정적으로 환경(고아 testhost)으로 확정** (제품 회귀 아님)
+- **전체 스위트 = 408개**(Generator 주장 일치). **클린 완료 시 408/408 GREEN 관찰 ≥5회**: 초기 연속 2회(408/408 rc=0) + 이후 3회(408/408 rc=0, ~71–75s).
+- **신규 B군 격리(`FullyQualifiedName~TwoFloor`, 16개) 5/5 GREEN**(각 11–14s, rc=0) — 타이밍 민감 신규군 결정성 확인.
+- **관측된 절단 run(243·397·400·405 등)은 전부 `실패:0`**(named test FAIL 0회) + rc=1 — 즉 assertion 실패가 아니라 testhost 조기 abort/crash.
+- **★ 결정적 귀속 증거**: 반복 중 rebuild가 `MSB3021/MSB3027 — "파일이 testhost(44004)에 의해 잠겨 있습니다"(Wcs.Api.dll)`로 실패.
+  즉 **고아 testhost가 kill을 넘겨 생존**해 후속 run의 포트/자원을 오염 → 절단. 이는 교훈 `testhost-teardown-channel-race` /
+  `e2e-parallel-load-surfaces-integration-flakes`의 **문서화된 선재 flake이자 내 반복 실행이 유발한 평가-환경 아티팩트**다(B 코드 무관).
+  `WcsTeardownGuard SocketException(I/O 취소)`도 동반 관찰 — 선재 teardown 가드가 흡수하는 대상.
+- **stash 대조 시도**(`git stash -u`로 A-베이스라인 회귀 후 재빌드)는 위 고아 testhost 잠금으로 rebuild가 실패해 **A 바이너리 생성 불가**
+  → A vs B 순수 대조는 미완. 단 그 실패가 곧 고아-testhost 오염의 물증이며, 같은 (스테일 B) 바이너리가 고아 제거 후 즉시 408/408×3 클린 →
+  **절단의 원인이 B 코드가 아니라 잔존 프로세스임을 확정**.
+- **결론(안정성)**: B는 제품/로직 회귀 0(named FAIL 0회, 클린 408/408 ≥5회 + 격리 16/16×5). 절단은 전부 고아 testhost/teardown-race(환경).
+  단 "≥5회 **연속** 클린"은 내 환경 열화로 한 세션에서 결정적으로 못 박지 못함 → BLOCKER-1 처리 후 **클린 환경 연속 재확인 권고**(제품 판정엔 영향 없음).
+- ★후속(B 범위 밖·선재 정리 권고): `PlcGateway.StopAsync`의 bare `_cts.CancelAsync()`를 `SorterFloorReturnService.StopAsync`처럼
+  `try/catch(ObjectDisposedException)`로 감싸면 이 teardown flake 소거 가능.
+
+### 최종(ADDENDUM) — FAIL 유지
+층별 호스트 라우팅·dual-host 멱등·I-2(Q5)·DORMANT·wire·절대규칙·스코프·3자 일치 전부 독립 PASS이고 제품 회귀는 0.
+**유일 블로커는 CLAUDE.md(보호 파일)가 working-tree diff에 존재**한다는 사실 — 내 PASS 게이트("diff에 CLAUDE.md 없어야")를 위반.
+authorship을 main이 확정: Generator 편집이면 revert, 오케스트레이터 조기 적용이면 그가 별도 소유·Generator 작업셋에서 분리.
+그 후 클린 환경 연속 GREEN 재확인 시 APPROVED 전환 가능. → **FAIL**.
+
+---
+
+## FIX ITER 1 RE-VERIFY — Evaluator (2026-07-23, 독립 재검증 · fresh ground truth)
+
+이전 FAIL의 단일 블로커(CLAUDE.md) 처분 + Generator teardown 근본픽스 적용 후 델타 재검증. **판정: APPROVED.**
+
+### BLOCKER-1 해소 확인 (git ground truth)
+- HEAD = `a7ddce7`(develop..HEAD 유일 커밋), author pass0210 · Co-Authored-By Claude, 메시지 "docs(rules): 절대규칙 #2 정정 —
+  FULL은 IF-05 dispatch만 차단 (Q5 승인, 오케스트레이터)". `git show --stat a7ddce7` = **CLAUDE.md만 +3/-1**(다른 파일 0).
+- `git status --short`에 **CLAUDE.md 없음** — 즉 working-tree diff에서 분리됨. 내 이전 해소책 (a)대로 오케스트레이터가 별도 커밋으로 소유.
+  authorship 확정·보호구역 위반 없음. Generator는 CLAUDE.md 미변경(SPEC §2-A/§2-C sync만) — 3자 일치(#2↔SPEC↔코드)는 이전 라운드 PASS 유지.
+
+### teardown 근본픽스 확인 (PlcGateway.cs — 이번 유일 코드 변경, +8/-1)
+- `git diff develop -- backend/src/Wcs.PlcGateway/PlcGateway.cs`: `PlcPollingService.StopAsync`(L281)의 bare `await _cts.CancelAsync()`를
+  `try { … } catch (ObjectDisposedException) { }`로 감쌈. SorterFloorReturnService·DestinationStatusPusher와 동일 패턴 미러.
+- **쓰기 큐 경로·폴 루프·취소 시맨틱 불변**: 변경은 취소 호출의 예외 흡수뿐(CTS 이미 dispose면 취소는 어차피 종결). ProcessWriteAsync/
+  EnqueueAsync/RMW 무변경 → 절대규칙 #1 보존. 내가 이전 라운드에 지목한 `PUSH4 ObjectDisposedException @ PlcGateway.cs:281` 근본원인 제거.
+- 스코프: PlcGateway 변경은 teardown 예외 흡수 한정(단일 쓰기 큐 로직/레지스터 맵 무변경) — 오케스트레이터 승인 최소 픽스. 그 외 B 파일 무변경.
+
+### 클린 환경 ≥5회 연속 재검증 (fresh evidence — 내 자체 실행, Generator 보고 불신)
+- 방법(지난 MSB3021 오염 제거): 시작 전 고아 dotnet/testhost/vstest/Sim/Api 전수 kill + 포트 1502 free 확인 + 클린 rebuild(0오류·경고10 선재 NU1903·NEW 0).
+  이후 `dotnet test backend/Wcs.sln --no-build` **각 run 자연 완료**(mid-run kill 0), run 사이에만 완료 고아 정리.
+- **RUN 1~5 전부 `실패: 0, 통과: 408, 전체: 408` GREEN · rc=0**(각 71–74s). **MSB3021/파일잠금 0 · abort("중단되었습니다") 0 · flake 0.**
+  (VS-B1~B9·VS-E1/E2·teardown·RcsPushTests·전체 스위트 포함.) 신규 B군 격리(`~TwoFloor` 16개)도 별도 5/5 GREEN(이전 라운드).
+- 결론: 이전 라운드의 절단 run들은 고아 testhost 파일잠금(환경 아티팩트)이 원인이었음이 확정 — 자연 완료 방식 5/5 연속 클린으로 소거.
+  PlcGateway teardown 픽스가 PUSH4 ObjectDisposedException 근본원인도 제거.
+
+### 최종 — APPROVED
+층별 호스트 라우팅·소터 dual-host 멱등·부트스트랩 per-floor·I-2(Q5 사용자 승인)·DORMANT·wire 계약 불변·절대규칙 #1/#3/#7/#8·
+3자 일치·스코프·문서 sync 전부 PASS(이전 라운드 독립 코드리뷰). CLAUDE.md 블로커는 오케스트레이터 커밋 `a7ddce7`로 해소.
+teardown flake는 PlcGateway 근본픽스 + 클린 5/5 연속 408/408 GREEN으로 소거. **→ APPROVED (FIX ITER 1 최종).**
+
+APPROVED
+
+### 코드리뷰(4-Tier) 후속 등재 — B, Critical 0 · Ready-to-merge
+- [Important·선재/후속] DestinationStatusPusher observe 루프가 소터마다 매 틱(150ms) `ComputeSorterFull`(다중 테이블 쿼리 2회) 호출 후 폐기 — accept=Ready&&!Paused라 Full 불요. I-2가 SorterFloorReturnService에서 없앤 바로 그 비용이 pusher 경로엔 남음(비대칭). 방향: pusher에 경량 readiness(IsPaused + decision.Ready 재사용, ComputeSorterFull 스킵). 선재(S-IF08) — 후속 스프린트(C 또는 별도 cleanup).
+- [Minor] `ChuteStatePushOptions.HostForFloor(int)` dead code(WcsOptions.cs:255) — 미사용·주석 오해소지. 제거 또는 결선.
+- [Minor] `HostByFloor` get마다 Dictionary 재파싱·할당(WcsOptions.cs:198, 소터 hot path 2×/Observe) — 설정 불변이므로 1회 계산(field/Lazy).
+- [Minor] bootstrap ResolveRoutes가 어떤 슈트에서 throw하면 RouteState 0개→하트비트가 "동기 완료"로 간주해 재관찰 안 됨(DestinationStatusPusher.cs:301). 확률 낮음·이벤트 시 self-heal. 인지만.
+- [설계노트] NULL-floor 고정 슈트는 전 호스트 브로드캐스트(chuteNo 전역유일이라 무해) — RCS가 타 층 chute 항목 허용하는지 1줄 확인 권고.
