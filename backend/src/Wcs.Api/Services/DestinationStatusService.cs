@@ -92,6 +92,15 @@ public interface IDestinationStatusService
     /// 셀 수량 산출원은 SorterCellQty 공유(IF-10 SelectCell·SorterFull과 byte-consistent).
     /// </summary>
     bool SorterCanAcceptBarcode(long destinationId, string barcode);
+
+    /// <summary>
+    /// 경량 정지 판정 — destination.Status==PAUSED || !IsActive || 미존재(단일 조회, 셀 만재 집계 없음).
+    /// I-2(S-TWO-FLOOR-CONTROL B): 관측 루프(SorterFloorReturnService)의 정렬 기입 게이트가 **매 유휴
+    /// 틱마다 무거운 <c>Compute</c>(→ ComputeSorterFull: cell/cell_assignment/sorter_command/piece 다중
+    /// 쿼리)를 돌리지 않도록** 분리한 저비용 경로. 게이트엔 Paused(+Online — snap.Online로 선판정)만 필요하다
+    /// (Q5 확정: FULL은 정렬 기입을 차단하지 않음 — 만재는 IF-05 dispatch만 차단. Paused/Offline은 여전히 차단).
+    /// </summary>
+    bool IsPaused(long destinationId);
 }
 
 /// <summary>
@@ -148,6 +157,23 @@ public sealed class DestinationStatusService : IDestinationStatusService
         //   ①오더 배정 보유 → 그 배정 셀 여유만(빈 셀 폴백 금지) / ②배정 없음 → 빈 enabled 셀.
         //   "IF-05 OK ⟺ SelectCell 적재 가능"(§88)을 크로스-엔드포인트로 보장.
         return SorterCellQty.CanAcceptBarcode(db, destinationId, barcode);
+    }
+
+    /// <inheritdoc/>
+    public bool IsPaused(long destinationId)
+    {
+        // I-2: ComputeSorter의 paused 산출과 **동일 로직**이되 ComputeSorterFull(셀 집계 다중 쿼리)은
+        //   호출하지 않는다 — destination.Status/IsActive만 단일 조회. 관측 루프가 매 유휴 틱 호출해도 저비용.
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<WcsDbContext>();
+
+        var info = db.Destinations
+            .Where(d => d.Id == destinationId)
+            .Select(d => new { d.Status, d.IsActive })
+            .FirstOrDefault();
+
+        // 미존재·비활성·PAUSED = 정지(ComputeSorter/ComputeChute와 동형).
+        return info is null || !info.IsActive || info.Status == DestStatus.PAUSED;
     }
 
     // ── 소터 목적지-단위 full(SorterFull) 산출 — 확정1 ───────────────────────────

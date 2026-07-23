@@ -36,12 +36,16 @@ D4는 한 워드 — 한 비트만 바꿀 땐 D4 읽기→비트 수정→쓰기
 | 1 | Online && Hold=None && Ready=1 && CurFloor==F (TgtFloor 무관 — 이동완료 후 잔류 ≠0 포함) | true | None(와이어 reason="READY") | 안 씀 |
 | 2 | Ready=1 && CurFloor≠F && TgtFloor==0 | false | WRONG_FLOOR | **F 기입** |
 | 3 | Ready=1 && CurFloor≠F && TgtFloor≠0 | false | WRONG_FLOOR | 안 씀(핑퐁 차단) |
-| 4 | Ready=0 && TgtFloor==0 (층 무관) | false | BUSY | **F 기입**(분류 후 복귀 선기입) |
+| 4 † | Ready=0 && TgtFloor==0 (층 무관) | false | BUSY | **F 기입**(분류 후 복귀 선기입) |
 | 5 | Ready=0 && TgtFloor≠0 | false | BUSY | 안 씀 |
-| 6 | Hold=Full / Paused | false | FULL / PAUSED | 안 씀(대기) |
+| 6 ‡ | Hold=Full / Paused | false | FULL / PAUSED | 안 씀(대기) |
 | 7 | !Online | false | OFFLINE | 안 씀 |
 
 TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=F || Ready==0)` → **F 기입** — 단 Hold/Offline이면 항상 안 씀. 이 판정의 `F`는 **소터별 pending-floor 큐의 머리 피스 층**이다(§2-C).
+
+> **판정 함수(순수)의 산출 vs 트리거(관측 루프)의 실제 호출 조건 — 구분(A·B 반영)**: 위 표는 `Wcs.Core.DepositDecider`(순수 함수)의 **불변 스펙**이다(코드 무변경). 그러나 실제 TgtFloor 기입 트리거인 `SorterFloorReturnService.ObserveSorter`(관측 루프)는 이 게이트를 **일부 조건에서만 호출**하므로, 표의 일부 write는 관측 루프 경로에선 **dead output**이다:
+> - **†행 4(Ready=0 선기입)** — A 재설계로 관측 루프는 **유휴(Ready=1)일 때만** 기입한다(분류 중 Ready=0 선기입 폐지 — 분류+이동 융합이 사이클 감지를 깨는 것 방지, §2-C). 즉 관측 루프는 Ready=0에서 게이트를 **호출하지 않으므로** `DepositDecider`가 산출하는 행 4의 "F 기입"은 관측 루프에선 실행되지 않는다(순수 함수는 여전히 그 값을 산출).
+> - **‡행 6의 Full** — B(I-2·Q5)로 관측 루프는 게이트에 hold ∈ {None, **Paused**}만 넘긴다(**Full은 절대 안 넘김** — 매 유휴 틱 `ComputeSorterFull` 셀 집계 호출 제거). 따라서 **FULL(셀 만재)은 정렬 기입을 차단하지 않는다** — 만재는 **IF-05 dispatch에서만 차단**(2단계 게이트 분리: 큐에 든 피스는 이미 IF-05에서 수용 확정분이므로 만재로 물리 정렬까지 막으면 확정 피스가 고립). **PAUSED/Offline은 여전히 차단**(Paused는 hold로, Offline은 `snap.Online` 선판정으로). 절대규칙 #2 문언은 이 정정을 반영한다("FULL은 IF-05 dispatch만 차단, 관측 루프 정렬 기입은 Paused/Offline만 차단" — 오케스트레이터가 사용자 승인 하에 CLAUDE.md 정정). 행 6의 Paused write-금지만 관측 루프에서 유효.
 **쓰기 트리거**: IF-05는 소터 목적지 피스를 큐에 **enqueue**만 한다(OK 응답). 실제 TgtFloor 쓰기는 **소터가 free(TgtFloor==0)일 때 큐 머리 층 F**를 위 게이트로 기입 — 피스마다 자기 IF-05 순간에 쓰는 게 아니다(과거 IF-09 도착 트리거 폐지). 쓰는 값만 상수 2→인덕션 층 F로 바뀌고, 게이트·순서·핑퐁 차단은 동일.
 클리어: WCS는 절대 안 함. PLC가 분류 시작(Ready 1→0) 시 0으로(도착 시엔 CurFloor만 기입·TgtFloor 유지).
 
@@ -49,7 +53,7 @@ TgtFloor 쓰기 조건 한 줄: `TgtFloor==0 && (CurFloor!=F || Ready==0)` → *
 
 **IF-08 push 층별 호스트 라우팅**: 상태가 바뀐 목적지의 **층**으로 라우팅한다 — 1층 호스트 `http://192.168.0.151:3000` · 2층 호스트 `http://192.168.0.152:3000`(경로 `PUT /api/UpdateChuteState`·페이로드 snake_case `{chute_numbers[], next_states[]}`·`next_state` 3=수용/2=불가 불변). 3DS 소터(두 층 겸용)는 **현재 CurFloor의 층 호스트**로 push — 층 F로 정렬·ready면 **F층 호스트에 `next_state=3`**, **다른 층 호스트엔 사실상 `2`**(그 층엔 지금 서비스 안 함). 고정(비3D) 슈트는 **자기 층 호스트**로 push. (호스트 값·매핑은 §5-A 설정.)
 
-**기동 시 부트스트랩(전 목적지 1회)**: 프로그램 시작 시(층별 호스트 설정 시) WCS는 **전 목적지의 현재 수용 상태를 목적지별로 1회 푸시**한다(`DestinationStatusPusher.StartAsync`). **소터는 두 층 호스트 모두에 발신**(현재 CurFloor 호스트=`3` 수용 시(online·!full·!paused·Ready=1) / 다른 층 호스트=`2`; CurFloor에서도 미수용이면 두 호스트 모두 `2`), **고정 슈트는 자기 층 호스트 1곳**(`!full && !paused`면 `3`, 아니면 `2`). 이후로는 **상태 전이 시에만** 푸시(같은 dual-host 규칙 — 부트스트랩·전이 동일). 2층이므로 부트스트랩도 per-floor 라우팅이 필요하다(현재 단일 BaseUrl 전제 → 층별 라우팅 결선은 코드 스프린트).
+**기동 시 부트스트랩(전 목적지 1회)**: 프로그램 시작 시(층별 호스트 설정 시) WCS는 **전 목적지의 현재 수용 상태를 목적지별로 1회 푸시**한다(`DestinationStatusPusher.StartAsync`). **소터는 두 층 호스트 모두에 발신**(현재 CurFloor 호스트=`3` 수용 시(online·!full·!paused·Ready=1) / 다른 층 호스트=`2`; CurFloor에서도 미수용이면 두 호스트 모두 `2`), **고정 슈트는 자기 층 호스트 1곳**(`!full && !paused`면 `3`, 아니면 `2`). 이후로는 **상태 전이 시에만** 푸시(같은 dual-host 규칙 — 부트스트랩·전이 동일). 2층이므로 부트스트랩도 per-floor 라우팅으로 결선됐다(**서브 스프린트 B 구현 완료** — `Wcs:ChuteStatePush:FloorHosts` 층→호스트 맵. 레거시 단일 `BaseUrl`은 FloorHosts 미설정 시 fallback으로만 유지).
 
 ### 2-B. CHUTE 경로 (M4-P2a 신설)
 입력: WcsHold(IChuteCapacityService.GetHold) — PLC 스냅샷·층(F) 미사용, TgtFloor 쓰기 없음.
@@ -94,9 +98,15 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
   - **인메모리 큐 — 재시작 복원 미구현(I-3, Sub-Sprint C 이연)**: pending-floor 큐는 인메모리라 WCS
     재시작 시 in-flight 큐 항목이 유실된다. 재시작 시 레지스터/큐 복원은 **Sub-Sprint C(재시작 클리어·복원)**
     에서 처리한다(§4-B 기동 클리어와 함께). A 스코프에선 문서화만.
+  - **관측 루프 write-gate 비용·FULL 게이트(I-2 · Sub-Sprint B · Q5 승인)**: `ObserveSorter`의 정렬 기입
+    게이트는 **매 유휴 틱마다 `Compute`(→ `ComputeSorterFull` 셀/배정/명령/piece 다중 집계 쿼리)를
+    호출하지 않는다** — 저비용 `IDestinationStatusService.IsPaused`(destination Status/IsActive 단일 조회)로
+    hold(Paused만)를 산출한다. **FULL(셀 만재)은 정렬 기입을 차단하지 않는다**(만재는 IF-05 dispatch만 차단 —
+    큐 피스는 이미 수용 확정분이라 물리 정렬까지 막으면 고립). PAUSED/Offline은 여전히 차단(§2-A 표 ‡행 참조).
 - **소터 readiness(CurFloor 기준)**: `DestinationStatusService.ComputeSorter`는 단일 운영층 고정 비교를
   폐지하고 **CurFloor를 목표 층으로 주입**해 `ready = online && Ready==1`로 산출한다(현재 정렬된 층에서만
-  ready). dual-host 층별 발신 라우팅은 후속 서브 스프린트 B.
+  ready). **dual-host 층별 발신 라우팅은 서브 스프린트 B에서 구현 완료**(§2-A "IF-08 push 층별 호스트
+  라우팅" — 소터는 설정된 두 층 호스트 모두에 발신, 전이 추적은 `(목적지, 층 호스트)` 단위).
 - **~~현행 코드 갭~~ (해소됨 — A 구현)**: pending-floor 큐(`SorterPendingFloorQueues`) + 관측 루프
   (`SorterFloorReturnService`) 신설 완료. IF-09 정렬 트리거 제거(도착 기록만). 층 파생은 순수 함수
   `Wcs.Core.InductionFloorMap.DeriveFloor`(맵은 호출자 주입).
@@ -142,7 +152,7 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
 
 ### 5-A. 인덕션 층 매핑 · 층별 IF-08 push 호스트 (설정 — 하드코딩 금지, 절대규칙 #7)
 - `InductionFloorMap` — inductionNo→floor 맵. 예 `{"1":1,"2":1,"3":2}`. IF-05에서 요청의 `inductionNo`로 목표 층 F(1/2)를 파생(§2-A·§3). 값은 현장 확정, appsettings 결선은 코드 스프린트.
-- IF-08 층별 push 호스트 — **1층 `http://192.168.0.151:3000` · 2층 `http://192.168.0.152:3000`**. 상태가 바뀐 목적지의 **층**으로 라우팅(§2-A 라우팅 규칙: 3DS 소터=현재 CurFloor 층 호스트, 고정 슈트=자기 층 호스트). 경로 `PUT /api/UpdateChuteState`·페이로드·`next_state` 의미는 층 무관 동일.
+- IF-08 층별 push 호스트 — **1층 `http://192.168.0.151:3000` · 2층 `http://192.168.0.152:3000`**. 상태가 바뀐 목적지의 **층**으로 라우팅(§2-A 라우팅 규칙: 3DS 소터=설정된 두 층 호스트 모두[현재 CurFloor 층=3 수용 시·다른 층=2], 고정 슈트=자기 층 호스트). 경로 `PUT /api/UpdateChuteState`·페이로드·`next_state` 의미는 층 무관 동일. **서브 스프린트 B 결선 완료** — appsettings `Wcs:ChuteStatePush:FloorHosts`(층→호스트 맵, JSON 문자열 키). 어떤 층만 채우면 그 층만 활성(층별 DORMANT). 출하 기본 `{}`=전 층 미설정 DORMANT. 코드엔 호스트 리터럴 0(절대규칙 #7). 구 단일 `BaseUrl`은 FloorHosts 미설정 시 fallback(하위호환).
 - 기동 부트스트랩도 per-floor — 시작 시 전 목적지 현재 상태 1회 푸시(§2-A). **소터는 두 층 호스트 모두**(현재 CurFloor 호스트=`3` 수용 시 / 다른 층 호스트=`2`), **고정 슈트는 자기 층 호스트 1곳**. 두 층 라우팅이므로 부트스트랩 경로도 per-floor로 결선(코드 스프린트).
 - ※ 두 값 모두 appsettings — 하드코딩 금지. 본 문서는 설계 확정값을 기록하고, 실제 파일 결선은 별도 코드 스프린트.
 

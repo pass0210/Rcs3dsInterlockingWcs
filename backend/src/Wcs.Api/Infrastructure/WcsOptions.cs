@@ -153,33 +153,63 @@ public sealed record MonitorOptions
 // ════════════════════════════════════════════════════════════════════════════
 // ChuteStatePushOptions — 목적지 수용상태 아웃바운드 푸시 설정 (appsettings "Wcs:ChuteStatePush").
 //
-// S-IF08-READY-PUSH (확정 와이어 단일 채널):
-//   목적지(슈트+소터) 수용상태 전이 시 WCS가 PUT {BaseUrl}{Path}로
+// S-IF08-READY-PUSH (확정 와이어 단일 채널) + S-TWO-FLOOR-CONTROL B (층별 호스트 라우팅):
+//   목적지(슈트+소터) 수용상태 전이 시 WCS가 PUT {host}{Path}로
 //   {chute_numbers:[dest.ChuteNo], next_states:[2|3]} 를 RCS로 푸시한다(3=수용가능/2=불가).
-//   전이원: 운영자 PAUSED/RESUMED · 슈트 만재/비움 · 소터 분류 사이클(스냅샷 관찰).
-//   base URL·경로·재시도·백오프·HTTP 타임아웃·소터 관찰 주기를 전부 설정으로 외부화한다
-//   (하드코딩 금지·절대규칙 #7).
+//   ★ 호스트는 목적지의 **층**으로 라우팅한다 — 층은 payload에 유입되지 않고 **어느 호스트가
+//     수신하느냐**로만 전달된다(경로·payload·next_state 의미는 층 무관 동일 — wire 계약 불변).
+//   전이원: 운영자 PAUSED/RESUMED · 슈트 만재/비움 · 소터 분류 사이클·정렬(스냅샷 관찰).
+//   호스트 맵·경로·재시도·백오프·HTTP 타임아웃·소터 관찰 주기를 전부 설정으로 외부화한다
+//   (하드코딩 금지·절대규칙 #7 — 호스트 리터럴은 코드에 없다. 실 IP는 appsettings·docs에만).
 //   - 지수 백오프(기본 3회 1s/2s/4s).
-//   - BaseUrl 미설정(null/공백)이면 푸시 완전 비활성(DORMANT — 경고 후 no-op). 크래시 0.
+//   - 층별 DORMANT: 어떤 층 호스트가 미설정이면 그 층 push는 no-op(HTTP 시도 0). 전 층 미설정이면
+//     서브시스템 전체 DORMANT(경고 후 관찰/구독 미기동·크래시 0).
 //   - chute_number 매핑 config 없음(Q-b LOCKED = Destination.ChuteNo 직접 1:1).
-//   - SorterObserveIntervalMs: 소터 분류 사이클(3↔2) 전이는 명시 이벤트가 없어 스냅샷 관찰이 유일한
-//     감지 수단이므로 반드시 유지(폐지된 목적지-상태 와이어 옵션에서 이전).
+//   - SorterObserveIntervalMs: 소터 분류 사이클(3↔2)·정렬 전이는 명시 이벤트가 없어 스냅샷 관찰이
+//     유일한 감지 수단이므로 반드시 유지.
+//
+// 하위호환(레거시 단일 호스트): 구 단일 키 `BaseUrl`은 **FloorHosts가 비었을 때만** 쓰이는
+//   fallback으로 유지한다(제거 대신 alias — 이연 결정). FloorHosts가 하나라도 설정되면 BaseUrl은
+//   무시된다(FloorHosts 우선). 레거시 모드에선 모든 목적지가 그 단일 호스트로 발신된다(층 무관 —
+//   구 동작 보존). 출하 기본은 FloorHosts={} + BaseUrl=null → DORMANT(실 운영 파괴 0).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>appsettings.json "Wcs:ChuteStatePush" 섹션 — 목적지 수용상태 아웃바운드 푸시 설정.</summary>
 public sealed record ChuteStatePushOptions
 {
     /// <summary>
-    /// RCS base URL(예: "http://10.0.0.9:9000"). 엔드포인트는 Path와 결합 —
-    /// WCS는 "{BaseUrl}{Path}"로 PUT한다.
-    /// 미설정(null/공백)이면 푸시 비활성(DORMANT — 경고 로그 후 no-op).
-    /// 호스트 미정으로 지금은 null로 출하하며, RCS가 추후 제공하는 **유일한 활성화 값**이다.
+    /// [레거시 alias] RCS 단일 base URL. **FloorHosts가 비었을 때만** fallback으로 쓰인다(층별 라우팅으로
+    /// 대체됨 — 하위호환용). FloorHosts가 설정되면 무시. 미설정(null/공백)이고 FloorHosts도 비면 DORMANT.
     /// </summary>
     public string? BaseUrl { get; init; }
 
     /// <summary>
-    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). RCS 계약(UpdateChuteState) 기본값.
-    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값).
+    /// 층 → RCS 호스트 맵 (appsettings "Wcs:ChuteStatePush:FloorHosts", 예 {"1":"http://rcs-1f-host:3000","2":"http://rcs-2f-host:3000"}. 실 IP는 appsettings·docs).
+    /// 목적지의 층에 해당하는 호스트로 push를 라우팅한다. 키는 JSON 문자열(설정 바인딩 제약) —
+    /// <see cref="HostByFloor"/>가 int 키 맵으로 변환한다. 값이 null/공백인 층은 미설정(그 층 DORMANT)으로 간주.
+    /// 호스트 리터럴은 여기(설정)에만 존재하고 코드엔 없다(절대규칙 #7).
+    /// </summary>
+    public Dictionary<string, string> FloorHosts { get; init; } = new();
+
+    /// <summary>
+    /// <see cref="FloorHosts"/>(문자열 키)를 int 키 맵으로 변환한 읽기 전용 뷰. 파싱 불가 키·null/공백
+    /// 호스트는 건너뛴다(그 층은 미설정=DORMANT). 층별 라우팅·부트스트랩이 이 뷰를 소비한다.
+    /// </summary>
+    public IReadOnlyDictionary<int, string> HostByFloor
+    {
+        get
+        {
+            var result = new Dictionary<int, string>(FloorHosts.Count);
+            foreach (var (key, host) in FloorHosts)
+                if (int.TryParse(key, out var floor) && !string.IsNullOrWhiteSpace(host))
+                    result[floor] = host.Trim();
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// 아웃바운드 경로(호스트에 이어붙이는 상대 경로). RCS 계약(UpdateChuteState) 기본값.
+    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값). 층 공통(호스트만 다름).
     /// </summary>
     public string Path { get; init; } = "/api/UpdateChuteState";
 
@@ -209,6 +239,19 @@ public sealed record ChuteStatePushOptions
     /// </summary>
     public int SorterObserveIntervalMs { get; init; } = 150;
 
-    /// <summary>BaseUrl이 설정되어 푸시가 활성인지(미설정=DORMANT).</summary>
-    public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);
+    /// <summary>
+    /// 푸시 서브시스템이 활성인지 — 층 호스트가 하나라도 설정됐거나(신규) 레거시 BaseUrl이 설정됨.
+    /// 둘 다 미설정이면 서브시스템 전체 DORMANT(관찰/구독 미기동).
+    /// </summary>
+    public bool IsEnabled => HostByFloor.Count > 0 || !string.IsNullOrWhiteSpace(BaseUrl);
+
+    /// <summary>
+    /// 레거시 단일 호스트 모드인지 — 층 호스트 맵이 비어 있고 BaseUrl만 설정됨(하위호환).
+    /// 이 모드에선 모든 목적지가 층 무관하게 BaseUrl 한 곳으로 발신된다(구 동작 보존).
+    /// </summary>
+    public bool IsLegacySingleHost => HostByFloor.Count == 0 && !string.IsNullOrWhiteSpace(BaseUrl);
+
+    /// <summary>지정 층의 호스트(미설정이면 null=그 층 DORMANT). 층별 라우팅 진입점.</summary>
+    public string? HostForFloor(int floor) =>
+        HostByFloor.TryGetValue(floor, out var host) ? host : null;
 }

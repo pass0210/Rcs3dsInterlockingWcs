@@ -37,12 +37,20 @@ public sealed record ChuteStatePushPayload(
 /// </summary>
 public interface IChuteStatePushClient
 {
-    /// <summary>푸시가 활성인지(BaseUrl 설정 시 true — 미설정이면 DORMANT).</summary>
+    /// <summary>푸시 서브시스템이 활성인지(층 호스트 or 레거시 BaseUrl 설정 시 true — 둘 다 미설정이면 DORMANT).</summary>
     bool IsEnabled { get; }
 
     /// <summary>
-    /// UpdateChuteState 1건을 고객 시스템으로 PUT(재시도 포함).
-    /// 성공(2xx + flag==1) 시 true, 재시도 소진 후 실패 시 false. 예외를 던지지 않는다(false로 수렴).
+    /// UpdateChuteState 1건을 지정 <paramref name="baseUrl"/>(층 호스트)로 PUT(재시도 포함).
+    /// 층은 payload에 유입되지 않고 **어느 호스트로 보내느냐**로만 전달된다(층별 라우팅은 호출자 책임).
+    /// 성공(2xx + flag==1) 시 true, 재시도 소진 후 실패 시 false. baseUrl 미지정(null/공백)이면 즉시 false(미발신).
+    /// 예외를 던지지 않는다(취소 제외 — false로 수렴).
+    /// </summary>
+    Task<bool> PushAsync(ChuteStatePushPayload payload, string? baseUrl, CancellationToken ct = default);
+
+    /// <summary>
+    /// [레거시 편의] 설정된 BaseUrl로 PUT(재시도 포함). 층별 라우팅을 쓰지 않는 호출부·직접 테스트용.
+    /// 내부적으로 <see cref="PushAsync(ChuteStatePushPayload, string?, CancellationToken)"/>에 위임.
     /// </summary>
     Task<bool> PushAsync(ChuteStatePushPayload payload, CancellationToken ct = default);
 }
@@ -79,15 +87,19 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
     public bool IsEnabled => _opt.IsEnabled;
 
     /// <inheritdoc/>
-    public async Task<bool> PushAsync(ChuteStatePushPayload payload, CancellationToken ct = default)
+    public Task<bool> PushAsync(ChuteStatePushPayload payload, CancellationToken ct = default)
+        => PushAsync(payload, _opt.BaseUrl, ct);   // 레거시 편의 — 설정된 BaseUrl로 위임.
+
+    /// <inheritdoc/>
+    public async Task<bool> PushAsync(ChuteStatePushPayload payload, string? baseUrl, CancellationToken ct = default)
     {
-        // DORMANT: BaseUrl 미설정이면 푸시 비활성(no-op). 호출자(Pusher)가 이미 IsEnabled로
-        // 걸러내지만 방어적으로 한 번 더 — "성공"으로 간주하지 않고 false 반환(미발신 유지).
-        if (!_opt.IsEnabled)
+        // DORMANT/미라우팅: 호스트 미지정(층 미설정 or BaseUrl 미설정)이면 no-op. 호출자(Pusher)가 이미
+        // 층별 DORMANT로 걸러내지만 방어적으로 한 번 더 — "성공"으로 간주하지 않고 false 반환(미발신 유지).
+        if (string.IsNullOrWhiteSpace(baseUrl))
             return false;
 
-        // 절대규칙 #7: 엔드포인트는 BaseUrl + Path 설정 조합(하드코딩 0).
-        var url = CombineUrl(_opt.BaseUrl!, _opt.Path);
+        // 절대규칙 #7: 엔드포인트는 (층)호스트 + Path 설정 조합(하드코딩 0 — 호스트는 설정값이 주입).
+        var url = CombineUrl(baseUrl, _opt.Path);
 
         // 총 시도 = 1(최초) + RetryCount(재시도). 기본 3회 지수 백오프.
         int maxAttempts = 1 + Math.Max(0, _opt.RetryCount);
@@ -152,11 +164,11 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
             }
         }
 
-        // 재시도 소진 — 최종 실패 명시 로깅(Fail-Loud). false 반환 → 조용한 드롭 금지.
+        // 재시도 소진 — 최종 실패 명시 로깅(Fail-Loud, 층 호스트별 독립). false 반환 → 조용한 드롭 금지.
         _log.LogError(
-            "[CHUTESTATE푸시] 재시도 소진({Max}회) — 고객 시스템 미도달: chute_numbers=[{Chutes}] next_states=[{States}]. " +
-            "다음 전이 시 재발신.",
-            maxAttempts, Join(payload.ChuteNumbers), Join(payload.NextStates));
+            "[CHUTESTATE푸시] 재시도 소진({Max}회) — 호스트 {Url} 미도달: chute_numbers=[{Chutes}] next_states=[{States}]. " +
+            "다음 전이/관찰 시 재발신(해당 층 호스트만 — 타 층 발신엔 영향 없음).",
+            maxAttempts, url, Join(payload.ChuteNumbers), Join(payload.NextStates));
         // operation_log: 아웃바운드 푸시 전수(실패) — 부수 기록(WARN).
         _opLog.Log(OperationLogCategory.API, OpLogAction, level: OperationLogLevel.WARN,
             detail: DetailJson(payload, "FAIL", maxAttempts));

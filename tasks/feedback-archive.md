@@ -622,3 +622,16 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - [CODE-REVIEW] sprint=S-MULTISORTER-SHARED-BUS-P2 critical=0 important=1(CR-I1 bus-timeout-validation,fixed+reverified) minor=4(M2/M3/M4 fixed,M5 backlog) iter=3(impl+C4fix+CR-I1fix)
 
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-A critical=0 major=3(I-1 fixed / I-2,I-3 deferred) minor=4(M-1 fixed / M-2,sampling-edge,SPEC§2A-sync deferred) iter=3
+
+## S-TWO-FLOOR-CONTROL 서브 스프린트 B (IF-08 층별 호스트 라우팅 · 소터 dual-host push · 부트스트랩 per-floor · I-2/Q5 · 문서 sync) — APPROVED (2026-07-23, Evaluator, iter2: impl+FIX ITER 1)
+브랜치 feat/two-floor-control-b. HEAD a7ddce7(오케스트레이터 CLAUDE.md 커밋), B 구현은 working tree.
+- **구현(독립 코드리뷰 PASS)**: `DestinationStatusPusher`가 전이 추적을 `(목적지, 층 호스트)` 단위 `RouteState`(Gate/Computed/Acked/PushInFlight 독립)로 확장 — S-IF08 목적지당 멱등을 route당 멱등으로. `ResolveRoutes`: 3D 소터=설정 전 층(CurFloor층 accept?3:2 / 타층·오프라인·CurFloor 불명=2), 고정 슈트=자기 층 1곳, Floor==NULL 슈트=전 층 동일 accept, 레거시 BaseUrl=단일 호스트 fallback(구 동작 보존→기존 push 테스트 회귀 0). CurFloor 1→2 = route1(3→2)+route2(2→3) 각 1회(중복·누락 0), 층 독립(한 층 다운이 타 층 미차단). 층은 payload 유입 0·호스트 선택으로만 전달.
+- **설정(WcsOptions.ChuteStatePushOptions)**: `FloorHosts`(층→호스트 JSON맵)+`HostByFloor`(int키 뷰)+`IsLegacySingleHost`+`HostForFloor`. 층별 DORMANT(미설정 층 no-op·전 층 미설정=서브시스템 DORMANT). 출하 기본 FloorHosts={}+BaseUrl=null → DORMANT(실 운영 파괴 0). 코드 내 192.168 리터럴 0(appsettings·docs만 — 절대규칙 #7).
+- **I-2/Q5(사용자 승인)**: 관측 루프(`SorterFloorReturnService.ObserveSorter`)가 매 유휴 틱 `Compute`(→ComputeSorterFull 셀/배정/명령/piece 다중 집계) 대신 경량 `IDestinationStatusService.IsPaused`(destination Status/IsActive 단일 조회)만 호출. **FULL은 정렬 기입 미차단(만재는 IF-05 dispatch만 차단 — 큐 피스는 수용 확정분이라 물리 정렬까지 막으면 고립), Paused/Offline은 여전히 차단.** 스파이 테스트(VSE2a: 만재 소터 TgtFloor 기입 발생+ComputeCount==0·IsPaused 매틱 / VSE2b: Paused 미기입+ComputeCount==0)로 구조 실증. 절대규칙 #2 문언 정정은 오케스트레이터가 Q5 승인 하 커밋 a7ddce7(Generator CLAUDE.md 미변경 — 보호 파일), SPEC §2-A ‡행6/†행4 dead-output·§2-C sync는 Generator가 수행 → 3자 일치.
+- **절대규칙**: #1 PLC 단일 쓰기 큐 diff 0(I-2는 hold 산출만)·#3 D6→0 클리어 0·#7 호스트 리터럴 코드 0·#8 Wcs.Core diff 0. 스코프: Core·마이그레이션(0·스키마 불변)·frontend(diff 0) 무접촉.
+- **iter1 FAIL 사유**: CLAUDE.md(보호 파일)가 working-tree diff에 존재(계약: 오케스트레이터만 정정·Generator 미변경). authorship 미확정으로 무조건 APPROVED 불가. 기술 구현은 그때도 PASS.
+- **FIX ITER 1**: (a) 오케스트레이터가 CLAUDE.md를 별도 커밋 a7ddce7로 소유 → working-tree에서 분리(블로커 해소). (b) Generator teardown 근본픽스 = `PlcGateway.StopAsync`의 bare `_cts.CancelAsync()`를 try/catch(ObjectDisposedException)로 래핑(+8/-1, 유일 코드 변경, 쓰기큐/취소 시맨틱 불변) → PUSH4 ObjectDisposedException@PlcGateway.cs:281 근본원인 제거.
+- **테스트**: 전체 408개. 클린 환경(자연 완료·mid-run kill 0·run 사이만 고아 정리) **5/5 연속 408/408 GREEN·실패 0·flake 0·MSB3021 0**(각 71–74s). 빌드 0오류·경고10(선재 NU1903)·NEW 0.
+- **★교훈(메타)**: 무거운 실-Sim E2E 스위트 반복 검증 시 **mid-run kill 금지**(각 run 자연 완료). 고아 testhost가 kill을 넘겨 생존→Wcs.Api.dll 파일잠금(MSB3021 "testhost(PID)에 의해 잠김")→후속 run 절단(실패:0인데 전체<408). 이건 제품 회귀가 아니라 평가-환경 오염. 절단 run의 named FAIL 0 + 자연완료 시 클린 = 환경 귀속 신호. testhost-teardown-channel-race/e2e-parallel-load 교훈과 일치. `PlcGateway.StopAsync` CancelAsync 래핑이 관련 ObjectDisposedException teardown flake도 소거.
+
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-B critical=0 important=1(pusher ComputeSorterFull 매틱 호출 — 선재/후속) minor=3 design-note=1 iter=2 → Ready-to-merge

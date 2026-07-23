@@ -80,7 +80,8 @@ public sealed class SorterPendingFloorQueues
 ///     Ready 0→1은 피스 소비가 아니므로 pop하지 않는다.
 ///   · 미정렬(머리 F != CurFloor)이면 **유휴(Ready=1)일 때만** 게이트로 F 기입해 그 층으로 정렬(분류 중
 ///     선기입 금지 — 분류+이동 융합으로 사이클 감지가 깨지는 것 방지).
-///   · OFFLINE(스냅샷 불신)이면 pop·기입 모두 생략. FULL/PAUSED면 기입 생략(hold — DepositDecider 차단).
+///   · OFFLINE(스냅샷 불신)이면 pop·기입 모두 생략. PAUSED면 기입 생략(hold — DepositDecider 차단).
+///     FULL(셀 만재)은 정렬 기입을 막지 않는다(I-2/Q5 — 만재는 IF-05 dispatch만 차단, 물리 정렬은 진행).
 /// </summary>
 public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
 {
@@ -236,11 +237,16 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         if (!ready || !_queues.TryPeek(destId, out int f) || snap.CurFloor == f)
             return;   // 분류/이동 중이거나 큐 빔이거나 이미 머리층 → 기입 불요.
 
-        // hold(FULL/PAUSED) 산출 후 게이트. FULL/PAUSED/OFFLINE·핑퐁(TgtFloor≠0)이면 미기입(DepositDecider 차단).
-        var readiness = _status.Compute(destId, DestType.SORTER_3D);
-        var hold = readiness.Paused ? WcsHold.Paused
-                 : readiness.Full   ? WcsHold.Full
-                 :                     WcsHold.None;
+        // hold(PAUSED만) 산출 후 게이트. PAUSED/OFFLINE·핑퐁(TgtFloor≠0)이면 미기입(DepositDecider 차단).
+        //
+        // I-2(S-TWO-FLOOR-CONTROL B · Q5 승인): 게이트에 **Paused만** 넘긴다(Online은 위 snap.Online 조기
+        //   반환으로 이미 선판정). **매 유휴 틱마다 무거운 Compute(→ ComputeSorterFull: 셀/배정/명령/piece
+        //   다중 집계 쿼리)를 호출하지 않는다** — 저비용 IsPaused(destination Status/IsActive 단일 조회)로 대체.
+        //   ★ FULL(셀 만재)은 정렬 기입을 **차단하지 않는다**: 큐에 든 피스는 이미 IF-05 dispatch에서 수용
+        //     확정분이므로, 만재로 물리 정렬(이동)까지 막으면 확정 피스가 고립된다. FULL은 IF-05 dispatch에서만
+        //     차단(2단계 게이트 분리). Paused/Offline은 여전히 차단(절대규칙 #2 — 오케스트레이터 정정 문언).
+        bool paused = _status.IsPaused(destId);
+        var hold = paused ? WcsHold.Paused : WcsHold.None;
 
         var decision = DepositDecider.Decide(snap, f, hold);
         if (!decision.WriteTgtFloor)
