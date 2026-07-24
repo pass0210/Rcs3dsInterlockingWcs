@@ -308,7 +308,7 @@ public sealed class MonitoringApiTests
             db.SorterCommands.Add(new SorterCommand
             {
                 PieceId = piece.Id, CellId = cell1.Id, CSeq = 1, CellNo = 1,
-                CWrittenAt = now, RSeq = 1, RCellNo = 1, RFlagAt = now,
+                CWrittenAt = now, RSeq = 1, RCellNo = 1, TiltedAt = now,
                 Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
             });
             // 활성 cell_assignment: cell1 → ORD-003
@@ -364,7 +364,7 @@ public sealed class MonitoringApiTests
                 db.SorterCommands.Add(new SorterCommand
                 {
                     PieceId = piece.Id, CellId = cell1.Id, CSeq = i, CellNo = 1,
-                    CWrittenAt = now, RSeq = i, RCellNo = 1, RFlagAt = now,
+                    CWrittenAt = now, RSeq = i, RCellNo = 1, TiltedAt = now,
                     Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
                 });
             db.SaveChanges();

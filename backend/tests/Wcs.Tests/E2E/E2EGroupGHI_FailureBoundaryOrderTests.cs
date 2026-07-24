@@ -344,7 +344,7 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
                 db.SorterCommands.Add(new SorterCommand
                 {
                     PieceId = piece.Id, CellId = cell.Id, CSeq = seq, CellNo = 1, CWrittenAt = now,
-                    RSeq = seq, RCellNo = 1, RFlagAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
+                    RSeq = seq, RCellNo = 1, TiltedAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
                 });
             await db.SaveChangesAsync();
         }

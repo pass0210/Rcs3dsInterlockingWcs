@@ -635,3 +635,14 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - **★교훈(메타)**: 무거운 실-Sim E2E 스위트 반복 검증 시 **mid-run kill 금지**(각 run 자연 완료). 고아 testhost가 kill을 넘겨 생존→Wcs.Api.dll 파일잠금(MSB3021 "testhost(PID)에 의해 잠김")→후속 run 절단(실패:0인데 전체<408). 이건 제품 회귀가 아니라 평가-환경 오염. 절단 run의 named FAIL 0 + 자연완료 시 클린 = 환경 귀속 신호. testhost-teardown-channel-race/e2e-parallel-load 교훈과 일치. `PlcGateway.StopAsync` CancelAsync 래핑이 관련 ObjectDisposedException teardown flake도 소거.
 
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-B critical=0 important=1(pusher ComputeSorterFull 매틱 호출 — 선재/후속) minor=3 design-note=1 iter=2 → Ready-to-merge
+
+## S-TWO-FLOOR-CONTROL C1 — R-clear@Ready + 처리 3시각 + 양-provider 마이그레이션 (2026-07-24) — APPROVED (0 fix iter)
+- **R-clear 지연은 레지스터 전이 순서로만 실증된다**: R2가 RegChange 인덱스로 `R_Flag↑ → Ready↑ → R_Flag↓`(clear가 Ready==1 이후)를 단언 — "복귀까지 R 유지"를 시계열로 못 박음. gap(returned-tilted)=411ms≈MoveDuration으로 실제 복귀 이동 계측 확인. 무-이동 대조(R1 gap<300ms, MoveDuration=1000이지만 이동 없음)로 "즉시 clear·추가 지연 0" 분리 입증. 성공 코드 존재만으론 부족 — 레지스터 순서 인덱스가 권위.
+- **양 provider 마이그레이션은 실 SQL Server 일회용 콜드스타트로만 SQL Server-valid**(교훈 sqlserver-migration-prod-provider 재확인): SQLite scratch(PRAGMA)+빈 SQL Server `WcsMigCheck_*` fresh `ef database update`(1785/207 없음)+sys.columns/foreign_keys(NO_ACTION 불변)/indexes+DROP. 운영 DB `Rcs3dsInterlockingWcs.__EFMigrationHistory` 최신=AddPieceArchivedAt 읽기전용 확인으로 무접촉 증거화. has-pending "No changes" 양 provider.
+- **snake_case 계약 텍스트 vs PascalCase 실제 스키마**: 계약/ERD가 deposited_at 표기여도, 대상 테이블 기존 컬럼이 전부 PascalCase면 신규도 PascalCase가 정답(Consistency Over Preference — 한 테이블 혼용 금지). sys.columns 덤프로 기존 관행 확인 후 판정.
+- **완료된 분류를 복귀 정체로 실패 격하 금지**: R_Seq 대사 성공=적재 완료. Ready 미복귀(복귀 이동 정체)는 계측 실패일 뿐 → outcome=Success 유지 + returnedAt=NULL + RETURN_TIMEOUT WARN + ClearR ack가 정답(재dispatch/오알람 방지).
+- **새 대기 루프 teardown 방어 = 기존 ct 상속 확인으로 닫힘**: WaitReadyThenClearRAsync가 `Task.Delay(pollMs, ct)`로 ApplicationStopping ct 존중 + ContinueWith stopping 게이트 유지 → 새 경쟁 도입 0. 새 루프 추가 시 ct 배선 소스 직독 필수.
+- **flake 소거**: 전체 5회 + 타이밍군(HandshakeReturnClear|Residue|E2EGroupCD) 3회 = 이 군 8회 관측 413/413 GREEN. 자연완료·run 사이 orphan kill.
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C1 critical=0 major=0 minor=0 iter=0 (Evaluator PASS — orchestrator Step 4.5 독립 코드리뷰는 후속)
+
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C1 critical=0 important=1(depositedAt 단조 client-clock 미강제 — 관측전용/후속) minor=3 iter=1(0 fix) → Ready-to-merge

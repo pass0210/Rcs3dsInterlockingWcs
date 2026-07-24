@@ -363,7 +363,17 @@ public sealed class SorterCommand
     public DateTime           CWrittenAt  { get; set; }
     public int?               RSeq        { get; set; }  // NULL=미수신
     public int?               RCellNo     { get; set; }
-    public DateTime?          RFlagAt     { get; set; }
+
+    // ── S-TWO-FLOOR-CONTROL C1: 처리 3시각(투입→틸트→복귀 소요 계측 — SPEC §4·ERD sorter_command) ──
+    //   컬럼명 = 프로퍼티명(PascalCase, B2C 규약 — HasColumnName 미사용). NULL 규칙:
+    //     · DepositedAt = 3DS 투입(IF-10 보고) 시각. 행 생성 시 유입 → 항상 non-NULL.
+    //     · TiltedAt    = 셀 틸트(R_Flag==1 관측) 시각. 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL.
+    //                     (구 RFlagAt 개명 — 의미 확장: "Success만"→"R_Flag==1 관측 시 항상". RenameColumn 보존.)
+    //     · ReturnedAt  = 복귀 완료(Ready 0→1) 시각. 성공(복귀 관측)만 non-NULL / 그 외 NULL.
+    //   단조: DepositedAt ≤ TiltedAt ≤ ReturnedAt.
+    public DateTime?          DepositedAt { get; set; }
+    public DateTime?          TiltedAt    { get; set; }
+    public DateTime?          ReturnedAt  { get; set; }
     public SorterCommandStatus Status     { get; set; }
 
     public DateTime CreatedAt { get; set; }

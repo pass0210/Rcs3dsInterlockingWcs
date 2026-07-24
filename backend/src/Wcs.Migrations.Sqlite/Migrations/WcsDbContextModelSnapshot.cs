@@ -937,21 +937,27 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("DepositedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("PieceId")
                         .HasColumnType("INTEGER");
 
                     b.Property<int?>("RCellNo")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTime?>("RFlagAt")
-                        .HasColumnType("TEXT");
-
                     b.Property<int?>("RSeq")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ReturnedAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("TiltedAt")
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");

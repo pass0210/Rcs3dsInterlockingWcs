@@ -305,7 +305,9 @@ public sealed class MonitoringQueries : IMonitoringQueries
                 sc.RSeq,
                 sc.Status,
                 sc.CWrittenAt,
-                sc.RFlagAt,
+                sc.DepositedAt,
+                sc.TiltedAt,
+                sc.ReturnedAt,
             })
             .ToList();
 
@@ -313,7 +315,7 @@ public sealed class MonitoringQueries : IMonitoringQueries
         var page = (hasMore ? rows.Take(take) : rows)
             .Select(sc => new SorterCommandDto(
                 sc.Id, sc.PId, sc.Barcode, sc.CellNo, sc.CSeq, sc.RSeq,
-                sc.Status.ToString(), sc.CWrittenAt, sc.RFlagAt))
+                sc.Status.ToString(), sc.CWrittenAt, sc.DepositedAt, sc.TiltedAt, sc.ReturnedAt))
             .ToList();
 
         long? next = hasMore && page.Count > 0 ? page[^1].Id : null;

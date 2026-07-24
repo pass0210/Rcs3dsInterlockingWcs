@@ -159,7 +159,7 @@ public class SorterCellFullnessTests
             CWrittenAt = now,
             RSeq       = 1,
             RCellNo    = cellNo,
-            RFlagAt    = now,
+            TiltedAt   = now,
             Status     = SorterCommandStatus.COMPLETED,
             CreatedAt  = now,
         });
@@ -996,7 +996,7 @@ public class SorterCellFullnessTests
         db.SorterCommands.Add(new SorterCommand
         {
             PieceId = piece.Id, CellId = cell.Id, CSeq = 1, CellNo = cellNo, CWrittenAt = cWrittenAt,
-            RSeq = 1, RCellNo = cellNo, RFlagAt = cWrittenAt, Status = SorterCommandStatus.COMPLETED, CreatedAt = cWrittenAt,
+            RSeq = 1, RCellNo = cellNo, TiltedAt = cWrittenAt, Status = SorterCommandStatus.COMPLETED, CreatedAt = cWrittenAt,
         });
         db.SaveChanges();
     }

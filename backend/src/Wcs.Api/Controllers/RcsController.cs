@@ -290,10 +290,14 @@ public sealed class RcsController : ControllerBase
         }
 
         // piece.id / cell.id 조회 (sorter_command 연결 키 — 백그라운드 콜백에서 사용)
-        long pieceId = db.Pieces
+        //   C1: depositedAt(IF-10 투입 보고 시각 = piece.DepositedAt)를 함께 조회해 저널에 유입(계약 (e)).
+        //   단일 진실(piece.DepositedAt) 재사용 — 요청 스코프 db로 지금 읽어 클로저로 넘긴다(백그라운드는 스코프 종료).
+        var pieceRow = db.Pieces
             .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)   // S-B2C-DATAGEN: 아카이브 제외.
-            .Select(p => p.Id)
+            .Select(p => new { p.Id, p.DepositedAt })
             .FirstOrDefault();
+        long pieceId = pieceRow?.Id ?? 0;
+        DateTime? depositedAt = pieceRow?.DepositedAt;
         long cellId = db.Cells
             .Where(c => c.DestinationId == dest.Id && c.CellNo == selectedCell)
             .Select(c => c.Id)
@@ -353,7 +357,7 @@ public sealed class RcsController : ControllerBase
                         {
                             try
                             {
-                                var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell);
+                                var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell, depositedAt);
                                 journal.Finalize(cmdId, result);
                             }
                             catch (Exception ex)
@@ -379,6 +383,21 @@ public sealed class RcsController : ControllerBase
                                 catch (Exception ex)
                                 {
                                     SafeLog(() => _log.LogError(ex, "[IF-11] alarm 영속화 예외: pId={PId}", pId));
+                                }
+                            }
+                            // C1: 성공했으나 복귀(Ready==1)를 상한 내 관측하지 못한 경우(returnedAt=NULL) — 소터 정체
+                            //   경보. 분류 자체는 완료(status=COMPLETED)라 !IsSuccess 게이트 밖의 별도 분기.
+                            //   즉시-clear 성공(무-이동)은 returnedAt non-NULL이므로 여기 미해당.
+                            else if (result.ReturnedAt is null)
+                            {
+                                try
+                                {
+                                    alarmSink.Append("RETURN_TIMEOUT", Wcs.Data.AlarmSeverity.WARN, pieceId,
+                                        $"pId={pId} cellNo={selectedCell} detail={result.Detail}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    SafeLog(() => _log.LogError(ex, "[IF-11] RETURN_TIMEOUT alarm 영속화 예외: pId={PId}", pId));
                                 }
                             }
                         }

@@ -83,6 +83,12 @@ public sealed record PlcGatewayOptions
     // RFlagTimeoutMs보다 짧게(현장 폴 주기 몇 배) 잡는다. 초과 시 C 미기입 종결(§2C).
     public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
 
+    // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
+    // R 클리어를 "R_Flag==1 즉시"가 아니라 "복귀 완료(Ready 0→1)"로 지연하는 성공 경로 전용 데드라인.
+    // 복귀 이동(MoveDuration)이 RFlagTimeoutMs(분류 최대+여유)와 독립이라 별도 키로 분리(계약 (d-iii)).
+    // 하드코딩 금지(절대규칙 #7). 초과 시 ClearR ack + 알람 + returnedAt=NULL(측정 실패), outcome=Success 유지.
+    public int ReturnReadyTimeoutMs { get; init; } = 30000;
+
     // S-CLEANUP-FIELD D-1 — OFFLINE 지속 중 로그 스팸 억제용 요약 주기.
     // OFFLINE '전이'는 1회만 상세(스택 포함) 로깅하고, 이후 '지속' 폴 실패는 스택 없이 Debug로
     // 강등하되 이 주기(연속 실패 N회)마다 WARN 요약 1줄만 남긴다(진단 로그 매몰 방지).
