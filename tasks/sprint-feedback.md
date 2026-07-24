@@ -794,3 +794,61 @@ APPROVED
 - [Minor] `HostByFloor` get마다 Dictionary 재파싱·할당(WcsOptions.cs:198, 소터 hot path 2×/Observe) — 설정 불변이므로 1회 계산(field/Lazy).
 - [Minor] bootstrap ResolveRoutes가 어떤 슈트에서 throw하면 RouteState 0개→하트비트가 "동기 완료"로 간주해 재관찰 안 됨(DestinationStatusPusher.cs:301). 확률 낮음·이벤트 시 self-heal. 인지만.
 - [설계노트] NULL-floor 고정 슈트는 전 호스트 브로드캐스트(chuteNo 전역유일이라 무해) — RCS가 타 층 chute 항목 허용하는지 1줄 확인 권고.
+
+---
+
+# Sprint Feedback — S-TWO-FLOOR-CONTROL 서브 스프린트 C1 (R-clear@Ready + 처리 3시각 + 양-provider 마이그레이션)
+
+Evaluator: 단일 (functional + data-integrity[마이그레이션 포함] 순차).
+평가일: 2026-07-24. 브랜치: feat/two-floor-control-c1 (HEAD ea8d48e, 작업은 전부 워킹트리 미커밋 — status 확인).
+방법: ground-truth git 확인 + 계약/코드 직독 + fresh 빌드/테스트(자체 실행·Generator 보고 불신) + 양 provider 마이그레이션 실적용.
+
+## 1. Build + Tests — PASS
+- `dotnet build backend/Wcs.sln -c Debug`: **0 오류**. 경고 = NU1903(선재 SQLitePCLRaw 취약성) 10개뿐 — **NEW 경고 0**. (Generator가 언급한 CS8604/xUnit2013은 이 빌드에 미출현.)
+- `dotnet test backend/Wcs.sln --no-build` **전체 스위트 5회 연속 GREEN**: RUN1~5 전부 `실패: 0, 통과: 413, 전체: 413`(각 72–75s). flake 0. run 사이 orphan Sim/testhost kill·자연완료(mid-run kill 0 → MSB3021 0).
+- baseline 산술: 413 − 5 신규(HandshakeReturnClearTests R1~R4 4건 + E2EGroupCD D11 1건) = **408** ✓.
+- 타이밍 취약군(`HandshakeReturnClearTests|HandshakeResidueTests|E2EGroupCD_AlignHandshakeTests`, 21 테스트) **추가 3회 반복 GREEN(21/21)** — 전체 5회 + 표적 3회 = 이 군 8회 관측 flake 0(s9-flake·e2e-parallel-load 교훈 대응).
+
+## 2. R-clear@Ready 타이밍 실증 (E2E, 실 SimServer TCP) — PASS
+상세 로거 출력(fresh, 자체 실행)으로 실증:
+- **(b) 무-이동 사이클 R1**: Outcome=Success, tilted==returned, `gap=0.0711ms < 300ms`(MoveDuration=1000ms인데 이동 미발생) → 즉시 clear·추가 지연 0. `HS_RETURN_TIMEOUT` 미발생 + CLEAR_R 발생.
+- **(a) 복귀 이동 사이클 R2**: Outcome=Success, `gap=411ms`(MoveDuration=400ms 실측). RegChange 순서 `R_Flag↑=idx4 → Ready↑=idx5 → R_Flag↓=idx9` — **ClearR(R_Flag 1→0)가 Ready 0→1 이후**임을 인덱스로 실증 = Ready==1까지 R 영역 유지. `HS_RETURN_WAIT` 스테이지 발화.
+- **(c) 복귀 타임아웃 R3**: MoveDuration=3000ms ≫ ReturnReadyTimeoutMs=250ms → Outcome=Success, tiltedAt non-NULL, **returnedAt=NULL**, `HS_RETURN_TIMEOUT` 스테이지 + CLEAR_R ack.
+- **(d) 회귀 R4(불일치)**: Outcome=RSeqMismatch, tiltedAt 기입, returnedAt=NULL, `HS_RETURN_WAIT` 미발생(즉시 clear 현행 유지). arming/타임아웃/OFFLINE 경로 diff 0(코드 직독) — HandshakeOrchestrator 삭제 라인은 옛 즉시-clear 성공경로 + mismatch return 라인뿐, ArmRFlagZeroAsync/WaitCFlagZeroAsync/R-poll 타임아웃 무변경.
+
+## 3. 3시각 DB 실증 — PASS
+- **D11**(E2E, 실 Sim3ds Tcp, IF-10→핸드셰이크→DB 3레이어 관통): 성공 sorter_command 행 `deposited=01:30:54.163 ≤ tilted=01:30:54.419 ≤ returned=01:30:54.421`, **전부 non-NULL·단조** ✓.
+- outcome별 NULL 규칙((e)): 성공=3시각 non-NULL(D11), 복귀타임아웃=returnedAt NULL·tiltedAt non-NULL(R3), 불일치=tiltedAt non-NULL·returnedAt NULL(R4). HandshakeResult가 규칙대로 담고 Finalize가 그대로 기입(DbRepositories.cs:853-857) — RFlagAt=now 옛 기입 제거 확인.
+
+## 4. 양 provider 마이그레이션 — PASS (교훈 sqlserver-migration-prod-provider 대응)
+- **SQLite**(scratch `migcheck.db`): `ef database update` fresh 7개 마이그레이션 적용(신규 `20260724005735_AddSorterCommandProcessingTimes` 최신). PRAGMA table_info: `TiltedAt`(구 RFlagAt 개명)·`DepositedAt`·`ReturnedAt` 전부 nullable TEXT 실재, **RFlagAt 소멸**. FK piece/cell 둘 다 RESTRICT 불변. 인덱스 IX_PieceId/IX_CellId 불변(신규 0). has-pending = "No changes".
+- **SQL Server**(실 검증 — localhost 가용): 빈 일회용 DB `WcsMigCheck_20260724102953` 생성 → `ef database update` **fresh 성공(1785/207 없음)** 신규 마이그레이션 최신 적용. sys.columns: `TiltedAt`/`DepositedAt`/`ReturnedAt` datetime2 nullable=1, RFlagAt count=0. sys.foreign_keys: FK_..._cell/piece 둘 다 delete=NO_ACTION·update=NO_ACTION 불변. sys.indexes: PK(clustered)+IX_CellId+IX_PieceId(nonclustered non-unique), 신규 0. **DROP 후 존재 0 확인**. has-pending = "No changes".
+- **운영 DB 무접촉**: `Rcs3dsInterlockingWcs.__EFMigrationHistory` 최신 = `20260713053134_AddPieceArchivedAt`(신규 미적용) 읽기전용 확인 → 스크래치/일회용에만 적용됨 증거로 닫힘.
+- RenameColumn(RFlagAt→TiltedAt) 데이터 보존 방식 확인(양 provider Up/Down 대칭).
+
+## 5. 절대규칙 (코드 직독) — PASS
+- **#1**: 모든 ClearR = `_gw.EnqueueAsync(new PlcWrite.ClearR())` 경유(HandshakeOrchestrator L181/309/404/422). 직접 Modbus 0. ProcessWriteAsync ClearR 케이스 내부 무변경(PlcGateway.cs diff = ReturnReadyTimeoutMs 필드 1개뿐).
+- **#3**: TgtFloor 미접촉 — 프로덕션 src에 D6/TgtFloor **write 0**(RcsController의 TgtFloor는 전부 주석). SetTgtFloor는 테스트 하니스(R2/R3 Sim 구동)에만.
+- **#4**: 복귀 완료 판정 = `s.Ready`(Ready 0→1)로 정확.
+- **#7**: 복귀 타임아웃/주기 = `_opt.ReturnReadyTimeoutMs`/`_opt.RFlagPollMs` (appsettings·PlcGatewayOptions·TimingOptions·SorterTimingOverride·Program.cs 배선). 신규 return-wait 코드 3자리+ ms 리터럴 grep 0.
+- **#8**: Wcs.Core diff 0(git 확인).
+- **teardown 채널 경쟁 방어**: 신규 WaitReadyThenClearRAsync 대기 루프 `Task.Delay(_opt.RFlagPollMs, ct)`가 ct 존중. 핸드셰이크 dispatch = `bundle.ExecuteHandshakeAsync(cell, lifetime.ApplicationStopping)` → 종료 시 취소 전파 + ContinueWith `stopping.IsCancellationRequested→return` 게이트 + ObjectDisposedException 스킵 유지. 테스트 하니스 DisposeAsync는 `Queue.Writer.TryComplete()` 선행(교훈 testhost-teardown 미러). 새 teardown 경쟁 도입 0.
+
+## 6. 스코프 — PASS
+- 무접촉존 diff 0(git 확인): Wcs.Core·frontend·Sim3ds 소스·arming(ArmRFlagZeroAsync)·ProcessWriteAsync ClearR 케이스·CLAUDE.md. HandshakeOrchestrator 삭제 라인은 성공경로 재구성분뿐. C2(재시작/I-3)·C3(스톨/pusher) 미구현(로드맵 유지). 마이그레이션 FK/인덱스 거동 불변.
+- frontend diff 0: `git diff --stat -- frontend/` 빈 출력 → Web/UI 브라우저 검증 면제(계약 N/A 근거 성립).
+
+## 7. Generator 플래그 2건 판정 — 둘 다 합리적
+- **(i) PascalCase 컬럼명**: 계약 scope #4·ERD는 snake_case(deposited_at 등) 표기이나, sorter_command 테이블의 **기존 컬럼 전부가 PascalCase**(Id/PieceId/CWrittenAt/RFlagAt…, WcsDbContext "B2C 규약·HasColumnName 미사용")임을 SQL Server sys.columns 덤프로 확인. 신규 3컬럼만 snake_case로 가면 **한 테이블 내 혼용** — Core Principle "Consistency Over Preference" 위반. PascalCase 준수가 정답. Generator가 sprint-log에 투명 플래그. → **PASS(기존 스키마 관행 준수)**.
+- **(ii) 복귀 타임아웃 outcome=Success + returnedAt=NULL + WARN**: R_Seq 대사 성공 = 틸트·적재 완료(분류 성공). Ready 미복귀는 복귀 이동 정체(계측 실패)일 뿐 분류 결과를 뒤집지 않음 → 완료된 분류를 실패(MISMATCH/TIMEOUT)로 격하하면 재dispatch/오알람 유발. Success 유지 + returnedAt=NULL(계측 실패 표기) + RETURN_TIMEOUT WARN(운영 이상 표면화) + ClearR ack(R 잔류 방지)가 계약 (d-iii)·(e)에 정합. → **PASS(합리적)**.
+
+## 최종 — APPROVED
+전체 5회+타이밍군 8회 GREEN(413/413, flake 0)·R-clear@Ready 레지스터 순서 실증·3시각 단조 DB 실증·양 provider 마이그레이션 실적용(SQL Server 일회용 fresh·운영 무접촉·FK/인덱스 불변)·절대규칙 #1/#3/#4/#7/#8·teardown 방어·스코프·플래그 2건 전부 PASS. **→ APPROVED.**
+
+APPROVED
+
+### 코드리뷰(4-Tier) 후속 등재 — C1, Critical 0 · Ready-to-merge
+- [Important·소비처 결선 전 처리] depositedAt≤tiltedAt 단조가 코드로 강제 안 됨. depositedAt=RCS 클라이언트 timeStamp(ParseTimestamp ?? UtcNow), tilted/returned=서버 UtcNow. clamp는 tilted≤returned만 보장. Entities.cs:373 주석·D11 테스트는 전체 체인을 보장처럼 단언(현재 E2E 드라이버가 server-ish 시각이라 통과). 실 RCS 시계 오차 시 depositedAt>tiltedAt 가능 → 향후 '투입→틸트' 소요 지표 음수. 관측 전용(프론트 미결선). 방향: (a) depositedAt를 서버 시계로 정규화, (b) 하류 소요 계산 방어적으로, 또는 (c) 주석/테스트를 'depositedAt=client-sourced, 하드 보장은 서버측 tilted≤returned'로 완화. → C3/cleanup 또는 프론트 소요 지표 결선 전 처리.
+- [Minor] ReturnReadyTimeoutMs 경계검증 없음(≤0이면 매 복귀사이클 즉시 타임아웃→허위 RETURN_TIMEOUT). RFlagPollMs=0 tight-loop도 동일(선재). 가드/최소값 문서화 권고.
+- [Minor] 복귀 대기(최대 ReturnReadyTimeoutMs) 동안 R 영역 유지 → 동일 소터 concurrent IF-10 시 2번째 arming이 1번째 R 잔류 보고 조기 ClearR(memory single-sorter-concurrent-handshake-gap). 순차 dispatch 전제라 비블로킹이나 C1이 취약 창을 늘림 → 향후 동일소터 직렬화 후보.
+- [Minor·정보] 개명 컬럼 의미 드리프트: 레거시 행 TiltedAt=구 Finalize 시각(Success만) vs 신규=R_Flag 관측(Mismatch도). 이력 비교 시 유의.
