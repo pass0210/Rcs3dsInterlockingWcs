@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Wcs.Core;
 using Wcs.Data;
@@ -90,8 +91,10 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     private readonly IDestinationStatusService  _status;
     private readonly IHostApplicationLifetime   _lifetime;
     private readonly IPendingFloorQueueRestorer _restorer;
+    private readonly IOperationLogger           _opLog;
     private readonly ILogger<SorterFloorReturnService> _log;
     private readonly int _intervalMs;
+    private readonly int _stallSuspectTicks;   // ≤0이면 스톨 감지 비활성(C3).
 
     private CancellationTokenSource? _cts;
     private Task?                    _loopTask;
@@ -103,6 +106,11 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     {
         public bool PrevReady = true;        // 소터 기동 Ready=1 전제(첫 전이 정상 감지).
         public int  CycleStartFloor;         // Ready 1→0 시점 CurFloor(분류-제자리 vs 이동 구분).
+
+        // ── fail-loud 스톨 의심 감지 상태(C3 — 관측 전용) ──────────────────────
+        public int  StallTicks;              // AND 조건 연속 지속 틱수.
+        public bool StallWarned;             // 이 에피소드에서 WARN 이미 발화(스팸 억제 — 에피소드당 1회).
+        public int  StallHeadFloor;          // 직전 틱 큐 머리 층(머리 불변 판정 — pop 진행 여부).
     }
     private readonly ConcurrentDictionary<long, ObserveState> _observeState = new();
 
@@ -112,16 +120,19 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         IDestinationStatusService status,
         IHostApplicationLifetime  lifetime,
         IPendingFloorQueueRestorer restorer,
+        IOperationLogger          opLog,
         IOptions<WcsOptions>      options,
         ILogger<SorterFloorReturnService> log)
     {
-        _registry   = registry;
-        _queues     = queues;
-        _status     = status;
-        _lifetime   = lifetime;
-        _restorer   = restorer;
-        _log        = log;
-        _intervalMs = Math.Max(1, options.Value.SorterFloorReturn.ObserveIntervalMs);
+        _registry          = registry;
+        _queues            = queues;
+        _status            = status;
+        _lifetime          = lifetime;
+        _restorer          = restorer;
+        _opLog             = opLog;
+        _log               = log;
+        _intervalMs        = Math.Max(1, options.Value.SorterFloorReturn.ObserveIntervalMs);
+        _stallSuspectTicks = options.Value.SorterFloorReturn.StallSuspectTicks;   // ≤0=비활성(클램프 안 함).
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -223,10 +234,11 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         var  st     = _observeState.GetOrAdd(destId, static _ => new ObserveState());
 
         // OFFLINE(스냅샷 불신) — pop·기입 생략. PrevReady만 동기(오프라인 스냅샷은 직전 Ready 유지)해
-        // 복구 시 스퓨리어스 에지 방지.
+        // 복구 시 스퓨리어스 에지 방지. 오프라인은 정당한 미기입 상태이므로 스톨 감지 리셋(발화 제외).
         if (!snap.Online)
         {
             st.PrevReady = snap.Ready;
+            ResetStall(st);
             return;
         }
 
@@ -248,6 +260,11 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
             }
         }
         st.PrevReady = ready;
+
+        // ── fail-loud 스톨 의심 감지(C3 — 관측 전용·WARN + operation_log 1회/에피소드) ──────────
+        // pop이 관측 샘플링에 의존하므로(§2-C 불변식), 큐 머리가 있는데도 pop이 일어나지 않고 정체하는
+        // 상황을 조용히 방치하지 않고 발화한다. 쓰기/pop/재dispatch 같은 교정 동작은 하지 않는다(그건 D).
+        DetectStall(destId, bundle.ChuteNo, snap, st, ready);
 
         // ── 정렬 기입 — 유휴(Ready=1)·CurFloor!=머리층에서만(분류/이동 중 선기입 금지) ──────────
         if (!ready || !_queues.TryPeek(destId, out int f) || snap.CurFloor == f)
@@ -278,5 +295,96 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
                           try { _log.LogError(t.Exception, "[층복귀] SetTgtFloor 큐 투입 예외 destId={DestId} floor={Floor}", destId, f); }
                           catch { }
                   }, TaskScheduler.Default);
+    }
+
+    // ── fail-loud 스톨 의심 감지기(C3 — 관측 전용) ─────────────────────────────
+    //
+    // AND 조건(Online은 호출 전 보장): 유휴(Ready==1) ∧ TgtFloor==0 ∧ 큐 머리 존재 ∧ 정지 아님(!IsPaused)
+    //   ∧ 큐 머리 층이 직전 틱과 동일. 이 조건이 연속 StallSuspectTicks 틱 지속되면 에피소드당 1회 WARN +
+    //   operation_log 를 발화한다. 조건이 하나라도 깨지면 리셋(다음 에피소드 재감지).
+    //
+    // 왜 오탐 0인가:
+    //   · busy(Ready==0) 구간(분류·이동)은 매 틱 리셋 — 어떤 pop 도 Ready 1→0→1 사이클을 동반하므로,
+    //     정상 사이클링은 그 busy 창에서 카운터가 리셋돼 임계에 못 미친다(정상 대기 cadence < 임계 지속시간 전제).
+    //   · 정렬 진행(머리 F != CurFloor)이면 정렬 기입이 TgtFloor 를 ≠0 으로 만들어 다음 틱 즉시 리셋된다.
+    //   · 오프라인/PAUSED 는 정당한 미기입 — 각각 상위 조기반환·IsPaused 로 제외(발화 안 함).
+    //   · 큐 빔·머리 진행(값 변경)도 리셋. 유휴 idle(큐 빔)은 애초에 머리 없음 → 발화 대상 아님.
+    // 즉 실제 지속 스톨(머리 있는데 유휴+TgtFloor==0 이 임계 이상 — 미투하 abandonment 등)에서만 발화한다.
+    //
+    // IsPaused 는 저비용 단일 조회(I-2 — Compute/ComputeSorterFull 셀 집계 미호출)이며, 값싼 조건이 모두
+    //   통과했을 때만 호출한다(불필요한 DB 조회 최소화). 예외는 관측 루프 try/catch(형제 소터 격리)가 흡수.
+    private void DetectStall(long destId, int chuteNo, PlcSnapshot snap, ObserveState st, bool ready)
+    {
+        // 스톨 감지 비활성(설정 ≤0) → 상태 리셋 후 no-op.
+        if (_stallSuspectTicks <= 0) { ResetStall(st); return; }
+
+        // 값싼 조건 먼저 — 유휴 ∧ TgtFloor==0 ∧ 큐 머리 존재(Online 은 호출 전 보장).
+        if (!ready || snap.TgtFloor != 0 || !_queues.TryPeek(destId, out int head))
+        {
+            ResetStall(st);
+            return;
+        }
+
+        // 정지(PAUSED/비활성)는 정당한 미기입 — 발화 제외(저비용 IsPaused 만·Compute 미호출).
+        if (_status.IsPaused(destId))
+        {
+            ResetStall(st);
+            return;
+        }
+
+        // 큐 머리 층이 직전 틱과 다르면(pop 으로 진행됨) 카운터 리셋·재무장 후 이 틱부터 재계수.
+        if (st.StallTicks > 0 && head != st.StallHeadFloor)
+            ResetStall(st);
+
+        st.StallHeadFloor = head;
+        st.StallTicks++;
+
+        // 임계 도달 → 에피소드당 1회만 발화(지속 중 매 틱 반복 발화 금지 — 로그 스팸 0).
+        if (st.StallTicks >= _stallSuspectTicks && !st.StallWarned)
+        {
+            st.StallWarned = true;
+            FireStallWarning(destId, chuteNo, snap, head, st.StallTicks);
+        }
+    }
+
+    private static void ResetStall(ObserveState st)
+    {
+        st.StallTicks     = 0;
+        st.StallWarned    = false;
+        st.StallHeadFloor = 0;
+    }
+
+    // 스톨 의심 발화 — Serilog WARN + operation_log 1건(구조화 detail). 관측 전용(교정 동작 0).
+    private void FireStallWarning(long destId, int chuteNo, PlcSnapshot snap, int headFloor, int ticks)
+    {
+        try
+        {
+            _log.LogWarning(
+                "[층복귀] 스톨 의심 — 소터 destId={DestId} chuteNo={ChuteNo}: 큐 머리 층 {Head} 존재·유휴(Ready=1)·" +
+                "TgtFloor=0·머리 불변이 {Ticks}틱(≈{Ms}ms) 지속. under-pop 가능(관측 전용 — 자동 조치 없음).",
+                destId, chuteNo, headFloor, ticks, ticks * _intervalMs);
+        }
+        catch { /* teardown 중 로거 disposed */ }
+
+        try
+        {
+            _opLog.Log(
+                OperationLogCategory.STATE,
+                action:        "SORTER_STALL_SUSPECT",
+                level:         OperationLogLevel.WARN,
+                sorterChuteNo: chuteNo,
+                destinationId: destId,
+                detail:        JsonSerializer.Serialize(new
+                {
+                    headFloor,
+                    curFloor     = snap.CurFloor,
+                    ready        = snap.Ready,
+                    tgtFloor     = snap.TgtFloor,
+                    stallTicks   = ticks,
+                    intervalMs   = _intervalMs,
+                    observedOnly = true,   // 관측 전용 — 교정 동작 없음(파킹/복구는 Sub-Sprint D).
+                }));
+        }
+        catch { /* operation_log fail-safe — 본 관측 비차단 */ }
     }
 }

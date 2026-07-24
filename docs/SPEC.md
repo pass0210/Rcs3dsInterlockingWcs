@@ -103,6 +103,19 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
     호출하지 않는다** — 저비용 `IDestinationStatusService.IsPaused`(destination Status/IsActive 단일 조회)로
     hold(Paused만)를 산출한다. **FULL(셀 만재)은 정렬 기입을 차단하지 않는다**(만재는 IF-05 dispatch만 차단 —
     큐 피스는 이미 수용 확정분이라 물리 정렬까지 막으면 고립). PAUSED/Offline은 여전히 차단(§2-A 표 ‡행 참조).
+  - **샘플링 안전 불변식 + fail-loud 스톨 감지기(I-A 이연 · Sub-Sprint C3)**: pop은 관측 루프(`SorterFloorReturnService`,
+    단일 스레드)의 `Ready 1→0→1` 에지 **샘플링**에 의존하므로 안전 불변식 **`ObserveIntervalMs ≪ 최소 분류
+    소요(Ready=0 창)`** 가 성립해야 한다. 이 가정이 깨지면(분류 Ready=0 창 < 관측 주기) 사이클 에지가 유실돼
+    큐 머리가 pop되지 않고 정체(**under-pop → stall**)될 수 있다 — over-pop/안전속성 회귀는 구조상 불가(**liveness
+    위협일 뿐**). 현장 분류=초 단위 ≫ 주기 150ms라 실무상 안전. 정적 설정 검증 인프라가 리포에 없고(분류 소요는
+    런타임/현장 값이라 기동 시 알 수 없음), 별도 정적 검증기 신설은 스코프 아님 → **문서화 + 런타임 스톨 감지기**로
+    닫는다. 스톨 감지기(관측 루프 계층, 순수 코어 무접촉): 소터별로 **Online ∧ 정지 아님(`!IsPaused`) ∧ 큐 머리
+    존재 ∧ 유휴(`Ready==1`) ∧ `TgtFloor==0` ∧ 큐 머리 층 직전 틱 불변**이 **연속 `Wcs:SorterFloorReturn:StallSuspectTicks`
+    틱**(기본 50 × 150ms ≈ 7.5초, 하드코딩 금지·절대규칙 #7, ≤0=비활성) 지속되면 **Serilog WARN + `operation_log`
+    `SORTER_STALL_SUSPECT`(Level=WARN, 구조화 detail) 1건을 에피소드당 1회** 발화한다(조건 해소 시 카운터 리셋·재무장).
+    오프라인·PAUSED는 정당한 미기입 상태이므로 **발화 제외**. **관측 전용** — PLC 쓰기·pop·재dispatch·파킹 같은
+    교정 동작은 하지 않는다(미투하 abandonment 복구·파킹존은 Sub-Sprint D 스코프). 절대규칙 #1(PLC 쓰기 경로
+    무접촉)·#8(순수 코어 무접촉) 불변.
 - **소터 readiness(CurFloor 기준)**: `DestinationStatusService.ComputeSorter`는 단일 운영층 고정 비교를
   폐지하고 **CurFloor를 목표 층으로 주입**해 `ready = online && Ready==1`로 산출한다(현재 정렬된 층에서만
   ready). **dual-host 층별 발신 라우팅은 서브 스프린트 B에서 구현 완료**(§2-A "IF-08 push 층별 호스트

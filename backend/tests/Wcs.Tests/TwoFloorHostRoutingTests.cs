@@ -602,7 +602,8 @@ public class TwoFloorWriteGateI2Tests
             SorterFloorReturn = new SorterFloorReturnOptions { ObserveIntervalMs = 20 },
         });
         var svc = new SorterFloorReturnService(
-            registry, queues, spy, new FakeLifetime(), new NoopQueueRestorer(), opts,
+            registry, queues, spy, new FakeLifetime(), new NoopQueueRestorer(),
+            new CapturingOperationLogger(), opts,
             NullLogger<SorterFloorReturnService>.Instance);
 
         return (svc, master, wq, polling);
