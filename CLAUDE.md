@@ -15,8 +15,12 @@
    진행 중(≠0)엔 절대 덮어쓰지 않는다(핑퐁 차단). PAUSED/OFFLINE이면 쓰지 않는다.
    **FULL(만재)은 IF-05 dispatch(수용 판정)에서만 차단**하고, 관측 루프의 물리 정렬 기입(D6)은 막지 않는다
    (이미 수용 확정된 큐 피스의 고립 방지 — S-TWO-FLOOR-CONTROL B 결정 2026-07-23).
-3. **WCS는 TgtFloor를 절대 클리어하지 않는다.** 클리어는 PLC가 분류 시작(Ready 1→0) 시점에 수행
+3. **정상 운영 중 WCS는 TgtFloor를 클리어하지 않는다.** 클리어는 PLC가 분류 시작(Ready 1→0) 시점에 수행
    (도착 시엔 CurFloor만 기입, TgtFloor 유지 — 도착 즉시 비우면 재기입 왕복 발생).
+   **단 콜드스타트(프로세스 기동/재시작) 1회 복구 리셋으로 WCS가 자신이 쓴 레지스터(C/R 영역·TgtFloor)를
+   0으로 초기화하는 것은 허용**한다(SPEC §4-B — 잔류 핸드셰이크·목표층 없이 깨끗한 상태로 시작).
+   이 리셋은 IF-08 부트스트랩 push보다 먼저, 단일 쓰기 큐(#1)로만 수행한다
+   (S-TWO-FLOOR-CONTROL C2 결정 2026-07-24).
 4. **Ready(D4.2) 의미**: 1=받을 수 있음(정지·비분류) / 0=분류 중 **또는 이동 중**(둘 다 BUSY).
 5. FULL(만재)·PAUSED(일시정지)·OFFLINE(폴 타임아웃/소켓 끊김)은 **WCS가 판단**한다. PLC는 Ready만 제공.
 6. API 필드명은 `pId, agvNo, barcode, inductionNo, chuteNo, qty, timeStamp` — `loadQty` 아님(개명됨).

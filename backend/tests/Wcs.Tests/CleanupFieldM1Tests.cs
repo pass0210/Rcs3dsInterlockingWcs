@@ -96,6 +96,14 @@ public class CleanupFieldM1_OfflineLogTests
 
             // 정상 기동 — Online 확립
             await WaitUntilAsync(() => gw.Latest.Online, 3000, "초기 Online");
+
+            // C2: 콜드스타트 레지스터 클리어(StartupClear)가 쓰기 컨슈머에서 처리 완료될 때까지 대기.
+            //   기동 위생 클리어는 쓰기 컨슈머에서 D0~D6 read/write 를 수행하므로, 이 활동이 아직 진행 중일 때
+            //   아래 OFFLINE 유도(SetFailReads=true)가 겹치면 클리어의 RMW read 가 실패해 쓰기 컨슈머 경로에서도
+            //   ERROR 가 1건 추가된다(부하 하 경합). 클리어를 먼저 정착시켜 "OFFLINE ERROR 는 폴 실패 1건뿐"을
+            //   결정적으로 만든다(스팸 억제 검증의 전제 — 기동 위생 활동과 무관하게).
+            await Task.WhenAny(gw.StartupClearCompleted, Task.Delay(3000));
+
             int onlineCountBefore = Count(logger, LogLevel.Information, "ONLINE");
 
             // ── OFFLINE 유도 ──────────────────────────────────────────────────────

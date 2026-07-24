@@ -182,6 +182,12 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         // ── CTS 생성(부트스트랩 발신 앞으로 재배치 — S-HARDENING-1 라이드얼롱) ────────
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
+        // ── S-TWO-FLOOR-CONTROL C2 §4-B: 소터 콜드스타트 레지스터 클리어(S1)를 부트스트랩보다 먼저 대기 ──
+        //   기동 첫 폴이 투입한 StartupClear가 처리 완료(레지스터 0)될 때까지 기다린 뒤 아래 부트스트랩 push를
+        //   낸다 — "클리어 before push"(계약 S3/CC3). 잔류 목표층 기반 상태를 push하는 것을 구조적으로 차단.
+        //   소터가 끝내 Online이 안 되면 설정 상한(StartupClearWaitMs) 경과 후 경고와 함께 진행(무한 대기 금지).
+        await WaitForSorterStartupClearsAsync(_cts.Token).ConfigureAwait(false);
+
         // ── 부트스트랩: 기동 시 전 활성 목적지 현재 수용상태 route별 1회 발신(§라우팅 규칙 동일) ──
         //   Observe가 라우팅으로 route를 만들고(Acked=null → 무조건 1회 발신) 각 route를 pump. 이후엔 전이만.
         foreach (var st in _states.Values)
@@ -479,6 +485,40 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
                 // ok==true && Computed!=Acked → 발신 중 새 전이 발생, 즉시 다음 전이 발신(continue while).
             }
         }
+    }
+
+    // ── S-TWO-FLOOR-CONTROL C2 §4-B: 소터 콜드스타트 클리어 완료 대기(클리어 before push — S3/CC3) ──
+    //
+    // 전 소터 번들의 StartupClearCompleted(첫 폴 StartupClear 처리 완료 시 완료)를 상한 내 대기한다.
+    // 온라인 기동이면 통상 폴 주기 수 배 이내에 완료 → 부트스트랩 push가 클리어 뒤에 나간다. 소터가 끝내
+    // Online이 안 되면(오프라인 기동) 상한 경과 후 경고와 함께 진행한다(무한 대기 금지 — 잔류 클리어 대상도
+    // 없으므로 순서 위반 아님). 소터 0대면 즉시 반환. 대기 자체는 호스트 기동 스레드에서 await하지만 폴/쓰기
+    // 컨슈머는 별도 태스크라 데드락 없다.
+    private async Task WaitForSorterStartupClearsAsync(CancellationToken ct)
+    {
+        var bundles = _sorterRegistry.AllBundles;
+        if (bundles.Count == 0) return;
+
+        int waitMs = Math.Max(1, _opt.StartupClearWaitMs);
+        var all = Task.WhenAll(bundles.Select(b => b.StartupClearCompleted));
+        Task done;
+        try
+        {
+            done = await Task.WhenAny(all, Task.Delay(waitMs, ct)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;   // 호스트 종료 — 부트스트랩 자체가 무의미(상위 취소 전파).
+        }
+
+        if (done == all)
+            _log.LogInformation(
+                "[IF-08푸시] 소터 {Count}대 콜드스타트 클리어 완료 확인 — 부트스트랩 push 진행(클리어 before push).",
+                bundles.Count);
+        else
+            _log.LogWarning(
+                "[IF-08푸시] 소터 콜드스타트 클리어 대기 타임아웃({Ms}ms) — 일부 소터 미완료(오프라인 기동?). " +
+                "부트스트랩 push 진행.", waitMs);
     }
 
     // ── 기동 시 DB로 전이 추적 상태 구성 ──────────────────────────────────────

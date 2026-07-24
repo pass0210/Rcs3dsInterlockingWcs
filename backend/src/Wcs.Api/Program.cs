@@ -175,6 +175,9 @@ builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusServic
 //   도착 시 pop(폐루프). 절대규칙 #1(단일 쓰기 큐)·#3(WCS 클리어 금지) 준수.
 // 하스티드 등록은 람다(ImplementationType=null) — 테스트 팩토리의 "null-hosted 제거" 패턴과 정합.
 builder.Services.AddSingleton<SorterPendingFloorQueues>();
+// C2 S2(I-3): 재시작 시 미완료 SORTER_3D piece 에서 pending-floor 큐를 재파생(읽기 전용). SorterFloorReturnService
+// 가 관측 루프 기동 전에 RestoreAsync 를 await 한다(복원 before 관측 — 스키마 변경·마이그레이션 0).
+builder.Services.AddSingleton<IPendingFloorQueueRestorer, PendingFloorQueueRestorer>();
 builder.Services.AddSingleton<SorterFloorReturnService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SorterFloorReturnService>());
 

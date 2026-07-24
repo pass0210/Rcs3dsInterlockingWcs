@@ -646,3 +646,14 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C1 critical=0 major=0 minor=0 iter=0 (Evaluator PASS — orchestrator Step 4.5 독립 코드리뷰는 후속)
 
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C1 critical=0 important=1(depositedAt 단조 client-clock 미강제 — 관측전용/후속) minor=3 iter=1(0 fix) → Ready-to-merge
+
+## S-TWO-FLOOR-CONTROL C2 — 콜드스타트 복구(기동 레지스터 클리어 + I-3 큐 재파생) (2026-07-24) — APPROVED (0 fix iter)
+- **전체 스위트 abort는 기능 실패가 아니라 testhost teardown crash일 수 있고, TCP TIME_WAIT 고갈이 원인**: 반복 실 Sim 스위트 실행이 loopback 소켓을 TIME_WAIT로 쌓아(1910개 관측) 후속 real-Sim 테스트 connect/bind 간헐 실패→testhost crash→run abort(기능 실패 0). **드레인 인과 증명**: 100s 대기로 1910→935 감소 후 즉시 423/423 clean. 편차 카운트(292/349/402/180)는 crash 시점 차. 귀속 절차 = ①develop stash 대조(baseline 동일 abort=코드 무관) ②세션 초반 fresh env clean 대조 ③병렬 비활성에도 abort(병렬 아님) ④TIME_WAIT 상관 ⑤WcsTeardownGuard 포착 로그. **교훈**: 전체 스위트 abort 목격 시 `netstat | grep -c TIME_WAIT` 먼저 확인·드레인 후 재측정. 반복 실행 자체가 env를 소진하므로 clean 측정은 세션 초반 또는 드레인 후에.
+- **무조건 StartupClear는 teardown write 물량을 늘려 pre-existing 테스트 취약성을 노출**: 구 "R_Flag 잔류 시에만 ClearR"→"매 기동 StartupClear(4 write)"로 확장 시 모든 real-Sim 테스트 teardown에 write consumer 활동 추가. VSB6(instant assert)·D1(스팸 억제 전제) 같은 타이밍 취약 테스트를 노출 → test-observation 견고화(수렴값 WaitUntil·클리어 정착 대기)로 해소. production은 기동 1회라 무영향. flake-fix가 production 마스킹인지 = pusher 발신 로직 diff 0 + 동일 단언 유지로 검증.
+- **cold-start 레지스터 클리어 순서 정확성**: StartupClear를 `_latest=snap`(Online 게시) 이전에 큐 투입 → 관측 루프 SetTgtFloor(Online 관찰 후 투입)보다 단일 큐 선행 → 재파생 정렬 기입이 클리어에 클로버되지 않음. D4 RMW clear=C_Flag|R_Flag로 Ready(bit2)·CurFloor(D5) 보존.
+- **보호규칙 문언 정정은 오케스트레이터 커밋으로 선행 확인**: #3 개정(f0f5927, "C2 Q(a) 사용자 승인")이 Generator 턴 전 실재 → 콜드스타트 TgtFloor 클리어가 정당 예외임을 evaluation 전 git show로 검증. Generator CLAUDE.md 미변경 확인.
+- **프로세스**: sprint-contract.md가 C2로 재작성 안 됨(C1 잔존). 로드맵+이연질문+정정커밋으로 스코프 판정 가능했으나 다음부터 서브스프린트마다 계약 재작성 권장(오케스트레이터).
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C2 critical=0 major=0 minor=1 iter=0 (minor=무조건 StartupClear teardown write 물량↑·Step 4.5 후속)
+
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C2 critical=0 important=0 minor=5 iter=1(0 fix) → Ready-to-merge
+- [INCIDENT] C2 미커밋 코드 유실(Evaluator baseline stash `eval-baseline-check-C2` 드롭) → stash 객체 53aca9e(-u) apply로 전량 복구(19파일·충돌0). 교훈: baseline 비교 stash는 -u + 즉시 pop 보장, 오케스트레이터는 APPROVED 즉시 커밋해 미커밋 상태 최소화.

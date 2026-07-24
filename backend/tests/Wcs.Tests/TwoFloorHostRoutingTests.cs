@@ -404,10 +404,14 @@ public class TwoFloorHostRoutingTests
         factory.FakeMaster.SetCurFloor(2);
         await WaitUntilAsync(() => srvB.LastFor(sorter) is { NextStates: [3] }, 5000, "2층 2→3 독립 delivery");
 
-        // 1층 복구 → 다음 관찰에서 재푸시 도달(복구 하트비트 — CurFloor=2라 1층 = next_state 2).
+        // 1층 복구 → 다음 관찰에서 재푸시 도달(복구 하트비트 — CurFloor=2라 1층 = next_state 2로 수렴).
+        //   ★ 재시도 중 CurFloor 1→2 전이가 겹치면 pusher 가 재시도하던 stale target(=3)이 복구 직후 먼저
+        //     도달할 수 있으나(전이당-1회 발신의 재평가로 곧 최신값 [2] 재푸시), 최종은 [2]로 수렴한다. 따라서
+        //     특정 push 순간을 instant assert 하던 취약성을 제거하고 **수렴값**을 WaitUntil 로 단언한다
+        //     (B 발신 로직 무변경 — 관측 시점만 견고화. C2 기동 배리어의 타이밍 시프트로 노출된 pre-existing
+        //     경합의 견고화).
         srvA.StopRejecting();
-        await WaitUntilAsync(() => srvA.CountFor(sorter) >= 1, 6000, "1층 복구 후 재푸시 도달");
-        Assert.Equal(new[] { 2 }, srvA.LastFor(sorter)!.NextStates);
+        await WaitUntilAsync(() => srvA.LastFor(sorter) is { NextStates: [2] }, 6000, "1층 복구 후 재푸시 [2] 수렴");
         _out.WriteLine($"[VS-B6] 1층 다운 중 2층 정상(2→3)·1층 재시도 소진, 복구 후 1층 재푸시 도달");
     }
 
@@ -550,6 +554,12 @@ public class TwoFloorWriteGateI2Tests
         }
     }
 
+    /// <summary>관측 루프 단위 테스트용 no-op I-3 복원기 — DB 없이 재파생 skip(테스트가 큐를 직접 조작).</summary>
+    private sealed class NoopQueueRestorer : IPendingFloorQueueRestorer
+    {
+        public Task<int> RestoreAsync(CancellationToken ct = default) => Task.FromResult(0);
+    }
+
     /// <summary>테스트용 IHostApplicationLifetime — ApplicationStopping=None(취소 안 됨).</summary>
     private sealed class FakeLifetime : IHostApplicationLifetime
     {
@@ -592,7 +602,7 @@ public class TwoFloorWriteGateI2Tests
             SorterFloorReturn = new SorterFloorReturnOptions { ObserveIntervalMs = 20 },
         });
         var svc = new SorterFloorReturnService(
-            registry, queues, spy, new FakeLifetime(), opts,
+            registry, queues, spy, new FakeLifetime(), new NoopQueueRestorer(), opts,
             NullLogger<SorterFloorReturnService>.Instance);
 
         return (svc, master, wq, polling);

@@ -53,6 +53,12 @@ public sealed class SorterBundleHandle
     /// <summary>이 소터의 최신 PLC 스냅샷(논블로킹).</summary>
     public Wcs.Core.PlcSnapshot Latest => _polling.Latest;
 
+    /// <summary>
+    /// 콜드스타트 레지스터 클리어(StartupClear)가 이 소터 쓰기 큐 컨슈머에서 처리 완료되면 완료되는 Task(C2 S3).
+    /// IF-08 부트스트랩 push(DestinationStatusPusher)가 이 Task를 대기해 "클리어 before push" 순서를 보장한다.
+    /// </summary>
+    public Task StartupClearCompleted => _polling.StartupClearCompleted;
+
     /// <summary>TgtFloor 설정을 소터별 쓰기 큐에 투입(번들 전용 큐 — 절대규칙 #1 소터별 보존).</summary>
     public ValueTask EnqueueSetTgtFloorAsync(int floor, CancellationToken ct = default) =>
         _polling.EnqueueAsync(new PlcWrite.SetTgtFloor(floor), ct);

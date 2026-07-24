@@ -145,6 +145,20 @@ public sealed class SimSlave
         LogTimeline($"[테스트] R 잔류 세팅: R_CellNo={rCellNo} R_Seq={rSeq} R_Flag=1");
     }
 
+    /// <summary>
+    /// 테스트 전용(C2 §4-B): TgtFloor(D6)에 잔류값을 직접 세팅(콜드스타트 클리어 대상). 이동 유발을 피하려면
+    /// 호출자가 CurFloor와 같은 값을 준다(tgt==cur → Sim 상태기계 미이동). WCS 기동 클리어가 이 값을 0으로 지운다.
+    /// </summary>
+    public void SetTgtFloor(int tgtFloor)
+    {
+        lock (_hrLock)
+        {
+            _hr[RegisterMap.TgtFloor] = (ushort)tgtFloor;
+            FlushToServerLocked();
+        }
+        LogTimeline($"[테스트] TgtFloor 잔류 세팅: TgtFloor={tgtFloor}");
+    }
+
     /// <summary>테스트 전용: Ready 비트(D4.2)를 직접 세팅(BUSY 재현).</summary>
     public void SetReady(bool ready)
     {

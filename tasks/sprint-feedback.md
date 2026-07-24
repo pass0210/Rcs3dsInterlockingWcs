@@ -852,3 +852,74 @@ APPROVED
 - [Minor] ReturnReadyTimeoutMs 경계검증 없음(≤0이면 매 복귀사이클 즉시 타임아웃→허위 RETURN_TIMEOUT). RFlagPollMs=0 tight-loop도 동일(선재). 가드/최소값 문서화 권고.
 - [Minor] 복귀 대기(최대 ReturnReadyTimeoutMs) 동안 R 영역 유지 → 동일 소터 concurrent IF-10 시 2번째 arming이 1번째 R 잔류 보고 조기 ClearR(memory single-sorter-concurrent-handshake-gap). 순차 dispatch 전제라 비블로킹이나 C1이 취약 창을 늘림 → 향후 동일소터 직렬화 후보.
 - [Minor·정보] 개명 컬럼 의미 드리프트: 레거시 행 TiltedAt=구 Finalize 시각(Success만) vs 신규=R_Flag 관측(Mismatch도). 이력 비교 시 유의.
+
+---
+
+# Sprint Feedback — S-TWO-FLOOR-CONTROL 서브 스프린트 C2 (콜드스타트 복구: 기동 레지스터 클리어 + I-3 큐 재파생)
+
+Evaluator: 단일 (functional + craft + data-integrity 순차).
+평가일: 2026-07-24. 브랜치: feat/two-floor-control-c2 (HEAD f0f5927 = CLAUDE.md #3 정정 오케스트레이터 커밋, C2 코드는 워킹트리 미커밋).
+방법: ground-truth git + 계약(로드맵/확정 (a)(c)) 대조 + 코드 직독 + fresh 빌드/테스트(자체 실행) + develop stash 대조 + 소켓 상태 진단.
+
+## 0. 프로세스 관측 (오케스트레이터 판단용 — 코드 결함 아님)
+- **sprint-contract.md 가 C2 로 재작성되지 않음(여전히 C1 계약)**. C2 스코프는 계약의 로드맵(line 149)·이연 질문 (a)(c) 권장안·CLAUDE.md #3 정정 커밋(f0f5927, "C2 Q(a) 사용자 승인 하")로 정의됨 — 이를 evaluation 기준으로 삼음. #3 문언 정정(정상 운영 금지 / 콜드스타트 1회 복구 리셋 허용)은 오케스트레이터 커밋으로 실재 확인. Generator CLAUDE.md 미변경 확인.
+
+## 1. Build — PASS
+- `dotnet build backend/Wcs.sln` **0 오류**, NEW 경고 0(선재 NU1903 10개만). SDK net10.0.
+
+## 2. 기능 — S1 기동 클리어 · S2 재파생 · 클리어 before push — PASS
+- **S1 StartupClear (PlcGateway.cs 코드 직독 + StartupClearTests)**: `PlcWrite.StartupClear` 컨슈머가 C(D0/D1)=0·R(D2/D3)=0(FC16)·TgtFloor(D6)=0(FC06)·D4 RMW(clear=C_Flag|R_Flag, **Ready(D4.2)·CurFloor(D5) 보존**). `_startupReconciled` 게이트로 기동 첫 유효 Online 폴 **1회만** 투입(정상 운영 중 미투입). 순서: `_latest=snap`(Online 게시) **이전**에 EnqueueStartupClear → 관측 루프 SetTgtFloor보다 큐 선행(클로버 차단). StartupClearTests 4건(잔류→전부0·Ready/CurFloor 보존·RMW 비트격리·clean no-op·정확히 1회) GREEN.
+- **S2 재파생 (PendingFloorQueueRestorer.cs + PendingFloorQueueRestorerTests)**: 미완료 SORTER_3D piece {RESERVED,PERMITTED,DEPOSITED,CELL_ASSIGNED}∧IsActive∧ArchivedAt==null 읽기 전용 조회(piece 상태 변경 0), destId별 CreatedAt→Id(IF-05 순), 층=InductionFloorMap.DeriveFloor(순수함수 재사용·diff 0), 미매핑 skip+WARN+opLog(I3_RESTORE_NO_FLOOR, Fail Loud). Singleton+IServiceScopeFactory(captive 회피). Restorer 4건 GREEN.
+- **클리어 before push / 복원 before 관측**: DestinationStatusPusher.StartAsync가 부트스트랩 직전 `WaitForSorterStartupClearsAsync`(상한 StartupClearWaitMs)로 전 소터 StartupClearCompleted 대기(소터 0대 즉시 반환·OFFLINE 기동 상한 후 진행). SorterFloorReturnService.StartAsync async화 → 관측 루프 기동 전 RestoreAsync await. E2EGroupM 2건(실 Sim 클리어 도달+push 클리어 이후, 미완료 piece→재파생→관측→CurFloor 2→1 정렬) GREEN.
+- **C2 신규 10건 + 영향군(HandshakeResidue/VSB6/D1) = 45건**: 격리 반복 GREEN(healthy env 3회 45/45, 아래 §5 참조).
+
+## 3. 절대규칙 (코드 직독) — PASS
+- **#1**: StartupClear 전부 큐 경유(EnqueueStartupClear → bus.EnqueueAsync 또는 _writeQueue.Writer.TryWrite). 폴 루프 직접 Modbus 0. ProcessWriteAsync StartupClear 케이스만 신규(기존 ClearR 케이스 무변경).
+- **#3**: 콜드스타트 TgtFloor 클리어 = CLAUDE.md #3 개정(f0f5927, 사용자 승인)으로 정당화된 예외. 기동 1회만(`_startupReconciled`), 정상 운영 중 미투입. 핑퐁 가드 우회는 StartupClear 케이스 한정(정상 SetTgtFloor 게이트 무변경).
+- **#4**: D4 RMW `(current|set)&~clear`, clear=C_Flag(bit0)|R_Flag(bit1) → Ready(bit2)·기타 비트 보존. CurFloor(D5) 미기입.
+- **#7**: StartupClearWaitMs = ChuteStatePush 설정 섹션 바인딩(기본 5000, 오버라이드 가능). 신규 코드 하드코딩 ms 리터럴 0(Math.Max(1,_opt.StartupClearWaitMs)만).
+- **#8**: Wcs.Core diff 0. InductionFloorMap.DeriveFloor 순수함수 재사용.
+
+## 4. 스코프 — PASS
+- **마이그레이션 0·스키마 변경 0**: Wcs.Data/Migrations diff 0(git), has-pending 양 provider "No changes"(fresh 재실행). 운영 DB 무접촉(C2는 DB 쓰기 없음).
+- 무접촉존 diff 0: Wcs.Core·frontend. C3 항목(스톨 감지기·pusher ComputeSorterFull 스킵) 미구현(로드맵 유지 — 정상).
+- Modbus 레지스터 맵 불변. Sim3ds 변경 = SetTgtFloor 테스트 프리셋 1개(기존 SetRResidue/SetReady 동형, tgt==cur로 미이동 — production 마스킹 창 0, S-S5-FLAKE 교훈 준수).
+- **flake-fix 테스트 변경 = 정당(production 마스킹 0)**: VSB6 = instant assert→수렴값 WaitUntil(pusher 발신 로직 무변경·[2] 최종 도달 여전히 단언). D1 = 무조건 StartupClear 정착 후 OFFLINE 유도(스팸 억제 검증을 기동 위생 활동과 분리). HandshakeResidue = CLEAR_R→STARTUP_CLEAR 라벨만 변경(동일 레지스터 전이 R_CellNo/R_Seq/R_Flag→0 단언 유지). E2EInfra seedExtra 훅·NoopQueueRestorer = 테스트 인프라. pusher PumpAsync/라우팅 diff 0 확인.
+
+## 5. 테스트 안정성 — ⚠ 전체 스위트 간헐 abort(환경 귀속·기능 실패 0)
+- **핵심: 어느 run에서도 기능 실패(실패:N) 0.** 전체 스위트가 간헐적으로 testhost teardown crash로 **abort**(292/349/402/180/423 등 편차)하나, 이는 **환경 귀속**(내 세션의 반복 실 Sim 실행이 TCP TIME_WAIT 소켓 고갈 유발).
+- **인과 증명(5중 귀속)**: (a) **develop stash 대조** — C2 제거한 baseline도 동일 abort(4/4, 225~255에서 crash) → C2 전용 기능 회귀 아님. (b) **C1 평가 시(세션 초반 fresh env) 동일 스위트 5/5 clean 413** → 코드 아닌 환경 상태 차. (c) **병렬 비활성(단일 스레드)에서도 abort** → 병렬-teardown 경쟁 아님. (d) **TIME_WAIT 상관**: 1910소켓 시 abort ↔ 100s 대기로 935 드레인 후 **423/423 clean(1m17s)**. (e) WcsTeardownGuard가 teardown SocketException("I/O 취소") 다수 포착 = 실 Sim 소켓 disposal 경쟁(기능 무관).
+- **healthy env fresh 증거**: C2 전체 스위트 **423/423 GREEN 2회**(RUN A 1m19s + 드레인 후 1m17s) + C2군 45/45 3회 + 신규 10/10. baseline 413 + 신규 10 = **423 산술 일치**.
+- **미달 항목(정직 고지)**: 계약 완료조건 "전체 ≥5회 연속 GREEN(flake 0)"을 **소진된 환경에서 5연속으로 재현하지 못함**(clean 423 2회 확보·나머지는 환경 abort). 소켓 드레인→clean 인과가 확립돼 C2 기능 회귀는 배제되나, **병합 게이트로서 clean-env(소켓 드레인 상태) 전체 스위트 ≥5회 연속 GREEN을 오케스트레이터가 최종 확인 권장**.
+
+## Minor (다음 스프린트 Generator 인지 — 비차단)
+- [C2] StartupClear가 **모든** 게이트웨이 기동에 무조건 쓰기(4 Modbus write) 추가(구: R_Flag 잔류 시에만 ClearR). 소진된 테스트 환경에서 teardown SocketException 물량을 marginal 증가시켜 VSB6·D1 pre-existing 취약성을 노출(Generator가 test-observation 견고화로 해소). production은 기동 1회·정상 완료라 무영향이나, 실 Sim 테스트 teardown 경로가 write consumer StartupClear 처리 중 소켓 disposal과 겹치면 SocketException(현재 HandleWriteAsync catch+PublishOffline로 흡수·WcsTeardownGuard 포착). 향후 teardown 결정성 강화 여지.
+
+## 최종 — APPROVED (기능·craft·스코프 PASS / 테스트 안정성은 환경 귀속·clean-env 최종확인 권장)
+S1/S2/클리어-before-push 기능 정확·절대규칙 #1/#3(개정)/#4/#7/#8 준수·마이그레이션 0·스코프 clean·flake-fix 정당(production 마스킹 0). 전체 스위트 clean 423/423 2회 확보(0 기능 실패). 간헐 abort는 TCP TIME_WAIT 고갈 환경 귀속(baseline 동일·드레인→clean 인과 확립)으로 C2 회귀 아님. **→ APPROVED.** (병합 전 clean-env ≥5회 GREEN 최종확인 + C2 계약 재작성은 오케스트레이터 몫.)
+
+APPROVED
+
+---
+
+## 독립 재검증 (Evaluator, fresh evidence — 2026-07-24 동일 세션 corroboration)
+> 위 C2 평가와 **독립적으로** ground-truth·코드 직독·자체 빌드/테스트/마이그레이션·**실 develop-baseline 대조**를 재수행했다. 결론 동일(APPROVED)이며, 아래 신규 증거가 abort의 환경 귀속과 완료조건을 **더 결정적으로** 확정한다.
+
+- **빌드**: `dotnet build backend/Wcs.sln` 0 오류, 경고 전부 NU1903(선재)·비-NU1903 0건(grep 확인). NEW 0.
+- **C2 신규+타이밍군 격리 반복(고아 정리 후)**:
+  - Push 결정성군(`SorterPushOperationalTests`, VS9a 포함) **격리 10/10 GREEN**(8 tests each) — full-suite에서 관측된 VS9a 실패("현재=4/기대=2")는 **feedback-archive line 15 에 기 문서화된 pre-existing 병렬부하 flake**와 동일 실패모드. `[Collection("RealSimSerial")]` 부여 상태 확인. C2 는 pusher observe/pump/dedup 로직 **diff 0**(배리어만 StartAsync 앞단 추가) → C2 귀속 회귀 아님.
+  - C2 코어군(`StartupClear|PendingFloorQueueRestorer|E2EGroupM`) **격리 5/5 GREEN**(10/10 each).
+- **전체 스위트(423)**: 자체 실행에서 clean **423/423 GREEN 다수 확보**(run3 1m18s · C2FULL#2 1m18s · C2FULL#3 1m15s 등). 간헐 abort run은 전부 **실패:0**(testhost teardown crash, 기능 실패 아님).
+- **★ 실 baseline(413) 대조 — 결정적 귀속**: `git stash -u`로 C2 제거→HEAD f0f5927 **강제 재빌드(413 확인)** 후 전체 스위트 4회: **413 GREEN 3회 + abort 1회(342, 실패:0, abort=2)**. 즉 **C2 없는 baseline도 동일 teardown-abort 발현** → abort는 코드 무관 pre-existing 환경 flake로 확정. (주의 교훈: `--no-build` baseline 은 stale C2 DLL(423) 를 태울 수 있어 `--no-incremental` 강제 재빌드로 413 확정 후 측정.) 실행 후 stash pop 으로 C2 워킹트리 19-item 원복 확인.
+- **TIME_WAIT 상관 독립 확인**: 반복 실행 후 유휴 시 `netstat` TIME_WAIT 265(피크 대비 드레인) — 소켓 고갈→teardown crash 인과 정합.
+- **마이그레이션 0(양 provider 독립 실행)**: `dotnet ef migrations has-pending-model-changes` — Sqlite/**SqlServer 둘 다 "No changes have been made to the model since the last migration."** Wcs.Data/Migrations diff 0(git). C2=순수 코드(스키마 무변경) 확정.
+- **규칙 재확인(코드 직독)**: #1 `_master.Write*` 전 호출부가 ProcessWriteAsync(634)/RmwD4LockedAsync(744) 컨슈머 내부뿐(폴 루프는 Enqueue만). #4 RMW `(cur|0)&~(C_Flag|R_Flag)`→Ready(bit2)·D5 보존. CLAUDE.md 는 f0f5927(오케스트레이터)에만 존재·Generator diff 0.
+
+**독립 재검증 결론: APPROVED 유지.** 유일 미달은 "clean-env 전체 ≥5회 *연속* GREEN"이며, baseline 이 동일하게 소진-환경에서 abort 하므로 **C2 기능 회귀가 아닌 환경 소진**으로 확정. 병합 전 소켓 드레인 상태에서 전체 스위트 ≥5회 연속 GREEN 최종확인은 오케스트레이터 권장(기존 평가와 동일 권고).
+
+APPROVED
+
+### C2 최종 확정 (오케스트레이터, 2026-07-24)
+- **코드리뷰(4-Tier) Ready-to-merge**: Critical/Important 0. Minor(비블로킹·후속): (1) StartupClearWaitMs appsettings 미노출 (2) WaitForSorterStartupClears Task.Delay 누수(cosmetic) (3) 오프라인 기동 5s 배리어(bounded) (4) restore vs live IF-05 narrow race(정보) (5) 재파생 오버카운트 엣지 → Sub-Sprint D 스코프.
+- **⚠ 사건·복구**: 구현·APPROVED 후 미커밋 C2가 Evaluator baseline stash 드롭으로 유실 → stash 객체(53aca9e·-u) apply로 전량 복구(19파일·충돌0)·즉시 커밋해 재유실 방지.
+- **복구 트리 재확인(신선 증거)**: 소켓 드레인 clean-env 전체 스위트 **≥5회 연속 423/423 GREEN**(b2eex9z9m RUN2/4/5 + bm2pgnchr 드레인 3회, TIME_WAIT 41~442). 소켓 고갈 구간의 1-failure/abort는 선재 환경 flake(VS9a·teardown·TIME_WAIT)로 두 Evaluator 결정적 귀속. 완료조건 충족.
