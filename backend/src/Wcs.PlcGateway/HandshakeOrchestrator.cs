@@ -35,12 +35,23 @@ public enum HandshakeOutcome
 }
 
 /// <summary>C/R 핸드셰이크 1건 결과. 성공/실패·사유·대사 정보 포함.</summary>
+/// <remarks>
+/// S-TWO-FLOOR-CONTROL C1 — 처리 3시각 계측을 위해 <see cref="TiltedAt"/>·<see cref="ReturnedAt"/>를
+/// append-only로 추가(기본값 null → 기존 5-인자 생성자 호출 전부 보존, IsSuccess 불변).
+/// depositedAt(3DS 투입=IF-10 보고 시각)은 핸드셰이크가 관측하지 않으므로 result에 담지 않는다
+/// (RcsController가 저널에 직접 유입 — 계약 (e)).
+/// </remarks>
 public sealed record HandshakeResult(
     HandshakeOutcome Outcome,
     int              SentCSeq,
     int              ReceivedRSeq,
     int              ReceivedRCellNo,
-    string           Detail)
+    string           Detail,
+    // 셀 틸트 시각 = R_Flag==1 관측 시점. 성공·불일치에서 non-NULL, R 미수신(타임아웃/OFFLINE)에서 NULL.
+    DateTime?        TiltedAt   = null,
+    // 복귀 완료 시각 = Ready 0→1(R 영역 클리어) 관측 시점. 성공(복귀 관측)에서만 non-NULL.
+    //   복귀 대기 타임아웃(성공이나 Ready 미관측)·불일치·타임아웃·OFFLINE에서 NULL.
+    DateTime?        ReturnedAt = null)
 {
     public bool IsSuccess => Outcome == HandshakeOutcome.Success;
 }
@@ -275,9 +286,10 @@ public sealed class HandshakeOrchestrator
 
             if (snap.RFlag)
             {
-                // R_Flag=1 — R 읽기
-                int rCellNo = snap.RCellNo;
-                int rSeq    = snap.RSeq;
+                // R_Flag=1 — R 읽기. 이 순간이 셀 틸트 관측 시점(tiltedAt) — 성공·불일치 공통.
+                int rCellNo   = snap.RCellNo;
+                int rSeq      = snap.RSeq;
+                var tiltedAt  = DateTime.UtcNow;
 
                 _log.LogInformation(
                     "[핸드셰이크] R_Flag=1 수신: R_CellNo={RCellNo} R_Seq={RSeq} (기대 C_Seq={CSeq})",
@@ -287,7 +299,8 @@ public sealed class HandshakeOrchestrator
                 // R_Seq == C_Seq 대사
                 if (rSeq != cSeq)
                 {
-                    // 불일치 알람 — ClearR 투입 후 결과 반환
+                    // 불일치 알람 — 현행 유지: R_Flag==1 즉시 ClearR(복귀 대기 없음 — 정상 사이클 아님).
+                    //   tiltedAt 기입(R_Flag==1 관측), returnedAt=NULL(복귀 미측정) — 계약 (d-i)·(e).
                     _log.LogError(
                         "[핸드셰이크] R_Seq 대사 실패 — R_Seq={RSeq} ≠ C_Seq={CSeq} (유실·중복 의심)",
                         rSeq, cSeq);
@@ -298,17 +311,16 @@ public sealed class HandshakeOrchestrator
 
                     return new(
                         HandshakeOutcome.RSeqMismatch, cSeq, rSeq, rCellNo,
-                        $"R_Seq mismatch: expected={cSeq}, actual={rSeq}");
+                        $"R_Seq mismatch: expected={cSeq}, actual={rSeq}",
+                        TiltedAt: tiltedAt, ReturnedAt: null);
                 }
 
-                // 대사 성공 — ClearR 큐 투입
+                // 대사 성공 — R 영역 클리어를 "R_Flag==1 즉시"가 아니라 "Ready==1(복귀 완료) 관측 후"로
+                //   지연한다(SPEC §4·계약 (d-i) 성공 경로 한정). 무-이동 사이클(관측 시점 이미 Ready==1)은
+                //   추가 지연 0으로 즉시 clear. 복귀 이동 사이클은 Ready==1까지 R 유지 후 clear + returnedAt 기록.
                 EmitStage("HS_RSEQ_MATCH", $"{{\"cSeq\":{cSeq},\"rSeq\":{rSeq},\"rCellNo\":{rCellNo}}}");
-                await _gw.EnqueueAsync(new PlcWrite.ClearR(), ct).ConfigureAwait(false);
-                _log.LogInformation("[핸드셰이크] 성공 — R_Seq={RSeq} 대사 일치, ClearR 큐 투입", rSeq);
-                EmitStage("HS_CLEAR_R", $"{{\"cSeq\":{cSeq},\"outcome\":\"Success\"}}");
-
-                return new(HandshakeOutcome.Success, cSeq, rSeq, rCellNo,
-                    $"OK: C_Seq={cSeq} R_Seq={rSeq} R_CellNo={rCellNo}");
+                return await WaitReadyThenClearRAsync(cSeq, rCellNo, rSeq, tiltedAt, snap, ct)
+                    .ConfigureAwait(false);
             }
 
             // 타임아웃 확인
@@ -326,5 +338,94 @@ public sealed class HandshakeOrchestrator
                     $"RFLAG_TIMEOUT after {_opt.RFlagTimeoutMs}ms. Online={finalSnap.Online} Ready={finalSnap.Ready}");
             }
         }
+    }
+
+    // ── 복귀 대기 → Ready==1 관측 후 ClearR (성공 경로 한정 — S-TWO-FLOOR-CONTROL C1) ──
+
+    /// <summary>
+    /// R_Seq 대사 성공 후 R 영역 클리어 시점을 Ready==1(복귀 완료)로 지연한다(SPEC §4).
+    ///
+    /// 절대규칙 #4: Ready(D4.2) = 1(수용가능·비분류·정지) / 0(분류 중 또는 이동 중). 복귀 이동이 남으면
+    ///   Sim/PLC는 Ready=0을 유지한 채 이동하고 도착 후에만 Ready=1 → "복귀 완료" 판정 = Ready 0→1 상승.
+    ///
+    /// 케이스:
+    ///   · R_Flag==1 관측 스냅샷에서 이미 Ready==1(무-이동) → 즉시 ClearR(추가 지연 0), returnedAt≈tiltedAt.
+    ///   · Ready==0(복귀 이동 중) → RFlagPollMs 주기로 Ready==1 폴링 대기(상한 = ReturnReadyTimeoutMs,
+    ///     appsettings·하드코딩 금지·절대규칙 #7). Ready==1 관측 시 ClearR + returnedAt 기록.
+    ///   · 복귀 대기 타임아웃(Ready 미복귀 — 소터 정체) → ClearR로 완료 ack(온라인) + 알람 발화 +
+    ///     returnedAt=NULL 유지. outcome은 Success(분류 자체는 완료·대사 일치 — 계약 (d-iii)).
+    ///   · 대기 중 OFFLINE → 명확 종결(ClearR 불가·현행 offline 패턴), Offline outcome·returnedAt=NULL.
+    ///
+    /// ClearR는 전부 단일 쓰기 큐 경유(_gw.EnqueueAsync — 절대규칙 #1, 직접 Modbus 호출 0).
+    /// </summary>
+    private async Task<HandshakeResult> WaitReadyThenClearRAsync(
+        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, PlcSnapshot rFlagSnap, CancellationToken ct)
+    {
+        // 무-이동 사이클: R_Flag==1 관측 스냅샷에서 이미 Ready==1 → 즉시 clear(추가 지연 0).
+        if (rFlagSnap.Ready)
+            return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, ct).ConfigureAwait(false);
+
+        // 복귀 이동 중(Ready=0) — Ready==1(복귀 완료)까지 R 영역 유지 후 clear.
+        EmitStage("HS_RETURN_WAIT",
+            $"{{\"cSeq\":{cSeq},\"rSeq\":{rSeq},\"timeoutMs\":{_opt.ReturnReadyTimeoutMs}}}");
+        _log.LogInformation(
+            "[핸드셰이크] 복귀 대기 시작 — Ready==1까지 R 유지(상한={Ms}ms)", _opt.ReturnReadyTimeoutMs);
+
+        var deadline = DateTimeOffset.Now.AddMilliseconds(_opt.ReturnReadyTimeoutMs);
+        while (true)
+        {
+            await Task.Delay(_opt.RFlagPollMs, ct).ConfigureAwait(false);
+
+            var s = _gw.Latest;
+
+            // 대기 중 OFFLINE — 명확 종결(더티 진행 금지·ClearR 불가). returnedAt=NULL.
+            if (!s.Online)
+            {
+                _log.LogError("[핸드셰이크] 복귀 대기 중 OFFLINE — 명확 종결(returnedAt=NULL)");
+                EmitStage("HS_OFFLINE", $"{{\"phase\":\"returnWait\",\"cSeq\":{cSeq},\"rSeq\":{rSeq}}}");
+                return new(HandshakeOutcome.Offline, cSeq, rSeq, rCellNo,
+                    $"OFFLINE during return wait (cSeq={cSeq}, rSeq={rSeq})",
+                    TiltedAt: tiltedAt, ReturnedAt: null);
+            }
+
+            // 복귀 완료(Ready 0→1) — R 클리어 + returnedAt 기록.
+            if (s.Ready)
+                return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, ct).ConfigureAwait(false);
+
+            // 복귀 대기 타임아웃 — Ready 미복귀(소터 정체). ClearR로 완료 ack + 알람 + returnedAt=NULL.
+            //   분류 자체는 완료·대사 일치이므로 outcome=Success 유지(계약 (d-iii)·(e)).
+            if (DateTimeOffset.Now >= deadline)
+            {
+                _log.LogError(
+                    "[핸드셰이크] 복귀 대기 타임아웃 — {Ms}ms 내 Ready==1 미관측(소터 정체 의심). " +
+                    "ClearR ack + 알람 발화, returnedAt=NULL.", _opt.ReturnReadyTimeoutMs);
+                EmitStage("HS_RETURN_TIMEOUT",
+                    $"{{\"cSeq\":{cSeq},\"rSeq\":{rSeq},\"timeoutMs\":{_opt.ReturnReadyTimeoutMs}}}");
+                await _gw.EnqueueAsync(new PlcWrite.ClearR(), ct).ConfigureAwait(false);
+                EmitStage("HS_CLEAR_R", $"{{\"cSeq\":{cSeq},\"outcome\":\"ReturnTimeout\"}}");
+                return new(HandshakeOutcome.Success, cSeq, rSeq, rCellNo,
+                    $"OK(return timeout): C_Seq={cSeq} R_Seq={rSeq} — Ready==1 not observed within " +
+                    $"{_opt.ReturnReadyTimeoutMs}ms (returnedAt=NULL)",
+                    TiltedAt: tiltedAt, ReturnedAt: null);
+            }
+        }
+    }
+
+    /// <summary>Ready==1 관측 확정 후 ClearR 큐 투입 + returnedAt 기록(단조 보장). 성공 결과 반환.</summary>
+    private async Task<HandshakeResult> ClearRAndReturnSuccessAsync(
+        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, CancellationToken ct)
+    {
+        // 단조 보장(depositedAt≤tiltedAt≤returnedAt) — 시계 비단조/즉시-clear 시 tiltedAt로 클램프.
+        var returnedAt = DateTime.UtcNow;
+        if (returnedAt < tiltedAt) returnedAt = tiltedAt;
+
+        await _gw.EnqueueAsync(new PlcWrite.ClearR(), ct).ConfigureAwait(false);
+        _log.LogInformation(
+            "[핸드셰이크] 성공 — R_Seq={RSeq} 대사 일치·Ready==1(복귀 완료) 관측 → ClearR 큐 투입", rSeq);
+        EmitStage("HS_CLEAR_R", $"{{\"cSeq\":{cSeq},\"outcome\":\"Success\"}}");
+
+        return new(HandshakeOutcome.Success, cSeq, rSeq, rCellNo,
+            $"OK: C_Seq={cSeq} R_Seq={rSeq} R_CellNo={rCellNo}",
+            TiltedAt: tiltedAt, ReturnedAt: returnedAt);
     }
 }

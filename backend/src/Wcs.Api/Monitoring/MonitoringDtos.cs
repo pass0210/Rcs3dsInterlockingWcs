@@ -69,6 +69,10 @@ public sealed record CellStatusDto(
     string? AssignedOrderNo);
 
 /// <summary>E7 소터 명령(적재 이력) — piece·cell JOIN.</summary>
+/// <remarks>
+/// S-TWO-FLOOR-CONTROL C1 — 처리 3시각 노출(계측 가시화). RFlagAt → TiltedAt 개명 + DepositedAt·ReturnedAt
+/// 신설(append-only — 기존 필드 제거 0). 프론트 결선은 본 스프린트 스코프 밖.
+/// </remarks>
 public sealed record SorterCommandDto(
     long      Id,
     int?      PId,
@@ -78,7 +82,9 @@ public sealed record SorterCommandDto(
     int?      RSeq,
     string    Status,       // SorterCommandStatus(SENT/COMPLETED/MISMATCH/TIMEOUT)
     DateTime  CWrittenAt,
-    DateTime? RFlagAt);
+    DateTime? DepositedAt,   // 3DS 투입(IF-10 보고) — 항상 non-NULL
+    DateTime? TiltedAt,      // 셀 틸트(R_Flag==1 관측) — 성공·불일치 non-NULL (구 RFlagAt)
+    DateTime? ReturnedAt);   // 복귀 완료(Ready 0→1) — 성공만 non-NULL
 
 /// <summary>
 /// F2 operation_log 조회 항목 — 테일 초기 백로그(읽기 전용·커서 페이징). enum→문자열.

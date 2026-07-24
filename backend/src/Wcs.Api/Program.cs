@@ -784,6 +784,9 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             CFlagTimeoutMs = t?.CFlagTimeoutMs ?? commonTiming.CFlagTimeoutMs,
             RFlagClearConfirmTimeoutMs =
                 t?.RFlagClearConfirmTimeoutMs ?? commonTiming.RFlagClearConfirmTimeoutMs,
+            // C1: 복귀 대기(Ready==1) 상한(소터별 오버라이드 or 공통).
+            ReturnReadyTimeoutMs =
+                t?.ReturnReadyTimeoutMs ?? commonTiming.ReturnReadyTimeoutMs,
             // D-1: OFFLINE 지속 로그 요약 주기(소터별 오버라이드 or 공통).
             OfflineLogSummaryEveryPolls =
                 t?.OfflineLogSummaryEveryPolls ?? commonTiming.OfflineLogSummaryEveryPolls,
@@ -858,6 +861,9 @@ public sealed record SorterTimingOverride
     // S-HANDSHAKE-RESIDUE — 소터별 잔류 대사 확인 타임아웃 오버라이드(null=공통 상속).
     public int? RFlagClearConfirmTimeoutMs { get; init; }
 
+    // S-TWO-FLOOR-CONTROL C1 — 소터별 복귀 대기(Ready==1) 상한 오버라이드(null=공통 상속).
+    public int? ReturnReadyTimeoutMs { get; init; }
+
     // S-CLEANUP-FIELD D-1 — 소터별 OFFLINE 지속 로그 요약 주기 오버라이드(null=공통 상속).
     public int? OfflineLogSummaryEveryPolls { get; init; }
 }
@@ -914,4 +920,7 @@ public sealed record TimingOptions
 
     // S-HANDSHAKE-RESIDUE — 잔류 대사 ClearR 후 R_Flag==0 확인 대기 상한(ms).
     public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
+
+    // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
+    public int ReturnReadyTimeoutMs { get; init; } = 30000;
 }

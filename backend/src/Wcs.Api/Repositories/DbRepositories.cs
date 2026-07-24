@@ -794,7 +794,7 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
         _db = db;
     }
 
-    public long CreateSent(long pieceId, long cellId, int cSeq, int cellNo)
+    public long CreateSent(long pieceId, long cellId, int cSeq, int cellNo, DateTime? depositedAt)
     {
         using var tx = _db.Database.BeginTransaction();
         try
@@ -802,16 +802,19 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
             var now = DateTime.UtcNow;
             var cmd = new SorterCommand
             {
-                PieceId    = pieceId,
-                CellId     = cellId,
-                CSeq       = cSeq,
-                CellNo     = cellNo,
-                CWrittenAt = now,
-                RSeq       = null,
-                RCellNo    = null,
-                RFlagAt    = null,
-                Status     = SorterCommandStatus.SENT,
-                CreatedAt  = now,
+                PieceId     = pieceId,
+                CellId      = cellId,
+                CSeq        = cSeq,
+                CellNo      = cellNo,
+                CWrittenAt  = now,
+                RSeq        = null,
+                RCellNo     = null,
+                // C1 처리 3시각: 투입(IF-10 보고 시각)은 행 생성 시 유입, 틸트·복귀는 Finalize(HandshakeResult).
+                DepositedAt = depositedAt,
+                TiltedAt    = null,
+                ReturnedAt  = null,
+                Status      = SorterCommandStatus.SENT,
+                CreatedAt   = now,
             };
             _db.SorterCommands.Add(cmd);
             _db.SaveChanges();
@@ -847,11 +850,15 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
                     HandshakeOutcome.CFlagTimeout => SorterCommandStatus.TIMEOUT,  // CFLAG_TIMEOUT → TIMEOUT 저장, alarm code로 구분
                     _                             => SorterCommandStatus.TIMEOUT,
                 };
+                // C1 처리 3시각: tiltedAt(R_Flag==1 관측)·returnedAt(Ready 0→1)은 HandshakeResult에서 유입.
+                //   tiltedAt = 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL(result가 규칙대로 담아 옴).
+                //   returnedAt = 성공(복귀 관측)만 non-NULL / 복귀 타임아웃·그 외 NULL.
+                cmd.TiltedAt   = result.TiltedAt;
+                cmd.ReturnedAt = result.ReturnedAt;
                 if (result.Outcome == HandshakeOutcome.Success)
                 {
                     cmd.RSeq    = result.ReceivedRSeq;
                     cmd.RCellNo = result.ReceivedRCellNo;
-                    cmd.RFlagAt = now;
                 }
             }
 

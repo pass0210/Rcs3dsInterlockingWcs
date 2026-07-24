@@ -543,7 +543,11 @@ public class WcsDbContext : DbContext
             e.Property(x => x.CWrittenAt).IsRequired();
             e.Property(x => x.RSeq).IsRequired(false);
             e.Property(x => x.RCellNo).IsRequired(false);
-            e.Property(x => x.RFlagAt).IsRequired(false);
+            // S-TWO-FLOOR-CONTROL C1: 처리 3시각(add-only nullable, 컬럼명=프로퍼티명 PascalCase).
+            //   TiltedAt = 구 RFlagAt 개명(RenameColumn, 데이터 보존). DepositedAt·ReturnedAt 신설.
+            e.Property(x => x.DepositedAt).IsRequired(false);
+            e.Property(x => x.TiltedAt).IsRequired(false);
+            e.Property(x => x.ReturnedAt).IsRequired(false);
             e.Property(x => x.Status)
              .HasConversion<string>()
              .HasMaxLength(20)

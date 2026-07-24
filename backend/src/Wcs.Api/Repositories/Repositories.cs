@@ -138,8 +138,10 @@ public interface ISorterCommandJournal
     /// <summary>
     /// 핸드셰이크 전송 시작 — sorter_command SENT 행 생성.
     /// 반환값: 생성된 sorter_command.id (이후 Finalize에 사용).
+    /// depositedAt = IF-10 투입 보고 시각(= piece.DepositedAt) — RcsController에서 유입(계약 (e)).
+    ///   NULL 허용(비정상 경로 방어)이나 정상 흐름에선 항상 non-NULL.
     /// </summary>
-    long CreateSent(long pieceId, long cellId, int cSeq, int cellNo);
+    long CreateSent(long pieceId, long cellId, int cSeq, int cellNo, DateTime? depositedAt);
 
     /// <summary>
     /// 핸드셰이크 완료 — sorter_command 상태 전이 (COMPLETED/MISMATCH/TIMEOUT).
