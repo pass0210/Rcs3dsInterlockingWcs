@@ -232,6 +232,14 @@ public sealed record ChuteStatePushOptions
     public int HttpTimeoutMs { get; init; } = 3000;
 
     /// <summary>
+    /// S-TWO-FLOOR-CONTROL C2 — 부트스트랩 push 전에 소터 콜드스타트 레지스터 클리어(StartupClear) 완료를
+    /// 기다리는 상한(ms). "클리어 before push" 순서(계약 S3/CC3)를 보장하되, 소터가 끝내 Online이 안 되면
+    /// (오프라인 기동) 이 상한 경과 후 경고와 함께 부트스트랩을 진행한다(무한 대기 금지). 하드코딩 금지(절대규칙 #7).
+    /// 기본 5000ms(첫 폴+클리어 처리는 통상 폴 주기 수 배 이내 — 온라인 기동은 이 값보다 훨씬 빨리 완료).
+    /// </summary>
+    public int StartupClearWaitMs { get; init; } = 5000;
+
+    /// <summary>
     /// 소터 수용상태 전이 감지를 위한 스냅샷 관찰 주기(ms). 폐지된 목적지-상태 와이어 옵션에서 이전.
     /// 소터 분류 사이클(Ready 1↔0)·정렬 전이는 명시 이벤트가 없으므로 게이트웨이 폴링 스냅샷
     /// (bundle.Latest)을 이 주기로 diff해 수용상태 전이를 감지한다(게이트웨이 본문 무변경 — Latest

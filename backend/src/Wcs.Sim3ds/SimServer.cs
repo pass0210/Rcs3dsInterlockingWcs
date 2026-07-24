@@ -161,6 +161,7 @@ public sealed class SimServer : IAsyncDisposable
 
     public PlcSnapshot ReadSnapshot()             => _primary.ReadSnapshot();
     public void        SetRResidue(int rCellNo, int rSeq) => _primary.SetRResidue(rCellNo, rSeq);
+    public void        SetTgtFloor(int tgtFloor)  => _primary.SetTgtFloor(tgtFloor);
     public void        SetReady(bool ready)       => _primary.SetReady(ready);
 
     // ─── 시작·종료 ──────────────────────────────────────────────────────────

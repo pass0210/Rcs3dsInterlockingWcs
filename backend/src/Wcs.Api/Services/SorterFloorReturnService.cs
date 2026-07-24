@@ -89,6 +89,7 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     private readonly SorterPendingFloorQueues   _queues;
     private readonly IDestinationStatusService  _status;
     private readonly IHostApplicationLifetime   _lifetime;
+    private readonly IPendingFloorQueueRestorer _restorer;
     private readonly ILogger<SorterFloorReturnService> _log;
     private readonly int _intervalMs;
 
@@ -110,6 +111,7 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         SorterPendingFloorQueues  queues,
         IDestinationStatusService status,
         IHostApplicationLifetime  lifetime,
+        IPendingFloorQueueRestorer restorer,
         IOptions<WcsOptions>      options,
         ILogger<SorterFloorReturnService> log)
     {
@@ -117,16 +119,30 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         _queues     = queues;
         _status     = status;
         _lifetime   = lifetime;
+        _restorer   = restorer;
         _log        = log;
         _intervalMs = Math.Max(1, options.Value.SorterFloorReturn.ObserveIntervalMs);
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // ── S-TWO-FLOOR-CONTROL C2 S2/S3: I-3 큐 재파생 복원 (관측 루프 소비 전 1회 — 복원 before 관측) ──
+        // 미완료 SORTER_3D piece 에서 소터별 pending-floor 큐를 재구성한 뒤 관측 루프를 띄운다. 이 순서로
+        // "복원이 관측 첫 소비보다 먼저"(계약 S3/CC5)가 구조적으로 보장된다. 재파생 예외는 격리(빈 큐로 진행)하되
+        // 로깅으로 Fail Loud — 복원 실패가 관측 루프 기동을 막지 않는다(부트스트랩 이후 신규 IF-05 는 정상 enqueue).
+        try
+        {
+            await _restorer.RestoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[층복귀] I-3 큐 재파생 예외 — 빈 큐로 관측 시작(Fail-Loud)");
+        }
+
         _cts      = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _loopTask = Task.Run(() => RunObserveLoopAsync(_cts.Token));
         _log.LogInformation("[층복귀] 소터 pending-floor 큐 관측 루프 시작(주기 {Ms}ms)", _intervalMs);
-        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

@@ -34,6 +34,15 @@ public abstract record PlcWrite
 
     /// <summary>R 영역 처리 완료: R_CellNo·R_Seq=0 + D4 RMW로 R_Flag clear.</summary>
     public sealed record ClearR : PlcWrite;
+
+    /// <summary>
+    /// 콜드스타트(프로세스 기동/재시작) 1회 복구 리셋 — WCS가 소유·기입하는 레지스터를 0으로 위생 초기화.
+    /// C 영역(D0/D1)·R 영역(D2/D3)=0(FC16) + TgtFloor(D6)=0(FC06, 핑퐁 가드 우회 — "목표 설정"이 아닌
+    /// "복구 리셋") + D4 RMW로 C_Flag·R_Flag 비트만 clear(Ready(D4.2) 보존). CurFloor(D5)는 미접촉.
+    /// 규칙 #3 개정(SPEC §4-B — 콜드스타트 1회 허용)·#1(단일 큐 경유)·#4(D4 RMW·CurFloor 미접촉) 준수.
+    /// 정상 운영 중에는 절대 투입되지 않는다(기동 첫 유효 Online 폴 1회만 PlcPollingService가 투입).
+    /// </summary>
+    public sealed record StartupClear : PlcWrite;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -179,6 +188,13 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     private PlcSnapshot? _prevSnap;
     private bool         _startupReconciled;
 
+    // S-TWO-FLOOR-CONTROL C2 — 콜드스타트 레지스터 클리어(StartupClear) 완료 신호.
+    // 첫 유효 Online 폴이 StartupClear를 단일 큐에 투입하고, 쓰기 컨슈머가 처리 완료하면 완료된다.
+    // IF-08 부트스트랩 push가 이 Task를 대기해 "클리어 before push" 순서를 보장한다(계약 S3/CC3).
+    // RunContinuationsAsynchronously — 쓰기 컨슈머 스레드에서 대기자 연속을 인라인 실행하지 않게 한다.
+    private readonly TaskCompletionSource _startupClearTcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     // R_Flag 상승 통지 채널 — 핸드셰이크 오케스트레이터가 구독
     private readonly Channel<PlcSnapshot> _rFlagChannel =
         Channel.CreateBounded<PlcSnapshot>(new BoundedChannelOptions(4)
@@ -225,6 +241,13 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     }
 
     public PlcSnapshot Latest => _latest;
+
+    /// <summary>
+    /// 콜드스타트 레지스터 클리어(StartupClear)가 쓰기 큐 컨슈머에서 처리 완료되면 완료되는 Task(C2 S3).
+    /// IF-08 부트스트랩 push가 이 Task를 기다려 클리어가 push보다 먼저 나가도록 순서를 보장한다.
+    /// PLC가 끝내 Online이 안 되면(오프라인 기동) 완료되지 않으므로 대기자는 설정 타임아웃으로 진행한다.
+    /// </summary>
+    public Task StartupClearCompleted => _startupClearTcs.Task;
 
     /// <summary>버스 멤버일 때 이 슬레이브의 unitId(단독 모드에선 기본 0 — 의미 없음).</summary>
     public byte UnitId => _unitId;
@@ -355,8 +378,55 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                 _clientLock.Release();
             }
 
+            // ── S-TWO-FLOOR-CONTROL C2 §4-B: 콜드스타트 1회 레지스터 클리어 (첫 유효 폴 1회·무조건) ──
+            // 프로세스 기동/재시작 직후 WCS 소유 레지스터(C 영역 D0/D1·R 영역 D2/D3·TgtFloor D6)를 0으로
+            // 위생 초기화한다 — 잔류 핸드셰이크·잔류 목표층 없이 깨끗하게 시작(에러 복구). 쓰기는 반드시 단일 큐
+            // 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지. 규칙 #3 개정(콜드스타트 1회 복구 리셋 허용).
+            // 이미 0이면 결과 동일(무해 — 매 폴 반복 아님·기동 1회뿐). 이 클리어가 R_Flag 잔류(§4-A 실측
+            // R_CellNo=20/R_Seq=123)도 함께 0으로 지운다(R 영역 reconcile 포섭). IF-08 부트스트랩 push는
+            // StartupClearCompleted를 대기해 이 클리어 뒤에 나간다(계약 S3).
+            //
+            // ★ 순서(중요): StartupClear 를 **Online 스냅샷 게시(_latest=snap) 이전에** 큐 투입한다. 관측 루프
+            //   (SorterFloorReturnService)의 정렬 기입 SetTgtFloor 는 이 클리어와 **같은 단일 쓰기 큐(#1)**를
+            //   공유하며, 관측 루프는 Online 스냅샷을 본 뒤에야 SetTgtFloor 를 투입한다. 따라서 스냅샷을
+            //   Online 으로 게시하기 전에 StartupClear 를 넣으면 큐 순서상 StartupClear 가 항상 앞선다
+            //   — 관측 정렬 기입(재파생 큐 머리 층)이 클리어에 의해 0으로 되돌려지는 전이 클로버를 원천 차단.
+            // A-2: 이 폴에 한해 spurious 상승 에지 발화를 억제한다.
+            bool suppressRFlagEdge = false;
+
+            if (!_startupReconciled)
+            {
+                _startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
+
+                bool hadResidue = snap.CCellNo != 0 || snap.CSeq != 0 || snap.CFlag
+                               || snap.RCellNo != 0 || snap.RSeq != 0 || snap.RFlag
+                               || snap.TgtFloor != 0;
+                try
+                {
+                    if (hadResidue)
+                        _log.LogWarning(
+                            "[폴링] 기동 첫 폴 콜드스타트 클리어(단일 큐 경유) — 잔류: C_CellNo={CCell} C_Seq={CSeq} " +
+                            "C_Flag={CFlag} R_CellNo={RCell} R_Seq={RSeq} R_Flag={RFlag} TgtFloor={Tgt} " +
+                            "(Ready·CurFloor 보존)",
+                            snap.CCellNo, snap.CSeq, snap.CFlag,
+                            snap.RCellNo, snap.RSeq, snap.RFlag, snap.TgtFloor);
+                    else
+                        _log.LogInformation(
+                            "[폴링] 기동 첫 폴 콜드스타트 클리어(단일 큐 경유) — 잔류 없음(위생 리셋·no-op)");
+                }
+                catch { /* 로거 disposed — 무시 */ }
+
+                // 큐 경유 StartupClear(컨슈머가 C/R 영역 0 + TgtFloor 0 + D4 RMW C_Flag·R_Flag clear).
+                // 단독=자기 큐 / 버스=공유 큐(대상 unitId). Online 게시 이전 투입(위 순서 근거).
+                EnqueueStartupClear();
+
+                // A-2: 기동 R_Flag 잔류를 RFlagRaised 상승 에지로 흘리지 않는다(클리어가 지울 값이므로).
+                if (snap.RFlag)
+                    suppressRFlagEdge = true;
+            }
+
             var prevOnline = _latest.Online;
-            _latest  = snap;
+            _latest  = snap;   // 이제 관측 루프가 Online 관찰 가능 — StartupClear는 이미 큐 앞에 있음.
             _failures = 0;
             _offlineFailureCount = 0;   // D-1: 지속 실패 카운트 리셋(정상 폴 성공 — 다음 OFFLINE 요약 새로 시작)
             // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
@@ -373,33 +443,6 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
             if (_prevSnap is { } p)
                 EmitRegisterChanges(p, snap);
             _prevSnap = snap;
-
-            // ── S-HANDSHAKE-RESIDUE §2B: 기동 잔류 R_Flag reconciliation (첫 유효 폴 1회) ──
-            // PLC 기동 직후 R 영역 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가
-            // 소비하기 전에 차단한다. 쓰기는 반드시 단일 큐 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지.
-            // A-2: 이 폴에 한해 spurious 상승 에지 발화를 억제한다.
-            bool suppressRFlagEdge = false;
-
-            if (!_startupReconciled)
-            {
-                _startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
-                if (snap.RFlag)
-                {
-                    try
-                    {
-                        _log.LogWarning(
-                            "[폴링] 기동 첫 폴 R_Flag=1 잔류 감지 — ClearR 대사(단일 큐 경유): " +
-                            "R_CellNo={RCellNo} R_Seq={RSeq}", snap.RCellNo, snap.RSeq);
-                    }
-                    catch { /* 로거 disposed — 무시 */ }
-
-                    // 큐 경유 ClearR(컨슈머가 RMW로 R_Flag clear + R 영역 0). 단독=자기 큐 / 버스=공유 큐(대상 unitId).
-                    EnqueueReconcileClearR();
-
-                    // A-2: 이 잔류를 RFlagRaised 상승 에지로도 흘리지 않는다(reconcile가 지울 값이므로).
-                    suppressRFlagEdge = true;
-                }
-            }
 
             // R_Flag 상승 (0→1) 감지 — RFlagRaised 채널에 게시(현재 소비자 없음 — 향후 훅). reconcile 폴은 억제.
             if (!_prevRFlag && snap.RFlag && !suppressRFlagEdge)
@@ -480,15 +523,15 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     }
 
     /// <summary>
-    /// 기동 reconcile ClearR 투입. 단독 모드는 자기 큐에 직접 TryWrite(현행), 버스 모드는 EnqueueAsync로
-    /// 버스 공유 큐(대상 unitId)에 라우팅(절대규칙 #1 — 폴 루프가 직접 Modbus 호출 금지).
+    /// 콜드스타트 레지스터 클리어(StartupClear) 투입. 단독 모드는 자기 큐에 직접 TryWrite(현행), 버스 모드는
+    /// EnqueueAsync로 버스 공유 큐(대상 unitId)에 라우팅(절대규칙 #1 — 폴 루프가 직접 Modbus 호출 금지).
     /// </summary>
-    private void EnqueueReconcileClearR()
+    private void EnqueueStartupClear()
     {
         if (_bus is not null)
-            _ = _bus.EnqueueAsync(_unitId, new PlcWrite.ClearR(), CancellationToken.None);
+            _ = _bus.EnqueueAsync(_unitId, new PlcWrite.StartupClear(), CancellationToken.None);
         else
-            _writeQueue.Writer.TryWrite(new PlcWrite.ClearR());
+            _writeQueue.Writer.TryWrite(new PlcWrite.StartupClear());
     }
 
     private void EnsureConnected()
@@ -579,6 +622,13 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
             _log.LogError(ex, "[쓰기 큐] 처리 예외: {Write}", write);
             PublishOffline();
         }
+        finally
+        {
+            // C2: 콜드스타트 클리어는 성공/실패 무관하게 순서 배리어(StartupClearCompleted)를 신호해
+            // 대기자(IF-08 부트스트랩 push)가 영원히 막히지 않게 한다. 실제 반영 여부는 레지스터 read-back으로 검증.
+            if (write is PlcWrite.StartupClear)
+                _startupClearTcs.TrySetResult();
+        }
     }
 
     private async Task ProcessWriteAsync(PlcWrite write, CancellationToken ct)
@@ -647,6 +697,27 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     await RmwD4LockedAsync(set: 0, clear: RegisterMap.D4.R_Flag, ct).ConfigureAwait(false);
                     _log.LogInformation("[쓰기 큐] ClearR → D2·D3=0, R_Flag=0");
                     EmitWrite("CLEAR_R", "{\"reg\":\"D2,D3\",\"rFlag\":0}");
+                    break;
+
+                case PlcWrite.StartupClear:
+                    // ── C2 §4-B: 콜드스타트 1회 복구 리셋 — WCS 소유 레지스터를 0으로 위생 초기화 ──
+                    // C 영역(D0·D1) FC16 = 0,0
+                    await _master.WriteMultipleRegistersAsync(
+                        RegisterMap.C_CellNo, new short[] { 0, 0 }, ct).ConfigureAwait(false);
+                    // R 영역(D2·D3) FC16 = 0,0
+                    await _master.WriteMultipleRegistersAsync(
+                        RegisterMap.R_CellNo, new short[] { 0, 0 }, ct).ConfigureAwait(false);
+                    // TgtFloor(D6) — 핑퐁 가드 우회(복구 리셋 — "목표 설정" 아님), 무조건 0 기입(FC06).
+                    await _master.WriteSingleRegisterAsync(
+                        RegisterMap.TgtFloor, 0, ct).ConfigureAwait(false);
+                    // D4 RMW — C_Flag·R_Flag 비트만 clear, Ready(D4.2) 보존. CurFloor(D5)는 미접촉.
+                    await RmwD4LockedAsync(
+                        set: 0, clear: (ushort)(RegisterMap.D4.C_Flag | RegisterMap.D4.R_Flag), ct)
+                        .ConfigureAwait(false);
+                    _log.LogInformation(
+                        "[쓰기 큐] StartupClear → D0·D1·D2·D3·D6=0, C_Flag·R_Flag=0 (Ready·CurFloor 보존)");
+                    EmitWrite("STARTUP_CLEAR",
+                        "{\"reg\":\"D0,D1,D2,D3,D6\",\"cFlag\":0,\"rFlag\":0,\"note\":\"cold-start reset\"}");
                     break;
 
                 default:

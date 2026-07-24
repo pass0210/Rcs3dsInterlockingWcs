@@ -70,6 +70,10 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     // 폐루프 1↔2 테스트는 커스텀 맵({1:1,2:2})을 주입해 induction 1→층1·2→층2를 구동한다.
     private readonly IReadOnlyDictionary<int, int> _inductionFloorMap;
 
+    // C2 S2(I-3): 표준 시드 + 슬롯 DestinationId 확정 후 추가 시드 훅(호스트 기동 전 실행 — 재파생 복원 대상
+    // 미완료 piece 시드용). db·슬롯을 받아 임의 행을 삽입하고 SaveChanges 한다(같은 in-memory DB).
+    private readonly Action<WcsDbContext, IReadOnlyList<SorterSimSlot>>? _seedExtra;
+
     // S-MULTISORTER-SHARED-BUS Phase 2 — 공유 버스 모드(한 포트·멀티유닛 Sim 1대에 여러 SORTER_3D를 unitId로 구분).
     private readonly (int ChuteNo, byte UnitId)[] _sharedBusUnits;
     private readonly bool _induceSerialMismatch;       // fail-loud 재현(OQ4): 같은 버스 멤버 BaudRate 불일치.
@@ -116,10 +120,12 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         bool      induceTimeoutMismatch    = false,
         bool      injectTimeoutConnection  = false,
         IReadOnlyDictionary<int, int>? inductionFloorMap = null,
-        IReadOnlyDictionary<int, string>? floorHosts = null)
+        IReadOnlyDictionary<int, string>? floorHosts = null,
+        Action<WcsDbContext, IReadOnlyList<SorterSimSlot>>? seedExtra = null)
     {
         _rcsBaseUrl                 = rcsBaseUrl;
         _floorHosts                 = floorHosts;
+        _seedExtra                  = seedExtra;
         _extraSorterChuteNos        = extraSorterChuteNos ?? [];
         _initialCurFloor            = initialCurFloor;
         _rFlagTimeoutMs             = rFlagTimeoutMs;
@@ -348,6 +354,11 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                     .First(d => d.ChuteNo == slot.ChuteNo && d.DestType == DestType.SORTER_3D && d.IsActive);
                 slot.DestinationId = dest.Id;
             }
+
+            // C2 S2(I-3): 추가 시드 훅 — 호스트 기동(hosted service StartAsync) 전에 미완료 piece 등을 주입해
+            // 재파생 복원(RestoreAsync)이 그 piece 를 관측 루프 소비 전에 큐로 복원함을 실증한다.
+            _seedExtra?.Invoke(db, _slots);
+
             // production SorterRegistryFactory·DestinationStatusPusher·ChuteCapacityService는 교체하지 않는다.
             // (Fake/Nop 미사용 — 실 핸드셰이크 + 실 push ground-truth.)
         });
