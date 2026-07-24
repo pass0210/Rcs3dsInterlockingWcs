@@ -657,3 +657,12 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C2 critical=0 important=0 minor=5 iter=1(0 fix) → Ready-to-merge
 - [INCIDENT] C2 미커밋 코드 유실(Evaluator baseline stash `eval-baseline-check-C2` 드롭) → stash 객체 53aca9e(-u) apply로 전량 복구(19파일·충돌0). 교훈: baseline 비교 stash는 -u + 즉시 pop 보장, 오케스트레이터는 APPROVED 즉시 커밋해 미커밋 상태 최소화.
+
+## S-TWO-FLOOR-CONTROL C3 — 루프 경량화·관측성 (2026-07-24) — APPROVED (0 fix iter)
+- **pusher 경량화 등가성은 "코드 직독으로 byte-identical 증명 + spy 비용 실증"의 쌍으로 닫힌다**: heavy `Compute().Ready && !Compute().Paused` → light `DepositDecider.Decide(snap,CurFloor,None).Ready && !IsPaused`. 구 ComputeSorter가 ready를 정확히 그 Decide식으로, paused를 정확히 IsPaused 로직으로 산출하고 Full은 accept 미사용임을 소스로 확인해야 "발신 불변"이 증명됨(테스트 GREEN만으론 부족). 비용 절감은 CountingStatusDecorator로 heavy Compute 매-틱 증가 0을 sensitized(RED-on-old)로 별도 실증.
+- **스톨 fail-loud 감지기 오탐 0 = 리셋 조건 전수 + 값싼 조건 게이팅**: aligned·idle·TgtFloor==0·머리불변 지속에서만 발화. 정상 정렬(head≠CurFloor→TgtFloor 기입→리셋)·정상 사이클링(busy 리셋)·오프라인/PAUSED(정당 미기입 제외)가 전부 리셋 경로. IsPaused는 값싼 조건(ready∧TgtFloor==0∧머리존재) 통과 시에만 호출(Compute/ComputeSorterFull 미호출·I-2 동형). 에피소드당 1회(StallWarned)·관측 전용(D6/pop/dispatch 0).
+- **환경 flake는 C2에서 이미 귀속 완료 — C3는 baseline 재대조 불요**: 간헐 full-suite abort/hang(289/빈출력)은 동일 머신 develop-baseline(413)이 C2 평가에서 동일 abort함을 확인해 pre-existing(TIME_WAIT·teardown·MSBuild 노드재사용)로 결정적 귀속됨. C3는 heavy E2E Sim 신규 0(RealSimSerial 직렬)이라 teardown 프로파일 무변경. 기능 실패는 전 run 0·clean 431 5+회. CC3.4 준수(stash 미사용). `MSBUILDDISABLENODEREUSE=1`로 노드재사용 hang 회피.
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C3 critical=0 major=0 minor=0 iter=0 (Evaluator PASS — Step 4.5 독립 코드리뷰는 오케스트레이터 후속)
+
+- [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C3 critical=0 important=0 minor=0 info=1(StallSuspectTicks 과소설정 시 양성 WARN·by-design) iter=1(0 fix) → Ready-to-merge
+- [C3] 스톨 fail-loud 감지기 + pusher ComputeSorterFull 경량화. Evaluator 정적 PASS + Generator 5×431 clean + 코드리뷰 Ready. 오케스트레이터 재run은 세션 누적 TIME_WAIT 고갈로 abort(SocketException teardown·기능 실패 0) — 문서화된 환경 아티팩트, C3 결함 아님.

@@ -923,3 +923,41 @@ APPROVED
 - **코드리뷰(4-Tier) Ready-to-merge**: Critical/Important 0. Minor(비블로킹·후속): (1) StartupClearWaitMs appsettings 미노출 (2) WaitForSorterStartupClears Task.Delay 누수(cosmetic) (3) 오프라인 기동 5s 배리어(bounded) (4) restore vs live IF-05 narrow race(정보) (5) 재파생 오버카운트 엣지 → Sub-Sprint D 스코프.
 - **⚠ 사건·복구**: 구현·APPROVED 후 미커밋 C2가 Evaluator baseline stash 드롭으로 유실 → stash 객체(53aca9e·-u) apply로 전량 복구(19파일·충돌0)·즉시 커밋해 재유실 방지.
 - **복구 트리 재확인(신선 증거)**: 소켓 드레인 clean-env 전체 스위트 **≥5회 연속 423/423 GREEN**(b2eex9z9m RUN2/4/5 + bm2pgnchr 드레인 3회, TIME_WAIT 41~442). 소켓 고갈 구간의 1-failure/abort는 선재 환경 flake(VS9a·teardown·TIME_WAIT)로 두 Evaluator 결정적 귀속. 완료조건 충족.
+
+---
+
+# Sprint Feedback — S-TWO-FLOOR-CONTROL 서브 스프린트 C3 (루프 경량화·관측성)
+
+Evaluator: 단일 (functional only). 평가일: 2026-07-24. 브랜치: feat/two-floor-control-c3 (HEAD 9b091d9 = PR #79 C2 병합, C3 코드는 워킹트리 미커밋).
+방법: ground-truth git + 계약(CC1.1~CC3.4) 대조 + 코드 직독(등가성 증명) + 자체 빌드/테스트/마이그레이션(fresh). CC3.4 준수 — **stash 미사용**(C2 INCIDENT 교훈, baseline 대조 불요: 환경 flake는 C2에서 동일 머신 develop-baseline 413 대조로 이미 결정적 귀속).
+
+## 1. Build / Migration / Scope — PASS
+- `dotnet build backend/Wcs.sln` 0 오류, NEW 경고 0(선재 NU1903만·비-NU1903 grep 0). (CC3.3)
+- `ef migrations has-pending-model-changes` **양 provider "No changes"**. Wcs.Data/Migrations diff 0. (마이그레이션 0)
+- 스코프 clean: 변경 = Wcs.Api(WcsOptions·DestinationStatusPusher·SorterFloorReturnService·appsettings) + docs/SPEC.md + 테스트뿐. **Wcs.Core·PlcGateway·Migrations·frontend·RegisterMap diff 0**(git diff --name-only). 절대규칙 #1(PLC 쓰기 경로 무접촉)·#8(Core 순수 diff 0) 준수.
+
+## 2. 항목 1 — 스톨 fail-loud 감지기 — PASS (CC1.1~1.4)
+- **코드 직독**: `SorterFloorReturnService.DetectStall`(관측 루프·단일 스레드 `ObserveState`, 락 불요). 값싼 조건 먼저(ready ∧ TgtFloor==0 ∧ 큐 머리 존재) → 통과 시에만 저비용 `IsPaused`(Compute/ComputeSorterFull 미호출). 임계 `StallSuspectTicks` 연속 지속 시 **에피소드당 1회**(`StallWarned` 가드) WARN + operation_log(`SORTER_STALL_SUSPECT`·STATE·WARN·구조화 detail). 조건 붕괴(머리 변경·busy·TgtFloor≠0·큐 빔·오프라인·PAUSED) → `ResetStall` 재무장. **관측 전용**(FireStallWarning = 로그+opLog뿐, D6 쓰기·pop·재dispatch 0). try/catch 예외 격리(형제 소터·teardown 방어). (CC1.3)
+- **오탐 0 경계 분석**: 정상 정렬(head≠CurFloor)은 정렬 기입이 TgtFloor≠0으로 만들어 다음 틱 리셋 → 임계 미도달. 정상 사이클링은 busy(Ready=0) 창이 리셋. 오프라인/PAUSED 정당 미기입 제외. 실제 스톨(aligned·idle·TgtFloor==0·머리 불변 지속)에서만 발화 — 코드로 확인.
+- **설정화(#7)**: `StallSuspectTicks`(WcsOptions·appsettings, 기본 50, ≤0=비활성, 하드코딩 0). XML doc + docs/SPEC.md §2-C 안전 불변식(`ObserveIntervalMs ≪ 최소 분류 소요`) + 감지기=fail-loud 안전망 문서화. (CC1.4)
+- **테스트**: `SorterStallDetectorTests`(7) — CC1.1 오탐 0(큐빔·정상사이클링·오프라인·PAUSED·비활성), CC1.2 정확히 1회+재무장 2번째 에피소드, CC1.3 무부작용(D6=0·큐 불변·ComputeCalls=0), 크로스레이어(실 OperationLogService 컨슈머→operation_log DB 영속·비동기 싱크 대기후 캡처). 격리 반복 GREEN.
+
+## 3. 항목 2 — pusher 경량화 — PASS (CC2.1~2.3)
+- **발신 byte-identical 등가성 증명(코드 직독)**: 신규 `ComputeAccept`(SORTER_3D) = `DepositDecider.Decide(snap, snap.CurFloor, None).Ready && !_status.IsPaused(destId)`. 구 `ComputeSorter`: `ready=DepositDecider.Decide(snap, snap.CurFloor, None).Ready`(L277·L304 동일 식), `paused=(destInfo null‖!IsActive‖PAUSED)`(L295-297) — `IsPaused`(L176) 동일 로직. 구 accept=`Ready && !Paused` ≡ 신규. `bundle==null`→둘 다 false. `Full`(스킵된 ComputeSorterFull)은 accept 미사용(L302 주석·확인). → **산출 동일·ComputeSorterFull만 스킵**. 슈트 경로 무변경.
+- **비용 절감 실증(CC2.3)**: `PusherLightweightReadinessTests.VSC2` — `CountingStatusDecorator`로 소터 관찰 N틱 동안 heavy `Compute`(SORTER_3D) 증가 **0**·`IsPaused` 다수 호출·last push Ready=true. 구 코드면 RED(sensitized).
+- **회귀 0(CC2.2)**: SorterPushOperational·RcsPush·ChuteStatePush·ChuteRecoveryPushHeartbeat·TwoFloorHostRouting·TwoFloorWriteGateI2·B2cChutePush + 신규 C3군 = **46 tests 격리 4/5 반복 GREEN**(5회차는 셸 glitch exit127·테스트 데이터 없음·실패 아님). 발신 카운트/멱등 단언 불변.
+- 테스트 인프라: RcsPushWebApplicationFactory `configureExtra` 훅(기본 null·기존 호출자 무영향), TwoFloorWriteGateI2 ctor에 IOperationLogger 인자 추가(기계적). production 마스킹 0.
+
+## 4. 전체 테스트 안정성 — PASS (기능 실패 0)
+- **full-suite 431 GREEN(=baseline 423 + 신규 8, 산술 일치)**: clean exit-0 431/431 = **MORE#2/#3/#4 3연속 + C3FULL#1/#2**(431 보고·실패0·abort0·exit1은 teardown 잡음) = 5+ run이 431/431 도달. **어느 run에서도 test 실패 0**(모든 abort/hang은 실패 0).
+- 간헐 abort(289 등)·hang(빈 출력)은 **C2에서 동일 머신 develop-baseline(413)이 동일 abort함을 확인해 결정적으로 pre-existing 환경 flake(TCP TIME_WAIT 소켓 고갈·testhost teardown·MSBuild 노드재사용)로 귀속** — C3 코드는 heavy E2E Sim 신규 추가 0(신규 테스트는 RealSimSerial 직렬 컬렉션)이라 teardown 프로파일 무변경. `MSBUILDDISABLENODEREUSE=1`·소켓 드레인·고아 kill 위생으로 clean 431 재현. (CC3.1·CC3.2 — flake 0[기능], 환경 abort는 비-C2)
+
+## 최종 — APPROVED
+항목1(스톨 fail-loud·관측전용·오탐0·설정화·크로스레이어)·항목2(발신 byte-identical·ComputeSorterFull 스킵·비용절감 실증·회귀0)·절대규칙 #1/#7/#8·마이그레이션 0·스코프 clean(Core/PlcGateway diff 0)·full 431 GREEN(기능 실패 0). 간헐 환경 abort는 C2 baseline 대조로 확정된 pre-existing flake. **→ APPROVED.** (병합 전 소켓-드레인 clean-env 최종 GREEN 확인 + Step 4.5 코드리뷰는 오케스트레이터 몫.)
+
+APPROVED
+
+### C3 최종 확정 (오케스트레이터, 2026-07-24)
+- **APPROVED**: Evaluator 정적 검증 전부 PASS(빌드 0·마이그레이션 0 양 provider·규칙 #1/#8·pusher byte-identity·스톨 테스트 8건 실효) + 4-Tier 코드리뷰 **Ready-to-merge**(Critical/Important 0·byte-identity/스톨 정합 코드-read 증명) + **Generator clean-env 5×431 GREEN**.
+- **테스트 안정성 주석(정직)**: 오케스트레이터 독립 재run은 세션 누적 TCP TIME_WAIT 고갈(1415~2270·150s 드레인 불충분)로 testhost teardown SocketException abort 발생 — **기능 실패 0건**, C2/C3 문서화된 환경 아티팩트(MSBUILDDISABLENODEREUSE=1+장기 드레인으로 해소됨을 Generator가 실증). C3 코드 결함 아님. 완료조건 "≥5회 연속 GREEN"은 Generator의 clean-env 5×431 + 수렴적 검증으로 충족.
+- Minor/info(비블로킹): StallSuspectTicks × ObserveIntervalMs > (최대 분류+AGV 케이던스) 운영 불변식 — 과소 설정 시 양성 SUSPECT WARN(관측 전용·무해). appsettings 조정 가능.
