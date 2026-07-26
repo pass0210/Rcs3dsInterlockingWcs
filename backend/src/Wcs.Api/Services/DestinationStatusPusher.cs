@@ -417,8 +417,30 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
     }
 
     // ── 수용상태 합성(계약 SC-2): accept = Ready ∧ !Paused ─────────────────────
+    //
+    // S-TWO-FLOOR-CONTROL C3 항목2 — 소터 경량화(I-2 동형): 소터에 대해 무거운 Compute(→ ComputeSorterFull:
+    //   cell/cell_assignment/sorter_command/piece 다중 집계 쿼리)를 **매 관찰 틱마다 호출하지 않는다**. accept 에
+    //   실제로 쓰이는 것은 Ready ∧ !Paused 뿐이고 Full 은 미사용이므로, 스냅샷 기반 Ready(bundle.Latest +
+    //   DepositDecider(순수, CurFloor 목표) — DB 무접촉) ∧ !IsPaused(destination Status/IsActive 단일 조회)로
+    //   대체한다. 발신 결과는 **완전히 동일**하고 셀 집계 비용만 절감된다.
+    //     · 기존 Compute().Ready(= ComputeSorter 의 decision.Ready) == DepositDecider.Decide(snap, snap.CurFloor,
+    //       None).Ready — 동일 산출(번들 없음/오프라인이면 둘 다 false).
+    //     · 기존 Compute().Paused == IsPaused(destId) — 동일 로직(destination Status/IsActive).
+    //   → accept = Ready ∧ !Paused 가 경량화 전후 byte-identical(next_state 3/2·전이당 1회 멱등 불변).
+    //   슈트(비소터)는 현행 유지 — ChuteCapacityService.GetHold(인메모리 hold, DB 집계 없음)라 이미 경량이다.
     private bool ComputeAccept(DestState st)
     {
+        if (st.DestType == DestType.SORTER_3D)
+        {
+            var bundle = _sorterRegistry.GetBundle(st.DestinationId);
+            if (bundle is null) return false;   // 번들 없음 = OFFLINE(ComputeSorter 와 동일: Ready=false → accept=false).
+
+            var snap  = bundle.Latest;
+            bool ready = DepositDecider.Decide(snap, snap.CurFloor, WcsHold.None).Ready;   // = Compute().Ready(운영상태).
+            return ready && !_status.IsPaused(st.DestinationId);                            // ComputeSorterFull 스킵.
+        }
+
+        // 슈트: 현행 유지(ComputeChute — 인메모리 hold 기반이라 이미 경량).
         var r = _status.Compute(st.DestinationId, st.DestType);
         return r.Ready && !r.Paused;
     }

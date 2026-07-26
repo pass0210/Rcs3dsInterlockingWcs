@@ -52,6 +52,9 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
     private readonly string? _rcsBaseUrl;
     private readonly int     _retryCount;
     private readonly int     _retryBaseDelayMs;
+    // C3 항목2: 기본 등록 뒤 테스트별 서비스 오버라이드 훅(예: IDestinationStatusService 카운팅 데코레이터).
+    // 기본 null → 기존 호출자 동작 불변. ConfigureServices 말미에 base 등록 이후 1회 적용.
+    private readonly Action<IServiceCollection>? _configureExtra;
 
     private readonly PlcWriteQueue     _fakeWriteQueue = new();
     private readonly PlcGatewayOptions _fakeGwOpt = new()
@@ -75,11 +78,14 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
     public long SorterDestinationId { get; private set; }
     public int  SorterChuteNo       { get; private set; }
 
-    public RcsPushWebApplicationFactory(string? rcsBaseUrl, int retryCount = 3, int retryBaseDelayMs = 50)
+    public RcsPushWebApplicationFactory(
+        string? rcsBaseUrl, int retryCount = 3, int retryBaseDelayMs = 50,
+        Action<IServiceCollection>? configureExtra = null)
     {
         _rcsBaseUrl       = rcsBaseUrl;
         _retryCount       = retryCount;
         _retryBaseDelayMs = retryBaseDelayMs;
+        _configureExtra   = configureExtra;
 
         _anchorConnection = new Microsoft.Data.Sqlite.SqliteConnection(
             $"Data Source={_dbName};Mode=Memory;Cache=Shared");
@@ -178,6 +184,9 @@ public sealed class RcsPushWebApplicationFactory : WebApplicationFactory<Program
             //   → 가짜 RCS 수신 검증을 위해 반드시 살아 있어야 한다.
             services.AddSingleton<IHostedService>(sp =>
                 sp.GetRequiredService<DestinationStatusPusher>());
+
+            // C3: 테스트별 서비스 오버라이드(base 등록 이후 — 예: IDestinationStatusService 데코레이터). 기본 no-op.
+            _configureExtra?.Invoke(services);
         });
     }
 
