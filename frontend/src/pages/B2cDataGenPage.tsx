@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Plus, RotateCcw } from 'lucide-react'
+import { Download, Plus, RotateCcw, Upload } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -11,7 +11,13 @@ import { useToast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { ROW_HIGHLIGHT_CLASS, useRowSelection } from '@/lib/useRowSelection'
 import { todayBizDay } from '@/lib/uiMode'
-import { b2cTestData, useB2cBatches, type BatchSummary } from '@/lib/b2cTestData'
+import {
+  b2cTestData,
+  useB2cBatches,
+  B2C_UPLOAD_TEMPLATE_URL,
+  type BatchSummary,
+  type UploadRowError,
+} from '@/lib/b2cTestData'
 import { ORDERS_FETCH_MAX, useFacilityBatchOrders } from '@/lib/b2cFacility'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -169,6 +175,7 @@ export function B2cDataGenPage() {
           </CardHeader>
           <CardContent>
             <B2cGenerateForm onGenerated={invalidateAll} />
+            <B2cExcelUpload onUploaded={invalidateAll} />
           </CardContent>
         </Card>
 
@@ -475,6 +482,86 @@ function B2cGenerateForm({ onGenerated }: { onGenerated: () => void }) {
         멱등: 같은 파라미터 재실행 시 카운트 불변(upsert). <b>목적지 미할당</b> 오더/바코드만 생성합니다.
       </p>
     </form>
+  )
+}
+
+// ── 엑셀 업로드 블록(S-B2C-EXCEL-UPLOAD) ──────────────────────────────────────
+//   생성 폼의 대안 입력 경로 — 정적 양식 다운로드 + .xlsx 업로드(행 = 오더/바코드 1건, 미할당).
+//   성공 시 배치 그리드 invalidate + 입력 리셋. 실패 시 에러 토스트 + 행별 오류 목록(Fail-Loud).
+function B2cExcelUpload({ onUploaded }: { onUploaded: () => void }) {
+  const { toast } = useToast()
+  const [file, setFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [rowErrors, setRowErrors] = useState<UploadRowError[]>([])
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  async function onUpload() {
+    if (!file || uploading) return
+    setUploading(true)
+    setRowErrors([])
+    try {
+      const res = await b2cTestData.upload(file)
+      if (res.ok) {
+        toast('success', res.message)
+        onUploaded()
+        setFile(null)
+        if (inputRef.current) inputRef.current.value = ''
+      } else {
+        toast('error', res.message)
+        setRowErrors(res.rowErrors ?? [])
+      }
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  return (
+    <div className="mt-4 flex flex-col gap-3 border-t border-line pt-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[12px] font-semibold text-ink">엑셀 업로드</span>
+        {/* 양식 다운로드 — 정적 파일 링크(동일 출처). download 속성으로 파일 저장 트리거. */}
+        <a
+          href={B2C_UPLOAD_TEMPLATE_URL}
+          download
+          className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel px-2.5 py-1.5 text-[12px] font-medium text-ink hover:bg-elevated focus-visible:outline-2 focus-visible:outline-ink"
+        >
+          <Download className="size-3.5" />양식 다운로드
+        </a>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".xlsx"
+        aria-label="엑셀 파일 선택"
+        onChange={(e) => {
+          setFile(e.target.files?.[0] ?? null)
+          setRowErrors([])
+        }}
+        className="block w-full text-[12px] text-muted file:mr-3 file:cursor-pointer file:rounded-lg file:border file:border-line file:bg-panel file:px-3 file:py-1.5 file:text-[12px] file:font-medium file:text-ink hover:file:bg-elevated"
+      />
+      <Button type="button" variant="solid" disabled={!file || uploading} onClick={onUpload} className="w-full">
+        <Upload className="size-4" />
+        {uploading ? '업로드 중…' : '업로드'}
+      </Button>
+      <p className="text-[11px] text-faint">
+        컬럼: 작업일자·배치명·차수·바코드·수량. <b>목적지 미할당</b> 오더/바코드로 추가됩니다(멱등 —
+        같은 데이터 재업로드 시 중복 0). 한 행이라도 오류가 있으면 전체 취소됩니다.
+      </p>
+      {rowErrors.length > 0 && (
+        <div className="rounded-lg border border-offline/40 bg-offline/5 p-2.5">
+          <p className="text-[12px] font-semibold text-offline">
+            행 오류 {rowErrors.length}건 — 전체 취소됨(반영 0건)
+          </p>
+          <ul className="mt-1.5 max-h-40 list-disc overflow-auto pl-4 text-[11px] leading-relaxed text-offline">
+            {rowErrors.map((e, i) => (
+              <li key={`${e.row}-${i}`}>
+                <b className="tabular-nums">{e.row}행</b>: {e.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using ClosedXML.Excel;
 using Microsoft.EntityFrameworkCore;
 using Wcs.Api.B2B;   // AppUtils.NormalizeBizDay 재사용(DRY — 작업일자 정규화 단일 소스)
 using Wcs.Data;
@@ -30,6 +33,13 @@ public interface IB2cTestDataService
 {
     /// <summary>생성(멱등 upsert · 슬림). 미할당 오더 N건 생성. workDate 비존재 날짜 → ArgumentException → 400.</summary>
     Task<B2cManagementResponse> GenerateAsync(B2cGenerateRequest req, CancellationToken ct = default);
+
+    /// <summary>
+    /// 엑셀 업로드(S-B2C-EXCEL-UPLOAD) — 행 단위 = 오더/바코드 1건. ClosedXML 파싱 → 행별 검증 →
+    /// 멱등 append + 오류 시 전체 거부(atomic). 미할당 유지(DestinationId=null·orderNo==barcode).
+    /// 파일 레벨 검증(없음/크기/확장자·MIME)은 컨트롤러가 400 으로 선행. 여기선 구조/행오류를 200 F 로.
+    /// </summary>
+    Task<B2cUploadResponse> UploadExcelAsync(Stream excelStream, CancellationToken ct = default);
 
     /// <summary>최근 work_batch 요약(생성 결과 view) — 미할당 오더 수 포함.</summary>
     Task<List<B2cBatchSummary>> GetBatchesAsync(int take, CancellationToken ct = default);
@@ -185,6 +195,262 @@ public sealed class B2cTestDataService : IB2cTestDataService
             await tx.RollbackAsync(ct).ConfigureAwait(false);
             throw;
         }
+    }
+
+    // ── 순수 함수: 행별 파싱·검증(결정적·I/O 무의존 — 절대규칙 #8·테스트가 스펙) ──────────
+    /// <summary>
+    /// 업로드 원시 행(문자열 셀)을 검증·파싱한다. 순수(부수효과·I/O·DB 0) — 같은 입력 → 같은 출력.
+    ///   · 작업일자: 필수·형식(YYYYMMDD|YYYY-MM-DD)·달력 유효(NormalizeBizDay). 정규화("yyyy-MM-dd").
+    ///   · 배치명: 필수(1~100자).  · 차수: 선택(빈=기본1)·정수 1~9999.
+    ///   · 바코드(=오더번호): 필수·안전문자(영문·숫자·하이픈·언더스코어 1~100).
+    ///   · 수량(계획수량): 선택(빈=기본1)·정수 1~상한.
+    ///   · 파일 내 중복 (작업일자·배치명·차수·바코드) → 오류(멱등 키 충돌).
+    /// 한 행에 사유가 여럿이면 공백으로 결합해 1개 <see cref="B2cUploadRowError"/> 로 반환. Q4 원자성은
+    /// 호출측(UploadExcelAsync)이 "오류가 하나라도 있으면 커밋 0"으로 강제(이 함수는 순수 판정만).
+    /// </summary>
+    public static (IReadOnlyList<B2cUploadParsedRow> Rows, IReadOnlyList<B2cUploadRowError> Errors)
+        ValidateUploadRows(IReadOnlyList<B2cUploadRawRow> rawRows)
+    {
+        var parsed = new List<B2cUploadParsedRow>();
+        var errors = new List<B2cUploadRowError>();
+        var seen   = new HashSet<(string WorkDate, string BatchNo, int WaveNo, string Barcode)>();
+
+        foreach (var r in rawRows)
+        {
+            var rowErrs = new List<string>();
+
+            // 작업일자 — 필수·형식·달력 유효.
+            string workDateNorm = string.Empty;
+            if (string.IsNullOrWhiteSpace(r.WorkDate))
+                rowErrs.Add("작업일자는 필수입니다.");
+            else if (!Regex.IsMatch(r.WorkDate.Trim(), B2cConstants.WorkDateRegex))
+                rowErrs.Add("작업일자 형식이 올바르지 않습니다(YYYYMMDD 또는 YYYY-MM-DD).");
+            else
+            {
+                try { workDateNorm = AppUtils.NormalizeBizDay(r.WorkDate); }
+                catch (ArgumentException) { rowErrs.Add($"작업일자가 존재하지 않는 날짜입니다: {r.WorkDate.Trim()}"); }
+            }
+
+            // 배치명 — 필수(1~100).
+            var batchNo = r.BatchNo.Trim();
+            if (batchNo.Length == 0) rowErrs.Add("배치명은 필수입니다.");
+            else if (batchNo.Length > 100) rowErrs.Add("배치명은 100자 이하여야 합니다.");
+
+            // 차수 — 선택(빈=기본1)·정수 1~9999.
+            int waveNo = B2cConstants.DefaultWaveNo;
+            if (!string.IsNullOrWhiteSpace(r.WaveNo)
+                && (!int.TryParse(r.WaveNo.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out waveNo)
+                    || waveNo < 1 || waveNo > B2cConstants.WaveNoMax))
+                rowErrs.Add($"차수는 1~{B2cConstants.WaveNoMax} 사이 정수여야 합니다.");
+
+            // 바코드 — 필수·안전문자.
+            var barcode = r.Barcode.Trim();
+            if (barcode.Length == 0) rowErrs.Add("바코드는 필수입니다.");
+            else if (!Regex.IsMatch(barcode, B2cConstants.UploadBarcodeRegex))
+                rowErrs.Add("바코드는 영문·숫자·하이픈·언더스코어(1~100자)만 허용합니다.");
+
+            // 수량 — 선택(빈=기본1)·정수 1~상한.
+            int qty = 1;
+            if (!string.IsNullOrWhiteSpace(r.Qty)
+                && (!int.TryParse(r.Qty.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out qty)
+                    || qty < 1 || qty > B2cConstants.UploadPlannedQtyMax))
+                rowErrs.Add($"수량은 1~{B2cConstants.UploadPlannedQtyMax} 사이 정수여야 합니다.");
+
+            // 파일 내 중복 — 키 필드가 전부 유효할 때만 판정(무효 행은 이미 오류).
+            if (rowErrs.Count == 0)
+            {
+                if (!seen.Add((workDateNorm, batchNo, waveNo, barcode)))
+                    rowErrs.Add("같은 파일 내 중복된 (작업일자·배치명·차수·바코드) 입니다.");
+            }
+
+            if (rowErrs.Count > 0)
+                errors.Add(new B2cUploadRowError(r.RowNumber, string.Join(" ", rowErrs)));
+            else
+                parsed.Add(new B2cUploadParsedRow(r.RowNumber, workDateNorm, batchNo, waveNo, barcode, qty));
+        }
+
+        return (parsed, errors);
+    }
+
+    // ── 엑셀 업로드(S-B2C-EXCEL-UPLOAD) — 행 단위 = 오더/바코드 1건 ──────────────────
+    //   파일 레벨(없음/크기/확장자·MIME)은 컨트롤러가 400 으로 선행. 여기선 구조/행오류를 200 F 로.
+    //   Q4 확정 원자성: 행 검증 오류가 하나라도 있으면 커밋 0(트랜잭션 진입 전 조기 반환) + 행별 리포트.
+    //   멱등 append: 기존 (배치·오더번호) 는 upsert 스킵(재업로드 시 신규 카운트 0). GenerateAsync 구조 재사용.
+    public async Task<B2cUploadResponse> UploadExcelAsync(Stream excelStream, CancellationToken ct = default)
+    {
+        // ── 1) 워크북 로드 + 헤더 검증 + 원시 행 수집(파싱 예외는 명시 F 로 표면화 — 삼킴 0) ──
+        List<B2cUploadRawRow> rawRows;
+        try
+        {
+            using var wb = new XLWorkbook(excelStream);
+            var ws = wb.Worksheet(1);
+            var used = ws.RangeUsed();
+            if (used is null)
+                return FailUpload(B2cConstants.UploadNoData);
+
+            // zip-bomb/대용량 방어 — 압축 해제 후 사용 범위 행·열 상한 조기 차단(O(1)).
+            if (used.RowCount() > B2cConstants.UploadMaxRows || used.ColumnCount() > B2cConstants.UploadMaxColumns)
+                return FailUpload(B2cConstants.UploadTooLarge);
+
+            var firstRow = used.FirstRow().RowNumber();
+            var lastRow  = used.LastRow().RowNumber();
+            var firstCol = used.FirstColumn().ColumnNumber();
+
+            // 헤더 필수(구조 검증) — 첫 행 5개 셀이 기대 헤더와 정확히 일치(위치 기반 파싱).
+            string Hdr(int off) => ws.Cell(firstRow, firstCol + off).GetString().Trim();
+            if (Hdr(0) != B2cConstants.HdrWorkDate || Hdr(1) != B2cConstants.HdrBatchNo
+             || Hdr(2) != B2cConstants.HdrWaveNo   || Hdr(3) != B2cConstants.HdrBarcode
+             || Hdr(4) != B2cConstants.HdrQty)
+                return FailUpload(B2cConstants.UploadHeaderMismatch);
+
+            rawRows = new List<B2cUploadRawRow>();
+            for (var rn = firstRow + 1; rn <= lastRow; rn++)
+            {
+                string Col(int off) => ws.Cell(rn, firstCol + off).GetString().Trim();
+                var workDate = Col(0);
+                var batchNo  = Col(1);
+                var waveNo   = Col(2);
+                var barcode  = Col(3);
+                var qty      = Col(4);
+
+                // 전 셀 공백 = 빈 행 skip(오류 아님 — 관용).
+                if (workDate.Length == 0 && batchNo.Length == 0 && waveNo.Length == 0
+                    && barcode.Length == 0 && qty.Length == 0)
+                    continue;
+
+                rawRows.Add(new B2cUploadRawRow(rn, workDate, batchNo, waveNo, barcode, qty));
+            }
+        }
+        catch (Exception ex)
+        {
+            // 파싱/포맷 예외 → 명시 F(삼킴 아님 — 사유를 사용자에게 표면화 + 감사 WARN).
+            return FailUpload($"엑셀 파싱 오류: {ex.Message}");
+        }
+
+        // ── 2) 데이터 행 0 / 상한 초과 ──────────────────────────────────────────────
+        if (rawRows.Count == 0)
+            return FailUpload(B2cConstants.UploadNoValidData);
+        if (rawRows.Count > B2cConstants.UploadDataRowsMax)
+            return FailUpload(B2cConstants.UploadTooManyRows(rawRows.Count));
+
+        // ── 3) 행별 검증(순수) — 오류가 하나라도 있으면 전체 거부(Q4 원자성 · 커밋 0) ────────
+        var (parsedRows, rowErrors) = ValidateUploadRows(rawRows);
+        if (rowErrors.Count > 0)
+        {
+            var msg = $"업로드 실패 — {rowErrors.Count}개 행에 오류가 있어 전체 취소되었습니다(반영 0건).";
+            Audit("B2C_UPLOAD", OperationLogLevel.WARN, null, null,
+                $"{{\"upload\":\"reject\",\"dataRows\":{rawRows.Count},\"rowErrors\":{rowErrors.Count}}}");
+            return B2cUploadResponse.Fail(msg, null, rowErrors);
+        }
+        if (parsedRows.Count == 0)
+            return FailUpload(B2cConstants.UploadNoValidData);
+
+        // ── 4) 영속화(트랜잭션·원자적) — 배치별 upsert(멱등) → 미할당 오더 → order_item ──────
+        var now = DateTime.UtcNow;
+        int ordersCreated = 0, itemsCreated = 0;
+        var batchKeys = new HashSet<(DateOnly, string, int)>();
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+        try
+        {
+            foreach (var group in parsedRows.GroupBy(r => (r.WorkDate, r.BatchNo, r.WaveNo)))
+            {
+                var workDate = DateOnly.ParseExact(group.Key.WorkDate, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                var batchNo  = group.Key.BatchNo;
+                var waveNo   = group.Key.WaveNo;
+                batchKeys.Add((workDate, batchNo, waveNo));
+
+                // work_batch (RUNNING) — UQ(work_date,batch_no,wave_no) 멱등.
+                var batch = await _db.WorkBatches.FirstOrDefaultAsync(
+                    b => b.WorkDate == workDate && b.BatchNo == batchNo && b.WaveNo == waveNo, ct)
+                    .ConfigureAwait(false);
+                if (batch is null)
+                {
+                    batch = new WorkBatch
+                    {
+                        WorkDate = workDate, BatchNo = batchNo, WaveNo = waveNo,
+                        Status = WorkBatchStatus.RUNNING, OpenedAt = now, ClosedAt = null,
+                        CreatedAt = now, UpdatedAt = now,
+                    };
+                    _db.WorkBatches.Add(batch);
+                    await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+                }
+
+                // 미할당 오더 upsert(DestinationId=null·orderNo==barcode) — UQ(batch,order_no).
+                var existingOrders = await _db.Orders
+                    .Where(o => o.WorkBatchId == batch.Id)
+                    .ToDictionaryAsync(o => o.OrderNo, ct).ConfigureAwait(false);
+
+                foreach (var r in group)
+                {
+                    if (!existingOrders.ContainsKey(r.Barcode))
+                    {
+                        _db.Orders.Add(new WcsOrder
+                        {
+                            WorkBatchId = batch.Id, OrderNo = r.Barcode, OrderType = OrderType.GENERAL,
+                            DestinationId = null, DestAssignType = null, DestAssignedAt = null,  // 미할당(2b 소관)
+                            Status = OrderStatus.RUNNING, StartedAt = now, ClosedAt = null,
+                            CreatedAt = now, UpdatedAt = now,
+                        });
+                        ordersCreated++;
+                    }
+                }
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+                var orderByNo = await _db.Orders.Where(o => o.WorkBatchId == batch.Id)
+                    .ToDictionaryAsync(o => o.OrderNo, o => o.Id, ct).ConfigureAwait(false);
+
+                // order_item(barcode==orderNo, planned_qty=행 수량) — 기존 실적 보존(INSERT 만).
+                var existingItemKeys = (await _db.OrderItems
+                    .Where(i => orderByNo.Values.Contains(i.OrderId))
+                    .Select(i => new { i.OrderId, i.Barcode })
+                    .ToListAsync(ct).ConfigureAwait(false))
+                    .Select(x => (x.OrderId, x.Barcode)).ToHashSet();
+
+                foreach (var r in group)
+                {
+                    long orderId = orderByNo[r.Barcode];
+                    if (!existingItemKeys.Contains((orderId, r.Barcode)))
+                    {
+                        _db.OrderItems.Add(new OrderItem
+                        {
+                            OrderId = orderId, Barcode = r.Barcode, PlannedQty = r.PlannedQty,
+                            ReservedQty = 0, SortedQty = 0, CreatedAt = now, UpdatedAt = now,
+                        });
+                        itemsCreated++;
+                    }
+                }
+                await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+            }
+
+            await tx.CommitAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct).ConfigureAwait(false);
+            throw;   // DB 예외는 삼키지 않음(트랜잭션 롤백 후 재던짐 — 컨트롤러/미들웨어가 표면화).
+        }
+
+        var counts = new Dictionary<string, int>
+        {
+            ["ordersCreated"]     = ordersCreated,
+            ["orderItemsCreated"] = itemsCreated,
+            ["batches"]           = batchKeys.Count,
+            ["dataRows"]          = parsedRows.Count,
+        };
+        var message = $"업로드 완료 — 데이터 {parsedRows.Count}행, 배치 {batchKeys.Count}개, "
+                    + $"미할당 오더 신규 {ordersCreated}건·항목 신규 {itemsCreated}건. 목적지 배정은 설비 관리에서 수행하세요.";
+        Audit("B2C_UPLOAD", OperationLogLevel.INFO, null, null,
+            $"{{\"upload\":\"ok\",\"dataRows\":{parsedRows.Count},\"batches\":{batchKeys.Count},\"ordersCreated\":{ordersCreated},\"itemsCreated\":{itemsCreated}}}");
+        return B2cUploadResponse.Ok(message, counts);
+    }
+
+    // 업로드 파일/구조 거부(200 F) — 감사 WARN(전수) + F 응답 조립 단일 소스.
+    private B2cUploadResponse FailUpload(string message)
+    {
+        Audit("B2C_UPLOAD", OperationLogLevel.WARN, null, null,
+            $"{{\"upload\":\"reject\",\"message\":\"{Esc(message)}\"}}");
+        return B2cUploadResponse.Fail(message);
     }
 
     // ── 생성 결과 view: 최근 배치 요약(미할당 오더 수 포함) ────────────────────────

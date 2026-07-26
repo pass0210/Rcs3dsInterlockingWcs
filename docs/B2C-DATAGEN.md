@@ -31,6 +31,7 @@
 | 메서드 | 경로 | 용도 | 요청 | 응답 |
 |---|---|---|---|---|
 | POST | `/api/b2c/test-data/generate` | 멱등 생성(슬림 — 미할당 오더 N) | `B2cGenerateRequest`(body) | `B2cManagementResponse` |
+| POST | `/api/b2c/test-data/upload` | 엑셀 업로드(행=오더/바코드 1건 · S-B2C-EXCEL-UPLOAD) | multipart `IFormFile file`(.xlsx) | `B2cUploadResponse` |
 | GET  | `/api/b2c/test-data/batches?take=` | 최근 배치 요약(생성 결과 view) | query `take?` | `B2cBatchSummary[]` |
 | GET  | `/api/b2c/test-data/summary?sorterChuteNo=` | 소터별 요약 집계(선택 필터) | query `sorterChuteNo?` | `B2cSorterSummary[]` |
 | GET  | `/api/b2c/test-data/detail?sorterChuteNo=` | 셀 상세(그리드) | query `sorterChuteNo`(필수) | `B2cCellDetail[]` |
@@ -160,3 +161,48 @@ wcs_order.WorkBatchId` 를 통해 배치에 귀속(스코프 술어 = `p.OrderIt
   **아카이브 후 셀 currentQty=0 이중카운트 차단**·in-flight 가드/force·**미존재 배치 F**·TOCTOU COUNT-in-tx) + `B2cApiTests`(generate 왕복·검증 400·**미존재 배치 200 F**) +
   `B2cFacilityApiTests`(**E2E generate→소터 셀 배정→IF-05 예약→배치 reset(force)→재 IF-05 재예약** + 하드삭제 0 단언).
 - 마이그레이션: SQLite 스크래치 `ef database update` 5체인 적용 + `ArchivedAt` 3테이블 실재 확인. (SqlServer 는 localhost 일회용 DB 로 검증.)
+
+---
+
+## 7. 엑셀 업로드 + 정적 양식 (S-B2C-EXCEL-UPLOAD · 2026-07-26)
+
+파라미터 생성 폼의 **대안 입력 경로** — 엑셀 한 행 = **오더/바코드 1건**(사용자가 실제 바코드값 직접 입력).
+생성과 동일하게 **목적지 미할당 오더**(`DestinationId=null`·`orderNo==barcode`)를 만든다. 확정 결정(사용자 게이트 2026-07-26).
+
+### 7.1 양식 컬럼 (헤더 고정 · 위치 기반 파싱 · 파서/템플릿 단일 소스 `B2cConstants.Hdr*`)
+
+| 순서 | 헤더 | 필수 | 기입 대상 | 검증 |
+|---|---|---|---|---|
+| 1 | 작업일자 | 필수 | `work_batch.work_date` | `YYYYMMDD`\|`YYYY-MM-DD` + 달력 유효(`NormalizeBizDay`) |
+| 2 | 배치명 | 필수 | `work_batch.batch_no` | 1~100자 |
+| 3 | 차수 | 선택(기본 1) | `work_batch.wave_no` | 정수 1~9999 |
+| 4 | 바코드 | 필수 | `wcs_order.order_no` = `order_item.barcode` | `^[A-Za-z0-9_\-]{1,100}$` |
+| 5 | 수량 | 선택(기본 1) | `order_item.planned_qty` | 정수 1~9999 |
+
+- 배치 그룹핑 = (작업일자·배치명·차수). 목적지/셀 컬럼 **없음**(2b 소관 — 미할당 유지).
+
+### 7.2 엔드포인트 `POST /api/b2c/test-data/upload` (multipart `IFormFile file`)
+
+- **파일 레벨 검증(400 선행 · 컨트롤러)**: 파일 없음/0바이트 · 크기 > 10MB(`UploadMaxBytes`) · 확장자 ≠ `.xlsx`(**`.xls` 거부**) · MIME 화이트리스트 불일치.
+- **구조/행 검증(200 + `status:"F"`)**: 헤더 불일치 · 사용범위 팽창(행 `UploadMaxRows`/열 `UploadMaxColumns` — zip-bomb 방어) · 데이터 행 0 · 데이터 행 > 1000(`UploadDataRowsMax=GenerateCountMax`) · **행별 검증 오류**(→ `rowErrors[{row,message}]`).
+- **원자성(Q4 확정)**: 행 검증 오류가 하나라도 있으면 **커밋 0**(트랜잭션 진입 전 조기 반환) + 전체 `rowErrors` 반환. 파일 내 중복 (작업일자·배치명·차수·바코드)도 오류.
+- **멱등 append**: 기존 (배치·오더번호)/(오더·바코드) 는 upsert 스킵 → 재업로드 시 신규 카운트 0, 기존 `reserved/sorted` 보존(생성과 동형).
+- **응답 `B2cUploadResponse`** = `{ status, message, counts?, rowErrors? }`. `counts` = `ordersCreated·orderItemsCreated·batches·dataRows`. 성공 판정 = `res.ok && status==="S"`.
+- **파싱 예외**는 삼키지 않고 명시 `F`(`엑셀 파싱 오류: …`) + 감사 WARN. 순수 파싱/검증(`B2cTestDataService.ValidateUploadRows`)은 I/O 무의존(절대규칙 #8 · 테스트 가능).
+- **감사**: `operation_log` `STATE`/`B2C_UPLOAD`(성공 INFO · 거부/실패 WARN — 전수). 마이그레이션 0(기존 오더 테이블 재사용).
+
+### 7.3 정적 양식 파일 (동적 엔드포인트 없음 — 확정 결정)
+
+- `frontend/public/b2c-order-upload-template.xlsx`(헤더행 + 예시행 2건 + "설명" 시트). vite build 시 `wwwroot/` 로 복사 → 동일 출처 서빙(`UseStaticFiles`). dev 는 vite 가 `public/` 서빙.
+- 프론트 "양식 다운로드" 버튼 = 이 정적 파일 링크(`/b2c-order-upload-template.xlsx`). **동적 `GET /template` 미구현**.
+- 드리프트 방지: 커밋된 양식을 파서에 재투입하는 **라운드트립 테스트**(`StaticTemplate_RoundTrips_ThroughParser`)가 헤더 정합을 잠근다.
+
+### 7.4 프론트 (`B2cDataGenPage` 생성 카드 좌측 — 생성 폼과 공존)
+
+- 양식 다운로드 버튼 + 파일 선택(`accept=".xlsx"`) + 업로드 버튼(파일 미선택 시 disabled · 업로드 중 로딩). 클라 `b2cTestData.upload(file)`(FormData · Content-Type 수동지정 금지).
+- 성공 → 성공 토스트 + 배치 그리드 invalidate + 파일 입력 리셋. 실패 → 에러 토스트 + **행별 오류 목록**(행번호+사유) 렌더(Fail-Loud).
+
+### 7.5 검증 (실증)
+
+- 백엔드: `dotnet test backend/Wcs.sln` 448 GREEN(회귀 0 · 신규 17). `B2cUploadServiceTests`(순수 검증·정상·전체롤백·멱등·상한·빈파일·헤더불일치·정적양식 라운드트립) + `B2cUploadApiTests`(happy 200S·200F+rowErrors·`.xls` 400·빈파일 400·MIME 400).
+- 브라우저(Playwright): 양식 다운로드 링크 표시 · 파일 선택→업로드→성공 토스트+DEMO-OK 배치 출현+미할당 상세 · 오류 파일→행별 오류 렌더+DEMO-ERR 미생성(원자성) · 콘솔 에러 0.
