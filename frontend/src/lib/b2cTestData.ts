@@ -11,6 +11,10 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 const BASE = '/api/b2c/test-data'
 
+// 정적 양식(.xlsx) 경로 — frontend/public/ 에 커밋된 정적 자산(빌드 시 wwwroot 로 복사·동일 출처 서빙).
+//   ⚠ 동적 GET /template 엔드포인트는 없다(확정 결정 2026-07-26 = 정적 파일). 다운로드 버튼은 이 링크.
+export const B2C_UPLOAD_TEMPLATE_URL = '/b2c-order-upload-template.xlsx'
+
 // ── 응답 형상(백엔드 DTO 미러 · camelCase) ───────────────────────────────────
 export interface SorterSummary {
   destinationId: number
@@ -79,10 +83,53 @@ export interface ActionOutcome {
   counts?: Record<string, number>
 }
 
+/** 엑셀 업로드 행별 오류(백엔드 B2cUploadRowError 미러) — row=엑셀 실제 행번호, message=사유. */
+export interface UploadRowError {
+  row: number
+  message: string
+}
+
+/** 엑셀 업로드 결과 — ok(= res.ok && status "S") + message + counts + rowErrors(실패 시 행별). */
+export interface UploadOutcome {
+  ok: boolean
+  message: string
+  counts?: Record<string, number>
+  rowErrors?: UploadRowError[]
+}
+
 interface RawApiResponse {
   status?: string
   message?: string
   counts?: Record<string, number>
+  rowErrors?: UploadRowError[]
+}
+
+/**
+ * 엑셀 업로드(multipart) — POST /api/b2c/test-data/upload.
+ *   ⚠ Content-Type 을 수동 지정하지 않는다(FormData 가 multipart boundary 를 자동 설정 — 지정 시 파싱 실패).
+ *   성공 판정 = res.ok && status "S". 파일 400·구조/행오류 200 F 모두 실패로 표면화(message + rowErrors).
+ */
+async function uploadExcel(file: File): Promise<UploadOutcome> {
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${BASE}/upload`, {
+      method: 'POST',
+      headers: { Accept: 'application/json' }, // Content-Type 미지정(FormData 자동)
+      body: fd,
+    })
+    let parsed: RawApiResponse = {}
+    try {
+      parsed = (await res.json()) as RawApiResponse
+    } catch {
+      /* 비-JSON 응답(예: 500) — 상태코드로 메시지 구성 */
+    }
+    const ok = res.ok && parsed.status === 'S'
+    const message = parsed.message ?? (ok ? '업로드 완료.' : `업로드 실패 (HTTP ${res.status})`)
+    return { ok, message, counts: parsed.counts, rowErrors: parsed.rowErrors }
+  } catch (e) {
+    return { ok: false, message: `네트워크 오류 — ${(e as Error).message}` }
+  }
 }
 
 /**
@@ -142,6 +189,8 @@ export const b2cTestData = {
   generate: (req: B2cGenerateRequest) => runAction('/generate', req),
 
   reset: (req: B2cResetRequest) => runAction('/reset', req),
+
+  upload: (file: File) => uploadExcel(file),
 }
 
 // ── TanStack Query 훅(조회) ──────────────────────────────────────────────────

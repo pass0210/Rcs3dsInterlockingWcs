@@ -21,6 +21,13 @@ public sealed class B2cTestDataController : ControllerBase
     private readonly IB2cTestDataService _svc;
     public B2cTestDataController(IB2cTestDataService svc) => _svc = svc;
 
+    // 업로드 MIME 화이트리스트(.xlsx 전용 — 확정 결정 Q5 · .xls 거부). 대소문자 무시.
+    private static readonly HashSet<string> AllowedExcelMimes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+        "application/octet-stream",                                          // 브라우저 미상정 시
+    };
+
     // ── POST /api/b2c/test-data/generate — 멱등 생성(OQ4) ──────────────────────
     [HttpPost("generate")]
     public async Task<IActionResult> Generate([FromBody] B2cGenerateRequest req, CancellationToken ct)
@@ -33,6 +40,34 @@ public sealed class B2cTestDataController : ControllerBase
         {
             return BadRequest(B2cManagementResponse.Fail(ex.Message));   // 비존재 workDate 등
         }
+    }
+
+    // ── POST /api/b2c/test-data/upload — 엑셀 업로드(파일 3중 검증 + 행별 파싱·멱등 append) ──
+    //   파일 레벨(없음/크기/확장자·MIME) = 400 선행. 구조/행오류·유효행0·팽창초과 = 200 F(+rowErrors).
+    //   .xlsx 전용(확정 결정 Q5 — .xls 거부). 상한은 B2cConstants(하드코딩 금지·절대규칙 #7).
+    [HttpPost("upload")]
+    public async Task<IActionResult> Upload(IFormFile? file, CancellationToken ct)
+    {
+        // #1 파일 없음/0바이트 → 400.
+        if (file is null || file.Length == 0)
+            return BadRequest(B2cUploadResponse.Fail(B2cConstants.UploadNoFile));
+
+        // #2 크기 > 상한 → 400.
+        if (file.Length > B2cConstants.UploadMaxBytes)
+            return BadRequest(B2cUploadResponse.Fail(B2cConstants.UploadFileTooBig));
+
+        // #3 확장자(경로 제거 후) .xlsx 아님 → 400(.xls 거부).
+        var ext = Path.GetExtension(Path.GetFileName(file.FileName)).ToLowerInvariant();
+        if (ext != ".xlsx")
+            return BadRequest(B2cUploadResponse.Fail(B2cConstants.UploadOnlyXlsx));
+
+        // #4 MIME 화이트리스트 불일치 → 400.
+        if (!AllowedExcelMimes.Contains(file.ContentType ?? string.Empty))
+            return BadRequest(B2cUploadResponse.Fail(B2cConstants.UploadInvalidFormat));
+
+        // 파싱/행검증 — 성공 200 S / 구조·행오류 200 F(+rowErrors).
+        await using var stream = file.OpenReadStream();
+        return Ok(await _svc.UploadExcelAsync(stream, ct));
     }
 
     // ── GET /api/b2c/test-data/batches?take= — 생성 결과 view(최근 배치·미할당 오더 수) ──

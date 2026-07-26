@@ -45,6 +45,50 @@ internal static class B2cConstants
     // 작업일자 형식(B2B ValidationRules.BizDayRegex 와 동형).
     public const string WorkDateRegex = @"^\d{8}$|^\d{4}-\d{2}-\d{2}$";
     public const string WorkDateError = "workDate must be in YYYYMMDD or YYYY-MM-DD format.";
+
+    // ════════════════════════════════════════════════════════════════════════
+    // S-B2C-EXCEL-UPLOAD: 엑셀 업로드 상한·양식 컬럼·메시지(하드코딩 금지·절대규칙 #7).
+    //   확정 결정(2026-07-26): 행 단위 = 오더/바코드 1건, .xlsx 전용(.xls 거부),
+    //   B2B AppConstants 제한 미러(바이트/행/열·zip-bomb), 데이터 행 상한 = GenerateCountMax(1000),
+    //   멱등 append + 오류 시 전체 거부(atomic). 정적 양식 파일(동적 엔드포인트 없음).
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// <summary>업로드 파일 최대 크기(바이트) — B2B 10MB 미러(단일 값·드리프트 0).</summary>
+    public const long UploadMaxBytes = Wcs.Api.B2B.AppConstants.UploadMaxBytes;
+    /// <summary>업로드 엑셀 사용 범위 최대 행수 — zip-bomb/대용량 조기 차단(B2B 미러).</summary>
+    public const int UploadMaxRows = Wcs.Api.B2B.AppConstants.UploadMaxRows;
+    /// <summary>업로드 엑셀 사용 범위 최대 열수 — zip-bomb/대용량 조기 차단(B2B 미러).</summary>
+    public const int UploadMaxColumns = Wcs.Api.B2B.AppConstants.UploadMaxColumns;
+    /// <summary>업로드 1회 데이터 행 상한 — 생성 상한(GenerateCountMax=1000)과 동일(한 업로드 오더 총량).</summary>
+    public const int UploadDataRowsMax = GenerateCountMax;
+    /// <summary>업로드 행별 수량(계획수량) 상한 — order_item.planned_qty(B2B QtyMaxPerRequest 미러).</summary>
+    public const int UploadPlannedQtyMax = Wcs.Api.B2B.AppConstants.QtyMaxPerRequest;
+
+    // 양식 헤더 문자열(파서·정적 템플릿이 공유하는 단일 소스 — 헤더 드리프트 0).
+    //   컬럼 순서(위치 기반 파싱): [작업일자][배치명][차수][바코드][수량].
+    public const string HdrWorkDate = "작업일자";
+    public const string HdrBatchNo  = "배치명";
+    public const string HdrWaveNo   = "차수";
+    public const string HdrBarcode  = "바코드";
+    public const string HdrQty      = "수량";
+
+    // 바코드(=오더번호) 안전 문자(패턴 인젝션 방지) — 숫자·영문·하이픈·언더스코어(1~100자).
+    //   생성 폼 접두(1~50)보다 길게 허용(임의 실바코드 직접 업로드 — 확정 결정 Q1).
+    public const string UploadBarcodeRegex = @"^[A-Za-z0-9_\-]{1,100}$";
+
+    // ── 파일 레벨 검증 메시지(HTTP 400 — 컨트롤러 선행) ─────────────────────────
+    public const string UploadNoFile        = "파일을 선택하세요.";
+    public const string UploadFileTooBig     = "파일 크기는 10MB 이하여야 합니다.";
+    public const string UploadOnlyXlsx       = "엑셀(.xlsx) 파일만 업로드할 수 있습니다.";
+    public const string UploadInvalidFormat  = "잘못된 파일 형식입니다.";
+
+    // ── 파싱/구조 검증 메시지(HTTP 200 + status "F") ──────────────────────────
+    public const string UploadNoData         = "엑셀에 데이터가 없습니다.";
+    public const string UploadTooLarge        = "엑셀 파일이 너무 큽니다(허용 범위를 초과).";
+    public const string UploadHeaderMismatch  = "양식 헤더가 올바르지 않습니다. 첫 행은 작업일자·배치명·차수·바코드·수량 이어야 합니다.";
+    public const string UploadNoValidData     = "업로드할 유효한 데이터가 없습니다.";
+    public static string UploadTooManyRows(int rows)
+        => $"데이터 행이 너무 많습니다({rows}행) — 한 번에 최대 {UploadDataRowsMax}행까지 업로드할 수 있습니다.";
 }
 
 /// <summary>
@@ -116,6 +160,50 @@ public sealed record B2cManagementResponse(
     public static B2cManagementResponse Fail(string message, IReadOnlyDictionary<string, int>? counts = null)
         => new("F", message, counts);
 }
+
+// ── 엑셀 업로드 응답(S-B2C-EXCEL-UPLOAD) ────────────────────────────────────────
+
+/// <summary>
+/// 엑셀 업로드 행별 오류 리포트 항목 — Fail-Loud(전체 거부 시 오류가 있던 행을 모두 반환).
+/// <see cref="Row"/> = 엑셀 실제 행 번호(1-base·헤더행 포함). <see cref="Message"/> = 그 행의 사유(복수 사유는 공백 결합).
+/// </summary>
+public sealed record B2cUploadRowError(int Row, string Message);
+
+/// <summary>
+/// 엑셀 업로드 결과 — { status:"S"|"F", message, counts, rowErrors }.
+///   · 성공(S): counts = ordersCreated·orderItemsCreated·batches·dataRows. rowErrors = null.
+///   · 실패(F): message + (행별 검증 실패 시) rowErrors. Q4 확정 원자성 — 오류 시 커밋 0(rowErrors 비어있지 않으면 전체 거부).
+/// 프론트 성공 판정 = res.ok && status=="S"(200 F 오인 금지 — 기존 함정).
+/// </summary>
+public sealed record B2cUploadResponse(
+    string Status,
+    string Message,
+    IReadOnlyDictionary<string, int>? Counts = null,
+    IReadOnlyList<B2cUploadRowError>? RowErrors = null)
+{
+    public static B2cUploadResponse Ok(string message, IReadOnlyDictionary<string, int>? counts = null)
+        => new("S", message, counts, null);
+
+    public static B2cUploadResponse Fail(
+        string message,
+        IReadOnlyDictionary<string, int>? counts = null,
+        IReadOnlyList<B2cUploadRowError>? rowErrors = null)
+        => new("F", message, counts, rowErrors);
+}
+
+/// <summary>
+/// 업로드 원시 행(엑셀에서 위치 기반으로 읽은 문자열 셀 — 파싱 전) — 순수 검증 입력(절대규칙 #8·테스트 가능).
+/// <see cref="RowNumber"/> = 엑셀 실제 행 번호(오류 리포트 귀속).
+/// </summary>
+public sealed record B2cUploadRawRow(
+    int RowNumber, string WorkDate, string BatchNo, string WaveNo, string Barcode, string Qty);
+
+/// <summary>
+/// 검증 통과 후 파싱된 행(영속화 준비 완료). <see cref="WorkDate"/> = 정규화("yyyy-MM-dd").
+/// Barcode == OrderNo(멱등 계약). PlannedQty = order_item.planned_qty.
+/// </summary>
+public sealed record B2cUploadParsedRow(
+    int RowNumber, string WorkDate, string BatchNo, int WaveNo, string Barcode, int PlannedQty);
 
 // ── 조회 응답(원시 JSON) ────────────────────────────────────────────────────────
 

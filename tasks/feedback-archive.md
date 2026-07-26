@@ -666,3 +666,13 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 
 - [CODE-REVIEW] sprint=S-TWO-FLOOR-CONTROL-C3 critical=0 important=0 minor=0 info=1(StallSuspectTicks 과소설정 시 양성 WARN·by-design) iter=1(0 fix) → Ready-to-merge
 - [C3] 스톨 fail-loud 감지기 + pusher ComputeSorterFull 경량화. Evaluator 정적 PASS + Generator 5×431 clean + 코드리뷰 Ready. 오케스트레이터 재run은 세션 누적 TIME_WAIT 고갈로 abort(SocketException teardown·기능 실패 0) — 문서화된 환경 아티팩트, C3 결함 아님.
+
+## S-B2C-EXCEL-UPLOAD — B2C 엑셀 업로드 + 정적 양식 (2026-07-26) — APPROVED (0 fix iter)
+- **업로드 정확성은 "미할당·barcode==orderNo·멱등·원자롤백"을 curl HTTP + DB 조회 쌍으로 닫는다**: happy(양식 라운드트립)→200S·orderUnassigned=2, error-rows(유효행+2오류행)→200F+rowErrors[3,4]이면서 **유효행조차 batches에 미출현**(전체 롤백), 재업로드→ordersCreated 0(멱등). 브라우저 detail이 DEMO-2 계획=2(수량 컬럼 반영)·전량 미할당까지 교차 확인. 200 F를 res.ok && status==="S"로만 성공 판정(200 F 오인 함정 회피).
+- **정적 양식 정합 = OOXML unzip 재파싱 + vite 복사 byte-cmp + 동적엔드포인트 부재**: 헤더 5컬럼이 B2cConstants와 정확 일치, 시트②설명, 라운드트립 unit GREEN. `frontend/public/*.xlsx`→`wwwroot/*.xlsx` cmp IDENTICAL(vite 기본 publicDir 복사), `GET /*.xlsx` 200·xlsx MIME 동일출처, `GET /api/b2c/test-data/template`→404(확정결정=정적파일 준수). 정적자산은 파서와 어긋날 위험이 있어 **라운드트립 테스트(다운로드 양식→파서 재투입 GREEN)가 드리프트 방어의 핵심**.
+- **격리 스택 브라우저 실검증 = 현장오염 0의 조건**: 운영 appsettings가 SqlServer(현장DB)+RTU COM1(실 PLC)이므로 env override(Provider=Sqlite·ConnectionStrings__WcsDb=scratch·MigrateOnStartup)로만 기동. ★`Urls` config 키가 `ASPNETCORE_URLS` env를 이겨 appsettings의 5205(사용자 실포트)로 바인딩됨 → 커맨드라인 `-- --urls http://127.0.0.1:5215`(최고 우선순위)로 강제해야 격리 포트 확보. 0-DB-소터면 SorterRegistry가 버스/트랜스포트 0개 생성 → COM1 무접촉(폴링은 SORTER_3D destination 존재분만 개통).
+- **콘솔 캡처는 세션 격리로 읽어라**: 영속 MCP Chromium이 Generator의 선행 vite :5190 dev 세션 콘솔 192건을 보유 → all:true는 그걸 다 반환. navigation 이후(현재 페이지)만 보는 기본 질의로 재확인해 프로덕션 빌드(:5215) 세션 = 0 errors/0 warnings 확정. 프로덕션 빌드는 vite client/HMR ws 없어 dev세션 에러와 URL(:5190 vs :5215)로 구분.
+- **openpyxl 픽스처 셀은 문자열로 써도 ClosedXML GetString() 파싱 정합**(위치기반 파서). 픽스처는 프로젝트루트 gitignored(screenshots/) + 소문자 c:\+백슬래시 경로로 browser_file_upload(#548 재확인).
+- [CODE-REVIEW] sprint=S-B2C-EXCEL-UPLOAD critical=0 important=0 minor=0 iter=0 (Evaluator 6축 PASS·브라우저 실검증·3×448 GREEN — Step 4.5 독립 코드리뷰는 오케스트레이터 후속)
+
+- [CODE-REVIEW] sprint=S-B2C-EXCEL-UPLOAD critical=0 important=1(zip-bomb 가드 post-materialize — B2B 선례 동일·10MB 캡 바운드) minor=5 iter=1(0 fix) → Ready-to-merge
