@@ -961,3 +961,60 @@ APPROVED
 - **APPROVED**: Evaluator 정적 검증 전부 PASS(빌드 0·마이그레이션 0 양 provider·규칙 #1/#8·pusher byte-identity·스톨 테스트 8건 실효) + 4-Tier 코드리뷰 **Ready-to-merge**(Critical/Important 0·byte-identity/스톨 정합 코드-read 증명) + **Generator clean-env 5×431 GREEN**.
 - **테스트 안정성 주석(정직)**: 오케스트레이터 독립 재run은 세션 누적 TCP TIME_WAIT 고갈(1415~2270·150s 드레인 불충분)로 testhost teardown SocketException abort 발생 — **기능 실패 0건**, C2/C3 문서화된 환경 아티팩트(MSBUILDDISABLENODEREUSE=1+장기 드레인으로 해소됨을 Generator가 실증). C3 코드 결함 아님. 완료조건 "≥5회 연속 GREEN"은 Generator의 clean-env 5×431 + 수렴적 검증으로 충족.
 - Minor/info(비블로킹): StallSuspectTicks × ObserveIntervalMs > (최대 분류+AGV 케이던스) 운영 불변식 — 과소 설정 시 양성 SUSPECT WARN(관측 전용·무해). appsettings 조정 가능.
+
+---
+
+# EVALUATION — S-B2C-EXCEL-UPLOAD · 2026-07-26 (Evaluator, single · functional)
+
+브랜치 `feat/b2c-excel-upload` · HEAD ddefa67(= origin/develop) · 구현 전부 **working tree 미커밋**.
+방법: ground-truth git 직독 + 코드 직독 + fresh 빌드/테스트 자체 실행(3회) + **실제 격리 스택(Wcs.Api :5215 · scratch SQLite · MigrateOnStartup) + Playwright MCP 브라우저 실검증** + curl HTTP 왕복 + 정적 양식 unzip 재파싱. Generator 요약 불신 — 전부 재현.
+
+## 판정: **APPROVED** — 6개 검증축 전부 PASS · 브라우저 실검증 완료 · 3회 안정 · 마이그레이션 0 · 경계 diff 0.
+
+### 1. 빌드 + 테스트 (fresh, 자체 실행) — PASS
+- `dotnet build backend/Wcs.sln` → **오류 0**, 경고 10(전부 선재 NU1903 SQLite advisory·신규 0).
+- `dotnet test backend/Wcs.sln` **3회 연속 448/448 GREEN**(각 ~84s, 실패/스킵 0). baseline 431 + 신규 17 = 448 산술 일치.
+- B2C 업로드 필터(`~B2cUpload`) 격리 = **정확히 17/17 GREEN**(순수검증 4 + 서비스 8 + API 5). flake 0.
+- 환경 위생: 실행 전 orphan dotnet/testhost/Sim 0·TIME_WAIT 13(낮음)·MSBUILDDISABLENODEREUSE=1. 종료 후 고아 0.
+
+### 2. 업로드 엔드포인트 (POST /api/b2c/test-data/upload) — PASS (curl HTTP 왕복 fresh)
+- happy: 정적 양식 재투입(라운드트립) → `200 {status:S, ordersCreated:2, batches:1, dataRows:2}`. `GET /batches` → UPLOAD-A orderTotal=2·**orderUnassigned=2**(전량 미할당·DestinationId=null).
+- **원자적 전체 롤백 실증**: error-rows.xlsx(유효행 EOK-1 + 3행 비존재날짜 + 4행 빈바코드) → `200 F` + `rowErrors:[{row:3,"…존재하지 않는 날짜…2026-13-40"},{row:4,"바코드는 필수…"}]`. 직후 `GET /batches`에 **ERR-UP 배치 부재**(EOK-1 유효행조차 미커밋 — DB 조회로 실증).
+- **멱등**: 양식 재업로드 → `200 S · ordersCreated 0`(중복 0).
+- 파일 3중 검증: **.xls→400** · **wrong MIME(text/plain)→400** · **empty(0byte)** = curl가 0바이트 -F 전송 거부(HTTP 미발생)라 unit `Upload_EmptyFile_400`(3회 GREEN)으로 대체 실증. 초과행(>1000)·헤더만·헤더불일치·팽창(행/열 상한) = 서비스 unit 8건으로 커버.
+- Fail-Loud: 파싱 예외 → `FailUpload($"엑셀 파싱 오류…")` 명시 F(삼킴 0) · DB 예외 → 롤백 후 rethrow(B2cTestDataService.cs L324-328·L428-432).
+
+### 3. 정적 엑셀 양식 — PASS (unzip 재파싱 + vite 복사 + 동일출처 서빙)
+- `frontend/public/b2c-order-upload-template.xlsx`(8154B) 실재. `npm run build` 후 `wwwroot/b2c-order-upload-template.xlsx`로 **byte-identical 복사**(cmp IDENTICAL). `GET /b2c-order-upload-template.xlsx` → `200 · Content-Type: …spreadsheetml.sheet · 8154B`(동일출처).
+- **OOXML 직접 파싱**: 시트① "업로드" = 헤더행 `작업일자·배치명·차수·바코드·수량`(B2cConstants와 정확 일치) + 예시행 2건(BC-0001/BC-0002·UPLOAD-A). 시트② "설명" = 컬럼표(5컬럼 필수/선택/설명) + 안내(미할당·원자성·멱등·최대1000행). 라운드트립 unit `StaticTemplate_RoundTrips_ThroughParser` GREEN.
+- **동적 /template 엔드포인트 부재 확인**: `GET /api/b2c/test-data/template → 404`(컨트롤러에 template 액션 0). 확정결정(정적파일) 준수.
+
+### 4. 프론트 브라우저 실검증 (Playwright MCP · 격리 스택 :5215 프로덕션 빌드) — PASS
+index.html = 프로덕션 번들(`assets/index-Dxa609NE.js`·vite client 없음 = dev proxy 아님). 스크린샷 4종(`.playwright-mcp/S-B2C-EXCEL-UPLOAD/`).
+- **01 기본상태**: 엑셀 업로드 블록 = 양식 다운로드 링크(→/b2c-order-upload-template.xlsx·download 속성) + 파일선택(accept=.xlsx) + **업로드 버튼 [disabled]**(미선택) · 오류목록 미표시.
+- 파일선택 → 업로드 버튼 enabled(대안상태).
+- **02 오류파일 업로드**(error-rows.xlsx) → **에러 토스트** "업로드 실패 — 2개 행에 오류…전체 취소(반영 0건)" + **행별 리스트**(3행 날짜형식·4행 바코드필수) + 그리드에 ERR-UP 미출현(Fail-Loud·원자성 UI 정합).
+- **03 정상파일 업로드**(valid-demo.xlsx: DEMO-1/2/3·수량 1/2/1) → 성공 후 **DEMO-UP 배치 그리드 출현**(오더 3·미할당 3·항목 3) + **업로드 버튼 [disabled] 리셋**(파일·rowErrors 초기화).
+- **04 배치 상세**: DEMO-1/2/3 전부 **barcode==orderNo** · 계획 **DEMO-2=2**(수량 컬럼 반영)·1/1 · 예약0·분류0·RUNNING · **목적지 미할당·할당 미할당**(전량).
+- **콘솔 에러 0**: 프로덕션 빌드(:5215) 세션 = 0 errors/0 warnings. (history 192건은 전부 Generator의 선행 vite dev :5190 세션 — 내 navigation 08:28:13 이전 타임스탬프, 본 빌드 무관.)
+
+### 5. E2E 교차레이어 — PASS
+양식(GET·정적) → 업로드(POST multipart) → ClosedXML 파서/행검증 → Wcs.Data 트랜잭션(work_batch UQ 멱등→미할당 wcs_order→order_item) → `GET /batches`(orderUnassigned) + 배치상세 그리드(미할당) 3계층 관통 실증. 업로드 오더 전량 DestinationId=null → IF-05 NO_DEST(2b 할당 대기)로 귀결하는 미할당 상태가 UI·DB 양쪽에서 확인됨.
+
+### 6. 절대규칙/스코프 (코드 직독 + git diff) — PASS
+- **#8 순수 함수**: `ValidateUploadRows(IReadOnlyList<B2cUploadRawRow>)` = `static`·I/O·DB 0(Regex·int.TryParse·NormalizeBizDay·HashSet만). 호출측(UploadExcelAsync)이 "오류 하나라도 → 커밋 0" 강제. 순수판정/영속화 분리.
+- **#6 필드명**: barcode 규약 준수(barcode==orderNo). **#7 하드코딩 0**: 상한·헤더·정규식·MIME 전부 B2cConstants(B2B AppConstants 미러).
+- **마이그레이션 0**: migration 파일 diff 0 · 엔티티/DbContext 무변경(기존 work_batch/wcs_order/order_item 재사용). scratch SQLite에 MigrateOnStartup 콜드스타트 정상 = 스키마 정합.
+- **경계 diff 0**: `git diff develop --name-only` = B2C DTO/Service/Controller + docs/B2C-DATAGEN.md + frontend(b2cTestData.ts·B2cDataGenPage.tsx) + tasks/ + 신규(B2cUploadTests.cs·frontend/public/). **Wcs.Core·Wcs.PlcGateway·Handshake·CLAUDE.md·양층 로직·2b 설비 diff 0**. 예외 삼킴 0.
+
+### git tree 무결성
+평가 전 과정에서 working-tree git mutation 0(stash/reset/checkout/restore/clean 미사용). 산출물은 gitignored(wwwroot·screenshots/·.playwright-mcp/·scratchpad)만. 소스 변경 8+2 파일 그대로 유지.
+
+## 최종 — APPROVED
+빌드0·3×448 GREEN(신규17 산술일치)·업로드 정확성(미할당·barcode==orderNo·멱등·원자롤백 curl+DB 실증)·Fail-Loud 행별리포트·정적양식 정합(unzip 재파싱·라운드트립·동적엔드포인트 부재)·브라우저 5시나리오+E2E 실검증(콘솔0)·규칙#6/#7/#8·마이그레이션0·경계 diff0. **→ APPROVED.** (병합 전 Step 4.5 코드리뷰 + clean-env 최종 GREEN은 오케스트레이터 몫.)
+
+APPROVED
+
+### 코드리뷰(4-Tier) 후속 등재 — S-B2C-EXCEL-UPLOAD, Critical 0 · Ready-to-merge
+- [Important·비블로킹·B2B 선례 동일] zip-bomb 가드가 post-materialization(XLWorkbook가 DOM 전체 로드 후 RowCount/ColumnCount 캡). 악성 ≤10MB xlsx의 sharedStrings 반복 팽창이 로드 중 수백MB 가능 — 실 바운드=10MB 컨트롤러 캡+Kestrel ~28MB. 계약 문구("materialize 전 캡")를 실제 동작에 맞게 정정 권고(코드 변경 불요·기존 B2B와 동일 수용).
+- [Minor] batchName charset 미제한(=/+/@ 허용, 현재 live sink 없음 — 미래 export 시 방어) / batchNo 길이 100 magic number(상수화) / DefaultPlannedQty 상수 추가(대칭) / 재업로드 qty 변경은 silent no-op(멱등 계약 부합·UI 문구 오해 소지) / FailUpload가 raw ex.Message 클라이언트 반환(Esc 개행 미이스케이프·B2B 동일).

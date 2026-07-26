@@ -1,221 +1,190 @@
-[Sprint Contract] — S-TWO-FLOOR-CONTROL Sub-Sprint C3 (루프 경량화·관측성)
+[Sprint Contract] — S-B2C-EXCEL-UPLOAD (B2C 작업 데이터 엑셀 업로드 + 업로드용 엑셀 양식/템플릿 제공)
 
-## 배경 / 위치
-S-TWO-FLOOR-CONTROL 로드맵의 C-계열 마지막 경량 서브-스프린트. A(#76)·B(#77)·C1(#78)·C2(#79)는 develop 병합 완료.
-C3는 **두 건의 이연 항목**을 처리한다 — 둘 다 관측 루프 계층(트리거)에 국한된 경량 작업이며 판정/재파생(순수 코어)·
-PLC 쓰기 경로·Modbus 맵·DB 스키마를 건드리지 않는다. **규칙 개정 없음·마이그레이션 0** → 사용자 게이트 불요
-(단 아래 §질문의 기본값 4건은 계약 확인 시 한 줄 승인 권장 — 블로킹 아님).
+작성: Planner Subagent · 2026-07-26
+근거(직접 읽어 확인): docs/B2C-DATAGEN.md, docs/ERD.md(WorkBatch/WcsOrder/OrderItem), 프로젝트 CLAUDE.md(절대규칙),
+  기존 B2B 엑셀 업로드 선례(TestDataController.Upload / TestDataService.UploadExcelAsync / AppConstants),
+  기존 B2B 엑셀 다운로드 선례(LogController.Export / LogExportService / frontend logs.ts exportLogs·triggerDownload),
+  B2C 현행(B2cTestDataService.GenerateAsync / B2cTestDataController / b2cTestData.ts / B2cDataGenPage.tsx),
+  tasks/lessons.md, tasks/feedback-archive.md(S-B2C-DATAGEN/FACILITY/UX + Playwright file_upload 교훈).
 
-- 항목 1 [A 이연]: 샘플링 스톨 fail-loud 감지기 (`SorterFloorReturnService`).
-- 항목 2 [B 이연]: pusher 경량화 (`DestinationStatusPusher` 관측 루프의 매-틱 `ComputeSorterFull` 제거).
+────────────────────────────────────────────────────────────────────────────
+■ Goal
+────────────────────────────────────────────────────────────────────────────
+B2C(3D 소터) 데이터 생성 페이지에, 파라미터 폼(5-필드)의 **대안 입력 경로**로서 **엑셀 업로드로 작업(오더) 데이터를
+직접 업로드**하는 기능을 추가한다. 동시에 사용자가 내려받아 채워 올릴 **표준 엑셀 양식(템플릿)** 을 제공한다.
+업로드는 기존 생성과 동일하게 **목적지 미할당 오더/바코드**를 만든다(2a/2b 책임 분리 불변 — 목적지·셀 배정은 설비 관리).
+검증(필수 컬럼 누락·형식 오류·중복·상한 초과)은 **Fail-Loud**로 표면화하고, **행별 오류 리포트**를 사용자에게 돌려준다.
 
----
+이 스프린트는 새 도메인 규칙을 만들지 않는다 — 기존 B2C generate 계약(멱등 upsert·미할당·barcode==orderNo)과
+기존 B2B 업로드/다운로드 관용구를 **B2C로 이식·재사용**하는 것이 핵심이다. 절대규칙(#1 PLC 무접촉·#6 필드명·
+#7 하드코딩 금지·#8 순수 함수 파싱) 준수. Wcs.PlcGateway·Wcs.Core·HandshakeOrchestrator 무접촉.
 
-## Goal
-1. **관측 루프의 under-pop 스톨을 조용히 방치하지 않는다(fail-loud).** 현재 `SorterFloorReturnService`의 분류
-   사이클 감지는 관측 주기(`ObserveIntervalMs`) 샘플링 기반이라, Ready=0 창이 주기보다 짧으면 사이클 에지를
-   놓쳐 큐 머리가 pop되지 않고 정체(under-pop→stall)될 수 있다. 이는 **liveness 위협일 뿐**이며 over-pop/안전속성
-   회귀는 구조상 불가(현장 분류=초 단위 ≫ 주기 150ms라 실무상 안전). C3는 (a) 이 안전 가정을 **불변식으로
-   문서화**하고, (b) 실제로 정체가 의심되는 상태를 **WARN 로그 + operation_log로 발화**해 운영자가 감지·진단할 수
-   있게 한다(현재는 완전 silent).
-2. **pusher 관측 루프의 낭비 비용을 제거한다(무기능 변경).** `DestinationStatusPusher`의 소터 관찰 루프가 매 틱
-   호출하는 `_status.Compute`(소터→`ComputeSorterFull`: cell/cell_assignment/sorter_command/piece 다중 집계 쿼리)의
-   결과 중 발신 판정에 실제로 쓰이는 것은 `Ready ∧ !Paused`뿐이고 `Full`은 쓰이지 않는다. I-2가
-   `SorterFloorReturnService`에서 한 것과 **동형**으로 경량 readiness(스냅샷 기반 Ready + `IsPaused`, `ComputeSorterFull`
-   스킵)로 대체한다. **발신 결과는 완전히 동일**하고 비용만 절감된다(선재/후속으로 B 코드리뷰가 `important=1`로 명시).
+────────────────────────────────────────────────────────────────────────────
+■ ★ USER GATE (승인 없이는 착수 불가 — 이 스프린트의 crux) ★
+────────────────────────────────────────────────────────────────────────────
+아래 Q1~Q5는 양식 컬럼·스키마 기입·파서·응답 형상을 좌우한다. **Q1은 BLOCKING**(컬럼 구성을 모르면
+템플릿도 파서도 만들 수 없음). Planner 권장안을 명시하되, 사용자 확정 후 Phase 2 진입.
 
----
+Q1 (BLOCKING · 양식 컬럼 구성 = 핵심). 엑셀 한 행의 단위는?
+  · (A) **배치 단위 행** — 파라미터 폼과 동형: [작업일자, 배치명, 차수, 계획수량(생성 개수 N), 바코드접두].
+        각 행이 기존 generate 처럼 "{접두}-NN" 오더 N건을 생성. 파일 1개 = 여러 배치.
+  · (B) **오더/바코드 단위 행** — [작업일자, 배치명, 차수, 바코드, (선택)계획수량]. 각 행 = 오더 1건(barcode==orderNo).
+        임의 실바코드를 직접 올릴 수 있음(접두-NN 자동생성이 아님).
+  ▶ Planner 권장: **(B) 오더/바코드 단위 행**. 사용자 요청이 "작업(오더) 데이터를 업로드"·"엑셀 행으로 직접
+     업로드"이고, 파라미터 폼(접두 자동생성)과의 **차별점**이 곧 "임의 바코드를 행마다 직접 지정"이기 때문.
+     권장 컬럼(헤더 고정·한글):
+       | 작업일자(필수) | 배치명(필수) | 차수(선택·기본1) | 바코드(필수·=오더번호) | 계획수량(선택·기본1) |
+     스키마 기입: WorkBatch(작업일자·배치명·차수 UQ) → WcsOrder(OrderNo=바코드·GENERAL·**DestinationId=null 미할당**)
+       → OrderItem(Barcode=바코드·PlannedQty=계획수량). 목적지/셀 컬럼 **없음**(2b 소관 — 미할당 유지).
+     하위 확인: (Q1a) 목적지/셀 컬럼을 양식에 넣어 업로드 시 바로 배정할지? → 권장 **아니오(미할당 유지)**.
+              (Q1b) RefNo/RefName(송장·매장) 등 선택 컬럼 필요? → 권장 **불포함(최소 컬럼)**.
+  ※ (A) 선택 시: 컬럼=파라미터 폼과 동일, 파서가 각 행마다 GenerateAsync 로직 재호출(재사용 극대화).
 
-## Implementation Scope
-Generator가 **무엇을** 만들지의 목록. **어떻게**(정확한 메서드 시그니처·자료구조·주입 방식)는 Generator 재량.
+Q2 (엑셀 라이브러리). **이미 ClosedXML 0.104.2 가 Wcs.Api.csproj 에 존재**(B2B 업로드/내보내기가 사용 중).
+  ▶ Planner 권장: **ClosedXML 재사용**(신규 라이브러리 도입 0). 별도 승인 불요로 판단 — 이견 있으면 지적만.
 
-### 항목 1 — 샘플링 스톨 fail-loud 감지기
-1a. **불변식 문서화**: `ObserveIntervalMs ≪ 최소 분류 소요(Ready=0 창)` 안전 가정을 (i) `SorterFloorReturnOptions`
-    XML doc 주석과 (ii) `docs/SPEC.md` §2-C(관측 루프) 에 명문화한다. "이 가정이 깨지면 사이클 에지 유실 →
-    under-pop 가능"과 "그 경우 아래 스톨 감지기가 fail-loud로 발화"를 함께 기술.
-    - 정적 설정 검증(IValidateOptions 등)은 **현재 리포에 인프라가 없다**(grep 0건). 분류 소요는 런타임/현장
-      값이라 기동 시 정적 검증으로 알 수 없으므로, **런타임 스톨 감지기가 곧 이 불변식의 fail-loud 안전망**이다.
-      (별도 정적 검증기 신설은 스코프 아님 — 문서화 + 런타임 감지로 닫는다.)
-1b. **fail-loud 스톨 감지기**(관측 루프 계층 — 순수 코어 무접촉): `ObserveSorter`(또는 그 관측 상태)에 per-소터
-    스톨 의심 카운터를 얹어, 다음 **AND 조건이 연속 N틱 지속**되면 WARN 발화:
-    - 소터 Online(스냅샷 신뢰) **그리고** 정지 아님(`IsPaused==false`) — 즉 오프라인/PAUSED는 **정당한 미기입
-      상태이므로 발화 안 함**.
-    - 큐 머리 존재(비어 있지 않음).
-    - 소터 유휴(`Ready==1`).
-    - `TgtFloor==0`.
-    - 큐 머리 층 값이 **직전 틱과 동일**(pop으로 머리가 바뀌지 않음).
-    발화 시: (i) Serilog **WARN** 로그(소터 destId/chuteNo·큐 머리 층·지속 틱수 포함), (ii) `IOperationLogger`로
-    **operation_log 1건**(구조화 detail) 기록. **에피소드당 1회만**(임계 도달 시 1회, 조건 유지 중 매 틱 반복
-    발화 금지 — 로그 스팸 0). 조건이 하나라도 깨지면(머리 변경·busy(Ready==0)·`TgtFloor≠0`·큐 빔·오프라인·
-    PAUSED) 카운터/발화 상태 **리셋**(다음 에피소드 재감지 가능).
-1c. **설정화**(절대규칙 #7 — 하드코딩 0): 임계 틱수 N(및 필요 시 판정 주기)을 `SorterFloorReturnOptions`에 신규
-    필드로 추가하고 `appsettings.json`(+`appsettings.Development.json` 필요 시)에 결선. 스톨 감지 자체를 끌 수 있는
-    비활성 값(예: N≤0 = 감지 비활성) 허용 여부는 Generator 재량(단 기본값은 활성).
+Q3 (템플릿 = 서버 동적 생성 vs 정적 파일).
+  ▶ Planner 권장: **서버 동적 생성 다운로드 엔드포인트**(`GET /api/b2c/test-data/template`) — LogController.Export 관용구
+     미러. 헤더 행 + 예시 행 1~2개 + 컬럼 설명(주석 행 또는 별도 "설명" 시트) 포함. **파서와 템플릿이 같은
+     코드베이스**라 컬럼 드리프트 0(정적 파일은 파서와 어긋날 위험). 정적 파일 원할 경우만 대안.
 
-### 항목 2 — pusher 경량화
-2a. **경량 readiness 대체**: `DestinationStatusPusher`의 관찰 경로(현재 `ComputeAccept`→`_status.Compute`)를,
-    소터에 대해 **`ComputeSorterFull`을 호출하지 않는** 경량 readiness로 대체한다. 소터 accept = 스냅샷 기반
-    Ready(게이트웨이 `bundle.Latest` + `DepositDecider`(순수, CurFloor 목표) — DB 무접촉) `∧ !IsPaused(destId)`
-    (destination Status/IsActive 단일 조회). I-2가 `SorterFloorReturnService`에서 쓴 `IDestinationStatusService.IsPaused`
-    경로와 **동형**. 신규 경량 산출 메서드를 `IDestinationStatusService`/`DestinationStatusService`에 추가할지,
-    pusher 내부에서 조립할지는 Generator 재량(단 **소터 accept 값이 기존 `Compute().Ready ∧ !Compute().Paused`와
-    비트 동일**해야 함 — `Full`은 accept에 미사용이므로 스킵해도 결과 불변).
-2b. **슈트(비소터) 경로**: 현행 슈트 accept는 `ChuteCapacityService.GetHold`(인메모리 hold — DB 집계 없음)라 이미
-    경량이다. 슈트 경로를 굳이 재작성하지 않아도 되나(§질문 3), 어느 선택이든 **슈트 accept 값은 불변**이어야 한다.
-2c. **와이어·멱등 불변**: 발신 페이로드(`{chute_numbers:[ChuteNo], next_states:[3|2]}` snake_case), 층별 호스트
-    라우팅(B), route별 전이당 1회 멱등(`PumpAsync`), 부트스트랩 순서(C2: 클리어 before push)는 **전부 무변경**.
-    이번 변경은 **오직 accept 산출의 데이터 소스**(heavy Compute → light readiness)만 바꾼다.
+Q4 (append vs replace · 부분 실패 정책).
+  ▶ Planner 권장: **append(멱등 upsert — generate 와 동일, 같은 배치·바코드 재업로드 시 카운트 불변)** +
+     **원자적 전체 거부**: 행 검증 오류가 하나라도 있으면 **커밋 0**(트랜잭션 롤백) + 전체 오류행 리포트 반환.
+     이유: 테스트 데이터 정합성 — 절반만 들어간 배치는 재테스트를 오염시킴. (대안: 유효행만 커밋·오류행 skip →
+     B2B 현행 관용구지만 B2C 재테스트 특성상 비권장.) **사용자 확정 필요**.
 
-### 스코프 경계 (무접촉·명시)
-- **D(파킹존)·D4.3(PLC 이연) 미착수.** 스톨 감지기는 **관측-전용**(WARN + operation_log)이며, 미투하
-  abandonment 복구·파킹/재dispatch 같은 **교정 동작은 하지 않는다**(그건 D 스코프). (§질문 4)
-- **C1/C2 병합 로직 무접촉**: R-clear@Ready, 처리 3시각, 콜드스타트 StartupClear/I-3 큐 재파생 로직 diff 0.
-- **절대규칙 #1**: PLC 단일 쓰기 큐 경로 무변경(항목 1·2 모두 쓰기 경로 미접촉 — 감지기는 읽기/관측만, pusher는
-  아웃바운드 HTTP만). `bundle.EnqueueSetTgtFloorAsync`·`PlcGateway` diff 0.
-- **절대규칙 #8**: `Wcs.Core`(DepositDecider·InductionFloorMap 등) **diff 0**. 판정/재파생은 순수 유지 —
-  스톨 감지기는 서비스(트리거) 계층에만 존재.
-- **Modbus 레지스터 맵·EF 마이그레이션·DB 스키마 변경 0.** `docs/ERD.md` 무접촉.
-- **frontend diff 0**(UI 표면 없음 — 아래 Detected Type 참조).
+Q5 (상한 · 파일 형식).
+  ▶ Planner 권장: 파일 크기 **10MB**(B2B `UploadMaxBytes` 재사용/미러), 사용범위 팽창방어 행/열 상한(B2B
+     `UploadMaxRows`/`UploadMaxColumns` 미러), **데이터 행 상한 = 1000**(B2cConstants.GenerateCountMax 재사용·
+     한 업로드 오더 총량). 확장자 **.xlsx 전용**(권장 — 신규 양식이라 레거시 .xls 불요. B2B는 .xls도 허용).
+     모든 상한은 B2cConstants 상수(하드코딩 금지·절대규칙 #7). **사용자 확정 필요**(행 상한·`.xls` 허용 여부).
 
----
+────────────────────────────────────────────────────────────────────────────
+■ Implementation Scope (Generator 가 만들 것)
+────────────────────────────────────────────────────────────────────────────
+[백엔드 — Wcs.Api/B2C, 라우트 접두 /api/b2c/test-data 재사용(무충돌)]
+1. **업로드 엔드포인트** `POST /api/b2c/test-data/upload` (신규, B2cTestDataController 에 추가):
+   · `IFormFile file` 멀티파트 수신. 파일-레벨 3중 검증(파일 없음/0바이트, >크기상한, 확장자·MIME 화이트리스트)은
+     컨트롤러가 **400 + Fail** 로 선행(B2B TestDataController.Upload 미러). MIME 화이트리스트/상수는 B2cConstants.
+   · 파싱/행검증 실패(구조·행오류·유효행 0·팽창 초과)는 **200 + status "F"** + 오류 리포트(파일레벨 400 과 구분).
+2. **파서/생성 서비스** `B2cTestDataService.UploadExcelAsync(Stream, ct)` (신규 인터페이스 메서드):
+   · ClosedXML 로 워크북 로드 → 팽창방어(행/열 상한 조기 차단) → 헤더 인식 → **행별 파싱·검증**(순수 검증 로직은
+     I/O 무의존 헬퍼로 분리 — 절대규칙 #8 정신, 테스트 가능). Q1 확정 컬럼을 스키마에 기입.
+   · 기존 GenerateAsync 의 **배치/오더/아이템 upsert·트랜잭션 구조 재사용**(work_batch UQ 멱등 → wcs_order 미할당
+     upsert → order_item INSERT·기존 reserved/sorted 보존). Q4 확정 원자성 정책 적용.
+   · 미할당 유지: `DestinationId=null`·`DestAssignType=null`·GENERAL·RUNNING (2a 슬림 계약 불변).
+   · 감사: operation_log 카테고리 STATE, action `B2C_UPLOAD`(성공 INFO·실패/거부 WARN — 전수), 행수·배치 기록.
+3. **템플릿 엔드포인트** `GET /api/b2c/test-data/template` (신규):
+   · ClosedXML 로 헤더 행 + 예시 행 + 컬럼 설명을 담은 .xlsx 를 서버 생성 → `File(bytes, xlsx-mime, fileName)` +
+     Content-Disposition (LogController.Export 미러). 컬럼 정의는 파서와 **단일 상수/헬퍼 공유**(드리프트 0).
+4. **응답 DTO**: 업로드 결과는 행별 오류를 담도록 확장 — `B2cUploadResponse`(또는 B2cManagementResponse +
+   `rowErrors: [{ row:int, message:string }]` 선택 필드). counts = ordersCreated·orderItemsCreated·batches·dataRows.
+   기존 B2cManagementResponse 소비처 무영향(additive). DataAnnotations 400 형식 분기는 기존 allowlist(/api/b2c/test-data)
+   재사용 — 신규 배선 0.
+5. **상수**: B2cConstants 에 업로드 상한 추가(UploadMaxBytes·UploadMaxRows·UploadMaxColumns·데이터행 상한·MIME
+   화이트리스트·양식 컬럼 헤더 문자열). 하드코딩 금지(절대규칙 #7).
+   · DI: `IB2cTestDataService` 확장(기존 등록 재사용 — 신규 서비스 없음). 마이그레이션 **0**(스키마 무변경 — 기존
+     work_batch/wcs_order/order_item 컬럼만 사용).
 
-## Evaluation Criteria (Backend/API — 4기준 구조, ★=가중치)
-1. **API/서비스 설계 품질 (★★★)**: 스톨 감지기가 관측 루프 계층에 깔끔히 얹혀 순수 코어를 오염시키지 않는가.
-   pusher 경량화가 기존 단일 발신 소스(Observe→PumpAsync) 구조를 우회·중복시키지 않고 데이터 소스만 교체하는가.
-   신규 설정 필드가 기존 `SorterFloorReturnOptions`/appsettings 관행(주석·기본값)과 일관되는가.
-2. **아키텍처 원본성 (★★★)**: I-2 경량화 패턴(IsPaused 분리)을 pusher에 **동형 재사용**했는가(중복 재발명 아님).
-   스톨 감지 상태가 기존 `ObserveState`(단일 스레드 관측 루프 전용·락 불요)에 자연스럽게 통합됐는가.
-3. **Craft (★★)**: 스톨 감지 오탐 0 경계가 정확한가(리셋 조건 누락 없음). 에피소드당 1회 발화(스팸 억제).
-   operation_log detail 구조화. 스톨 감지기 예외가 관측 루프/형제 소터를 죽이지 않게 격리(기존 try/catch 패턴 유지).
-   teardown 경쟁 방어(신규 상태/의존이 취소·dispose 경로를 깨지 않음).
-4. **Functionality (★★)**: (1) 실제 스톨 상태에서만 WARN 발화·정상 동작에서 오탐 0. (2) pusher 발신 결과가
-   경량화 전후 **완전 동일**(accept/next_state 값·전이당 1회 멱등). (3) `ComputeSorterFull`이 pusher 관찰 경로에서
-   더 이상 매 틱 호출되지 않음(비용 절감 실증). (4) 절대규칙 #1/#7/#8 준수.
+[프론트 — frontend/src, B2cDataGenPage.tsx 생성 카드 내부]
+6. **양식 다운로드 버튼**: `b2cTestData.template()` → blob 다운로드(logs.ts triggerDownload 관용구 재사용/미러).
+7. **업로드 UI**: 파일 선택 input(accept=.xlsx) + 업로드 버튼(파일 미선택 시 disabled·업로드 중 로딩) — B2B
+   GenerateForm.tsx 업로드 블록 미러. 컬럼 안내 문구(양식과 일치). 성공 시 배치 그리드/디테일 invalidate + 입력 리셋.
+8. **결과/오류 피드백**: 성공 토스트("N건 업로드 완료") + 배치 그리드 갱신. 실패 시 토스트 + **행별 오류 목록**
+   (row 번호 + 사유)을 렌더(rowErrors 소비). 성공 판정 = res.ok && status==="S"(200 F 오인 금지 — 기존 함정).
+9. **클라이언트**: b2cTestData.ts 에 `upload(file)`(FormData·multipart, Content-Type 수동지정 금지) +
+   `template()`(blob) 추가. 반환형에 rowErrors 반영.
 
----
+[문서]
+10. docs/B2C-DATAGEN.md 에 업로드/템플릿 계약 섹션 추가(엔드포인트 표·양식 컬럼·검증·원자성·상한 — 확정 게이트 반영).
 
-## Completion Conditions (Evaluator PASS 최소 조건)
+────────────────────────────────────────────────────────────────────────────
+■ Evaluation Criteria (Evaluator 판정 기준 + 가중치)
+────────────────────────────────────────────────────────────────────────────
+- (30%) **업로드 정확성**: 확정 컬럼(Q1)이 work_batch/wcs_order/order_item 에 정확히 기입되고 **미할당(DestinationId=null)**
+  유지. barcode==orderNo 규약·멱등 upsert(재업로드 카운트 불변)·기존 reserved/sorted 보존.
+- (25%) **검증·Fail-Loud**: 파일레벨(없음/크기/확장자·MIME) 400, 구조/행오류/유효행0/팽창초과 200 F + **행별 오류
+  리포트**. Q4 확정 원자성(전체거부 or 유효행커밋)이 코드·테스트로 실증. 예외 삼킴 0(파싱 실패 명시 F).
+- (15%) **템플릿 정합**: 템플릿 다운로드가 파서가 기대하는 헤더와 **정확히 일치**(단일 소스 공유로 드리프트 0).
+  헤더+예시+설명 포함. Content-Disposition 파일명·xlsx MIME.
+- (15%) **프론트 UX**: 양식 다운로드→채움→업로드→성공/오류 표시 흐름이 실제 브라우저에서 동작. 미선택 disabled·
+  로딩·성공 후 그리드 갱신·행오류 렌더. 기존 5-파라미터 폼·초기화 무손상.
+- (10%) **경계 준수·회귀 0**: PLC/Core/Handshake 무접촉, 절대규칙 #1·#6·#7·#8 준수, 마이그레이션 0,
+  `dotnet test backend/Wcs.sln` 전체 GREEN(기존 테스트 회귀 0). operation_log 감사 기록.
+- (5%) **테스트가 스펙**: UploadExcelAsync 순수 파싱/검증 단위테스트(정상·필수누락·형식오류·중복·상한초과·빈파일) +
+  API 왕복 테스트(happy·400·200F) + 템플릿 라운드트립(템플릿을 파서에 재투입 시 오류 0).
 
-### 항목 1 — 스톨 감지기
-- **CC1.1 (오탐 0)**: 정상 분류 사이클(enqueue→정렬→분류 Ready 1→0→1→pop)이 도는 동안, 그리고 다음 정상 상태에서
-  스톨 WARN이 **0건** 발화됨을 자동 테스트로 실증:
-  - 큐 빈 소터(머리 없음),
-  - 유휴이나 정상 사이클로 머리가 진행 중(pop마다 머리 변경 → 카운터 리셋),
-  - 오프라인 소터, PAUSED 소터(정당한 미기입 — 발화 제외).
-- **CC1.2 (실제 스톨에서만 발화)**: "큐 머리 존재 + 유휴(Ready==1) + `TgtFloor==0` + 머리 불변"이 임계 N틱을
-  넘겨 지속하는 상태(Sim이 분류/틸트를 하지 않아 pop이 안 일어나는 상황)를 조성하면 **정확히 1회** WARN + operation_log
-  발화됨을 실증(에피소드당 1회 — 지속 중 반복 발화 0). 이후 조건이 깨지면(예: 큐 머리를 소비시키거나 busy 전이)
-  카운터가 리셋돼 새 에피소드에서 재발화 가능함을 실증.
-- **CC1.3 (관측-전용 무부작용)**: 스톨 발화가 **PLC 쓰기/pop/재dispatch/파킹 같은 교정 동작을 유발하지 않음**을
-  실증(D6 쓰기 0·큐 상태 불변·발화는 WARN 로그 + operation_log 기록뿐). `Wcs.Core` diff 0(grep/`git diff --stat`).
-- **CC1.4 (설정화)**: 임계 N틱(및 주기)이 appsettings에서 읽힘(하드코딩 리터럴 0). XML doc + SPEC §2-C에 불변식
-  문서 반영.
+────────────────────────────────────────────────────────────────────────────
+■ Completion Conditions (Evaluator 통과 최소 조건)
+────────────────────────────────────────────────────────────────────────────
+1. `dotnet build backend/Wcs.sln` 성공 + `dotnet test backend/Wcs.sln` 전체 GREEN(회귀 0).
+2. 신규 백엔드 테스트(UploadExcelAsync 단위 + upload/template API) 추가·GREEN. **템플릿→파서 라운드트립** 테스트 존재
+   (다운로드한 템플릿을 그대로 업로드하면 예시행이 파싱되거나, 예시행 제거 시 유효행 0 이 정확히 F).
+3. 실제 브라우저(Playwright MCP)에서 Web/UI·E2E 시나리오 전 항목 재현 + 스크린샷. ★ file_upload 픽스처는 **프로젝트
+   루트 내부**(예: gitignored screenshots/)에 두고 **소문자 드라이브 `c:\`+백슬래시** 경로로 전달(feedback-archive #548).
+4. 업로드로 생성된 오더가 `GET /api/b2c/test-data/batches` 새 배치 + `GET /api/b2c/facility/orders?batchId=` **미할당**으로
+   실재 확인(E2E 데이터 흐름).
+5. 마이그레이션 0·PLC/Core/Handshake diff 0 실증(git diff). 절대규칙 위반 0.
+6. docs/B2C-DATAGEN.md 업데이트 반영.
 
-### 항목 2 — pusher 경량화
-- **CC2.1 (발신 동일성)**: 경량화 후 아웃바운드 push 결과가 기존과 동일 — 가짜 RCS 수신 서버(FakeChuteState류)
-  기준으로 (i) accept↔next_state 매핑 3(수용)/2(불가) 동일, (ii) 전이당 정확히 1회 멱등, (iii) 만재(SorterFull)
-  전이가 push를 유발하지 않음(만재는 발신 accept에 미반영 — 기존 동작) 이 유지됨을 실증.
-- **CC2.2 (기존 push 테스트군 회귀 0)**: `ChuteStatePushTests`·`SorterPushOperationalTests`·`RcsPushTests`·
-  `ChuteRecoveryPushHeartbeatTests`·`B2cChutePushTests`(B2C) 전부 GREEN(카운트 불변). 특히 SorterPushOperational의
-  `Ready ∧ !Paused` 합성·paused 재접힘·SorterFull 발신 제외 단언이 그대로 통과.
-- **CC2.3 (비용 절감 실증)**: pusher 관찰 경로에서 `ComputeSorterFull`(또는 그를 포함하는 heavy `Compute`)이
-  **매 틱 호출되지 않음**을 spy/카운트로 실증 — 기존 `TwoFloorHostRoutingTests`의 `CountingStatusService`
-  (ComputeCount vs IsPausedCount) 패턴(VSE2a/b)과 동형으로: 소터 관찰이 N틱 도는 동안 heavy `Compute`
-  호출 카운트가 (부트스트랩 등 정당 호출을 제외하고) 매 틱 증가하지 **않음**을 단언.
+- Parallel Modules: N/A (single module). 백엔드↔프론트가 계약(엔드포인트·응답형상)으로 강결합이고 파일 공유 없이
+  분할하기엔 규모가 작아 순차 구현이 적합. 기본 1/1/1.
+- Evaluation Dimensions: functional only. 보안/성능 민감면 아님(내부 관리 도구·인증 경계 불변·업로드 상한으로
+  DoS 방어). 단, 업로드 팽창(zip-bomb) 방어는 functional 판정에 포함.
 
-### 공통
-- **CC3.1 (전체 GREEN)**: `dotnet test backend/Wcs.sln` 전량 GREEN. 신규 테스트 = baseline + 신규분 산술 일치로 확인.
-- **CC3.2 (결정성·flake 0)**: 무거운 실-Sim 스위트 특성상 **clean-env에서 ≥5회 반복** GREEN·flake 0. 반복 전
-  dotnet/testhost/vstest 전수 kill로 클린 슬레이트, 각 run 자연 완료(mid-run kill 금지), **TCP TIME_WAIT 드레인**
-  후 측정(C2 교훈 — 소켓 고갈로 인한 testhost teardown abort는 기능 실패 아님·`netstat | grep -c TIME_WAIT` 선확인).
-- **CC3.3 (정적 검사)**: `dotnet build` 0 오류, 신규 경고 0(기존 선재 NU1903류만 허용).
-- **CC3.4 (평가 하네스 안전 — C2 유실 교훈)**: baseline 대조가 필요하면 `git stash`로 미커밋 코드를 제거하지 말 것.
-  부득이 stash 시 **`-u`(untracked 포함) + 즉시 pop 보장**, 대조 후 `git diff`로 Generator 산출물 전량 보존 확인
-  (C2 INCIDENT: baseline stash 드롭으로 19파일 미커밋 유실 → 복구). 미커밋 파일 revert 대조는 `git checkout` 금지
-  (HEAD 소거) — Copy-Item 백업+SHA256 방식(S5-FLAKE 교훈).
+- Detected Project Type: **Full-stack**
+  (신호: React 업로드 UI(frontend/src/pages/B2cDataGenPage.tsx·lib/b2cTestData.ts) + ASP.NET Core 멀티파트
+   업로드/파일 다운로드 엔드포인트(Wcs.Api) + EF Core 기입(Wcs.Data). .mcp.json playwright enabled·headless.)
 
----
+────────────────────────────────────────────────────────────────────────────
+■ Verification Scenarios (Full-stack — 필수)
+────────────────────────────────────────────────────────────────────────────
+=== Applicable Web/UI scenarios (B2cDataGenPage 생성 카드) ===
+- Default state of each surface: 생성 카드 = 기존 5-파라미터 폼 + **신규 "엑셀 업로드" 블록**(양식 다운로드 버튼 +
+  파일 선택 input[accept=.xlsx] + 업로드 버튼). 초기 = 파일 미선택 → **업로드 버튼 disabled**, 오류 목록 미표시.
+- Each alternate state the sprint introduces:
+  · 파일 선택됨 → 업로드 버튼 enabled.  · 업로드 중 → 버튼 "업로드 중…"·disabled.
+  · 업로드 성공 → 성공 토스트 + 생성 결과 배치 그리드에 새 배치 출현 + 파일 입력 초기화.
+  · 행오류 존재 → 오류행 목록(행번호+사유) 렌더 + 에러 토스트.  · 양식 다운로드 클릭 → .xlsx 다운로드 트리거.
+- Relevant empty / error state: (a) 잘못된 파일(비-xlsx/빈 파일/필수 컬럼 누락/형식 오류 행) 업로드 → 에러 토스트 +
+  행별 오류 리포트 표면화(Fail-Loud). (b) 데이터 행 0(헤더만) → "유효 데이터 없음" F. (c) 템플릿 다운로드 실패 → 에러 토스트.
+- Dark mode variant: **N/A** — B2C 페이지는 단일 라이트 테마(docs/B2C-DATAGEN.md §4 "단일 라이트 테마·다크모드 N/A").
+- Key interaction flow after the change: 양식 다운로드 → (양식대로 행 채움) → 파일 선택 → **업로드** → 성공 토스트 +
+  "생성 결과 — 최근 배치"에 업로드 배치 표시 + 배치 클릭 시 하단 디테일에 **미할당** 바코드/오더 표시.
 
-## Parallel Modules (optional)
-N/A (single module 권장). 두 항목은 파일 분리(항목1 = `SorterFloorReturnService.cs`·`WcsOptions.cs`·`appsettings*.json`·
-`docs/SPEC.md` / 항목2 = `DestinationStatusPusher.cs`·`DestinationStatusService.cs`)라 경계-청정 fan-out이 **가능은**
-하나, C3의 경량 스코프와 병렬 worktree의 stale-base/미커밋 유실 리스크(교훈 agent-worktree-stale-base·C2 INCIDENT)를
-고려해 **단일 Generator 순차 구현을 권장**한다. 오케스트레이터가 fan-out을 택할 경우 위 파일 파티션을 경계로 사용.
+=== Applicable Backend/API scenarios ===
+- Endpoints touched (method + path):
+  · POST /api/b2c/test-data/upload  (신규 · multipart IFormFile)
+  · GET  /api/b2c/test-data/template (신규 · .xlsx 다운로드)
+  (기존 generate/batches/summary/detail/reset 는 무접촉 — 회귀 대상으로만 재실행.)
+- Happy path per endpoint:
+  · upload: 유효 .xlsx(M 오더행·K 배치) → 200 { status:"S", message:"…N건 업로드 완료", counts:{ordersCreated,
+    orderItemsCreated, batches, dataRows} }. 생성 오더 전부 DestinationId=null(미할당). 재업로드 시 신규 카운트 0(멱등).
+  · template: 200 + application/vnd.openxmlformats-officedocument.spreadsheetml.sheet + Content-Disposition
+    attachment; filename=…xlsx. 본문 = 헤더+예시+설명. 그 파일을 upload 에 재투입하면 파싱 성공(라운드트립).
+- Relevant error cases per endpoint (해당하는 것만 — 패딩 금지):
+  · upload 400: 파일 없음/0바이트, 크기 > 상한, 확장자 ≠ 허용, MIME 화이트리스트 불일치(파일레벨 선행 검증).
+  · upload 200 F: 구조 오류(필수 헤더 누락)·행별 검증 오류(작업일자 형식·비존재 날짜·빈 바코드·바코드 문자셋·차수
+    범위·계획수량 범위)·유효 데이터행 0·사용범위 팽창 초과 → status "F" + rowErrors. (Q4 원자성: 오류 시 커밋 0.)
+  · template: 서버 생성 예외 → 400 + Fail(원문 미노출·서버 로그). (기타 4xx는 이 표면에 비해당 — 인증/권한 경계 불변.)
 
-## Evaluation Dimensions (optional)
-functional only. (항목2에 성능 측면이 있으나 별도 성능 Evaluator 불요 — 기능 회귀 테스트군 + spy 카운트로 충분히 커버.
-보안/권한 표면 무접촉.)
+=== End-to-end data-flow scenario (2+ layers) ===
+양식 다운로드(GET template) → (행 채움) → 업로드(POST upload, multipart) → Wcs.Api 파서(ClosedXML·행검증) →
+Wcs.Data 트랜잭션(work_batch UQ 멱등 → wcs_order 미할당 → order_item) → 프론트가 GET /api/b2c/test-data/batches 로
+새 배치·오더수 확인 + GET /api/b2c/facility/orders?batchId= 로 바코드가 **미할당**임을 확인. (연장 확인: 설비 관리(2b)
+에서 셀 배정 후 IF-05 가 그 바코드를 정상 라우팅 — 업로드가 기존 파이프라인과 정합함을 실증.) DB↔파서↔UI 3계층 관통.
 
----
-
-## Detected Project Type: Full-stack
-(리포 신호: `frontend/`(브라우저 진입점) + `backend/src/Wcs.Api`(서버 라우트/컨트롤러) 공존 → Full-stack.
-단 **이번 스프린트의 변경 표면은 백엔드 백그라운드 서비스 전용**이며 프론트엔드 diff는 0이다.)
-
-## Verification Scenarios (per-type, mandatory)
-
-=== Full-stack ===
-
-- **Applicable Web/UI scenarios (frontend surface this sprint touches)**:
-  **N/A — 이 스프린트는 UI 표면을 건드리지 않는다**(frontend diff 0, 신규 페이지/컴포넌트/네비게이션 0).
-  스톨 WARN·operation_log는 기존 F2 실시간 관측(operation_log tail)로 자연히 노출되나, 그 뷰 코드는 변경하지
-  않으므로 브라우저 검증 대상 아님. 프론트 무접촉은 `git diff develop --stat -- frontend/` 빈 출력로 실증.
-
-- **Applicable Backend/API scenarios (backend surface this sprint touches)**:
-  이 스프린트는 인바운드 HTTP 라우트를 **신규/변경하지 않는다**(엔드포인트 method+path 변경 0). 변경 표면은
-  (i) 백그라운드 관측 루프 2종, (ii) 아웃바운드 IF-08 push 와이어, (iii) operation_log 싱크. 각 표면의 정상/에지
-  시나리오를 자동 테스트로 검증:
-  1. **관측 루프 — 스톨 감지기(`SorterFloorReturnService`)**:
-     - 정상(happy): 정상 사이클 관측 중 스톨 WARN 0건(CC1.1).
-     - 에지(스톨): 머리 존재+유휴+TgtFloor==0+머리 불변 N틱 지속 → WARN + operation_log 정확히 1회(CC1.2).
-     - 에지(정당 미기입): 오프라인/PAUSED에서 발화 0(CC1.1).
-     - 에지(리셋): 조건 해소 후 재에피소드 재발화 가능(CC1.2).
-  2. **아웃바운드 IF-08 push 와이어(`DestinationStatusPusher` → PUT `/api/UpdateChuteState`)**:
-     - 정상(happy): 수용상태 전이 시 가짜 RCS 서버가 `{chute_numbers:[N], next_states:[3|2]}`를 전이당 1회 수신
-       (경량화 전후 **동일** — CC2.1).
-     - 에지: 만재(SorterFull) 전이는 push 유발 안 함(발신 accept에 Full 미반영); paused 전이는 next_state=2 1회.
-     - 에지(비용): 소터 관찰 N틱 동안 heavy `Compute`/`ComputeSorterFull` 매-틱 호출 0(CC2.3).
-  3. **operation_log 싱크**: 스톨 WARN 1건이 operation_log에 Level=WARN·구조화 detail로 영속(비동기 싱크 —
-     테스트에서 기록 출현 대기 후 조회. 교훈 sim-timeline-log-vs-snapshot-race: 비동기 append는 스냅샷 전이와
-     경합하므로 로그 출현을 조건 대기 후 캡처).
-
-- **At least one end-to-end data-flow scenario crossing two or more layers**:
-  1. **스톨 감지 크로스레이어(관측 루프 → operation_log → DB)**: 실 Sim 소터를 유휴·큐 머리 존재·TgtFloor==0
-     상태로 붙잡아(틸트 미발생) 관측 루프가 임계 N틱 관측 → Serilog WARN 발화 + `IOperationLogger` enqueue →
-     백그라운드 컨슈머가 operation_log 테이블에 영속 → 조회로 1건 확인. "관측 루프 신호가 실제 DB 감사 기록까지
-     도달"을 계층 관통으로 실증.
-  2. **pusher 경량화 발신 동일성 크로스레이어(스냅샷 관찰 → accept 합성 → 아웃바운드 HTTP)**: 소터 CurFloor/Ready
-     전이를 실 Sim로 발생시켜 관찰 루프가 경량 readiness로 accept 산출 → 가짜 RCS 서버가 수신한 실제 JSON 본문이
-     경량화 전 동작과 동일(next_state·전이당 1회)함을 실증. 동시에 spy로 `ComputeSorterFull` 매-틱 미호출 확인 —
-     "발신은 동일, 비용만 절감"을 한 시나리오에서 계층 관통으로 닫는다.
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 9 (Web/UI: default state, alternate states, empty/error state, dark-mode variant, key interaction flow; Backend/API: endpoints touched, happy path per endpoint, error cases per endpoint; E2E: cross-layer data-flow). All slots filled: yes.
 
 ---
 
-## 질문 (사용자 확인 필요 — 기본값 채택, 계약 확인 시 한 줄 승인 권장 · 블로킹 아님)
-C3는 규칙 개정·마이그레이션이 없어 사용자 게이트는 불요하나, 아래 4건은 기본값을 제안하며 이견 시에만 회신.
+## ✅ 확정 결정 (사용자 게이트 — 2026-07-26, S-B2C-EXCEL-UPLOAD)
 
-1. **스톨 감지 임계 N틱 기본값**: 정상 대기(정렬 후 AGV 틸트 대기)를 오탐하지 않도록 N×`ObserveIntervalMs`가
-   "현장 최대 분류 소요 + AGV 도착 cadence"를 충분히 상회해야 한다. **권장 기본값 = N틱을 지속시간으로 환산해
-   약 6~10초 상당**(예: `ObserveIntervalMs`=150ms 기준 N≈40~66). Generator가 틱수 또는 지속시간(ms) 중 어느
-   형태로 설정화할지는 재량이되 기본값은 이 범위. (이견 없으면 이대로.)
-2. **발화 수준 — WARN만 vs 알람**: **권장 = Serilog WARN + operation_log Level=WARN**(진단 신호). ERROR/알람
-   에스컬레이션은 하지 않는다(스톨은 liveness 의심일 뿐 — 실제 abandonment 복구/알람은 D 스코프). (이견 없으면 이대로.)
-3. **pusher 경량 readiness 적용 범위 — 슈트에도 vs 소터 한정**: **권장 = 소터 한정**(슈트 accept는 이미
-   인메모리 `GetHold` 기반이라 `ComputeSorterFull`을 타지 않음 — 최적화 대상 아님). 단 어느 선택이든 슈트 accept
-   값은 불변이어야 함. Generator가 코드 단순화를 위해 공통 경량 경로로 통합해도 무방(값 불변 전제). (이견 없으면 이대로.)
-4. **스톨 감지기 = 관측-전용 확인**: **권장 = 관측-전용**(WARN + operation_log만, 교정 동작 0). 파킹/재dispatch/
-   미투하 복구는 D 스코프로 이연 유지. (이견 없으면 이대로.)
+- **(Q1) 엑셀 행 단위 = 오더/바코드 단위 행** — 한 행 = 실제 오더 1건(사용자가 실제 바코드값 직접 입력·자동생성 아님). 컬럼(권장): 작업일자·배치명·차수·바코드·수량. 목적지 미할당 유지(2b에서 할당). orderNo==barcode 멱등 계약 재사용.
+- **(템플릿) 정적 파일 템플릿** — ⚠ 계약 초안의 "GET /api/b2c/test-data/template 동적 생성"이 **아니라 정적 .xlsx 파일**로 제공. Generator가 헤더·예시행·컬럼 설명이 든 .xlsx를 생성(ClosedXML 1회 생성 or 직접)해 **프론트가 다운로드할 정적 자산**(frontend/public/ 또는 Wcs.Api/wwwroot)으로 커밋. 프론트 "양식 다운로드" 버튼은 이 정적 파일 링크. (동적 엔드포인트 미구현.)
+- **(Q4) 멱등 append + 오류 시 전체 거부(atomic)** — 기존 데이터에 추가(orderNo==barcode upsert), 한 행이라도 검증 실패 시 전체 롤백 + 행별 오류 리포트 반환.
+- **(Q5) 기본 제한 · .xlsx만** — B2B 동일 제한(AppConstants 최대 바이트/행/열·zip-bomb 가드), .xls 거부. 최대 행수는 기존 생성 상한(1000)에 맞춤.
+- **(Q2) ClosedXML(이미 존재) 사용** — 신규 라이브러리 도입 없음.
 
----
-
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios [N/A·근거명시], Applicable Backend/API scenarios [관측루프 스톨감지·아웃바운드 IF-08 push·operation_log 싱크], At least one end-to-end cross-layer data-flow scenario [스톨감지 관측→operation_log→DB · pusher 경량화 발신동일성 스냅샷→accept→HTTP]). All slots filled: yes.
-
----
-
-## ✅ 확정 결정 (오케스트레이터, 2026-07-24, C3 — 사용자 "C3 진행" 위임 + Planner 권장 채택)
-
-게이트 불필요(규칙/마이그레이션 없음). 4개 기본값 = Planner 권장 확정(전부 appsettings·사후 조정 가능):
-- **스톨 감지 N틱**: 기본 ≈6~10초 상당(ObserveIntervalMs 배수, appsettings·하드코딩 0).
-- **레벨**: WARN + operation_log 1회/에피소드. 에스컬레이션/알람 없음(관측 전용).
-- **경량 readiness 적용 범위**: 소터 한정(슈트는 이미 인메모리 GetHold — ComputeSorterFull 미사용이라 이득 없음).
-- **스톨 감지기 = 관측 전용**: 파킹/복구/자동조치 없음(그건 Sub-Sprint D). 순수 fail-loud 가시화.
+**스코프 조정**: 백엔드 = 업로드 엔드포인트(POST /api/b2c/test-data/upload)만(동적 템플릿 엔드포인트 제외) + 정적 템플릿 .xlsx 자산. 프론트 = B2cDataGenPage 업로드 UI + 정적 양식 다운로드 버튼.
