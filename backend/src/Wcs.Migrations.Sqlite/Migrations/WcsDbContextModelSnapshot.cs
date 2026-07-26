@@ -709,6 +709,9 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Barcode")
+                        .HasDatabaseName("IX_order_item_barcode");
+
                     b.HasIndex("OrderId", "Barcode")
                         .IsUnique()
                         .HasDatabaseName("UQ_order_item_order_barcode");
@@ -724,6 +727,9 @@ namespace Wcs.Migrations.Sqlite.Migrations
 
                     b.Property<long?>("AgvId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Barcode")
                         .IsRequired()
@@ -793,6 +799,9 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasIndex("DestinationId", "Status")
                         .HasDatabaseName("IX_piece_dest_status");
 
+                    b.HasIndex("PId", "IsActive")
+                        .HasDatabaseName("IX_piece_pid_active");
+
                     b.ToTable("piece", (string)null);
                 });
 
@@ -801,6 +810,9 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("At")
                         .HasColumnType("TEXT");
@@ -907,6 +919,9 @@ namespace Wcs.Migrations.Sqlite.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("CSeq")
                         .HasColumnType("INTEGER");
 
@@ -922,21 +937,27 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("DepositedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("PieceId")
                         .HasColumnType("INTEGER");
 
                     b.Property<int?>("RCellNo")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTime?>("RFlagAt")
-                        .HasColumnType("TEXT");
-
                     b.Property<int?>("RSeq")
                         .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ReturnedAt")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("TiltedAt")
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");

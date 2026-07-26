@@ -746,6 +746,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Barcode")
+                        .HasDatabaseName("IX_order_item_barcode");
+
                     b.HasIndex("OrderId", "Barcode")
                         .IsUnique()
                         .HasDatabaseName("UQ_order_item_order_barcode");
@@ -763,6 +766,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     b.Property<long?>("AgvId")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<string>("Barcode")
                         .IsRequired()
@@ -833,6 +839,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.HasIndex("DestinationId", "Status")
                         .HasDatabaseName("IX_piece_dest_status");
 
+                    b.HasIndex("PId", "IsActive")
+                        .HasDatabaseName("IX_piece_pid_active");
+
                     b.ToTable("piece", (string)null);
                 });
 
@@ -843,6 +852,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateTime>("At")
                         .HasColumnType("datetime2");
@@ -955,6 +967,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
 
+                    b.Property<DateTime?>("ArchivedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<int>("CSeq")
                         .HasColumnType("int");
 
@@ -970,22 +985,28 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime?>("DepositedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<long>("PieceId")
                         .HasColumnType("bigint");
 
                     b.Property<int?>("RCellNo")
                         .HasColumnType("int");
 
-                    b.Property<DateTime?>("RFlagAt")
-                        .HasColumnType("datetime2");
-
                     b.Property<int?>("RSeq")
                         .HasColumnType("int");
+
+                    b.Property<DateTime?>("ReturnedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
+
+                    b.Property<DateTime?>("TiltedAt")
+                        .HasColumnType("datetime2");
 
                     b.HasKey("Id");
 

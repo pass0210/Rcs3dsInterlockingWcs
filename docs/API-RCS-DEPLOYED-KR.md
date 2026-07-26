@@ -48,7 +48,7 @@ NG 사유(NORMAL·BUSY·FULL·PAUSED·NO_DEST 등)는 **WCS 내부 로그(piece_
 | `pId` | int(1~30000) | ✔ | 피스 ID(AGV 트레이 단위) |
 | `agvNo` | int | ✔ | AGV 번호(기록·감사용) |
 | `barcode` | string(≤200) | ✔ | 상품 바코드 → 오더 매칭 키 |
-| `inductionNo` | int | ✔ | 인덕션 번호 |
+| `inductionNo` | int | ✔ | 인덕션 번호 (3D 소터 목적지의 **대상 층 1/2 결정**에 사용) |
 | `qty` | int(≥1) | ✔ | 수량(전량 틸트 기준값 — 진실의 원천) |
 | `timeStamp` | string(≤30) | ✔ | `"yyyy-MM-dd HH:mm:ss"` |
 
@@ -64,9 +64,10 @@ curl -X POST http://20.24.10.147:5205/api/v1/destination-query \
 - 미매칭 바코드 → `{"result":"NG","chuteNo":null}` (내부사유 NO_DEST).
 - 검증 실패(예 `pId:0`) → `400 {"error":"pId는 1~30000 범위여야 합니다."}`.
 - 가부 판정(요약): **슈트**는 full/paused여도 OK(보내고 대기). **3D 소터**는 `PAUSED`면 NG, 셀 수용 불가면 NG(FULL), BUSY(분류·이동 중)는 OK(이동시킴). 전체 표는 스펙 HTML §6.
+- **소터 순서 수용 · AGV 파킹(RCS측)**: 소터 목적지 피스는 **인덕션 순서(FIFO)**로 수용된다 — WCS가 소터를 각 피스의 층(1/2)으로 차례로 정렬하고, 정렬된 층이 열리면(IF-08 `3`) 해당 피스를 투입한다. **AGV는 미수용이면 목적지가 아니라 파킹존에서 대기**하다 열림(IF-08 `3`) 수신 시 목적지로 이동한다(이미 열림이면 직행) — 미개방 목적지에선 열림 푸시가 도착보다 먼저다.
 
 ### 2-2. IF-09 도착 보고 — `POST /api/v1/arrival-report`
-AGV가 목적지 슈트에 도착해 투입 직전 1회 호출. WCS가 도착을 기록하고, **3D 소터면 운영층(2층)으로 정렬**(TgtFloor 쓰기)한다.
+AGV가 목적지 슈트에 도착해 투입 직전 1회 호출. WCS가 도착을 기록한다. **층 필드 없음** — 3D 소터의 층 정렬은 IF-05(인덕션 번호로 층 파생) 시점에 이미 수행된다.
 
 **요청**
 | 필드 | 타입 | 필수 | 설명 |
@@ -85,7 +86,7 @@ curl -X POST http://20.24.10.147:5205/api/v1/arrival-report \
 ```json
 {"result":"OK"}
 ```
-- 소터의 경우 이 호출 뒤 소터가 2층으로 이동 → `/api/monitor/sorters`의 `ready`가 `false→true`로 전이(관측 가능).
+- 소터의 층 정렬은 IF-05 시점에 시작되며, 정렬 완료 시 `/api/monitor/sorters`의 `ready`가 `false→true`로 전이(관측 가능).
 - 미존재/비활성 `chuteNo`도 500 없이 200(도착만 기록, 정렬 스킵).
 
 ### 2-3. IF-10 투입 보고 — `POST /api/v1/deposit-report`
@@ -117,10 +118,10 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 ## 3. 투입 플로우 (한 피스 사이클)
 
 ```
-[IF-05] destination-query  → {result:OK, chuteNo}       (목적지·수량 판정, 피스 기록)
-   ↓ AGV가 슈트로 이동
-[IF-09] arrival-report      → {result:OK}                (도착 기록 + 3D 소터 2층 정렬)
-   ↓ 소터 ready 전이(운영층 도달)
+[IF-05] destination-query  → {result:OK, chuteNo}       (목적지·수량 판정, 피스 기록 · 인덕션→층 F 파생·소터 F층 선정렬)
+   ↓ AGV가 슈트로 이동 (소터 F층 정렬 완료 시 ready)
+[IF-09] arrival-report      → {result:OK}                (도착 기록 · 층 필드 없음)
+   ↓
 [IF-10] deposit-report      → {result:OK}                (틸트 보고 + Modbus 핸드셰이크)
    ↓ WCS 내부: 셀 배정 → C_Flag → R_Flag → sorter_command COMPLETED
    결과: 셀 currentQty +qty, 오더 sortedQty +qty
@@ -139,7 +140,7 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 | `GET /api/monitor/sorter-commands?destId=&take=` | `{items:[{id,pId,barcode,cellNo,cSeq,rSeq,status,cWrittenAt,rFlagAt}],nextCursor}` |
 | `GET /api/monitor/operation-log?take=&category=` | `{items:[{id,at,category,action,level,barcode,pId,detail}],nextCursor}` — API·PLC_WRITE·HANDSHAKE 전 단계 기록 |
 
-- `sorters[].ready` = 소터 운영 준비도 = `online && CurFloor==운영층(2) && Ready(D4.2)==1`. 부팅 직후엔 1층이라 `false`, IF-09 정렬 후 `true`.
+- `sorters[].ready` = 소터 수용 준비도 = `online && CurFloor==목표층 F && Ready==1` (F=인덕션 파생 층). 목표 층 미정렬이면 `false`, 정렬 후 `true`.
 - 모니터링 UI(웹): 브라우저로 `http://20.24.10.147:5205/` (WCS가 SPA 동일 포트 서빙).
 
 ---
@@ -162,10 +163,11 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 
 | 항목 | 값 |
 |---|---|
-| 와이어 | `PUT {RCS base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| 와이어 | `PUT {층별 RCS 호스트}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| 층별 호스트 | 상태가 바뀐 목적지의 **층**으로 라우팅 — **1층** `http://192.168.0.151:3000` · **2층** `http://192.168.0.152:3000`. 소터는 현재 정렬된 층의 호스트에 `3`, 다른 층 호스트엔 `2` |
 | 의미 | `next_state` = 수용 상태 플래그: **3**(Manual open)=받을 수 있음 · **2**(Pause)=받을 수 없음(분류중·이동중·미정렬·오프라인·정지) |
-| 트리거 | 목적지 수용 상태 실제 전이 시(주기 아님 — 소터는 분류 사이클마다 2↔3 반복 가능) |
-| 활성화 | **RCS가 수신 base URL을 WCS 측에 전달**하면 활성화(현재 미전달 → **비활성**) |
+| 트리거 | 목적지 수용 상태 실제 전이 시(주기 아님 — 소터는 분류 사이클마다 2↔3 반복 가능). **기동 시 전 목적지 현재 상태를 1회 발신**(소터는 두 층 호스트 모두 — 현재 층=`3` 수용 시/다른 층=`2`, 고정 슈트는 자기 층 1곳) 후, 이후엔 전이 시에만 |
+| 활성화 | **RCS가 층별 수신 호스트를 WCS 측에 설정**하면 활성화(현재 미설정 → **비활성**) |
 
 ---
 
@@ -175,7 +177,7 @@ WCS→RCS 아웃바운드는 **UpdateChuteState 한 채널**이다(RCS 제공 �
 | 시나리오 | 결과 |
 |---|---|
 | IF-05 정상 | `{result:OK, chuteNo:1}` |
-| IF-09 → 2층 정렬 | `{result:OK}` + 소터 `ready:false→true` |
+| IF-09 도착 보고 | `{result:OK}` |
 | IF-10 → 핸드셰이크 | `{result:OK}` + sorter_command **COMPLETED**(cSeq1→rSeq1), 셀1 `currentQty 0→1`, 오더1 `sortedQty 0→1` |
 | IF-05 검증실패(pId=0) | `400` |
 | IF-05 미존재 바코드 | `{result:NG, chuteNo:null}`(NO_DEST) |

@@ -43,9 +43,13 @@ export function BoxesPage() {
   const error = q.isError ? ((q.error as Error)?.message ?? '박스 조회 실패') : null
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — master-detail 그리드가 가용 높이를 채운다(flex-1 min-h-0). xl 2열은 단일
+    // 행을 1fr 로 늘려(xl:grid-rows-1) 두 카드가 같은 행 높이를 공유하고 각자 본문만 스크롤한다. 각 카드
+    // min-h-[220px] 하한(미만이면 페이지 스크롤 폴백). 기존 calc(100vh-220px) 매직값 제거. narrow(1열)은
+    // 자연 높이 2행으로 쌓이고 넘치면 페이지가 스크롤(데스크톱 폭이 주 대상).
+    <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] xl:grid-rows-1">
       {/* 좌: 박스 목록(마스터) */}
-      <Card className="flex min-w-0 flex-col">
+      <Card className="flex min-h-[220px] min-w-0 flex-col">
         <CardHeader className="flex-wrap gap-2">
           <CardTitle>박스 목록</CardTitle>
           <div className="flex flex-wrap items-center gap-2">
@@ -60,7 +64,7 @@ export function BoxesPage() {
             <SearchInput value={search} onChange={setSearch} className="w-44" placeholder="통합 검색" />
           </div>
         </CardHeader>
-        <CardContent className="max-h-[calc(100vh-220px)] min-w-0 overflow-auto p-0">
+        <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
           {q.isLoading && rows.length === 0 ? (
             <LoadingRow label="박스 불러오는 중" />
           ) : error ? (
@@ -103,8 +107,8 @@ export function BoxesPage() {
         </CardContent>
       </Card>
 
-      {/* 우: 내품(디테일) */}
-      <Card className="flex min-w-0 flex-col self-start">
+      {/* 우: 내품(디테일) — 같은 행 높이 공유(self-start 제거로 stretch), 본문만 스크롤. */}
+      <Card className="flex min-h-[220px] min-w-0 flex-col">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Package className="size-4 text-muted" />
@@ -116,7 +120,7 @@ export function BoxesPage() {
             </Badge>
           )}
         </CardHeader>
-        <CardContent className="max-h-[calc(100vh-220px)] min-w-0 overflow-auto p-0">
+        <CardContent className="min-h-0 min-w-0 flex-1 overflow-auto p-0">
           <BoxDetail box={selected} />
         </CardContent>
       </Card>

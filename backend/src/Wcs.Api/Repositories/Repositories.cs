@@ -12,8 +12,9 @@ public enum DestinationType { Chute, Sorter3D }
 /// <summary>
 /// 목적지 가용성 차단 사유(IF-05 상류 필터).
 /// None=배정 가능 / Full·Paused=배정 안 함(NG). FULL/PAUSED 차단을 도착 시점→배정 시점으로 상류 이동.
+/// Unmapped=미매핑 inductionNo(층 파생 불가) → 소터 목적지 NG(fail-loud — 조용한 통과 금지, 확정 결정 2026-07-22).
 /// </summary>
-public enum DestinationBlock { None, Full, Paused }
+public enum DestinationBlock { None, Full, Paused, Unmapped }
 
 /// <summary>
 /// 오더·목적지 조회 + 예약 차감.
@@ -137,8 +138,10 @@ public interface ISorterCommandJournal
     /// <summary>
     /// 핸드셰이크 전송 시작 — sorter_command SENT 행 생성.
     /// 반환값: 생성된 sorter_command.id (이후 Finalize에 사용).
+    /// depositedAt = IF-10 투입 보고 시각(= piece.DepositedAt) — RcsController에서 유입(계약 (e)).
+    ///   NULL 허용(비정상 경로 방어)이나 정상 흐름에선 항상 non-NULL.
     /// </summary>
-    long CreateSent(long pieceId, long cellId, int cSeq, int cellNo);
+    long CreateSent(long pieceId, long cellId, int cSeq, int cellNo, DateTime? depositedAt);
 
     /// <summary>
     /// 핸드셰이크 완료 — sorter_command 상태 전이 (COMPLETED/MISMATCH/TIMEOUT).

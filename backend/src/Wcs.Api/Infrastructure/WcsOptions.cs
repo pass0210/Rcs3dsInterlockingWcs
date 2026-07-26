@@ -9,11 +9,35 @@ namespace Wcs.Api;
 public sealed record WcsOptions
 {
     /// <summary>
-    /// 3D 소터 운영층(고정 정렬 대상). AGV는 항상 이 층에서 수령하므로
-    /// IF-09 도착 시 WCS가 소터를 이 층으로 정렬한다. 기본 2층.
-    /// 절대규칙 #7: 하드코딩 금지 — 설정에서 읽는다.
+    /// 3D 소터 운영층(레거시 단일 층). 인덕션 기반 2층 제어(2026-07-21)로 대체됐다 — 목표 층 F는
+    /// 이제 <see cref="InductionFloorMap"/>에서 파생하며, 이 값은 더 이상 정렬 트리거에 쓰이지 않는다
+    /// (하위호환·문서 참조용으로 남김). 절대규칙 #7: 하드코딩 금지 — 설정에서 읽는다.
     /// </summary>
     public int OperationalFloor { get; init; } = 2;
+
+    /// <summary>
+    /// 인덕션 번호 → 목표 층(F) 맵 (appsettings "Wcs:InductionFloorMap", 예 {"1":1,"2":1,"3":2}).
+    /// IF-05가 요청 inductionNo로 목표 층 F(1/2)를 파생하는 근거(§2-A·§3·§5-A). 하드코딩 금지(절대규칙 #7).
+    /// 키는 JSON 문자열(설정 바인딩 제약) — <see cref="FloorByInduction"/>가 int 키 맵으로 변환한다.
+    /// 미매핑 inductionNo는 fail-loud(NG 응답 + 경고 로그) — 조용한 통과·기본층 폴백 금지(확정 결정 2026-07-22).
+    /// </summary>
+    public Dictionary<string, int> InductionFloorMap { get; init; } = new();
+
+    /// <summary>
+    /// <see cref="InductionFloorMap"/>(문자열 키)을 int 키 맵으로 변환한 읽기 전용 뷰.
+    /// Wcs.Core.InductionFloorMap.DeriveFloor(순수)에 주입한다. 파싱 불가 키는 건너뛴다(무시).
+    /// </summary>
+    public IReadOnlyDictionary<int, int> FloorByInduction
+    {
+        get
+        {
+            var result = new Dictionary<int, int>(InductionFloorMap.Count);
+            foreach (var (key, floor) in InductionFloorMap)
+                if (int.TryParse(key, out var inductionNo))
+                    result[inductionNo] = floor;
+            return result;
+        }
+    }
 
     /// <summary>
     /// IF-05/IF-10 요청 qty 상한(입력 위생 — S-CLEANUP-FIELD D-4).
@@ -42,6 +66,51 @@ public sealed record WcsOptions
     /// 하드코딩 금지(절대규칙 #7) — appsettings "Wcs:OpsLimits"에서 읽는다.
     /// </summary>
     public OpsWriteLimits OpsLimits { get; init; } = new();
+
+    /// <summary>
+    /// 소터별 pending-floor 큐 관측 루프(SorterFloorReturnService) 타이밍 — 인덕션 기반 2층 제어.
+    /// TgtFloor==0 관측 주기 등. 하드코딩 금지(절대규칙 #7) — appsettings "Wcs:SorterFloorReturn".
+    /// </summary>
+    public SorterFloorReturnOptions SorterFloorReturn { get; init; } = new();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SorterFloorReturnOptions — 소터별 pending-floor 큐 관측 루프 타이밍 (Wcs:SorterFloorReturn).
+//
+// 인덕션 기반 2층 제어(2026-07-21): IF-05가 소터별 큐에 목표 층 F를 enqueue하면, 이 루프가
+//   각 소터 스냅샷의 TgtFloor==0을 이 주기로 관측해 큐 머리 층 F를 게이트 통과 시 기입(SetTgtFloor).
+//   폴 주기와 동급 권장. 하드코딩 금지(절대규칙 #7).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>appsettings.json "Wcs:SorterFloorReturn" 섹션 — 큐 관측 루프 타이밍.</summary>
+public sealed record SorterFloorReturnOptions
+{
+    /// <summary>
+    /// 큐 관측 주기(ms). 각 소터의 TgtFloor==0을 이 주기로 관측해 큐 머리 층 F 기입/pop을 수행한다.
+    /// ≤0이면 최소 1로 클램프. 기본 150ms(폴 주기 동급).
+    ///
+    /// ★ 안전 불변식(§2-C · S-TWO-FLOOR-CONTROL C3): <b>ObserveIntervalMs ≪ 최소 분류 소요(Ready=0 창)</b>.
+    ///   pop은 관측 루프의 <c>Ready 1→0→1</c> 에지 <b>샘플링</b>에 의존하므로, 분류 Ready=0 창이 이 주기보다
+    ///   짧으면 에지가 유실돼 큐 머리가 pop되지 않고 정체(under-pop→stall)될 수 있다. 현장 분류=초 단위 ≫
+    ///   주기 150ms라 실무상 안전하며, over-pop/안전속성 회귀는 구조상 불가(liveness 위협일 뿐).
+    ///   정적 설정 검증(IValidateOptions 등)은 리포에 인프라가 없고 분류 소요는 런타임/현장 값이라 기동 시
+    ///   알 수 없으므로, 이 가정이 깨질 때는 <see cref="StallSuspectTicks"/> 런타임 스톨 감지기가 fail-loud로
+    ///   발화(WARN + operation_log)해 운영자가 감지·진단하게 한다(관측 전용 — 자동 조치 없음).
+    /// </summary>
+    public int ObserveIntervalMs { get; init; } = 150;
+
+    /// <summary>
+    /// fail-loud 스톨 의심 임계 <b>틱수</b>(관측 루프 계층 — S-TWO-FLOOR-CONTROL C3). 다음 AND 조건이
+    /// <b>연속 이 틱수만큼</b> 지속되면 소터별로 WARN 로그 + operation_log 1건을 <b>에피소드당 1회</b> 발화한다:
+    ///   소터 Online ∧ 정지 아님(<c>!IsPaused</c>) ∧ 큐 머리 존재 ∧ 유휴(<c>Ready==1</c>) ∧ <c>TgtFloor==0</c>
+    ///   ∧ 큐 머리 층 값이 직전 틱과 동일(pop으로 머리가 바뀌지 않음).
+    /// 조건이 하나라도 깨지면(머리 변경·busy·TgtFloor≠0·큐 빔·오프라인·PAUSED) 카운터·발화 상태를 리셋해
+    /// 다음 에피소드를 재감지한다. <b>관측 전용</b> — PLC 쓰기·pop·재dispatch·파킹 같은 교정 동작은 하지 않는다
+    /// (그건 Sub-Sprint D). 지속 시간 환산 = 이 값 × <see cref="ObserveIntervalMs"/>. 정상 대기(정렬 후 AGV
+    /// 틸트 대기)를 오탐하지 않도록 "현장 최대 분류 소요 + AGV 도착 cadence"를 충분히 상회해야 한다.
+    /// 기본 50(× 150ms ≈ 7.5초). <b>≤0이면 스톨 감지 비활성</b>(발화 안 함). 하드코딩 금지(절대규칙 #7).
+    /// </summary>
+    public int StallSuspectTicks { get; init; } = 50;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -105,33 +174,63 @@ public sealed record MonitorOptions
 // ════════════════════════════════════════════════════════════════════════════
 // ChuteStatePushOptions — 목적지 수용상태 아웃바운드 푸시 설정 (appsettings "Wcs:ChuteStatePush").
 //
-// S-IF08-READY-PUSH (확정 와이어 단일 채널):
-//   목적지(슈트+소터) 수용상태 전이 시 WCS가 PUT {BaseUrl}{Path}로
+// S-IF08-READY-PUSH (확정 와이어 단일 채널) + S-TWO-FLOOR-CONTROL B (층별 호스트 라우팅):
+//   목적지(슈트+소터) 수용상태 전이 시 WCS가 PUT {host}{Path}로
 //   {chute_numbers:[dest.ChuteNo], next_states:[2|3]} 를 RCS로 푸시한다(3=수용가능/2=불가).
-//   전이원: 운영자 PAUSED/RESUMED · 슈트 만재/비움 · 소터 분류 사이클(스냅샷 관찰).
-//   base URL·경로·재시도·백오프·HTTP 타임아웃·소터 관찰 주기를 전부 설정으로 외부화한다
-//   (하드코딩 금지·절대규칙 #7).
+//   ★ 호스트는 목적지의 **층**으로 라우팅한다 — 층은 payload에 유입되지 않고 **어느 호스트가
+//     수신하느냐**로만 전달된다(경로·payload·next_state 의미는 층 무관 동일 — wire 계약 불변).
+//   전이원: 운영자 PAUSED/RESUMED · 슈트 만재/비움 · 소터 분류 사이클·정렬(스냅샷 관찰).
+//   호스트 맵·경로·재시도·백오프·HTTP 타임아웃·소터 관찰 주기를 전부 설정으로 외부화한다
+//   (하드코딩 금지·절대규칙 #7 — 호스트 리터럴은 코드에 없다. 실 IP는 appsettings·docs에만).
 //   - 지수 백오프(기본 3회 1s/2s/4s).
-//   - BaseUrl 미설정(null/공백)이면 푸시 완전 비활성(DORMANT — 경고 후 no-op). 크래시 0.
+//   - 층별 DORMANT: 어떤 층 호스트가 미설정이면 그 층 push는 no-op(HTTP 시도 0). 전 층 미설정이면
+//     서브시스템 전체 DORMANT(경고 후 관찰/구독 미기동·크래시 0).
 //   - chute_number 매핑 config 없음(Q-b LOCKED = Destination.ChuteNo 직접 1:1).
-//   - SorterObserveIntervalMs: 소터 분류 사이클(3↔2) 전이는 명시 이벤트가 없어 스냅샷 관찰이 유일한
-//     감지 수단이므로 반드시 유지(폐지된 목적지-상태 와이어 옵션에서 이전).
+//   - SorterObserveIntervalMs: 소터 분류 사이클(3↔2)·정렬 전이는 명시 이벤트가 없어 스냅샷 관찰이
+//     유일한 감지 수단이므로 반드시 유지.
+//
+// 하위호환(레거시 단일 호스트): 구 단일 키 `BaseUrl`은 **FloorHosts가 비었을 때만** 쓰이는
+//   fallback으로 유지한다(제거 대신 alias — 이연 결정). FloorHosts가 하나라도 설정되면 BaseUrl은
+//   무시된다(FloorHosts 우선). 레거시 모드에선 모든 목적지가 그 단일 호스트로 발신된다(층 무관 —
+//   구 동작 보존). 출하 기본은 FloorHosts={} + BaseUrl=null → DORMANT(실 운영 파괴 0).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// <summary>appsettings.json "Wcs:ChuteStatePush" 섹션 — 목적지 수용상태 아웃바운드 푸시 설정.</summary>
 public sealed record ChuteStatePushOptions
 {
     /// <summary>
-    /// RCS base URL(예: "http://10.0.0.9:9000"). 엔드포인트는 Path와 결합 —
-    /// WCS는 "{BaseUrl}{Path}"로 PUT한다.
-    /// 미설정(null/공백)이면 푸시 비활성(DORMANT — 경고 로그 후 no-op).
-    /// 호스트 미정으로 지금은 null로 출하하며, RCS가 추후 제공하는 **유일한 활성화 값**이다.
+    /// [레거시 alias] RCS 단일 base URL. **FloorHosts가 비었을 때만** fallback으로 쓰인다(층별 라우팅으로
+    /// 대체됨 — 하위호환용). FloorHosts가 설정되면 무시. 미설정(null/공백)이고 FloorHosts도 비면 DORMANT.
     /// </summary>
     public string? BaseUrl { get; init; }
 
     /// <summary>
-    /// 아웃바운드 경로(BaseUrl에 이어붙이는 상대 경로). RCS 계약(UpdateChuteState) 기본값.
-    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값).
+    /// 층 → RCS 호스트 맵 (appsettings "Wcs:ChuteStatePush:FloorHosts", 예 {"1":"http://rcs-1f-host:3000","2":"http://rcs-2f-host:3000"}. 실 IP는 appsettings·docs).
+    /// 목적지의 층에 해당하는 호스트로 push를 라우팅한다. 키는 JSON 문자열(설정 바인딩 제약) —
+    /// <see cref="HostByFloor"/>가 int 키 맵으로 변환한다. 값이 null/공백인 층은 미설정(그 층 DORMANT)으로 간주.
+    /// 호스트 리터럴은 여기(설정)에만 존재하고 코드엔 없다(절대규칙 #7).
+    /// </summary>
+    public Dictionary<string, string> FloorHosts { get; init; } = new();
+
+    /// <summary>
+    /// <see cref="FloorHosts"/>(문자열 키)를 int 키 맵으로 변환한 읽기 전용 뷰. 파싱 불가 키·null/공백
+    /// 호스트는 건너뛴다(그 층은 미설정=DORMANT). 층별 라우팅·부트스트랩이 이 뷰를 소비한다.
+    /// </summary>
+    public IReadOnlyDictionary<int, string> HostByFloor
+    {
+        get
+        {
+            var result = new Dictionary<int, string>(FloorHosts.Count);
+            foreach (var (key, host) in FloorHosts)
+                if (int.TryParse(key, out var floor) && !string.IsNullOrWhiteSpace(host))
+                    result[floor] = host.Trim();
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// 아웃바운드 경로(호스트에 이어붙이는 상대 경로). RCS 계약(UpdateChuteState) 기본값.
+    /// RCS가 다른 경로를 제공하면 설정으로 교체 가능(하드코딩 금지 — 외부화된 기본값). 층 공통(호스트만 다름).
     /// </summary>
     public string Path { get; init; } = "/api/UpdateChuteState";
 
@@ -154,6 +253,14 @@ public sealed record ChuteStatePushOptions
     public int HttpTimeoutMs { get; init; } = 3000;
 
     /// <summary>
+    /// S-TWO-FLOOR-CONTROL C2 — 부트스트랩 push 전에 소터 콜드스타트 레지스터 클리어(StartupClear) 완료를
+    /// 기다리는 상한(ms). "클리어 before push" 순서(계약 S3/CC3)를 보장하되, 소터가 끝내 Online이 안 되면
+    /// (오프라인 기동) 이 상한 경과 후 경고와 함께 부트스트랩을 진행한다(무한 대기 금지). 하드코딩 금지(절대규칙 #7).
+    /// 기본 5000ms(첫 폴+클리어 처리는 통상 폴 주기 수 배 이내 — 온라인 기동은 이 값보다 훨씬 빨리 완료).
+    /// </summary>
+    public int StartupClearWaitMs { get; init; } = 5000;
+
+    /// <summary>
     /// 소터 수용상태 전이 감지를 위한 스냅샷 관찰 주기(ms). 폐지된 목적지-상태 와이어 옵션에서 이전.
     /// 소터 분류 사이클(Ready 1↔0)·정렬 전이는 명시 이벤트가 없으므로 게이트웨이 폴링 스냅샷
     /// (bundle.Latest)을 이 주기로 diff해 수용상태 전이를 감지한다(게이트웨이 본문 무변경 — Latest
@@ -161,6 +268,19 @@ public sealed record ChuteStatePushOptions
     /// </summary>
     public int SorterObserveIntervalMs { get; init; } = 150;
 
-    /// <summary>BaseUrl이 설정되어 푸시가 활성인지(미설정=DORMANT).</summary>
-    public bool IsEnabled => !string.IsNullOrWhiteSpace(BaseUrl);
+    /// <summary>
+    /// 푸시 서브시스템이 활성인지 — 층 호스트가 하나라도 설정됐거나(신규) 레거시 BaseUrl이 설정됨.
+    /// 둘 다 미설정이면 서브시스템 전체 DORMANT(관찰/구독 미기동).
+    /// </summary>
+    public bool IsEnabled => HostByFloor.Count > 0 || !string.IsNullOrWhiteSpace(BaseUrl);
+
+    /// <summary>
+    /// 레거시 단일 호스트 모드인지 — 층 호스트 맵이 비어 있고 BaseUrl만 설정됨(하위호환).
+    /// 이 모드에선 모든 목적지가 층 무관하게 BaseUrl 한 곳으로 발신된다(구 동작 보존).
+    /// </summary>
+    public bool IsLegacySingleHost => HostByFloor.Count == 0 && !string.IsNullOrWhiteSpace(BaseUrl);
+
+    /// <summary>지정 층의 호스트(미설정이면 null=그 층 DORMANT). 층별 라우팅 진입점.</summary>
+    public string? HostForFloor(int floor) =>
+        HostByFloor.TryGetValue(floor, out var host) ? host : null;
 }

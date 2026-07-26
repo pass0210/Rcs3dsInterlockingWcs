@@ -53,8 +53,8 @@
   /* 다이어그램 카드 */
   .mer{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 16px;margin:8px 0 0;box-shadow:var(--sh-sm);}
   .mer pre.mermaid{margin:0;text-align:left;min-height:30px;}
-  /* SVG를 폭에 맞춰 확대하지 않도록 자연 크기 강제 */
-  .mer svg{width:auto!important;max-width:none!important;height:auto!important;}
+  /* SVG가 카드 폭을 채우도록 반응형 확대(useMaxWidth:true와 연동) — 과도 확대 방지용 상한 */
+  .mer svg{width:100%!important;max-width:1480px!important;height:auto!important;display:block;margin:0 auto;}
   /* 폰트 강제(렌더 무시 대비) */
   .mer svg text,.mer svg .messageText{font-size:10px!important;}
   .mer svg .actor,.mer svg .actor tspan,.mer svg text.actor,.mer svg text.actor tspan{font-size:10.5px!important;font-weight:600;}
@@ -138,71 +138,77 @@
 
 const S = [
 { id:'U1', kind:'chute', title:'WCS ↔ RCS ↔ 3DS 통합 시퀀스',
-  desc:'실시간 연속 흐름: 인덕션·목적지 조회 → 투입 가부(층 비교) → 투입. 메시지 클릭 시 필드·PLC 워드·동작 팝업. ※ IF-01~04(작업 시작/종료 등) 제외 · IF-16은 IF-05로 통합 · 낙하 대기는 PLC N초 · 시간값은 임의 표준(현장 조정).',
+  desc:'실시간 연속 흐름: 인덕션·목적지 조회(inductionNo→층 F 파생·F층 정렬) → 상태 푸시(F층 호스트) → 도착 보고 → 투입. 메시지 클릭 시 필드·PLC 워드·동작 팝업. ※ 층 F는 인덕션 파생(2026-06-22 "운영 2층 고정" 폐지) · IF-01~04(작업 시작/종료 등) 제외 · IF-16은 IF-05로 통합 · 낙하 대기는 PLC N초 · 시간값은 임의 표준(현장 조정).',
   mer:`sequenceDiagram
     autonumber
     participant SCN as 인덕션
     participant RCS as RCS
     participant WCS as WCS
     participant SRT as 3DS
-    Note over SCN,WCS: ① 인덕션 · 목적지 조회
+    Note over WCS,RCS: ⓪ 프로그램 시작 — 부트스트랩 (층별 호스트 설정 시)
+    Note over WCS,SRT: (재시작 복구) WCS가 자신이 쓴 레지스터 C·R·TgtFloor=0 클리어 (D4 bit0·1 RMW·Ready 보존) — 부트스트랩보다 먼저
+    WCS->>RCS: 전 목적지 상태 1회 발신 (각 층 호스트 · UpdateChuteState)
+    RCS-->>WCS: OK (부트스트랩 수신)
+    Note over SCN,WCS: ① 인덕션 · 목적지 조회 (IF-05)
     SCN->>RCS: 스캔 (qty)
     opt 판독 실패
         SCN->>RCS: NO_READ (재스캔/리젝트)
     end
     RCS->>WCS: IF-05 인덕션 투입 + 목적지 조회
+    Note over WCS,SRT: inductionNo→층 F 파생 · 소터별 FIFO 큐 enqueue · 큐 머리 층을 TgtFloor==0일 때 기입, 완료 시 다음
+    WCS->>SRT: Ready·CurFloor 읽기 (D4.2 · D5)
+    SRT-->>WCS: Ready·CurFloor 회신
+    opt CurFloor≠F/분류 중 → F층 정렬 (TgtFloor==0일 때)
+        WCS->>SRT: TgtFloor=F 쓰기 (D6)
+    end
     alt 정상 / BUSY(일시적) → 그 목적지로
         WCS-->>RCS: OK·chuteNo (BUSY 포함)
-        RCS->>RCS: AGV를 chuteNo(목적지)로 이동
+        RCS->>RCS: AGV 출발 (미수용이면 파킹존 우회)
     else NG → AGV 대기
         WCS-->>RCS: NG
     end
-    Note over RCS,WCS: ② 도착 보고 (IF-09)
+    Note over RCS,WCS: ② 목적지 상태 알림 (F층 호스트로 WCS→RCS 푸시)
+    WCS->>RCS: IF-08 상태 (next_state 3/2 · F층 호스트)
+    RCS-->>WCS: OK
+    Note over RCS: 미수용이면 AGV는 파킹존 대기 · 열림(3) 수신 시 목적지로 이동(이미 열림이면 직행)
+    Note over RCS,WCS: ③ 도착 보고 (IF-09 · 층 필드 없음)
     RCS->>WCS: IF-09 도착 보고 (chuteNo · agvNo)
     WCS-->>RCS: OK (도착 접수)
-    Note over WCS,SRT: WCS가 3DS를 2층(고정)으로 정렬 + 상태 감시
-    WCS->>SRT: Ready·CurFloor 읽기 (D4.2 · D5)
-    SRT-->>WCS: Ready·CurFloor 회신
-    opt CurFloor≠2/분류 중 → 2층 정렬
-        WCS->>SRT: TgtFloor 쓰기 (D6, 0일 때)
-    end
-    Note over RCS,WCS: ③ 목적지 상태 알림 (상태 변경 시 WCS→RCS 푸시)
-    WCS->>RCS: IF-08 상태 (단일 ready · OK/NG)
-    RCS-->>WCS: OK
-    Note over RCS: 자기 AGV 층이 ready일 때 투입 (아니면 다음 푸시 대기)
-    Note over RCS,SRT: ③ 투입 (슈트/3D 구분 없음)
+    Note over RCS,SRT: ④ 투입 (슈트/3D 구분 없음)
     RCS->>WCS: IF-10 투입 보고
     WCS-->>RCS: OK·접수
     WCS->>SRT: IF-11 셀 지정 — C_Flag=0 확인 후 C·C_Flag=1
     SRT->>SRT: C 값 읽음 → C 초기화 (C_Flag=0)
+    Note over WCS,SRT: 셀로 분류 출발(Ready 1→0) — PLC가 TgtFloor=0 클리어(WCS 아님) → 소터 큐 머리 dequeue·다음 피스 층 기입 대상
     SRT->>SRT: 셀 적재 → R_Flag=0 확인 후 R·R_Flag=1
     loop R_Flag=1 (100ms · 분류 완료까지)
         WCS->>SRT: R_Flag 읽기
         SRT-->>WCS: R_Flag 회신
     end
-    WCS->>SRT: R 값 읽음 → R 초기화 (R_Flag=0)
-    Note over WCS,SRT: 분류 후 복귀
-    SRT->>SRT: TgtFloor 층으로 복귀 → 도착 후 CurFloor 기입 (D5)`,
+    WCS->>SRT: R 값 읽음·R_Seq 대사·틸트 시각 기록 (클리어는 Ready==1일 때)
+    Note over WCS,SRT: 분류 완료 → 복귀 · Ready==1(복귀 완료) 시 WCS가 R 클리어+returnedAt 기록
+    WCS->>SRT: Ready==1 시 R 영역 클리어(returnedAt 기록) · TgtFloor==0 관측 시 큐 대기 층 기입 → 소터 복귀 → 도착 시 CurFloor 기입 (큐 비면 대기)`,
   det:[
     {t:'바코드 스캔 (qty)', res:[['barcode','상품 바코드'],['qty','트레이 적재 수량 (같은 상품 여러 개 가능)']], why:'인덕션 스캐너가 트레이 상품을 스캔. 한 트레이에 같은 상품 여러 개(qty)를 싣고 한 번에 전량 틸트.'},
     {t:'NO_READ (판독 실패)', res:[['결과','NO_READ (미판독)']], why:'스캐너가 못 읽음 → RCS 내부에서 재스캔 또는 리젝트. IF-05 대상이 아니다.'},
-    {t:'IF-05 인덕션 투입 + 목적지 조회', req:[['pId','피스 고유값 (1~30000)'],['agvNo','로봇 번호'],['barcode','바코드'],['inductionNo','인덕션 No'],['qty','적재 수량'],['timeStamp','시각']], res:[['→','정상·일시적막힘 / NG 분기']], why:'시점이 같아 IF-16(인덕션 투입 기록)을 IF-05로 통합 — 한 번 호출로 라인 투입 기록(추적 시작)과 목적지·수량 판정을 처리한다. WCS가 목적지(chuteNo)를 정하고 인덕션 시점에 예약 차감. 투입 기록은 응답이 NG여도 남는다. BUSY(분류 중·이동 중)는 일시적이라 그 목적지를 그대로 배정하나, FULL·PAUSED는 NG(가부 조회 폐지로 받을 수 없는 곳은 배정 안 함).'},
-    {t:'OK · chuteNo (그 목적지로 진행)', res:[['result','OK'],['chuteNo','목적지 번호'],['예약','전량 수용 · 차감'],['내부 사유(미전송)','NORMAL / BUSY(일시적) — piece_event 기록']], why:'전량이 한 곳(chuteNo)에 들어가고 NORMAL 또는 BUSY면 그 목적지로 진행. BUSY(분류 중·이동 중)는 곧 풀리는 일시적 상태라 그대로 보낸다 — 도착(IF-09) 후 그 층이 ready가 되면(IF-08) 투입. FULL·PAUSED는 받을 수 없어 NG(아래 분기).'},
+    {t:'IF-05 인덕션 투입 + 목적지 조회', req:[['pId','피스 고유값 (1~30000)'],['agvNo','로봇 번호'],['barcode','바코드'],['inductionNo','인덕션 No'],['qty','적재 수량'],['timeStamp','시각']], res:[['→','정상·일시적막힘 / NG 분기']], why:'시점이 같아 IF-16(인덕션 투입 기록)을 IF-05로 통합 — 한 번 호출로 라인 투입 기록(추적 시작)과 목적지·수량 판정을 처리한다. WCS가 목적지(chuteNo)를 정하고 인덕션 시점에 예약 차감. 투입 기록은 응답이 NG여도 남는다. BUSY(분류 중·이동 중)는 일시적이라 그 목적지를 그대로 배정하나, FULL·PAUSED는 NG(가부 조회 폐지로 받을 수 없는 곳은 배정 안 함). ★ 이 시점에 WCS가 요청 inductionNo로 목표 층 F(1/2)를 파생(InductionFloorMap)하고, 소터 목적지면 그 피스를 소터별 pending-floor FIFO 큐에 enqueue한다. TgtFloor는 IF-05 순간이 아니라 큐 머리 피스 층을 게이트 통과 시 기입 → 타겟층을 순서대로. 과거 "IF-09 도착 트리거 + 항상 2"는 폐지(2026-07-21).'},
+    {t:'OK · chuteNo (그 목적지로 진행)', res:[['result','OK'],['chuteNo','목적지 번호'],['예약','전량 수용 · 차감'],['내부 사유(미전송)','NORMAL / BUSY(일시적) — piece_event 기록']], why:'전량이 한 곳(chuteNo)에 들어가고 NORMAL 또는 BUSY면 그 목적지로 진행. BUSY(분류 중·이동 중)는 곧 풀리는 일시적 상태라 그대로 보낸다 — 그 목적지가 IF-08 상태에서 열림(3)이 되면 투입(도착 IF-09 후 틸트). FULL·PAUSED는 받을 수 없어 NG(아래 분기).'},
     {t:'NG · AGV 대기 (보낼 수 없음)', res:[['result','NG'],['내부 사유(미전송)','FULL / PAUSED / OVER / COMPLETED / NO_DEST / OFFLINE — piece_event 기록']], why:'받을 수 없거나 보낼 곳 없으면 NG → AGV 대기. FULL=만재 · PAUSED=일시정지(둘 다 가부 조회 폐지로 IF-05에서 막음) · OVER=전량이 한 곳에 안 들어감 · COMPLETED=수량 충족 · NO_DEST=미등록 · OFFLINE=3D 끊김. ※ BUSY(분류·이동 중)만 NG가 아니라 그 목적지로 보냄(위 분기).'},
-    {t:'Ready·CurFloor 읽기 (WCS의 3DS 상태 감시)', req:[['읽기','Ready (D4.2 비트) · CurFloor (D5) — FC03']], res:[['Ready','1=받을 수 있음(정지) / 0=분류 중·이동 중'],['CurFloor','현재 층']], why:'WCS가 3DS PLC 상태(Ready=D4.2 · CurFloor=D5)를 읽어 변화를 감지하고, 단일 ready(소터가 2층 정렬·정지·수용 가능한가)와 full/paused/online을 산출해 RCS로 푸시한다(IF-08). 층은 WCS 내부 판단이고 RCS엔 ready만 전달.'},
-    {t:'TgtFloor 쓰기 — 2층(고정)으로 정렬', req:[['TgtFloor','2 (D6 · FC06 · WCS write · TgtFloor==0일 때)']], res:[['—','3DS가 2층으로 이동 → 도착 후 CurFloor=2 기입']], why:'도착 보고(IF-09)를 받은 WCS가 3DS를 2층(운영 고정층)으로 정렬한다 — TgtFloor에 항상 2를 쓴다. TgtFloor==0일 때만 쓰고(핑퐁 차단), CurFloor≠2면 이동·분류 중이면 분류 후 2층 복귀. 분류 시작 시 PLC가 0으로 클리어. ※ 메커니즘은 다층 가능하나 운영 2층 고정.'},
-    {t:'IF-08 목적지 상태 알림 (WCS → RCS 푸시)', req:[['chuteNo','목적지 번호 (키 · 슈트/소터 공통)'],['ready','수용 가능 OK/NG (단일 boolean)'],['timeStamp','시각']], res:[['result','OK (RCS 수신 응답)']], why:'WCS가 목적지 상태를 변경 시마다 RCS로 푸시한다(주기 전송 아님). 키는 chuteNo — 일반 슈트와 3D 소터 슈트를 같은 인터페이스로 알린다. 페이로드는 단일 ready 하나. ready 산출: 일반 슈트=!full && !paused(WCS가 만재/정지 관리), 소터 슈트=online·!full·!paused·Ready=1·CurFloor=2. RCS는 chuteNo별 최신 ready를 보유하고 true일 때 투입, 아니면 대기 — 만재·정지 슈트엔 틸트하지 않는다. 기존 가부 조회(RCS 폴링)는 폐지.'},
-    {t:'IF-10 투입 보고 (슈트/3D 공통)', req:[['pId','피스 고유값'],['barcode','바코드'],['chuteNo','목적지 번호'],['agvNo','로봇 번호']], res:[['OK','접수']], why:'슈트/3D를 구분하지 않고 동일하게 투입을 보고한다. 전량을 목적지(chuteNo)에 한 번에 틸트. 보고 후 WCS가 셀을 지정(IF-11).'},
+    {t:'Ready·CurFloor 읽기 (WCS의 3DS 상태 감시)', req:[['읽기','Ready (D4.2 비트) · CurFloor (D5) — FC03']], res:[['Ready','1=받을 수 있음(정지) / 0=분류 중·이동 중'],['CurFloor','현재 정렬된 층 (그 층에서만 수용)']], why:'WCS가 3DS PLC 상태(Ready=D4.2 · CurFloor=D5)를 읽어 변화를 감지하고, 층 F 수용 상태(online·!full·!paused·Ready=1·CurFloor==F)와 full/paused/online을 산출해 RCS로 푸시한다(IF-08, F층 호스트). 소터 한 대가 정렬로 두 층을 겸하므로 CurFloor 층에서만 수용 — 어느 순간이든 최대 한 층에만 ready.'},
+    {t:'TgtFloor 쓰기 — 인덕션 파생 층 F로 정렬', req:[['TgtFloor','F (D6 · FC06 · WCS write · TgtFloor==0일 때)']], res:[['—','3DS가 F층으로 이동 → 도착 후 CurFloor=F 기입']], why:'WCS는 소터별 pending-floor FIFO 큐의 머리 피스 층 F를 TgtFloor에 쓴다(상수 2 아님) — TgtFloor==0일 때만(핑퐁 차단). 층 F는 IF-05 inductionNo→InductionFloorMap 파생. CurFloor≠F면 이동·분류 중이면 분류 후 F층 복귀. 머리 완료로 TgtFloor 클리어 시 dequeue 후 다음 피스 층 기입(순서대로). FULL/PAUSED/OFFLINE이면 쓰지 않음. 분류 시작 시 PLC가 0으로 클리어. dequeue 트리거 세부는 코드 스프린트 확정. ※ 2026-06-22 "운영 2층 고정" 폐지 — 층은 인덕션 파생(2026-07-21).'},
+    {t:'IF-08 목적지 상태 알림 (WCS → RCS 푸시 · UpdateChuteState)', req:[['엔드포인트','PUT {층별 호스트}/api/UpdateChuteState — 1층 192.168.0.151:3000 · 2층 192.168.0.152:3000'],['chute_numbers','목적지 번호[] (snake_case)'],['next_states','3=받을 수 있음 / 2=받을 수 없음 []']], res:[['flag','1 = 처리 성공'],['result[].status','0=닫힘 / 1=열림 (반영된 슈트 상태)'],['result[].msg','메시지 (현재 빈 문자열)'],['result[].chute_id','슈트 ID (요청 chute_numbers 대응)'],['result[].last_changed','갱신 시각 (ms epoch)']], why:'WCS가 목적지 상태를 변경 시마다 RCS로 푸시한다(주기 전송 아님). 상태가 바뀐 목적지의 층으로 라우팅 — 층별 호스트로 next_state를 보낸다(층은 페이로드에 없음). next_state 산출: 일반 슈트=!full && !paused(WCS가 만재/정지 관리)면 3, 소터 슈트=online·!full·!paused·Ready=1·CurFloor==F면 F층 호스트에 3, 다른 층 호스트엔 사실상 2(그 층엔 지금 서비스 안 함). 셀 만재는 push에 반영 안 함(IF-05 dispatch에서 차단). RCS는 목적지별 최신 상태를 보유하고 3일 때 투입, 아니면 대기. 기존 가부 조회(RCS 폴링)는 폐지.'},
+    {t:'IF-10 투입 보고 (슈트/3D 공통)', req:[['pId','피스 고유값'],['barcode','바코드'],['chuteNo','목적지 번호'],['agvNo','로봇 번호']], res:[['OK','접수']], why:'슈트/3D를 구분하지 않고 동일하게 투입을 보고한다. 전량을 목적지(chuteNo)에 한 번에 틸트. 보고 후 WCS가 셀을 지정(IF-11). 이 시점이 depositedAt(3DS 투입 시각)로 sorter_command에 기록된다 — 처리시각 3종(depositedAt→tiltedAt→returnedAt)의 첫 시각.'},
     {t:'IF-11 셀 지정 (영역 C)', req:[['C_CellNo','D0 · 지정할 셀 번호 (WCS write)'],['C_Seq','D1 · 명령 순번 (유실/중복 검출용, 매 건 증가)'],['C_Flag','D4.0 (워드 D4 비트0) · WCS가 1로 set']], res:[['—','PLC가 C_Flag=1 보고 C 값을 읽음']], why:'쓰기 전 C_Flag=0을 확인한다 — PLC가 아직 안 읽은 명령을 덮어쓰지 않도록. C_Flag=0이면 C_CellNo·C_Seq를 쓰고 C_Flag=1로 올린다. PLC는 값을 읽어도 N초 지연 후 분류/이동한다.'},
     {t:'C 값 읽음 → C 초기화 (PLC가 클리어)', res:[['PLC가 읽음','C_CellNo · C_Seq'],['클리어','C_CellNo · C_Seq · C_Flag = 0']], why:'PLC가 C_Flag=1을 보고 셀 지정 값을 읽은 직후, C 값들을 C_Flag와 함께 0으로 초기화한다 — "읽은 쪽이 0" 핸드셰이크.'},
     {t:'셀 적재 → R 쓰고 R_Flag=1 (영역 R)', res:[['R_CellNo','D2 · 실제 적재한 셀 (PLC write)'],['R_Seq','D3 · 처리한 순번 (= 받은 C_Seq)'],['R_Flag','D4.1 · PLC가 1로 set = "적재 완료"']], why:'PLC도 쓰기 전 R_Flag=0을 확인한다. R_Flag=0이면 적재 결과를 R 영역에 쓰고 R_Flag=1로 통지한다. 분류를 시작하는 순간 3DS는 Ready=0이 되며, 이때 PLC가 TgtFloor=0을 클리어한다(도착 즉시가 아니라 분류 시작 시).'},
     {t:'R_Flag 폴링 (완료 대기)', req:[['읽기','R_Flag (D4.1, 워드 D4 · FC03)']], res:[['R_Flag','0 또는 1']], why:'R_Flag를 100ms 간격으로 폴링한다. 분류(틸트) 소요시간은 가변적이고 5초를 넘을 수 있으므로 타임아웃은 분류 최대 소요 + 여유로 설정(현장 확정). R_Flag=1이면 적재 완료.'},
-    {t:'R 값 읽음 → R 초기화 (WCS가 클리어)', req:[['읽기','R_CellNo · R_Seq (FC03)'],['클리어','R_CellNo · R_Seq · R_Flag = 0 (WCS write)']], why:'R_Flag=1이면 WCS가 R_CellNo·R_Seq를 읽고(R_Seq가 보낸 C_Seq와 같은지 대사), 곧바로 R 값들을 R_Flag와 함께 0으로 초기화한다.'},
-    {t:'분류 후 복귀 — TgtFloor 층으로 이동 · CurFloor 기입', res:[['TgtFloor','D6 · 복귀할 층'],['CurFloor','D5 · 도착 후 PLC가 그 층을 기입']], why:'3DS가 분류를 마치고 TgtFloor(D6)에 층이 써 있으면 그 층으로 이동하고, 도착하면 CurFloor(D5)에 기입(TgtFloor 유지). TgtFloor는 분류 시작 시 0으로 클리어. 이 CurFloor 변화가 다음 상태 푸시(IF-08)에 반영된다.'},
-    {t:'AGV를 chuteNo(목적지)로 이동', res:[['chuteNo','IF-05에서 응답받은 목적지 번호']], why:'IF-05에서 OK·chuteNo를 받으면 RCS가 AGV를 그 목적지로 이동시킨다 — 슈트/3D 공통. 도착하면 도착 보고(IF-09)를 보내고, 소터가 ready가 되면(IF-08) 투입한다.'},
-    {t:'IF-09 도착 보고 (RCS → WCS)', req:[['pId','피스 고유값'],['chuteNo','목적지 번호'],['agvNo','로봇 번호'],['timeStamp','시각']], res:[['result','OK (도착 접수)']], why:'AGV가 목적지 슈트에 도착하면 RCS가 1회 보고. WCS는 이걸 받아 3DS를 2층(운영 고정층)으로 정렬한다(TgtFloor=2, ==0일 때). 이후 소터가 ready가 되면 IF-08 상태 푸시로 알리고 RCS가 투입. RCS는 층을 모르고 ready만 받는다. 슈트 전용(3D 아님)이면 WCS는 도착만 기록.'}
+    {t:'R 값 읽음·대사·틸트 시각 기록 (클리어는 Ready==1)', req:[['읽기','R_CellNo · R_Seq (FC03)'],['기록','tiltedAt = R_Flag==1 관측 시각'],['클리어','R_CellNo · R_Seq · R_Flag = 0 — 단 Ready==1(복귀 완료) 시점(다음 단계)']], why:'R_Flag=1이면 WCS가 R_CellNo·R_Seq를 읽고 R_Seq==C_Seq 대사 + 틸트 시각(tiltedAt)을 기록한다. 단 R을 즉시 클리어하지 않고 Ready==1(복귀 완료) 시점에 클리어하며 returnedAt을 기록한다 — 분류 시작~복귀 완료 소요 계측. R_Flag==1 관측 시 이미 Ready==1이면 즉시 클리어. (3시각: depositedAt=IF-10·tiltedAt=R_Flag=1·returnedAt=Ready 0→1, sorter_command 신규 컬럼.)'},
+    {t:'분류 완료 → 복귀 · R 클리어(Ready==1)', res:[['R 클리어','Ready==1(복귀 완료) 시 R_CellNo·R_Seq·R_Flag=0 + returnedAt 기록'],['TgtFloor','D6 · TgtFloor==0 관측 시 큐 대기 층 기입(게이트)'],['CurFloor','D5 · 복귀 도착 후 PLC가 기입 (분류 중엔 불변)']], why:'복귀 완료(Ready 0→1) 시점에 WCS가 (R_Flag=1에서 읽어 둔) R 영역을 클리어하고 returnedAt(복귀 시각)을 기록한다 — 분류 시작~복귀 완료 소요 계측(3시각: depositedAt=IF-10·tiltedAt=R_Flag=1·returnedAt=Ready 0→1, sorter_command 신규 컬럼). 다음 층: WCS는 TgtFloor==0을 계속 관측(기존 DepositDecider 게이트 write=TgtFloor==0?floor:null)하다 분류 시작 시 PLC가 TgtFloor=0으로 클리어하면(WCS는 절대 클리어 안 함 — 절대규칙 #3) 소터 큐에 대기 중인 층을 즉시 쓴다 → 소터가 그 층으로 복귀(옛 2층 고정 자동복귀 아님, 큐가 공급) → 도착 시 PLC가 CurFloor 기입. 큐가 비면 미기입·현 CurFloor에서 idle. 이 CurFloor 변화가 다음 IF-08 상태 푸시에 반영된다.'},
+    {t:'AGV 출발 → (미수용 시) 파킹존 우회', res:[['chuteNo','IF-05에서 응답받은 목적지 번호']], why:'IF-05에서 OK·chuteNo를 받으면 RCS가 AGV를 목적지로 출발시킨다 — 슈트/3D 공통. 목적지가 아직 미수용(BUSY·타 층 정렬·FULL·PAUSED·미개방)이면 목적지에서 대기하지 않고 파킹존으로 우회한다. WCS가 그 층 목적지에 IF-08 next_state=3(열림)을 푸시하면 RCS가 주차 AGV를 목적지로 보내고 → 도착 보고(IF-09) → 투입(IF-10). 도착 시 이미 열려 있으면 파킹 없이 직행.'},
+    {t:'IF-09 도착 보고 (RCS → WCS · 층 필드 없음)', req:[['pId','피스 고유값'],['chuteNo','목적지 번호'],['agvNo','로봇 번호'],['timeStamp','시각']], res:[['result','OK (도착 접수)']], why:'AGV가 목적지 슈트에 도착하면 RCS가 1회 보고. WCS는 도착만 기록한다 — 층 필드는 없다(층은 IF-05 인덕션에서 이미 확정). 3DS 정렬(TgtFloor=F)과 IF-08 상태 푸시는 IF-05 시점에 이미 수행됐다(과거 "IF-09가 정렬을 트리거" 폐지 — 2026-07-21). 슈트 전용(3D 아님)이든 소터든 IF-09는 도착 기록만. ★ AGV는 미수용 시 파킹존에서 대기하다가 그 층 목적지 열림(IF-08 next_state=3) 수신 후 이동하므로, 미개방 목적지에선 IF-08 열림 푸시가 이 도착보고보다 먼저다(이미 열려 있으면 직행).',},
+    {t:'⓪ 부트스트랩 — 전 목적지 상태 1회 발신 (프로그램 시작)', req:[['엔드포인트','PUT {각 목적지 층 호스트}/api/UpdateChuteState'],['chute_numbers / next_states','각 목적지 현재 수용 상태 (3/2)']], res:[['flag','1 = 처리 성공'],['result[].status','0=닫힘 / 1=열림'],['result[].msg','메시지 (현재 빈 문자열)'],['result[].chute_id','슈트 ID'],['result[].last_changed','갱신 시각 (ms epoch)']], why:'프로그램 시작 시(DestinationStatusPusher.StartAsync) 층별 RCS 호스트가 설정돼 있으면 WCS가 전 목적지의 현재 수용 상태를 1회 부트스트랩 푸시한다. 소터는 두 층 겸용이라 두 층 호스트 모두에 발신 — 현재 CurFloor 호스트=3(수용 시: online·!full·!paused·Ready=1) · 다른 층 호스트=2(CurFloor에서도 미수용이면 둘 다 2). 고정 슈트는 자기 층 호스트 1곳(!full && !paused면 3, 아니면 2). 이후로는 상태 전이 시에만 푸시(부트스트랩·전이 동일 규칙). RCS는 기동 직후 전 목적지 상태를 보유한다.'}
   ],
-  map:[0,1,2,3,15,4,16,16,5,5,6,7,7,8,8,9,10,11,12,12,13,14] }
+  map:[17,17,0,1,2,5,5,6,3,15,4,7,7,16,16,8,8,9,10,11,12,12,13,14] }
 ];
 
 /* ============ 렌더 ============ */
@@ -295,7 +301,7 @@ if(window.mermaid){
       noteBkgColor:'#FEF3C7', noteBorderColor:'#FCD34D', noteTextColor:'#92400E',
       activationBkgColor:'#D1FAE5', activationBorderColor:'#10B981', sequenceNumberColor:'#FFFFFF'
     },
-    sequence:{ useMaxWidth:false, wrap:false, diagramMarginX:8, diagramMarginY:1, actorMargin:170, boxMargin:11, boxTextMargin:5, noteMargin:1, messageMargin:6, mirrorActors:false, messageFontSize:10, actorFontSize:11, noteFontSize:9.5 }
+    sequence:{ useMaxWidth:true, wrap:true, diagramMarginX:16, diagramMarginY:14, actorMargin:170, boxMargin:11, boxTextMargin:5, noteMargin:1, messageMargin:6, mirrorActors:true, messageFontSize:10, actorFontSize:11, noteFontSize:9.5 }
   });
 }
 const popOv=document.getElementById('pop-ov'), popBody=document.getElementById('pop-body');

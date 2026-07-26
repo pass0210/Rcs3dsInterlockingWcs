@@ -19,6 +19,7 @@ namespace Wcs.Tests.E2E;
 // 고장주입은 실 SimServer(InjectRSeqOverride·InjectRFlagDelayMs·InjectNoResponse·StopAsync).
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class E2EGroupCD_AlignHandshakeTests
 {
     private readonly ITestOutputHelper _out;
@@ -341,5 +342,44 @@ public class E2EGroupCD_AlignHandshakeTests
             Assert.True(seqs[1] > seqs[0], $"C_Seq 단조 증가: {seqs[0]} → {seqs[1]}");
             _out.WriteLine($"[D9] C_Seq 단조 증가: {string.Join(",", seqs)}");
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // D11 (S-TWO-FLOOR-CONTROL C1): 성공 핸드셰이크 후 sorter_command에 처리 3시각이
+    //   depositedAt ≤ tiltedAt ≤ returnedAt 단조로 기록된다(전부 non-NULL). API(IF-10)·
+    //   PLC게이트웨이(핸드셰이크)·DB(sorter_command) 3레이어 관통 계측 왕복.
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task D11_ProcessingTimestamps_Monotonic_OnSuccess()
+    {
+        var (factory, rcs) = await StartAsync();
+        await using var _f = factory;
+        await using var _r = rcs;
+        var driver = MultiAgvDriver.ForFactory(factory);
+
+        await driver.RunSingleAsync(new AgvJob(25101, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo));
+        await E2EWait.UntilAsync(async () =>
+        {
+            using var db = factory.CreateDbScope();
+            return await db.SorterCommands.AnyAsync(c => c.Status == SorterCommandStatus.COMPLETED);
+        }, 8000, "COMPLETED");
+
+        using (var db = factory.CreateDbScope())
+        {
+            var cmd = await db.SorterCommands.FirstAsync(c => c.Status == SorterCommandStatus.COMPLETED);
+            _out.WriteLine($"[D11] deposited={cmd.DepositedAt:O} tilted={cmd.TiltedAt:O} returned={cmd.ReturnedAt:O}");
+
+            // 성공: 3시각 전부 non-NULL.
+            Assert.NotNull(cmd.DepositedAt);   // IF-10 투입 보고 시각.
+            Assert.NotNull(cmd.TiltedAt);      // R_Flag==1 관측(틸트).
+            Assert.NotNull(cmd.ReturnedAt);    // Ready 0→1(복귀 완료).
+
+            // 단조: depositedAt ≤ tiltedAt ≤ returnedAt.
+            Assert.True(cmd.DepositedAt <= cmd.TiltedAt,
+                $"depositedAt({cmd.DepositedAt:O}) ≤ tiltedAt({cmd.TiltedAt:O})");
+            Assert.True(cmd.TiltedAt <= cmd.ReturnedAt,
+                $"tiltedAt({cmd.TiltedAt:O}) ≤ returnedAt({cmd.ReturnedAt:O})");
+        }
+        _out.WriteLine("[D11] sorter_command 3시각 단조 기록(depositedAt ≤ tiltedAt ≤ returnedAt) 실증");
     }
 }

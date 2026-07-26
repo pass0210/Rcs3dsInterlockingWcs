@@ -72,6 +72,7 @@ internal static class SorterCellQty
         //    piece 중복 제거는 in-memory(셀별 from 차이 — 단일 WHERE 불가). minFrom 상수 비교는 provider-neutral.
         var cmds = db.SorterCommands
             .Where(sc => sc.Status == SorterCommandStatus.COMPLETED
+                      && sc.ArchivedAt == null   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 제외 — 이중 카운트 차단.
                       && sc.Cell.DestinationId == destinationId
                       && cellIds.Contains(sc.CellId)
                       && sc.CWrittenAt >= minFrom)

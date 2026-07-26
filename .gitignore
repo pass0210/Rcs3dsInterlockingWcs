@@ -22,8 +22,17 @@ backend/src/Wcs.Api/wwwroot/
 
 # 평가 산출물(스크린샷 증거 — 커밋 안 함)
 screenshots/
+portfolio-screenshots/
 tasks/evidence/
 .claude/
 
 # Playwright MCP 세션 잔여물
 .playwright-mcp/
+# MCP 설정 — 개발자별 로컬(커밋 안 함)
+.mcp.json
+
+# 협력사(비에텔) RCS API 문서 — 벤더 프로토콜 원본(RCS-WES) + 우리 요청서(RCS-WCS, 로컬 전용·커밋 안 함)
+docs/RCS-WES-API-KR.md
+docs/RCS-WCS-API-REQUEST-KR.md
+docs/RCS-WCS-API-REQUEST-KR.html
+docs/RCS-WCS-API-REQUEST-KR.pdf

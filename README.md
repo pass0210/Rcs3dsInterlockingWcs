@@ -16,8 +16,8 @@
   - `IF-09` `POST /api/v1/arrival-report` — AGV 도착 보고 → WCS가 3DS를 운영층으로 정렬
   - `IF-10` `POST /api/v1/deposit-report` — 틸트 완료 보고(멱등). 3D 목적지면 이후 IF-11 셀 지정 트리거
 - **WCS → RCS** (푸시)
-  - `IF-08` **목적지 상태 푸시** — WCS가 목적지 상태(ready) 변경 시 RCS로 푸시(키=chuteNo·단일 `ready`).
-    RCS는 `ready=true`면 투입, 아니면 대기. (구 RCS 폴링 `deposit-permission`은 폐지됨.)
+  - `IF-08` **목적지 상태 푸시(UpdateChuteState)** — WCS가 목적지 수용 상태 변경 시 RCS로 푸시(`PUT {RCS}/api/UpdateChuteState`, snake_case `{chute_numbers[], next_states[]}`, `next_state` 3=받을 수 있음 / 2=받을 수 없음).
+    RCS는 `3`이면 투입, `2`면 대기. (구 RCS 폴링 `deposit-permission`과 구 단일-`ready` `destination-status` 와이어는 모두 폐지 — UpdateChuteState 단일 채널로 통합.)
 - **WCS ↔ 3DS** (Modbus RTU/TCP — WCS가 마스터)
   - `IF-06` 상태 폴링(Ready·CurFloor 등 스냅샷)
   - `IF-11/12` 셀 지정·적재 완료 C/R 핸드셰이크, 층 제어(TgtFloor)

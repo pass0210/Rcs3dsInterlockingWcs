@@ -23,8 +23,10 @@ export function SortingSection() {
   }, [sorters, destId])
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
+    // 뷰포트 맞춤(S-UI-LAYOUT) — 소터 선택 바=shrink-0 크롬, 셀 현황/적재 이력 두 그리드가 가용 높이를
+    // flex-1 로 나눠 갖고(각자 min-h 하한으로 붕괴 방지) 본문만 스크롤한다. 다중 그리드 높이 배분 규칙.
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="flex shrink-0 items-center gap-2">
         <label className="text-[12px] text-faint">소터</label>
         <Select
           value={destId ?? ''}
@@ -53,8 +55,10 @@ function CellsCard({ destId }: { destId: number | null }) {
   const { data: cells, isLoading, isError, error } = useCells(destId)
 
   return (
-    <Card>
-      <CardHeader>
+    // 셀 현황 그리드 — 적재 이력과 가용 높이를 나눠 갖는다(flex-1) + 최소 높이 하한(min-h-[168px] on Card,
+    // min-h-0 on CardContent). 하한 미만이면 그리드 본문 대신 페이지(main)가 스크롤(폴백).
+    <Card className="flex min-h-[168px] flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>셀 현황</CardTitle>
         <div className="flex items-center gap-2">
           <Badge tone="online" dot>여유</Badge>
@@ -63,7 +67,7 @@ function CellsCard({ destId }: { destId: number | null }) {
           <Badge tone="neutral" dot>비활성</Badge>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="min-h-0 flex-1 overflow-auto">
         {(destId === null || isLoading) && <LoadingRow label="셀 현황 불러오는 중" />}
         {isError && <ErrorRow message={(error as Error)?.message ?? '셀 조회 실패'} />}
         {destId !== null && !isLoading && !isError && (cells?.length ?? 0) === 0 && (
@@ -145,11 +149,12 @@ function CommandsCard({ destId }: { destId: number | null }) {
   const items = data?.items ?? []
 
   return (
-    <Card>
-      <CardHeader>
+    // 적재 이력 그리드 — 셀 현황과 가용 높이를 나눠 갖는다(flex-1) + 최소 높이 하한. 헤더/페이저 고정, 본문만 스크롤.
+    <Card className="flex min-h-[168px] flex-1 flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle>적재 이력 · sorter_command</CardTitle>
       </CardHeader>
-      <CardContent className="p-0">
+      <CardContent className="min-h-0 flex-1 overflow-auto p-0">
         {(destId === null || isLoading) && <LoadingRow label="적재 이력 불러오는 중" />}
         {isError && <ErrorRow message={(error as Error)?.message ?? '조회 실패'} />}
         {destId !== null && !isLoading && !isError && items.length === 0 && (

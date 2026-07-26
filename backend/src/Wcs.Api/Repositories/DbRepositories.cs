@@ -148,7 +148,13 @@ public sealed class EfOrderRepository : IOrderRepository
             var block = availability(destId.Value, destApiType.Value);
             if (block != DestinationBlock.None)
             {
-                var blockReason = block == DestinationBlock.Full ? "FULL" : "PAUSED";
+                var blockReason = block switch
+                {
+                    DestinationBlock.Full     => "FULL",
+                    DestinationBlock.Paused   => "PAUSED",
+                    DestinationBlock.Unmapped => "NO_FLOOR",   // 미매핑 inductionNo(층 파생 불가) — fail-loud.
+                    _                         => "PAUSED",
+                };
                 RecordDenied(pId, agvNo, barcode, inductionNo, qty, blockReason,
                     clientTs, effective, item, dest);
                 return ("NG", null, blockReason, destApiType, null);
@@ -179,8 +185,8 @@ public sealed class EfOrderRepository : IOrderRepository
             item.ReservedQty += qty;
             item.UpdatedAt    = now;
 
-            // p_id 순환: 기존 활성 piece 비활성화
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive);
+            // p_id 순환: 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외 — 재테스트 시 옛 piece 오소비 차단)
+            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
             if (prevActive is not null)
             {
                 prevActive.IsActive  = false;
@@ -252,8 +258,8 @@ public sealed class EfOrderRepository : IOrderRepository
         {
             var now = DateTime.UtcNow;
 
-            // 기존 활성 piece 비활성화
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive);
+            // 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외)
+            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
             if (prevActive is not null)
             {
                 prevActive.IsActive  = false;
@@ -360,8 +366,9 @@ public sealed class EfArrivalRecorder : IArrivalRecorder
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
 
         // 활성 piece 조회 (IF-05에서 생성된 RESERVED/PERMITTED piece).
+        // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외 — 옛 piece에 도착 이벤트가 붙지 않게.
         var piece = _db.Pieces
-            .Where(p => p.PId == pId && p.IsActive)
+            .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
             .OrderByDescending(p => p.Id)
             .FirstOrDefault();
 
@@ -427,8 +434,9 @@ public sealed class EfDepositRecorder : IDepositRecorder
         using var tx = _db.Database.BeginTransaction();
         try
         {
+            // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외 — 옛 LOADED piece를 새 IF-10이 "중복"으로 오판하지 않게.
             var piece = _db.Pieces
-                .Where(p => p.PId == pId && p.IsActive)
+                .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
                 .OrderByDescending(p => p.Id)
                 .FirstOrDefault();
 
@@ -523,6 +531,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
         _db.Pieces.Any(p =>
             p.PId == pId &&
             p.IsActive &&
+            p.ArchivedAt == null &&   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
             (p.Status == PieceStatus.DEPOSITED ||
              p.Status == PieceStatus.CELL_ASSIGNED ||
              p.Status == PieceStatus.LOADED));
@@ -785,7 +794,7 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
         _db = db;
     }
 
-    public long CreateSent(long pieceId, long cellId, int cSeq, int cellNo)
+    public long CreateSent(long pieceId, long cellId, int cSeq, int cellNo, DateTime? depositedAt)
     {
         using var tx = _db.Database.BeginTransaction();
         try
@@ -793,16 +802,19 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
             var now = DateTime.UtcNow;
             var cmd = new SorterCommand
             {
-                PieceId    = pieceId,
-                CellId     = cellId,
-                CSeq       = cSeq,
-                CellNo     = cellNo,
-                CWrittenAt = now,
-                RSeq       = null,
-                RCellNo    = null,
-                RFlagAt    = null,
-                Status     = SorterCommandStatus.SENT,
-                CreatedAt  = now,
+                PieceId     = pieceId,
+                CellId      = cellId,
+                CSeq        = cSeq,
+                CellNo      = cellNo,
+                CWrittenAt  = now,
+                RSeq        = null,
+                RCellNo     = null,
+                // C1 처리 3시각: 투입(IF-10 보고 시각)은 행 생성 시 유입, 틸트·복귀는 Finalize(HandshakeResult).
+                DepositedAt = depositedAt,
+                TiltedAt    = null,
+                ReturnedAt  = null,
+                Status      = SorterCommandStatus.SENT,
+                CreatedAt   = now,
             };
             _db.SorterCommands.Add(cmd);
             _db.SaveChanges();
@@ -838,11 +850,15 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
                     HandshakeOutcome.CFlagTimeout => SorterCommandStatus.TIMEOUT,  // CFLAG_TIMEOUT → TIMEOUT 저장, alarm code로 구분
                     _                             => SorterCommandStatus.TIMEOUT,
                 };
+                // C1 처리 3시각: tiltedAt(R_Flag==1 관측)·returnedAt(Ready 0→1)은 HandshakeResult에서 유입.
+                //   tiltedAt = 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL(result가 규칙대로 담아 옴).
+                //   returnedAt = 성공(복귀 관측)만 non-NULL / 복귀 타임아웃·그 외 NULL.
+                cmd.TiltedAt   = result.TiltedAt;
+                cmd.ReturnedAt = result.ReturnedAt;
                 if (result.Outcome == HandshakeOutcome.Success)
                 {
                     cmd.RSeq    = result.ReceivedRSeq;
                     cmd.RCellNo = result.ReceivedRCellNo;
-                    cmd.RFlagAt = now;
                 }
             }
 

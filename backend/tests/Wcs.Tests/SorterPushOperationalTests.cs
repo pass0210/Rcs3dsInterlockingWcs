@@ -36,6 +36,11 @@ namespace Wcs.Tests;
 //        (b)만재 전이는 발신 0(제외)·paused 전이는 발신 1(next_state 2) — 대비
 // ════════════════════════════════════════════════════════════════════════════
 
+// [Collection("RealSimSerial")] — push-결정성(정확 push 카운트) 테스트를 무거운 실-Sim 테스트와
+//   동일 직렬 컬렉션에 편입해 병렬 CPU 경합 지터로 인한 카운트 초과 flake를 제거(S-TWO-FLOOR-CONTROL A
+//   flake-fix — Evaluator FAIL 귀속: VS9a 카운트 레이스. 실-Sim TCP 미사용이나 pusher 관찰 타이머 하
+//   정확-카운트 단언이 부하에 취약 → 직렬화가 근본 제거).
+[Collection("RealSimSerial")]
 public class SorterPushOperationalTests
 {
     private readonly ITestOutputHelper _out;
@@ -162,12 +167,13 @@ public class SorterPushOperationalTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // VS-2: 소터 busy → push ready=false. (a)Ready==0 (b)CurFloor≠운영층(미정렬)
+    // VS-2: 소터 busy(Ready==0 — 분류 중·이동 중) → push ready=false.
+    //   인덕션 기반 2층 제어(2026-07-21): ready는 **CurFloor 기준**(현재 정렬된 층에서 수용 가능한가)
+    //   이므로 "미정렬(CurFloor≠2)" 사례는 더 이상 not-ready가 아니다(그 층에서 ready) — 삭제.
+    //   유일한 운영상태 not-ready 사유는 Ready==0(busy) 또는 offline(VS-3).
     // ════════════════════════════════════════════════════════════════════════
-    [Theory]
-    [InlineData("ready0")]    // (a) Ready==0(분류 중·이동 중)
-    [InlineData("misalign")]  // (b) CurFloor≠운영층(미정렬)
-    public async Task VS2_Sorter_Busy_PushReadyFalse(string mode)
+    [Fact]
+    public async Task VS2_Sorter_Busy_Ready0_PushReadyFalse()
     {
         await using var rcs     = await FakeChuteStateServer.StartAsync();
         await using var factory = new RcsPushWebApplicationFactory(rcs.BaseUrl);
@@ -177,29 +183,21 @@ public class SorterPushOperationalTests
         int  sorterChute = factory.SorterChuteNo;
         var  status      = factory.Services.GetRequiredService<IDestinationStatusService>();
 
-        // 먼저 정렬해 ready=true로 만든 뒤 busy 전이를 일으켜야 push 전이(true→false)가 관찰됨.
+        // 먼저 정렬해 ready=true로 만든 뒤 busy(Ready==0) 전이를 일으켜야 push 전이(true→false)가 관찰됨.
         await AlignSorterAsync(factory);
         await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 6000, "정렬 후 ready=true");
 
-        if (mode == "ready0")
-        {
-            factory.FakeMaster.SetReady(false);  // 분류 중·이동 중
-            await WaitForSnapshotAsync(factory, s => s.Online && !s.Ready, 5000);
-        }
-        else
-        {
-            factory.FakeMaster.SetCurFloor(1);   // 미정렬(운영층 2 아님)
-            await WaitForSnapshotAsync(factory, s => s.Online && s.CurFloor == 1, 5000);
-        }
+        factory.FakeMaster.SetReady(false);  // 분류 중·이동 중
+        await WaitForSnapshotAsync(factory, s => s.Online && !s.Ready, 5000);
 
         await WaitUntilAsync(() => !status.Compute(sorterId, DestType.SORTER_3D).Ready, 5000, "busy → 산출 ready=false");
         var r = status.Compute(sorterId, DestType.SORTER_3D);
         Assert.False(r.Ready);
-        Assert.Equal(mode == "ready0" ? DenyReason.Busy : DenyReason.NotAligned, r.Reason);
+        Assert.Equal(DenyReason.Busy, r.Reason);
 
         await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: false }, 5000, "busy → push ready=false 수신");
         Assert.False(rcs.LastFor(sorterChute)!.Ready);
-        _out.WriteLine($"[VS-2/{mode}] busy → push ready=false (reason={r.Reason})");
+        _out.WriteLine($"[VS-2] busy(Ready==0) → push ready=false (reason={r.Reason})");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -398,13 +396,16 @@ public class SorterPushOperationalTests
         int sorterChute = factory.SorterChuteNo;
         var pusher = factory.Services.GetRequiredService<DestinationStatusPusher>();
 
-        // 부트스트랩 정착(미정렬 → ready=false 1건).
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 1, 8000, "부트스트랩 소터 수신");
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 1, stableCount: 6, timeoutMs: 4000, "부트스트랩 안정");
-        Assert.False(rcs.LastFor(sorterChute)!.Ready);
-
-        // 운영상태 전이(미정렬→정렬, ready false→true) 유발.
+        // 먼저 소터 운영상태 ready=true로 정착(CurFloor 기준 — online·Ready=1이면 ready).
+        // 부트스트랩은 offline→online 전이로 push 수가 1~2 사이일 수 있어 정확 수를 가정하지 않고
+        // "ready=true 정착 후 baseline 캡처" 방식으로 견고화(관측 루프 안정 대기).
         await AlignSorterAsync(factory);
+        await WaitUntilAsync(() => rcs.LastFor(sorterChute) is { Ready: true }, 8000, "소터 ready=true 정착");
+        int baseline = rcs.CountFor(sorterChute);
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseline, stableCount: 6, timeoutMs: 4000, "ready=true 안정");
+
+        // 운영상태 전이(Ready 1→0 — 분류/이동 시작 = busy) 유발.
+        factory.FakeMaster.SetReady(false);
 
         // 같은 전이를 N스레드가 동시에 관찰(NotifyChuteChanged = 슈트 콜백 경로지만 소터 destId도 Observe로 수렴).
         const int concurrency = 16;
@@ -416,13 +417,13 @@ public class SorterPushOperationalTests
         })).ToArray();
         await Task.WhenAll(tasks);
 
-        // 전이는 1회(false→true)뿐 — 부트스트랩 1 + 전이 1 = 정확히 2건. 동시 관찰에도 중복 0.
-        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= 2, 5000, "운영상태 전이 1건 도달");
-        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), 2, stableCount: 8, timeoutMs: 5000,
+        // 전이는 1회(true→false)뿐 — baseline + 전이 1 = 정확히 baseline+1. 동시 관찰에도 중복 0.
+        await WaitUntilAsync(() => rcs.CountFor(sorterChute) >= baseline + 1, 5000, "운영상태 전이 1건 도달");
+        await WaitUntilExactAsync(() => rcs.CountFor(sorterChute), baseline + 1, stableCount: 8, timeoutMs: 5000,
             "동시 16관찰에도 운영상태 전이당 정확히 1건(중복 0)");
-        Assert.Equal(2, rcs.CountFor(sorterChute));
-        Assert.True(rcs.LastFor(sorterChute)!.Ready);
-        _out.WriteLine($"[VS-9a] 동시 {concurrency}관찰 → 운영상태 전이당 1건(총 {rcs.CountFor(sorterChute)}건=부트1+전이1)");
+        Assert.Equal(baseline + 1, rcs.CountFor(sorterChute));
+        Assert.False(rcs.LastFor(sorterChute)!.Ready);
+        _out.WriteLine($"[VS-9a] 동시 {concurrency}관찰 → 운영상태 전이당 1건(baseline {baseline}+전이1=총 {rcs.CountFor(sorterChute)}건)");
     }
 
     // ════════════════════════════════════════════════════════════════════════

@@ -49,6 +49,15 @@ export function useSorters() {
   })
 }
 
+// 전 목적지 열거(설비 관리 페이지). refetchInterval 인자로 폴링 여부 제어(false=수동).
+export function useDestinations(refetchInterval: number | false = POLL_MS) {
+  return useQuery({
+    queryKey: ['destinations'],
+    queryFn: () => api.destinations(),
+    refetchInterval,
+  })
+}
+
 export function useCells(destId: number | null) {
   return useQuery({
     queryKey: ['cells', destId],

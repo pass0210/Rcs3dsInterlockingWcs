@@ -315,6 +315,11 @@ public sealed class Piece
     public DateTime  CreatedAt  { get; set; }
     public DateTime  UpdatedAt  { get; set; }
 
+    // S-B2C-DATAGEN(OQ1=B 아카이브): 재테스트 초기화(reset) 소프트삭제 타임스탬프. NULL=활성.
+    //   ★ 모든 활성 조회 경로(IF-05/09/10 dedup·셀 currentQty·SorterFull·모니터·집계)는 archived_at==null
+    //     행만 읽는다(아카이브 행 누출 = 재테스트 시 이중 카운트 → HIGHEST-STAKES 회귀). 하드삭제 금지.
+    public DateTime? ArchivedAt { get; set; }
+
     [Timestamp]
     public byte[]? RowVersion { get; set; }
     public int XminRowVersion { get; set; }
@@ -340,6 +345,9 @@ public sealed class PieceEvent
     public string?        ClientTs    { get; set; }  // RCS 원문 timeStamp (varchar NULL)
     public DateTime       At          { get; set; }  // UTC, 선두 인덱스
 
+    // S-B2C-DATAGEN(OQ1=B): reset 소프트삭제 타임스탬프. NULL=활성. 부모 piece와 함께 아카이브된다.
+    public DateTime? ArchivedAt { get; set; }
+
     // 네비게이션
     public Piece Piece { get; set; } = null!;
 }
@@ -355,10 +363,25 @@ public sealed class SorterCommand
     public DateTime           CWrittenAt  { get; set; }
     public int?               RSeq        { get; set; }  // NULL=미수신
     public int?               RCellNo     { get; set; }
-    public DateTime?          RFlagAt     { get; set; }
+
+    // ── S-TWO-FLOOR-CONTROL C1: 처리 3시각(투입→틸트→복귀 소요 계측 — SPEC §4·ERD sorter_command) ──
+    //   컬럼명 = 프로퍼티명(PascalCase, B2C 규약 — HasColumnName 미사용). NULL 규칙:
+    //     · DepositedAt = 3DS 투입(IF-10 보고) 시각. 행 생성 시 유입 → 항상 non-NULL.
+    //     · TiltedAt    = 셀 틸트(R_Flag==1 관측) 시각. 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL.
+    //                     (구 RFlagAt 개명 — 의미 확장: "Success만"→"R_Flag==1 관측 시 항상". RenameColumn 보존.)
+    //     · ReturnedAt  = 복귀 완료(Ready 0→1) 시각. 성공(복귀 관측)만 non-NULL / 그 외 NULL.
+    //   단조: DepositedAt ≤ TiltedAt ≤ ReturnedAt.
+    public DateTime?          DepositedAt { get; set; }
+    public DateTime?          TiltedAt    { get; set; }
+    public DateTime?          ReturnedAt  { get; set; }
     public SorterCommandStatus Status     { get; set; }
 
     public DateTime CreatedAt { get; set; }
+
+    // S-B2C-DATAGEN(OQ1=B): reset 소프트삭제 타임스탬프. NULL=활성. 부모 piece와 함께 아카이브된다.
+    //   ★ 셀 currentQty(SorterCellQty.LoadedQtyByCell) = COMPLETED sorter_command JOIN piece 이므로
+    //     아카이브 행이 새면 재테스트 셀 적재량이 이중 카운트된다 → 활성 조회는 archived_at==null만.
+    public DateTime? ArchivedAt { get; set; }
 
     // 네비게이션
     public Piece Piece { get; set; } = null!;

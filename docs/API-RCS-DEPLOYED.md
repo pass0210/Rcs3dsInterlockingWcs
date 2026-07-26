@@ -52,7 +52,7 @@ Called once per piece at the induction scan. WCS records the piece and decides t
 | `pId` | int (1–30000) | ✔ | Piece ID (per AGV tray) |
 | `agvNo` | int | ✔ | AGV number (for records/audit) |
 | `barcode` | string (≤200) | ✔ | Product barcode → order matching key |
-| `inductionNo` | int | ✔ | Induction number |
+| `inductionNo` | int | ✔ | Induction number (used to **decide the target floor 1/2** for a 3D-sorter destination) |
 | `qty` | int (≥1) | ✔ | Quantity (full-tilt basis — source of truth) |
 | `timeStamp` | string (≤30) | ✔ | `"yyyy-MM-dd HH:mm:ss"` |
 
@@ -70,10 +70,16 @@ curl -X POST http://20.24.10.147:5205/api/v1/destination-query \
 - Decision summary: a **plain chute** returns OK even when full/paused (send and wait). A **3D sorter**
   returns NG when `PAUSED`, NG (FULL) when it cannot receive by cell, and OK when BUSY (sorting/moving —
   still move the AGV). Full table: spec HTML §6.
+- **Per-sorter ordering · AGV parking (RCS side)**: sorter-destination pieces are received in
+  **induction order (FIFO)** — WCS aligns the sorter to each piece's floor (1/2) in turn, and once the
+  aligned floor is open (IF-08 `3`) that piece is deposited. **If not yet receivable, the AGV waits in a
+  parking zone (not at the destination)** and moves to the destination on the IF-08 `3` (open) push
+  (directly if already open) — so for a not-yet-open destination the open push precedes arrival.
 
 ### 2-2. IF-09 Arrival Report — `POST /api/v1/arrival-report`
 Called once when the AGV reaches the destination chute, right before depositing. WCS records the
-arrival and, for a 3D sorter, **aligns it to the operating floor (floor 2)**.
+arrival. **No floor field** — a 3D sorter's floor alignment was already done at IF-05 (the floor is
+derived from `inductionNo`).
 
 **Request**
 | Field | Type | Required | Description |
@@ -92,8 +98,8 @@ curl -X POST http://20.24.10.147:5205/api/v1/arrival-report \
 ```json
 {"result":"OK"}
 ```
-- For a sorter, this call makes it move to floor 2 → `ready` in `/api/monitor/sorters` transitions
-  `false→true` (observable).
+- A sorter's floor alignment starts at IF-05; once aligned, `ready` in `/api/monitor/sorters`
+  transitions `false→true` (observable).
 - A non-existent/inactive `chuteNo` still returns 200 (arrival recorded, alignment skipped) — no 500.
 
 ### 2-3. IF-10 Deposit Report — `POST /api/v1/deposit-report`
@@ -127,10 +133,10 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 ## 3. Deposit flow (one piece cycle)
 
 ```
-[IF-05] destination-query  → {result:OK, chuteNo}       (destination/qty decision, piece recorded)
-   ↓ AGV travels to the chute
-[IF-09] arrival-report      → {result:OK}                (arrival recorded + 3D sorter aligned to floor 2)
-   ↓ sorter ready transition (reaches the operating floor)
+[IF-05] destination-query  → {result:OK, chuteNo}       (destination/qty decision, piece recorded · induction→floor F, sorter pre-aligned to F)
+   ↓ AGV travels to the chute (sorter ready once aligned to floor F)
+[IF-09] arrival-report      → {result:OK}                (arrival recorded · no floor field)
+   ↓
 [IF-10] deposit-report      → {result:OK}                (tilt report + Modbus handshake)
    ↓ inside WCS: cell assignment → C_Flag → R_Flag → command COMPLETED
    result: cell currentQty +qty, order sortedQty +qty
@@ -149,8 +155,8 @@ curl -X POST http://20.24.10.147:5205/api/v1/deposit-report \
 | `GET /api/monitor/sorter-commands?destId=&take=` | `{items:[{id,pId,barcode,cellNo,cSeq,rSeq,status,cWrittenAt,rFlagAt}],nextCursor}` |
 | `GET /api/monitor/operation-log?take=&category=` | `{items:[{id,at,category,action,level,barcode,pId,detail}],nextCursor}` — every API/PLC-write/handshake step recorded |
 
-- `sorters[].ready` = sorter operating readiness = `online && CurFloor==operating floor(2) && Ready==1`.
-  Right after boot it is `false` (floor 1); it turns `true` after IF-09 alignment.
+- `sorters[].ready` = sorter receiving readiness = `online && CurFloor==target floor F && Ready==1`
+  (F = induction-derived floor). It is `false` while not aligned to the target floor; `true` once aligned.
 - Monitoring UI (web): open `http://20.24.10.147:5205/` in a browser (served by WCS on the same port).
 
 ---
@@ -173,10 +179,11 @@ RCS-provided document [UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md)).
 
 | Item | Value |
 |---|---|
-| Wire | `PUT {RCS base}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| Wire | `PUT {per-floor RCS host}/api/UpdateChuteState` + `{chute_numbers[], next_states[]}` (**snake_case**) |
+| Per-floor host | Routed to the changed destination's **floor** — **floor 1** `http://192.168.0.151:3000` · **floor 2** `http://192.168.0.152:3000`. A sorter gets `3` on the host of its currently-aligned floor and `2` on the other floor's host |
 | Meaning | `next_state` = receivability flag: **3** (Manual open) = can receive · **2** (Pause) = cannot (sorting / moving / not aligned / offline / paused) |
-| Trigger | Only on an actual receivability transition (not periodic — a sorter may toggle 2↔3 every sorting cycle) |
-| Activation | Activated once **RCS provides its receiving base URL to WCS** (not provided yet → **inactive**) |
+| Trigger | Only on an actual receivability transition (not periodic — a sorter may toggle 2↔3 every sorting cycle). **On startup, every destination's current state is sent once** (a sorter to both floor hosts — current floor=`3` when receivable / other floor=`2`; a plain chute to its single host), then only on transition |
+| Activation | Activated once **RCS configures its per-floor receiving hosts with WCS** (not configured yet → **inactive**) |
 
 ---
 
@@ -186,7 +193,7 @@ RCS-provided document [UpdateChuteState_API_EN.md](UpdateChuteState_API_EN.md)).
 | Scenario | Result |
 |---|---|
 | IF-05 normal | `{result:OK, chuteNo:1}` |
-| IF-09 → floor-2 alignment | `{result:OK}` + sorter `ready:false→true` |
+| IF-09 arrival report | `{result:OK}` |
 | IF-10 → handshake | `{result:OK}` + command **COMPLETED** (cSeq1→rSeq1), cell 1 `currentQty 0→1`, order 1 `sortedQty 0→1` |
 | IF-05 validation failure (pId=0) | `400` |
 | IF-05 unknown barcode | `{result:NG, chuteNo:null}` (NO_DEST) |

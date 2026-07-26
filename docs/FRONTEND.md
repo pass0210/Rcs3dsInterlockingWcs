@@ -9,7 +9,7 @@
 물류 테스트라인 WCS의 운영·엔지니어링용 웹 콘솔. 세 축:
 
 1. **모니터링** — 작업데이터(배치/오더/오더아이템 진행), 로봇 이동중 데이터(in-flight piece), 분류 데이터(sorter_command 적재 결과·셀 현황).
-2. **3DS 워드값 확인/수정** — 실시간 D0~D6 레지스터 관찰 + 제한적 쓰기.
+2. **3DS 워드값 확인/수정** — 실시간 D0~D6 레지스터 관찰 + 제한적 쓰기 (운영 제어 `/ops`에 통합; `/sorters`는 운영 로그 테일로 개편).
 3. **운영자 제어** — 슈트 비움(clear), destination PAUSED/RESUMED, 워드 조작.
 
 **사용자 확정 전제(재론 없음)**: 스택 = React + TypeScript + Vite SPA. 사용 환경 = 사내망 소수 사용자(엔지니어·관리자), 데스크톱 위주.
@@ -137,7 +137,7 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 | `GET /api/monitor/sorters` | 소터 목록 + 현재 스냅샷(Latest) + readiness | `ISorterGatewayRegistry` + `DestinationStatusService` |
 | `GET /api/monitor/sorters/{destId}/cells` | 셀 현황(cell_no·capacity·현재 적재 qty·배정 오더·점유여부) | `cell`·`cell_assignment`·`SorterCellQty`(재사용) |
 | `GET /api/monitor/sorter-commands?destId=&take=` | 적재 결과 이력(c_seq/r_seq·status) | `sorter_command` |
-| `GET /api/monitor/destinations` | 슈트/소터 상태(full/paused/online·work_full_qty·last_cleared_at) | `destination`·`chute_detail`·`DestinationStatusService` |
+| `GET /api/monitor/destinations` | **구현(S-B2C-FACILITY)** — 전 목적지(CHUTE+SORTER_3D) 열거: id·chuteNo·destType·floor·status·isActive + readiness(online/ready/full/paused) + CHUTE work_full_qty/last_cleared_at + SORTER_3D cellTotal/cellEnabled | `destination`·`chute_detail`·`cell`·`DestinationStatusService` |
 | `GET /api/monitor/operation-log?category=&level=&from=&to=&sorterChuteNo=&take=&cursor=` | operation_log 조회(시계열·커서 페이징) | `operation_log`(선두 인덱스 `at` 활용) |
 | `GET /api/monitor/alarms?acked=` | 알람 목록 | `alarm` |
 
@@ -158,6 +158,10 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 **자동 감사(무료)**: 위 큐 쓰기는 컨슈머 `EmitWrite`가 `OnWrite`를 발화 → 이미 operation_log `PLC_WRITE`(`SET_TGTFLOOR`/`CELL_ASSIGN`/`CLEAR_R`/`RMW_D4`)로 **자동 기록**된다(SorterRegistryFactory 구독). 즉 워드 쓰기 감사는 기존 결선을 그대로 탄다. operator_id 귀속은 OpsController가 요청 시 별도 `API`/`OPS` 로그 1행을 남겨 보완(3.4).
 
 ### 3.3 OpsController — 운영자 조작
+
+> **프론트 결선 완료(S-B2C-FACILITY)**: 슈트 clear(O1) + pause/resume(O2/O3)이 **설비 관리 페이지(`/b2c/facility`)** 에 결선됨.
+> `GET /api/monitor/destinations` 로 슈트 destId 를 열거해 목록 행별 제어(clear/pause/resume·활성화)를 확인 다이얼로그 + 작업자 이름으로 수행.
+> `ops.ts` 에 `clearChute(destId, op)` 추가(기존 pause/resume 은 destId 로 CHUTE 에도 동작). 소터 제어(O2~O6)는 `/ops` 페이지(OpsControls) 유지.
 
 | 엔드포인트 | 결선 | 감사 |
 |---|---|---|
@@ -211,6 +215,45 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
 
 전역: 좌측 내비 + 상단 상태바(소터 Online/Offline·알람 배지·연결 상태). antd `Layout`. `ConfigProvider locale=ko_KR`. 넓은 다열 밀집 레이아웃.
 
+### ★ 랜딩 정책 (S-B2C-GRID-UX R1, 2026-07-15)
+- **B2C 첫 착지 = 데이터 생성(`/b2c/test-data`)**. `homePathFor('b2c')` 가 반환하는 단일 소스(`frontend/src/lib/uiMode.ts`)를
+  `/monitor` → `/b2c/test-data` 로 변경 — App.tsx `ModeHome`(`/`·미매칭 `*` 리다이렉트)·Layout `ModeToggle`(b2b→b2c 전환) 3경로가
+  이 한 곳으로 정합. "생성 → 설비" 관리 흐름의 시작점과 첫 착지 일치(S-B2C-UX Evaluator Minor #1 해소). **B2B 는 `/data-generator` 불변.**
+
+### ★ 공용 그리드 상호작용 프리미티브 (S-B2C-GRID-UX R2/R3/R4, 2026-07-15)
+- 모든 체크박스 그리드(B2C 3 + B2B 2)가 **단일 훅 + 단일 컨텍스트 메뉴 프리미티브**를 공유(그리드별 중복 로직 0):
+  - `frontend/src/lib/useRowSelection.ts` — 드래그 **범위 하이라이트**(연속 행·id-키) + 우클릭 **4액션**(①전체 선택 ②전체 해제 ③선택행 체크 ④선택행 해제)을
+    그리드가 소유한 체크 `Set` 에 **브리지**(체크 모델 재작성 0). DOM 기반(`data-rsid`·`data-rseligible`)이라 지연 로딩 행(소터 셀)도 자동 포함.
+  - `frontend/src/components/ui/context-menu.tsx` — 위치 지정 팝오버(portal·뷰포트 클램프·키보드 role=menu/menuitem·Escape·포커스 관리 — Dialog 규약 정합).
+- **하이라이트 ≠ 체크**: 드래그는 하이라이트(시각 표시)만, 메뉴 ③④가 하이라이트 행에·①②가 전체 행에 체크를 적용. **자격(eligibility) 존중** — ①③은 개별 체크박스 비활성 조건과 동일하게 비활성 행을 체크하지 않음.
+- **공존**: 좌클릭 이동 임계(4px)로 클릭↔드래그 판별 + 좌/우 버튼 분리 → G1 행 클릭(디테일 로드)·G2 소터 행 펼침·개별 체크박스 토글 무손상. 드래그였으면 뒤따르는 click 을 캡처 단계에서 삼켜 기존 onClick 오발화 차단.
+- **OQ**: OQ-1 로드(렌더)된 행만(가상화 없음·truncation 배너가 캡 고지) · OQ-2 드래그 중 텍스트선택 억제 + 스크롤 추종(엣지 자동스크롤 없음) · OQ-3 그리드 본문 컨테이너 내부에서만 네이티브 우클릭 대체 · OQ-4 id-키 하이라이트(행 add/remove 를 MutationObserver 로 prune · 라우트/스코프/필터 변경 시 resetKey 전체 리셋).
+- 상세 계약: `docs/B2C-DATAGEN.md`·`docs/B2C-FACILITY.md`.
+
+### ★ 뷰포트 맞춤 레이아웃 패턴 (S-UI-LAYOUT, 2026-07-15)
+모든 데이터-그리드 페이지가 **데이터량과 무관하게 뷰포트 안에 딱 맞고**, 넘치는 데이터는 페이지가 아니라
+**그리드 본문 안에서만** 스크롤되도록 단일 flex 패턴으로 통일했다(이전의 무제한 증가 / `max-h-[Npx]` 고정 /
+`calc(100vh-Npx)` 매직값 3종 혼재를 대체).
+
+- **높이 컨텍스트**: `Layout.tsx` 의 `<main>` = `flex min-h-0 flex-1 flex-col overflow-auto p-5` — 사이드바·상단
+  헤더 밖의 가시영역에 바운드된 높이를 자식 페이지에 제공한다. `overflow-auto` 는 **폴백 전용**: 페이지가 flex 로
+  정확히 채우면 스크롤이 없고, 매우 작은 뷰포트에서 내부 min-height 하한 합이 가용 높이를 넘을 때만 페이지가 스크롤.
+- **페이지 규칙**: 각 페이지 루트 = `flex min-h-0 flex-1 flex-col`. 그 안에서
+  - 비스크롤 크롬(제목/툴바/탭바/필터/상태 배지/액션) = `shrink-0`,
+  - 그리드/스크롤 본문(대개 `CardContent`) = `flex-1 min-h-0 overflow-auto`.
+  - 카드 래퍼는 `flex min-h-0 flex-col`(그리드 본문이 스크롤하려면 부모 카드가 flex 컨텍스트여야 함).
+- **다중 그리드 높이 배분**: 형제 그리드는 각자 `flex-1` 로 가용 높이를 나눠 갖고, **min-height 하한**(예 카드에
+  `min-h-[168~260px]`)으로 0 붕괴를 방지한다. 탭 컨테이너(Tabs)도 `flex-1 min-h-0 flex-col` + `TabsContent` = `mt-0 flex-1 min-h-0`.
+  - 마스터-디테일(B2cDataGen: 상단 폼+마스터 / 하단 상세): 상·하 각 `flex-1` + 상단 그리드행 `xl:grid-rows-1`.
+  - 2열 마스터-디테일(Boxes·b2b DataGenerator): grid 컨테이너 `flex-1 min-h-0 xl:grid-rows-1` 로 단일 행을 1fr 로 늘려
+    카드가 같은 행 높이를 공유(생성 폼은 `self-start` 자연 높이 유지).
+  - 3단+2패널(B2cFacility): 작업자 바(chrome) + 목적지 카드(flex-1) + 오더 할당 카드(flex-1, 내부 2패널 각
+    `flex-1 min-h-0 overflow-auto`). 하한 합이 뷰포트를 넘는 극소 화면에서만 페이지가 스크롤(어느 영역도 미붕괴).
+- **sticky thead**: `ui/table.tsx` 의 래퍼 div 에서 `overflow-x-auto` 를 제거했다. 그 값은 CSS 명세상 `overflow-y`
+  까지 `auto` 로 승격시켜 래퍼를 별도(세로 미스크롤) 스크롤 컨테이너로 만들어 sticky thead 가 상위 스크롤을 못 따라갔다.
+  이제 **감싸는 단일 스크롤 컨테이너(CardContent 등)가 가로·세로를 모두 담당**하고 thead 가 거기에 정확히 고정된다.
+  페이지 바디 가로 스크롤은 발생하지 않는다(가로는 그리드 스크롤 컨테이너 내부에서만).
+
 ### 페이지 ① 모니터링 대시보드 (`/monitor`)
 
 - **A. 작업 데이터**: work_batch 선택 → 오더 테이블. 컬럼: order_no·type·destination(chuteNo)·status·planned/reserved/sorted(진행 바). 행 확장 → order_item(barcode·planned/reserved/sorted). 갱신 2~5s 폴링 + API/HANDSHAKE 이벤트 무효화. 필터: 배치·상태.
@@ -220,12 +263,20 @@ backend/src/Wcs.Api/wwwroot/  ← frontend/dist 복사본(정적 서빙 대상, 
   - sorter_command 이력: piece·cell·c_seq·r_seq·status(SENT/COMPLETED/MISMATCH/TIMEOUT)·시각. 핸드셰이크 이벤트 무효화.
 - 상호작용: 행 클릭 → 상세 drawer(연관 piece_event·operation_log 발췌).
 
-### 페이지 ② 3DS 워드 + 제어 (`/sorters/:destId` 또는 탭)
+### 페이지 ② 운영 로그 (`/sorters`) — ★ S-UI-LAYOUT 재정의(2026-07-15)
+> **개명·역할 재정의**: 이 페이지의 NAV 라벨·헤더가 `3DS 워드`(D0~D6 레지스터 관찰) → **`운영 로그`**(operation_log
+> 실시간 테일)로 바뀌었다. 근거: 3DS 레지스터 워드 패널(`WordPanel`)이 `/sorters` 와 `/ops` **두 곳에 문자 그대로 중복**
+> 렌더돼 있었고, `/ops`(운영 제어)는 이미 편집 전 근거로 같은 패널을 표시한다. 중복을 제거해 **레지스터 값 표시는
+> `/ops` 단일 인스턴스로 일원화**했다(`useMonitorState` 단일 구독 — `useHubLifecycle`(Layout)이 앱 수명 동안 SignalR
+> 연결 유지, WordPanel 삭제가 스트림에 무영향). `WordPanel` 의 destId 만 구동하던 소터 `Select` 도 고아라 함께 제거.
+> 라우트 `/sorters` 는 **유지**(operation_log 테일이 앱에서 유일하게 사는 곳이라 페이지 제거 금지).
 
-- **레지스터 패널(실시간)**: D0 C_CellNo·D1 C_Seq·D2 R_CellNo·D3 R_Seq·D4 비트(C_Flag·R_Flag·Ready)·D5 CurFloor·D6 TgtFloor·Online. SignalR 스트림(2.1). **변경값 하이라이트(깜빡임)**, 각 값에 마지막 변경 시각. Descriptions/Statistic로 표현.
-- **워드 편집(3.2)**: SetTgtFloor(현재 TgtFloor·≠0 경고 표시), Clear-R(진단), Cell-Assign(관리자), (옵션)Raw write. 각 컨트롤은 확인 모달 + 현재값 + 규칙 위반 경고.
-- **운영자 제어(3.3)**: 이 목적지 Pause/Resume 토글, 슈트면 Clear 버튼. 확인 + operator 표시.
-- **operation_log 라이브 테일(2.2)**: 하단 패널. category/level 필터. 자동 스크롤 토글. `POLL_CHANGE` 기본 접힘(옵트인).
+- **operation_log 라이브 테일(2.2)**: 이 페이지의 주 콘텐츠(전역·소터 비종속). category/level 필터·`POLL_CHANGE`
+  옵트인·자동 스크롤·500행 캡·REST 백로그+SignalR append. 뷰포트 맞춤 패턴상 필터 헤더=고정 크롬, 로그 본문만 스크롤.
+- **ConnBadge**: SignalR 연결 상태(라이브 스트림 근거).
+
+> 레지스터 관찰·워드 편집·운영자 제어는 **페이지 ③ 운영 제어(`/ops`)** 로 이관·통합됨(아래·3.2/3.3). `/ops` 가
+> `WordPanel`(레지스터 실시간 뷰) + `OpsControls`(SetTgtFloor·Clear-R·Cell-Assign·Pause/Resume)를 담는 유일 표면.
 
 ### (옵션) 관제 요약 (`/`)
 소터별 상태 카드(Online·CurFloor·TgtFloor·Ready·full/paused) + 미확인 알람 카운트 + 최근 operation_log. F2 이후 여유 시.

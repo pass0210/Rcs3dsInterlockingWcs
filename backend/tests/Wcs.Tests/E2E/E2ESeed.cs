@@ -67,7 +67,7 @@ public static class E2ESeed
         db.SorterCommands.Add(new SorterCommand
         {
             PieceId = piece.Id, CellId = cell.Id, CSeq = 1, CellNo = cellNo, CWrittenAt = now,
-            RSeq = 1, RCellNo = cellNo, RFlagAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
+            RSeq = 1, RCellNo = cellNo, TiltedAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
         });
         db.SaveChanges();
     }

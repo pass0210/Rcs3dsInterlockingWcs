@@ -27,6 +27,7 @@ public interface IMonitoringQueries
     IReadOnlyList<OrderItemDto>      GetOrderItems(long orderId);
     PagedResult<InFlightPieceDto>    GetInFlightPieces(int take, long? cursor);
     IReadOnlyList<SorterStatusDto>   GetSorters();
+    IReadOnlyList<DestinationDto>    GetDestinations();
     IReadOnlyList<CellStatusDto>     GetCells(long destId);
     PagedResult<SorterCommandDto>    GetSorterCommands(long? destId, int take, long? cursor);
     PagedResult<OperationLogDto>     GetOperationLog(
@@ -138,6 +139,7 @@ public sealed class MonitoringQueries : IMonitoringQueries
     {
         var q = _db.Pieces.AsNoTracking()
             .Where(p => p.IsActive
+                     && p.ArchivedAt == null   // S-B2C-DATAGEN: 아카이브(재테스트 초기화) piece 제외.
                      && (p.Status == PieceStatus.QUERIED
                       || p.Status == PieceStatus.RESERVED
                       || p.Status == PieceStatus.PERMITTED));
@@ -188,6 +190,61 @@ public sealed class MonitoringQueries : IMonitoringQueries
             .ToList();
     }
 
+    // ── A2 destinations (전 목적지 열거 — 설비 관리 페이지·슈트 제어 destId 소스) ───
+    // 읽기 전용·부수효과 0. readiness 는 DestinationStatusService.Compute 재사용(새 판정 0).
+    //   · CHUTE: workFullQty/lastClearedAt(chute_detail) + Compute(GetHold 기반) full/paused/ready.
+    //   · SORTER_3D: cellTotal/cellEnabled(cell 집계) + Compute(ComputeSorter — 게이트웨이 스냅샷).
+    // chute_detail·cell 은 materialize 후 C#에서 조립(EF 번역 의존 0 — provider-agnostic).
+    public IReadOnlyList<DestinationDto> GetDestinations()
+    {
+        var dests = _db.Destinations.AsNoTracking()
+            .OrderBy(d => d.ChuteNo)
+            .Select(d => new { d.Id, d.ChuteNo, d.DestType, d.Floor, d.Status, d.IsActive })
+            .ToList();
+
+        // CHUTE chute_detail(workFullQty/lastClearedAt) — 한 번에 조회 후 맵.
+        var chuteDetails = _db.ChuteDetails.AsNoTracking()
+            .Select(cd => new { cd.DestinationId, cd.WorkFullQty, cd.LastClearedAt })
+            .ToList()
+            .ToDictionary(x => x.DestinationId, x => (x.WorkFullQty, x.LastClearedAt));
+
+        // SORTER_3D 셀 집계(total/enabled) — destination_id 별 그룹.
+        var sorterIds = dests.Where(d => d.DestType == DestType.SORTER_3D).Select(d => d.Id).ToHashSet();
+        var cellAgg = _db.Cells.AsNoTracking()
+            .Where(c => sorterIds.Contains(c.DestinationId))
+            .Select(c => new { c.DestinationId, c.Enabled })
+            .ToList()
+            .GroupBy(c => c.DestinationId)
+            .ToDictionary(g => g.Key, g => (Total: g.Count(), Enabled: g.Count(x => x.Enabled)));
+
+        var result = new List<DestinationDto>(dests.Count);
+        foreach (var d in dests)
+        {
+            var r = _status.Compute(d.Id, d.DestType);   // readiness 단일 산출(재사용).
+
+            int? workFullQty = null; DateTime? lastClearedAt = null;
+            int? cellTotal = null; int? cellEnabled = null;
+
+            if (d.DestType == DestType.CHUTE && chuteDetails.TryGetValue(d.Id, out var cd))
+            {
+                workFullQty   = cd.WorkFullQty;
+                lastClearedAt = cd.LastClearedAt;
+            }
+            else if (d.DestType == DestType.SORTER_3D)
+            {
+                var agg = cellAgg.GetValueOrDefault(d.Id, (Total: 0, Enabled: 0));
+                cellTotal   = agg.Total;
+                cellEnabled = agg.Enabled;
+            }
+
+            result.Add(new DestinationDto(
+                d.Id, d.ChuteNo, d.DestType.ToString(), d.Floor, d.Status.ToString(), d.IsActive,
+                r.Online, r.Ready, r.Full, r.Paused,
+                workFullQty, lastClearedAt, cellTotal, cellEnabled));
+        }
+        return result;
+    }
+
     // ── E6 cells (SorterCellQty 재사용 — currentQty byte-consistent) ─────────────
     public IReadOnlyList<CellStatusDto> GetCells(long destId)
     {
@@ -226,7 +283,8 @@ public sealed class MonitoringQueries : IMonitoringQueries
     // ── E7 sorter commands (키셋 커서 페이징) ──────────────────────────────────
     public PagedResult<SorterCommandDto> GetSorterCommands(long? destId, int take, long? cursor)
     {
-        var q = _db.SorterCommands.AsNoTracking().AsQueryable();
+        // S-B2C-DATAGEN: 아카이브(재테스트 초기화) sorter_command 제외.
+        var q = _db.SorterCommands.AsNoTracking().Where(sc => sc.ArchivedAt == null);
 
         if (destId.HasValue)
             q = q.Where(sc => sc.Cell.DestinationId == destId.Value);
@@ -247,7 +305,9 @@ public sealed class MonitoringQueries : IMonitoringQueries
                 sc.RSeq,
                 sc.Status,
                 sc.CWrittenAt,
-                sc.RFlagAt,
+                sc.DepositedAt,
+                sc.TiltedAt,
+                sc.ReturnedAt,
             })
             .ToList();
 
@@ -255,7 +315,7 @@ public sealed class MonitoringQueries : IMonitoringQueries
         var page = (hasMore ? rows.Take(take) : rows)
             .Select(sc => new SorterCommandDto(
                 sc.Id, sc.PId, sc.Barcode, sc.CellNo, sc.CSeq, sc.RSeq,
-                sc.Status.ToString(), sc.CWrittenAt, sc.RFlagAt))
+                sc.Status.ToString(), sc.CWrittenAt, sc.DepositedAt, sc.TiltedAt, sc.ReturnedAt))
             .ToList();
 
         long? next = hasMore && page.Count > 0 ? page[^1].Id : null;

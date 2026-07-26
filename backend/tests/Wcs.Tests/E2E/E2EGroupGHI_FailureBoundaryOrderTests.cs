@@ -19,6 +19,7 @@ namespace Wcs.Tests.E2E;
 //     현 동작 단언 + finding(추측 단언 금지).
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public class E2EGroupGHI_FailureBoundaryOrderTests
 {
     private readonly ITestOutputHelper _out;
@@ -88,28 +89,33 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
 
     // ════════════════════════════════════════════════════════════════════════
     // G3: busy→ready 투입 가능 전이. GT: Ready 0→1 전이 → push ready=true 1건. (기존 PUSH2_3 패턴.)
-    //   미정렬(층1·운영층2 불일치)로 시작 → push ready=false. IF-09 정렬로 CurFloor=2·Ready=1 → ready=true.
+    //   인덕션 기반 2층 제어(2026-07-21): ready는 CurFloor 기준(online·Ready=1) — "미정렬=not ready"가
+    //   폐지됐다. 운영상태 not-ready는 Ready==0(busy). Ready 0→1(분류 완료) 전이로 push ready=true 검증.
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
     public async Task G3_BusyToReady_Transition_PushReadyTrue()
     {
-        var (factory, rcs) = await StartAsync(initialCurFloor: 1);  // 미정렬 → push ready=false
+        var (factory, rcs) = await StartAsync(initialCurFloor: 2);  // online·Ready=1 → ready=true
         await using var _f = factory;
         await using var _r = rcs;
         int chute = factory.PrimarySorter.ChuteNo;
         long destId = factory.PrimarySorter.DestinationId;
-        using var client = factory.CreateClient();
 
-        await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= 1, 8000, "부트스트랩 push");
-        await E2EWait.UntilAsync(() => rcs.LastFor(chute)!.Ready == false, 4000, "미정렬 ready=false");
+        // 부트스트랩 ready=true 정착.
+        await E2EWait.UntilAsync(() => rcs.LastFor(chute) is { Ready: true }, 8000, "부트스트랩 ready=true");
+
+        // busy(Ready 1→0 = 분류/이동 시작) 전이 → push ready=false. 이 상태를 baseline으로.
+        factory.PrimarySorter.Sim.SetReady(false);
+        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { Online: true, Ready: false }, 5000, "Ready 1→0(busy)");
+        await E2EWait.UntilAsync(() => rcs.LastFor(chute)!.Ready == false, 5000, "busy → push ready=false");
         int baseline = rcs.CountFor(chute);
 
-        // IF-05 → IF-09 정렬 → CurFloor 1→2·Ready=1 → push ready=true 전이.
-        await MultiAgvDriver.RunOneAsync(client, new AgvJob(27001, 1, "TEST-BARCODE-3", chute, DoDeposit: false));
-        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CurFloor: 2, Ready: true }, 5000, "정렬 완료");
+        // busy→ready(Ready 0→1 = 분류 완료) 전이 → push ready=true 정확히 1건.
+        factory.PrimarySorter.Sim.SetReady(true);
+        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { Online: true, Ready: true }, 5000, "Ready 0→1(ready)");
         await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= baseline + 1 && rcs.LastFor(chute)!.Ready, 5000, "ready=true 전이");
         Assert.True(rcs.LastFor(chute)!.Ready);
-        _out.WriteLine("[G3] busy(미정렬)→ready(정렬) 전이 → push ready=true");
+        _out.WriteLine("[G3] busy(Ready==0)→ready(Ready==1) 전이 → push ready=true");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -158,32 +164,32 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
     [Fact]
     public async Task G6_RcsDown_Recovery_SorterAutoRepush_CurrentBehavior_ChuteAsymmetryFinding()
     {
-        var (factory, rcs) = await StartAsync(initialCurFloor: 1);  // 미정렬 → ready=false
+        var (factory, rcs) = await StartAsync(initialCurFloor: 2);  // online·Ready=1 → ready=true
         await using var _f = factory;
         await using var _r = rcs;
         int chute = factory.PrimarySorter.ChuteNo;
         long destId = factory.PrimarySorter.DestinationId;
-        using var client = factory.CreateClient();
 
-        await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= 1, 8000, "부트스트랩");
-        await E2EWait.UntilAsync(() => rcs.LastFor(chute)!.Ready == false, 4000, "미정렬 ready=false");
+        await E2EWait.UntilAsync(() => rcs.LastFor(chute) is { Ready: true }, 8000, "부트스트랩 ready=true");
         int baseline = rcs.CountFor(chute);
+        await E2EWait.UntilExactAsync(() => rcs.CountFor(chute), baseline, stableCount: 6, timeoutMs: 4000, "부트스트랩 안정");
 
         // RCS 거부 모드(다운 시뮬레이션).
         rcs.StartRejecting();
 
-        // 소터 정렬 전이 유발(IF-09) → ready=true 전이지만 거부 중이라 미도달.
-        await MultiAgvDriver.RunOneAsync(client, new AgvJob(27201, 1, "TEST-BARCODE-3", chute, DoDeposit: false));
-        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { CurFloor: 2, Ready: true }, 5000, "정렬 완료");
-        // 거부 중이므로 수신 카운트는 baseline 유지(미알림).
+        // 소터 운영상태 전이 유발(Ready 1→0 = busy) → ready=false 전이지만 거부 중이라 미도달(미알림).
+        // (인덕션 기반 2층 제어: ready는 CurFloor 기준 — 전이는 Ready 비트로 발생. 정렬은 readiness 무변.)
+        factory.PrimarySorter.Sim.SetReady(false);
+        await E2EWait.UntilAsync(() => factory.SorterSnapshot(destId) is { Online: true, Ready: false }, 5000, "Ready 1→0");
+        // 거부 중이므로 성공 delivery 카운트는 baseline 유지(미알림).
         await Task.Delay(400);
         Assert.Equal(baseline, rcs.CountFor(chute));
 
-        // RCS 복구 — 거부 해제. 소터 관찰 타이머가 매 주기 재평가 → Computed(true)≠Acked(false) → 재푸시.
+        // RCS 복구 — 거부 해제. 소터 관찰 타이머가 매 주기 재평가 → Computed(false)≠Acked(true) → 재푸시.
         rcs.StopRejecting();
-        await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= baseline + 1 && rcs.LastFor(chute)!.Ready, 6000,
-            "복구 후 소터 자동 재푸시(ready=true)");
-        Assert.True(rcs.LastFor(chute)!.Ready);
+        await E2EWait.UntilAsync(() => rcs.CountFor(chute) >= baseline + 1 && rcs.LastFor(chute)!.Ready == false, 6000,
+            "복구 후 소터 자동 재푸시(ready=false)");
+        Assert.False(rcs.LastFor(chute)!.Ready);
         _out.WriteLine("[G6 ⚠현동작] 소터: RCS 복구 시 관찰 타이머 자동 재푸시. 슈트: 다음 이벤트까지 stale(비대칭 — SPEC §7/TODO finding)");
     }
 
@@ -338,7 +344,7 @@ public class E2EGroupGHI_FailureBoundaryOrderTests
                 db.SorterCommands.Add(new SorterCommand
                 {
                     PieceId = piece.Id, CellId = cell.Id, CSeq = seq, CellNo = 1, CWrittenAt = now,
-                    RSeq = seq, RCellNo = 1, RFlagAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
+                    RSeq = seq, RCellNo = 1, TiltedAt = now, Status = SorterCommandStatus.COMPLETED, CreatedAt = now,
                 });
             await db.SaveChangesAsync();
         }

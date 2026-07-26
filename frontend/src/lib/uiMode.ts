@@ -98,6 +98,8 @@ export function saveUiModeState(state: UiModeState): void {
 }
 
 /** 모드별 기본 진입 경로 — 토글/리다이렉트 공용 단일 소스. */
+//   b2c → /b2c/test-data(데이터 생성): "생성 → 설비" 관리 흐름의 시작점과 첫 착지를 일치(S-B2C-GRID-UX R1).
+//   (S-B2C-UX Evaluator Minor #1 의 "/monitor 유지" 판단을 사용자 이견으로 뒤집음.) b2b 는 불변.
 export function homePathFor(mode: UiMode): string {
-  return mode === 'b2b' ? '/data-generator' : '/monitor'
+  return mode === 'b2b' ? '/data-generator' : '/b2c/test-data'
 }

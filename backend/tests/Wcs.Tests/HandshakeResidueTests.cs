@@ -25,6 +25,7 @@ namespace Wcs.Tests;
 //   S5 확인 타임아웃 종결     S6 진짜 무응답 타임아웃 회귀
 // ════════════════════════════════════════════════════════════════════════════
 
+[Collection("RealSimSerial")]
 public sealed class HandshakeResidueTests
 {
     private readonly ITestOutputHelper _out;
@@ -216,11 +217,12 @@ public sealed class HandshakeResidueTests
             InitialRFlag   = true,
         });
 
-        // 기동 reconcile ClearR로 R_Flag==0 도달.
-        await WaitUntilAsync(() => !h.Gw.Latest.RFlag, 3000, "기동 잔류 ClearR로 R_Flag==0 도달");
+        // 기동 콜드스타트 클리어(StartupClear)로 R_Flag==0 도달.
+        await WaitUntilAsync(() => !h.Gw.Latest.RFlag, 3000, "기동 잔류 StartupClear로 R_Flag==0 도달");
 
-        // 관측성(§2B/§2D): ClearR OnWrite(PLC_WRITE) 발화 + 잔류값(20/123)이 POLL_CHANGE 전이로 기록.
-        Assert.Contains(h.Writes, w => w.action == "CLEAR_R");
+        // 관측성(§2B/§2D · C2 §4-B): 기동 reconcile은 이제 StartupClear(C/R 영역·TgtFloor 포괄)로 나간다 —
+        // R 영역 reconcile을 포섭. STARTUP_CLEAR OnWrite(PLC_WRITE) 발화 + 잔류값(20/123)이 POLL_CHANGE 전이로 기록.
+        Assert.Contains(h.Writes, w => w.action == "STARTUP_CLEAR");
         Assert.Contains(h.RegChanges, c => c.reg == "R_CellNo" && c.oldV == FieldRCellNo && c.newV == 0);
         Assert.Contains(h.RegChanges, c => c.reg == "R_Seq" && c.oldV == FieldRSeq && c.newV == 0);
         Assert.Contains(h.RegChanges, c => c.reg == "R_Flag" && c.oldV == 1 && c.newV == 0);

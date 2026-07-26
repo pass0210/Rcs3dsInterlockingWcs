@@ -378,6 +378,13 @@ public class WcsDbContext : DbContext
              .IsUnique()
              .HasDatabaseName("UQ_order_item_order_barcode");
 
+            // S-HARDENING-1(감사 A-3): IF-05의 순수 Barcode 조회용 비유니크 인덱스.
+            //   IF-05는 매 호출 `i.Barcode == barcode`(OrderId 없음)로 목적지를 조회하는데,
+            //   위 UQ_order_item_order_barcode는 OrderId 선두라 순수 Barcode 조회에 못 쓴다(스캔).
+            //   (Barcode) 단독 인덱스로 seek 가능하게 한다. 기존 유니크와 공존·비파괴.
+            e.HasIndex(x => x.Barcode)
+             .HasDatabaseName("IX_order_item_barcode");
+
             e.Property(x => x.PlannedQty).IsRequired();
             e.Property(x => x.ReservedQty).IsRequired();
             e.Property(x => x.SortedQty).IsRequired();
@@ -431,6 +438,15 @@ public class WcsDbContext : DbContext
                  .HasDatabaseName("UQ_piece_pid_active_status");
             }
 
+            // S-HARDENING-1(감사 A-3): 핫패스 조회 (p_id, is_active) 비필터 복합 인덱스.
+            //   IF-09/IF-10 등이 매번 `PId == pId && IsActive`(Status 술어 없음)로 활성 piece를 찾는데,
+            //   위 필터드 유니크 UQ_piece_pid_active_status는 `Status IN (...)` 조건이 붙어 이 조회를
+            //   커버하지 못한다(영구 보존 테이블 풀스캔). 비필터 (PId, IsActive) 복합으로 seek 가능하게 한다.
+            //   기존 필터드 유니크(멱등 백스톱)와 공존·비파괴 — filter 없으므로 물리 컬럼명 207 함정 비해당,
+            //   양 provider 동일 형태.
+            e.HasIndex(x => new { x.PId, x.IsActive })
+             .HasDatabaseName("IX_piece_pid_active");
+
             // 보조 인덱스
             e.HasIndex(x => x.Status)
              .HasDatabaseName("IX_piece_status");
@@ -457,6 +473,9 @@ public class WcsDbContext : DbContext
             e.Property(x => x.ClientTs).HasMaxLength(30).IsRequired(false);
             e.Property(x => x.CreatedAt).IsRequired();
             e.Property(x => x.UpdatedAt).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(기존 컬럼·인덱스 무변경).
+            //   물리 컬럼명 = 프로퍼티명(PascalCase, B2C 규약 — HasColumnName 미사용).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             ConfigureConcurrency(e, x => x.RowVersion, x => x.XminRowVersion);
 
@@ -496,6 +515,8 @@ public class WcsDbContext : DbContext
             e.Property(x => x.PayloadJson).IsRequired(false);
             e.Property(x => x.ClientTs).HasMaxLength(30).IsRequired(false);
             e.Property(x => x.At).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(부모 piece와 함께 아카이브).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             // (at) 선두 인덱스 + (piece_id, at) 보조
             e.HasIndex(x => x.At).HasDatabaseName("IX_piece_event_at");
@@ -522,12 +543,18 @@ public class WcsDbContext : DbContext
             e.Property(x => x.CWrittenAt).IsRequired();
             e.Property(x => x.RSeq).IsRequired(false);
             e.Property(x => x.RCellNo).IsRequired(false);
-            e.Property(x => x.RFlagAt).IsRequired(false);
+            // S-TWO-FLOOR-CONTROL C1: 처리 3시각(add-only nullable, 컬럼명=프로퍼티명 PascalCase).
+            //   TiltedAt = 구 RFlagAt 개명(RenameColumn, 데이터 보존). DepositedAt·ReturnedAt 신설.
+            e.Property(x => x.DepositedAt).IsRequired(false);
+            e.Property(x => x.TiltedAt).IsRequired(false);
+            e.Property(x => x.ReturnedAt).IsRequired(false);
             e.Property(x => x.Status)
              .HasConversion<string>()
              .HasMaxLength(20)
              .IsRequired();
             e.Property(x => x.CreatedAt).IsRequired();
+            // S-B2C-DATAGEN: archived_at 소프트삭제 — add-only nullable(부모 piece와 함께 아카이브).
+            e.Property(x => x.ArchivedAt).IsRequired(false);
 
             // S-SQLSERVER-FK-CASCADE: sorter_command는 piece·cell 양쪽에서 수렴, 두 경로 모두
             // destination으로 거슬러 올라가 다중 캐스케이드 경로(1785, 대표 케이스

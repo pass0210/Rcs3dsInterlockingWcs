@@ -53,6 +53,12 @@ public sealed class SorterBundleHandle
     /// <summary>이 소터의 최신 PLC 스냅샷(논블로킹).</summary>
     public Wcs.Core.PlcSnapshot Latest => _polling.Latest;
 
+    /// <summary>
+    /// 콜드스타트 레지스터 클리어(StartupClear)가 이 소터 쓰기 큐 컨슈머에서 처리 완료되면 완료되는 Task(C2 S3).
+    /// IF-08 부트스트랩 push(DestinationStatusPusher)가 이 Task를 대기해 "클리어 before push" 순서를 보장한다.
+    /// </summary>
+    public Task StartupClearCompleted => _polling.StartupClearCompleted;
+
     /// <summary>TgtFloor 설정을 소터별 쓰기 큐에 투입(번들 전용 큐 — 절대규칙 #1 소터별 보존).</summary>
     public ValueTask EnqueueSetTgtFloorAsync(int floor, CancellationToken ct = default) =>
         _polling.EnqueueAsync(new PlcWrite.SetTgtFloor(floor), ct);
@@ -79,7 +85,12 @@ public sealed class SorterBundleHandle
     /// <summary>소터 폴링 서비스 시작 (PlcPollingHostedAdapter에서 호출).</summary>
     public Task StartPollingAsync(CancellationToken ct) => _polling.StartAsync(ct);
 
-    /// <summary>소터 폴링 서비스 종료 (PlcPollingHostedAdapter에서 호출).</summary>
+    /// <summary>
+    /// 소터 폴링 서비스 종료 (독립 소터/PlcPollingHostedAdapter에서 호출).
+    /// ⚠ 공유 버스(ModbusBus) 멤버 번들에는 이것을 호출하면 안 된다: writeQueue=null이라 아래 TryComplete는
+    ///   무동작이지만, 이어지는 _polling.StopAsync() → _master.Disconnect()(BusSlaveMaster → 공유 연결 Disconnect)가
+    ///   형제 슬레이브의 연결까지 끊는다. 공유 버스 teardown은 버스 단위(ModbusBus.StopAsync) 1회로만 한다.
+    /// </summary>
     public Task StopPollingAsync()
     {
         // 쓰기 큐 채널을 먼저 완료 → 쓰기 컨슈머가 결정적으로 종료(빈 채널 취소 경쟁 회피).

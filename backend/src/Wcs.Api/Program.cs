@@ -63,9 +63,12 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options 
     options.InvalidModelStateResponseFactory = context =>
     {
         // S-B2B-2a: allowlist 에 /api/test-data 추가(additive) — /api/v1/works· B2C ProblemDetails 불변.
+        // S-B2C-DATAGEN: /api/b2c/test-data 추가(additive) — 검증실패 400 을 B2cManagementResponse.Fail 형식으로.
         var path = context.HttpContext.Request.Path;
         if (path.StartsWithSegments(Wcs.Api.B2B.AppConstants.WorksRoutePrefix, StringComparison.OrdinalIgnoreCase)
-         || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase))
+         || path.StartsWithSegments(Wcs.Api.B2B.AppConstants.TestDataRoutePrefix, StringComparison.OrdinalIgnoreCase)
+         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.RoutePrefix, StringComparison.OrdinalIgnoreCase)
+         || path.StartsWithSegments(Wcs.Api.B2C.B2cConstants.FacilityRoutePrefix, StringComparison.OrdinalIgnoreCase))
         {
             var firstError = context.ModelState
                 .Where(kv => kv.Value is not null && kv.Value.Errors.Count > 0)
@@ -166,6 +169,18 @@ builder.Services.AddSingleton<IHostedService>(sp =>
 // scoped WcsDbContext는 IServiceScopeFactory(싱글톤)로 스코프 생성해 취득(확정3 — captive 회피).
 builder.Services.AddSingleton<IDestinationStatusService, DestinationStatusService>();
 
+// ── 인덕션 기반 2층 제어 (S-TWO-FLOOR-CONTROL A) — 소터별 pending-floor 큐 + 관측 루프 ──
+// 큐(상태): IF-05가 목표 층 F를 소터별 FIFO에 enqueue. 관측 루프(트리거): TgtFloor==0 관측 시
+//   큐 머리 F를 DepositDecider(순수) 게이트로 소터별 단일 쓰기 큐(SetTgtFloor)에 기입, CurFloor==F
+//   도착 시 pop(폐루프). 절대규칙 #1(단일 쓰기 큐)·#3(WCS 클리어 금지) 준수.
+// 하스티드 등록은 람다(ImplementationType=null) — 테스트 팩토리의 "null-hosted 제거" 패턴과 정합.
+builder.Services.AddSingleton<SorterPendingFloorQueues>();
+// C2 S2(I-3): 재시작 시 미완료 SORTER_3D piece 에서 pending-floor 큐를 재파생(읽기 전용). SorterFloorReturnService
+// 가 관측 루프 기동 전에 RestoreAsync 를 await 한다(복원 before 관측 — 스키마 변경·마이그레이션 0).
+builder.Services.AddSingleton<IPendingFloorQueueRestorer, PendingFloorQueueRestorer>();
+builder.Services.AddSingleton<SorterFloorReturnService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SorterFloorReturnService>());
+
 // ── IDestinationControlService — B2C 운영자 런타임 PAUSED/RESUMED 전이 (S-F3a) ──
 // OpsController(/api/ops/destinations/{id}/pause|resume)가 소비. DB Status 전이 + destination_event
 // (operatorId) + CHUTE 인메모리 반영(ChuteCapacityService)을 한 단위로 수행. PLC 쓰기 없음(Q3 LOCK).
@@ -190,13 +205,13 @@ builder.Services.AddSingleton<IDestinationControlService, DestinationControlServ
 builder.Services.AddSingleton<IChuteStatePushClient, ChuteStatePushClient>();
 
 // ③ 전이 감지·전이당 1회 발신 파이프(변화원 셋 수렴 + 부트스트랩 + 복구 재푸시 + 동시성 멱등).
-//    IHostedService + IDestinationChangeNotifier 양쪽을 같은 싱글톤으로 공급.
+//    싱글톤 + IHostedService로 공급.
 //    변화원: ChuteCapacityService.OnChuteStateChanged(슈트) + 소터 스냅샷 관찰 타이머 +
 //    DestinationControlService.OnTransition(운영자 PAUSED/RESUMED) — StartAsync에서 구독.
 //    BaseUrl 미설정이면 StartAsync가 경고 후 비활성(구독 안 함 — 크래시 0).
+//    ※ IDestinationChangeNotifier는 DI로 resolve하는 소비처가 0(슈트 변화원은 ChuteCapacityService의
+//      OnChuteStateChanged 이벤트를 StartAsync에서 직접 구독) — S-HARDENING-1에서 사장 DI 등록 제거.
 builder.Services.AddSingleton<DestinationStatusPusher>();
-builder.Services.AddSingleton<IDestinationChangeNotifier>(sp =>
-    sp.GetRequiredService<DestinationStatusPusher>());
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<DestinationStatusPusher>());
 
@@ -229,6 +244,15 @@ builder.Services.AddScoped<Wcs.Api.B2B.ITestDataService, Wcs.Api.B2B.TestDataSer
 // ── S-B2B-3a: 조회 전용 서비스(로그·API호출이력·3-way 비교 / 투입+분류 Excel) — additive ──
 builder.Services.AddScoped<Wcs.Api.B2B.ILogService,       Wcs.Api.B2B.LogService>();
 builder.Services.AddScoped<Wcs.Api.B2B.ILogExportService, Wcs.Api.B2B.LogExportService>();
+
+// ── S-B2C-DATAGEN: B2C(3D 소터) 테스트 데이터 관리 서비스(생성·요약·초기화) — additive ──
+// 컨트롤러가 판정/PLC 를 직접 호출하지 않음(절대규칙 #1·#8). WcsDbContext(scoped)+IOperationLogger 만 사용.
+builder.Services.AddScoped<Wcs.Api.B2C.IB2cTestDataService, Wcs.Api.B2C.B2cTestDataService>();
+
+// ── S-B2C-FACILITY: 설비 관리 서비스(목적지 구성·셀 설정·오더 할당) — additive ──
+// WcsDbContext(scoped) + IOperationLogger + IChuteCapacityService + DestinationStatusPusher(런타임 슈트
+// 등록 — 신설 슈트가 GetHold·pause/resume·IF-08 push 에서 즉시 동작). 판정/Modbus 직접 호출 0.
+builder.Services.AddScoped<Wcs.Api.B2C.IB2cFacilityService, Wcs.Api.B2C.B2cFacilityService>();
 
 var app = builder.Build();
 
@@ -397,6 +421,17 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
     private readonly ILogger<SorterRegistryFactory> _log;
     private MultiSorterGatewayRegistry?             _registry;
 
+    // S-MULTISORTER-SHARED-BUS Phase 2 — 생명주기 = 버스 단위(배경 3).
+    // 버스 목록: StopAsync가 버스마다 ModbusBus.StopAsync를 1회 호출(멤버 번들 개별 teardown 금지).
+    private List<Wcs.PlcGateway.ModbusBus>? _buses;
+    private IReadOnlyList<BusInfo>?         _busInfos;
+
+    /// <summary>공유 버스 진단 정보(버스 1개 = SharedModbusConnection 1개 = 포트/마스터 1개).</summary>
+    public sealed record BusInfo(string BusKey, IReadOnlyList<byte> UnitIds, int MemberCount);
+
+    /// <summary>기동 후 구성된 버스 목록(진단·테스트용 — StartAsync 완료 후 유효). 각 항목 = 물리 버스 1개.</summary>
+    public IReadOnlyList<BusInfo> Buses => _busInfos ?? Array.Empty<BusInfo>();
+
     public SorterRegistryFactory(
         IServiceProvider               sp,
         IConfiguration                 config,
@@ -447,14 +482,19 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
 
         _log.LogInformation("[SorterRegistry] SORTER_3D destination {Count}대 조회됨", sorterDests.Count);
 
-        // ── 소터별 번들 구성 ──────────────────────────────────────────────────
-        var bundles = new Dictionary<long, SorterBundleHandle>();
-        var logFac  = _sp.GetRequiredService<ILoggerFactory>();
-        var timing  = _config.GetSection("Timing").Get<PlcGatewayOptions>() ?? new PlcGatewayOptions();
+        // ── 버스 키 그룹핑 구성 (S-MULTISORTER-SHARED-BUS Phase 2 — 계약 A1) ────────
+        // 같은 버스 키(RTU=PortName 대소문자무시 / TCP=Host:Port 입력그대로 — OQ8)를 가진 소터들을
+        // 하나의 ISharedModbusConnection + ModbusBus 위에 unitId로 구분해 공유 운영한다.
+        // 다른 버스 키는 각자 독립 ModbusBus로 병렬(멀티 포트 회귀 0 — A2). 멤버 1개(N=1)는 현행 단일
+        // 소터와 동작 동치(A3): 소켓/IO 하드오류 재연결·OFFLINE·arming·teardown 의미 보존.
+        var bundles  = new Dictionary<long, SorterBundleHandle>();
+        var logFac   = _sp.GetRequiredService<ILoggerFactory>();
+        var timing   = _config.GetSection("Timing").Get<PlcGatewayOptions>() ?? new PlcGatewayOptions();
 
+        // ① destination → (cfg, per-member gwOpt) 매핑 (ChuteNo 매칭 fail-loud 보존)
+        var members = new List<(Wcs.Data.Destination dest, SorterConfig cfg, PlcGatewayOptions gwOpt)>();
         foreach (var dest in sorterDests)
         {
-            // ChuteNo로 설정 매칭 — 미스매치 fail-loud
             if (!configByChuteNo.TryGetValue(dest.ChuteNo, out var cfg))
             {
                 _log.LogCritical(
@@ -466,40 +506,83 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                     $"SORTER_3D destination(id={dest.Id} chuteNo={dest.ChuteNo})에 대한 " +
                     $"appsettings Sorters[] 항목이 없습니다. fail-loud.");
             }
-
-            // ── 소터별 번들 구성 (인스턴스별 독립) ──────────────────────────────
-            // 공통 Timing + 소터별 오버라이드 적용
-            var gwOpt = BuildGatewayOptions(timing, cfg);
-
-            // 소터별 전송 설정으로 IModbusMaster 생성
-            var transportOpt = cfg.ToTransportOptions();
-            var master = ModbusMasterFactory.Create(transportOpt, logFac);
-
-            // 소터별 독립 PlcWriteQueue (단일 공유 큐 제거 — 절대규칙 #1 소터별 보존)
-            var writeQueue = new PlcWriteQueue();
-
-            // 소터별 독립 PlcPollingService (인스턴스별 _clientLock·_cSeq·RFlag 채널)
-            var polling = new PlcPollingService(
-                gwOpt,
-                writeQueue,
-                master,
-                logFac.CreateLogger<PlcPollingService>());
-
-            // 소터별 독립 HandshakeOrchestrator (인스턴스별 _cSeq)
-            var handshake = new HandshakeOrchestrator(
-                polling,
-                gwOpt,
-                logFac.CreateLogger<HandshakeOrchestrator>());
-
-            var bundle = new SorterBundleHandle(dest.Id, dest.ChuteNo, polling, handshake, writeQueue);
-            bundles[dest.Id] = bundle;
-
-            _log.LogInformation(
-                "[SorterRegistry] 소터 번들 구성: destId={DestId} chuteNo={ChuteNo} transport={Transport} host={Host}:{Port}",
-                dest.Id, dest.ChuteNo, cfg.Transport, cfg.Host, cfg.Port);
+            // 공통 Timing + 소터별 오버라이드 → per-member 게이트웨이 옵션(멤버별 핸드셰이크 Timing 보존 — OQ9-ii).
+            members.Add((dest, cfg, BuildGatewayOptions(timing, cfg)));
         }
 
-        // ── 소터별 폴링 서비스 시작 + OFFLINE 전이 이벤트 구독 ────────────────
+        // ② 버스 키로 그룹핑 → 그룹당 공유 연결 1개 + ModbusBus 1개 → 멤버 AddSlave(cfg.UnitId, per-member opt).
+        // 연결 생성은 seam(ISharedModbusConnectionFactory) 경유 — DI 미등록이면 기본 팩토리(정적 위임).
+        // 테스트가 데코레이터(예: read timeout 주입)를 끼워 실 레지스트리 경로를 검증할 수 있게 함(C4 fix 테스트).
+        var connFactory = _sp.GetService<Wcs.PlcGateway.ISharedModbusConnectionFactory>()
+                          ?? new Wcs.PlcGateway.DefaultSharedModbusConnectionFactory();
+        var buses     = new List<Wcs.PlcGateway.ModbusBus>();
+        var busInfos  = new List<BusInfo>();
+        try
+        {
+            foreach (var group in members.GroupBy(m => BusKeyOf(m.cfg)))
+            {
+                var busKey  = group.Key;
+                var groupMs = group.ToList();
+
+                // fail-loud: 같은 버스 멤버의 시리얼 파라미터·폴 주기 불일치(OQ4/OQ9-i/OQ10).
+                ValidateBusGroupConsistency(busKey, groupMs);
+
+                // 그룹 대표 전송 설정으로 공유 연결 1개(포트/마스터 1개) — 버스 키 규칙과 일치(TCP host:port / RTU portName).
+                var rep  = groupMs[0];
+                var conn = connFactory.Create(
+                    rep.cfg.ToTransportOptions(),
+                    logFac.CreateLogger("Wcs.PlcGateway.SharedModbusConnection"));
+                // 폴 cadence(PollIntervalMs)는 버스 단위 1개 — 그룹의 (일치 강제된) 대표 gwOpt를 버스 opt로.
+                var bus = new Wcs.PlcGateway.ModbusBus(conn, rep.gwOpt, logFac.CreateLogger("Wcs.PlcGateway.ModbusBus"));
+                buses.Add(bus);   // 예외 시에도 정리되도록 즉시 추적.
+
+                foreach (var m in groupMs)
+                {
+                    PlcPollingService polling;
+                    try
+                    {
+                        // per-member opt 오버로드 — 멤버별 handshake Timing/OfflineAfterFailures/WriteTimeoutMs 보존.
+                        polling = bus.AddSlave(m.cfg.UnitId, m.gwOpt, logFac.CreateLogger<PlcPollingService>());
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        // OQ11 — 같은 버스 중복 UnitId(ModbusBus.AddSlave가 throw). 명확 메시지 + LogCritical로 표면화.
+                        _log.LogCritical(ex,
+                            "[SorterRegistry] 버스 {Bus} UnitId {Unit} 중복 — 기동 불가(fail-loud). " +
+                            "한 물리 버스의 슬레이브 주소(UnitId)는 유일해야 합니다.", busKey, m.cfg.UnitId);
+                        throw new InvalidOperationException(
+                            $"버스 '{busKey}' UnitId {m.cfg.UnitId} 중복 — 한 물리 버스의 슬레이브 주소는 유일해야 합니다. fail-loud.", ex);
+                    }
+
+                    var handshake = new HandshakeOrchestrator(
+                        polling, m.gwOpt, logFac.CreateLogger<HandshakeOrchestrator>());
+                    var bundle = new SorterBundleHandle(
+                        m.dest.Id, m.dest.ChuteNo, polling, handshake,
+                        // 생명주기 = 버스 단위(배경 3): 버스 멤버 번들은 공유 큐를 소유하지 않는다(writeQueue=null).
+                        // ⚠ writeQueue=null은 StopPollingAsync의 '큐 완료(TryComplete)' 벡터만 무력화한다. 그 안의
+                        //   _polling.StopAsync()→_master.Disconnect()(BusSlaveMaster→공유 연결 Disconnect)는 여전히
+                        //   형제를 끊으므로, 버스 멤버 번들은 절대 개별 StopPollingAsync로 teardown하지 않는다
+                        //   (teardown은 버스 단위 ModbusBus.StopAsync 1회만 — StopAsync 참고). 향후 per-소터 재시작도
+                        //   버스 단위 제어로 가야 한다. (Disconnect를 no-op화하지 않는다 — solo 하드 재연결이 이에 의존.)
+                        writeQueue: null);
+                    bundles[m.dest.Id] = bundle;
+                }
+
+                busInfos.Add(new BusInfo(
+                    bus.BusKey, bus.Slaves.Select(s => s.UnitId).ToArray(), bus.Slaves.Count));
+                _log.LogInformation(
+                    "[SorterRegistry] 공유 버스 구성: busKey={Bus} 멤버 {Count}대 (unitIds=[{Units}]) transport={Transport}",
+                    bus.BusKey, bus.Slaves.Count, string.Join(",", bus.Slaves.Select(s => s.UnitId)), rep.cfg.Transport);
+            }
+        }
+        catch
+        {
+            // fail-loud/부분 구성 실패 — 이미 만든 버스(공유 연결 포함) 결정 종료 후 재던짐(포트 누수 0).
+            foreach (var b in buses) { try { await b.DisposeAsync(); } catch { /* teardown 경쟁 흡수 */ } }
+            throw;
+        }
+
+        // ── 관측/OFFLINE 구독 (버스 StartAsync 이전 — 첫 폴 포착) ─────────────────
         // P3: OFFLINE 전이당 1건 alarm 영속화 — IServiceScopeFactory 경유 별도 스코프.
         // 폴링 시작 전에 구독하면 첫 폴 실패도 포착 가능(이벤트는 true→false 전이만 발화).
         // S-OBSERVABILITY: operation_log 싱크(논블로킹 enqueue) — 관측 훅이 직접 호출.
@@ -569,34 +652,117 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                     _log.LogError(ex, "[SorterRegistry] OFFLINE alarm 영속화 예외: destId={DestId}", capturedDestId);
                 }
             });
+        }
 
-            await bundle.StartPollingAsync(cancellationToken);
-            _log.LogInformation("[SorterRegistry] 소터 폴링 시작: destId={DestId} chuteNo={ChuteNo}",
-                bundle.DestinationId, bundle.ChuteNo);
+        // ── 버스 단위 폴링 기동 (버스당 ModbusBus.StartAsync 1회 — 계약 A1/A5) ────────
+        // 멤버별 StartPollingAsync 아님: ModbusBus가 단일 폴 루프(주기당 1회 대기 후 멤버 순회) +
+        // 단일 쓰기 컨슈머를 구동한다(절대규칙 #1 — 쓰기는 버스당 단일 큐 컨슈머로만 직렬화).
+        // M2(부분 기동 누수 방지): 폴 루프 기동 '이전'에 _buses를 게시한다. 시작 안 된 버스의 StopAsync는
+        // 안전(무동작에 가깝고 결정적)하므로, bus[1].StartAsync가 던져도 이미 시작된 bus[0]가 StopAsync로
+        // 결정 종료돼 폴 태스크·열린 포트가 새지 않는다(그 다음 예외는 상위로 전파).
+        _buses    = buses;
+        _busInfos = busInfos;
+
+        foreach (var bus in buses)
+        {
+            await bus.StartAsync(cancellationToken);
+            _log.LogInformation("[SorterRegistry] 공유 버스 폴링 시작: busKey={Bus} 멤버 {Count}대",
+                bus.BusKey, bus.Slaves.Count);
         }
 
         _registry = new MultiSorterGatewayRegistry(bundles);
-        _log.LogInformation("[SorterRegistry] 초기화 완료 — 소터 {Count}대", bundles.Count);
+        _log.LogInformation("[SorterRegistry] 초기화 완료 — 소터 {Count}대 / 물리 버스 {BusCount}개",
+            bundles.Count, buses.Count);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_registry is null) return;
+        if (_buses is null) return;
 
-        // 모든 소터 폴링 서비스 종료 (ApplicationStopping)
-        // 호스트 종료 시 로거(EventLogInternal 등)가 먼저 dispose될 수 있어
-        // LogInformation/LogError 자체가 ObjectDisposedException을 던질 수 있음.
-        // teardown 중 로깅 실패가 StopAsync를 중단시키지 않도록 로깅도 try로 보호.
-        foreach (var bundle in _registry.AllBundles)
+        // ── 생명주기 = 버스 단위(배경 3·계약 A5) ──────────────────────────────────
+        // 버스마다 ModbusBus.StopAsync를 1회 호출한다. 그 내부가 (1) 쓰기 큐 Writer.TryComplete로
+        // parked ReadAllAsync를 결정적으로 깨우고(교훈: testhost-teardown-channel-race) (2) 폴/쓰기 태스크
+        // await (3) 멤버 정지 (4) 공유 연결 Disconnect를 순서대로 수행해 결정 종료한다.
+        // ⚠ 버스 멤버 번들에 대해 개별 bundle.StopPollingAsync()로 공유 큐/연결을 조기 teardown하지 않는다
+        //   (형제 슬레이브 보호 — writeQueue=null이라 TryComplete/Disconnect가 형제를 죽이지 않음).
+        // 호스트 종료 시 로거가 먼저 dispose될 수 있어 로깅도 try로 보호(ObjectDisposedException 방어).
+        foreach (var bus in _buses)
         {
             try
             {
-                await bundle.StopPollingAsync();
+                await bus.StopAsync();
             }
             catch (Exception ex)
             {
-                try { _log.LogError(ex, "[SorterRegistry] 소터 폴링 종료 예외: destId={DestId}", bundle.DestinationId); }
+                try { _log.LogError(ex, "[SorterRegistry] 공유 버스 종료 예외: busKey={Bus}", bus.BusKey); }
                 catch { /* 호스트 종료 중 로거 disposed — 로깅 실패 무시 */ }
+            }
+        }
+    }
+
+    // ── 헬퍼: 버스 키 도출 (OQ8) ──────────────────────────────────────────────
+    // RTU → PortName(대소문자 무시) / TCP → Host:Port(입력 그대로). host 별칭 정규화 안 함.
+    // 전송을 키에 포함해 교차 전송 충돌(예: RTU "COM3" vs TCP host "COM3") 방지.
+    private static string BusKeyOf(SorterConfig cfg)
+    {
+        var t = (cfg.Transport ?? "").Trim().ToUpperInvariant();
+        return t switch
+        {
+            "RTU" => "RTU|" + (cfg.PortName ?? "").ToUpperInvariant(),
+            "TCP" => "TCP|" + cfg.Host + ":" + cfg.Port,
+            // 알 수 없는 전송 — 연결 생성(SharedModbusConnectionFactory)에서 fail-loud. 그룹핑만 유일화.
+            _     => "?|" + cfg.Transport + "|" + cfg.Host + ":" + cfg.Port + "|" + cfg.PortName,
+        };
+    }
+
+    // ── 헬퍼: 같은 버스 멤버 설정 정합 검사 (fail-loud — OQ4/OQ9-i/OQ10) ─────────
+    // 같은 물리 버스의 모든 슬레이브가 공유하는 "버스(연결) 단위" 값의 불일치를 기동 시 거부한다.
+    // 대상(버스 단위 = 공유 연결/폴 루프가 1개만 가질 수 있는 값):
+    //   · 시리얼 파라미터 BaudRate/Parity/StopBits (OQ10 — DataBits/endianness는 설정 표면에 없어 검사 제외)
+    //   · PollIntervalMs (OQ9-i — 버스 폴 루프 cadence 1개)
+    //   · ReadTimeoutMs/WriteTimeoutMs (CR-I1 — 공유 클라이언트의 연결 타임아웃은 1개. 그룹 대표값이 실효이고
+    //     멤버별로 다르게 줘도 대표만 적용되므로, 조용히 대표가 이기는 대신 fail-loud로 표면화).
+    // 진짜 per-member(멤버 PlcPollingService/HandshakeOrchestrator가 인스턴스별로 실효) 값은 검사 안 함:
+    //   RFlagTimeoutMs/CFlagTimeoutMs/RFlagClearConfirmTimeoutMs/OfflineAfterFailures(+OfflineLogSummaryEveryPolls).
+    private void ValidateBusGroupConsistency(
+        string busKey,
+        IReadOnlyList<(Wcs.Data.Destination dest, SorterConfig cfg, PlcGatewayOptions gwOpt)> members)
+    {
+        if (members.Count <= 1) return;   // N=1 버스는 자명하게 정합(하위호환).
+        var first = members[0].cfg;
+        foreach (var (_, cfg, _) in members.Skip(1))
+        {
+            if (cfg.BaudRate != first.BaudRate
+                || !string.Equals(cfg.Parity,   first.Parity,   StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(cfg.StopBits, first.StopBits, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.LogCritical(
+                    "[SorterRegistry] 버스 {Bus} 시리얼 파라미터 불일치 — 기동 불가(fail-loud). " +
+                    "기준(Baud={B0} Parity={P0} StopBits={S0}) vs (Baud={B1} Parity={P1} StopBits={S1}).",
+                    busKey, first.BaudRate, first.Parity, first.StopBits, cfg.BaudRate, cfg.Parity, cfg.StopBits);
+                throw new InvalidOperationException(
+                    $"버스 '{busKey}' 멤버의 시리얼 파라미터(BaudRate/Parity/StopBits)가 불일치합니다 — " +
+                    $"한 물리 버스의 모든 슬레이브는 동일해야 합니다. fail-loud.");
+            }
+            if (cfg.PollIntervalMs != first.PollIntervalMs)
+            {
+                _log.LogCritical(
+                    "[SorterRegistry] 버스 {Bus} PollIntervalMs 불일치({A}≠{B}) — 기동 불가(fail-loud). " +
+                    "한 물리 버스의 폴 주기는 하나여야 합니다.", busKey, first.PollIntervalMs, cfg.PollIntervalMs);
+                throw new InvalidOperationException(
+                    $"버스 '{busKey}' 멤버의 PollIntervalMs가 불일치합니다({first.PollIntervalMs}≠{cfg.PollIntervalMs}) — " +
+                    $"한 물리 버스의 폴 주기는 하나여야 합니다. fail-loud.");
+            }
+            if (cfg.ReadTimeoutMs != first.ReadTimeoutMs || cfg.WriteTimeoutMs != first.WriteTimeoutMs)
+            {
+                _log.LogCritical(
+                    "[SorterRegistry] 버스 {Bus} 연결 타임아웃 불일치 — 기동 불가(fail-loud). " +
+                    "기준(ReadTimeoutMs={R0} WriteTimeoutMs={W0}) vs (ReadTimeoutMs={R1} WriteTimeoutMs={W1}). " +
+                    "공유 연결(클라이언트)의 Read/Write 타임아웃은 버스 단위 1개입니다.",
+                    busKey, first.ReadTimeoutMs, first.WriteTimeoutMs, cfg.ReadTimeoutMs, cfg.WriteTimeoutMs);
+                throw new InvalidOperationException(
+                    $"버스 '{busKey}' 멤버의 연결 타임아웃(ReadTimeoutMs/WriteTimeoutMs)이 불일치합니다 — " +
+                    $"공유 연결의 Read/Write 타임아웃은 버스 단위 1개여야 합니다. fail-loud.");
             }
         }
     }
@@ -621,6 +787,9 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             CFlagTimeoutMs = t?.CFlagTimeoutMs ?? commonTiming.CFlagTimeoutMs,
             RFlagClearConfirmTimeoutMs =
                 t?.RFlagClearConfirmTimeoutMs ?? commonTiming.RFlagClearConfirmTimeoutMs,
+            // C1: 복귀 대기(Ready==1) 상한(소터별 오버라이드 or 공통).
+            ReturnReadyTimeoutMs =
+                t?.ReturnReadyTimeoutMs ?? commonTiming.ReturnReadyTimeoutMs,
             // D-1: OFFLINE 지속 로그 요약 주기(소터별 오버라이드 or 공통).
             OfflineLogSummaryEveryPolls =
                 t?.OfflineLogSummaryEveryPolls ?? commonTiming.OfflineLogSummaryEveryPolls,
@@ -695,6 +864,9 @@ public sealed record SorterTimingOverride
     // S-HANDSHAKE-RESIDUE — 소터별 잔류 대사 확인 타임아웃 오버라이드(null=공통 상속).
     public int? RFlagClearConfirmTimeoutMs { get; init; }
 
+    // S-TWO-FLOOR-CONTROL C1 — 소터별 복귀 대기(Ready==1) 상한 오버라이드(null=공통 상속).
+    public int? ReturnReadyTimeoutMs { get; init; }
+
     // S-CLEANUP-FIELD D-1 — 소터별 OFFLINE 지속 로그 요약 주기 오버라이드(null=공통 상속).
     public int? OfflineLogSummaryEveryPolls { get; init; }
 }
@@ -751,4 +923,7 @@ public sealed record TimingOptions
 
     // S-HANDSHAKE-RESIDUE — 잔류 대사 ClearR 후 R_Flag==0 확인 대기 상한(ms).
     public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
+
+    // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
+    public int ReturnReadyTimeoutMs { get; init; } = 30000;
 }

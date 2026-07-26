@@ -9,8 +9,8 @@ namespace Wcs.Api.Controllers;
 // ════════════════════════════════════════════════════════════════════════════
 // RcsController — RCS → WCS 인바운드 인터페이스 (재설계 Phase 1)
 //
-//   IF-05  POST /api/v1/destination-query  목적지 조회 ({result, chuteNo})
-//   IF-09  POST /api/v1/arrival-report      도착 보고 ({result:"OK"}) + 2층 정렬
+//   IF-05  POST /api/v1/destination-query  목적지 조회 ({result, chuteNo}) + 소터 pending-floor 큐 enqueue
+//   IF-09  POST /api/v1/arrival-report      도착 보고 ({result:"OK"}) — 기록만(정렬 트리거 제거, 2026-07-21)
 //   IF-10  POST /api/v1/deposit-report       투입 보고 ({result:"OK"}) + IF-11 트리거
 //
 // IF-08(투입 가부 폴링 deposit-permission)은 폐지 — Phase 2에서 WCS→RCS 푸시로 대체.
@@ -48,6 +48,7 @@ public sealed class RcsController : ControllerBase
         [FromServices] IOrderRepository       orders,
         [FromServices] IChuteCapacityService  capacity,
         [FromServices] IDestinationStatusService status,
+        [FromServices] SorterPendingFloorQueues floorQueues,
         [FromServices] IOptions<WcsOptions>   wcsOptions)
     {
         // ── 검증 (D-4: 입력 상한 — DB 도달 전 거부, 위반 시 400. 정상 입력 경로 불변) ─────
@@ -69,6 +70,11 @@ public sealed class RcsController : ControllerBase
         _opLog.Log(OperationLogCategory.API, "IF05_REQ", barcode: req.Barcode, pId: req.PId,
             detail: $"{{\"agvNo\":{req.AgvNo},\"inductionNo\":{req.InductionNo},\"qty\":{req.Qty}}}");
 
+        // ── 인덕션 파생 목표 층 F (§2-A·§3 — 인덕션 기반 2층 제어) ─────────────────
+        // 요청 inductionNo → InductionFloorMap(순수) → F(1/2). 미매핑이면 null → 소터 목적지는
+        // fail-loud(NG + 경고) — 조용한 통과·기본층 폴백 금지(확정 결정 2026-07-22). 슈트는 층 무관.
+        int? floor = InductionFloorMap.DeriveFloor(wcsOptions.Value.FloorByInduction, req.InductionNo);
+
         // ── 오더 매칭 → 목적지·상태 판정 (+ FULL/PAUSED 상류 필터) → OK 시 예약 차감 ─
         // FULL/PAUSED 차단은 배정 시점(IF-05)으로 상류 이동. 산출원은 DestinationStatusService(슈트·소터 공용).
         // BUSY(분류·이동 중)는 차단하지 않는다 — OK·이동시킴(도착 후 Phase 2 푸시 ready 시 투입).
@@ -85,9 +91,22 @@ public sealed class RcsController : ControllerBase
             orders.QueryDestination(req.PId, req.AgvNo, req.Barcode, req.InductionNo, req.Qty, req.TimeStamp,
                 availability: (id, dt) =>
                 {
-                    // 슈트는 full/paused 통과(OK) — IF-05 dispatch에서 차단하지 않는다(확정4).
+                    // 슈트는 full/paused 통과(OK) — IF-05 dispatch에서 차단하지 않는다(확정4). 층 무관.
                     if (dt != DestinationType.Sorter3D)
                         return DestinationBlock.None;
+
+                    // 미매핑 inductionNo → 소터 목적지 fail-loud(NG + 경고 로그). 소터로 보내지 않음
+                    // (확정 결정 2026-07-22 — 조용한 통과·기본층 폴백 금지).
+                    if (floor is null)
+                    {
+                        _log.LogWarning(
+                            "[IF-05] pId={PId} inductionNo={Ind} 미매핑(InductionFloorMap 없음) — 소터 목적지 NG(fail-loud)",
+                            req.PId, req.InductionNo);
+                        _opLog.Log(OperationLogCategory.API, "IF05_NO_FLOOR", level: OperationLogLevel.WARN,
+                            destinationId: id, barcode: req.Barcode, pId: req.PId,
+                            detail: $"{{\"inductionNo\":{req.InductionNo}}}");
+                        return DestinationBlock.Unmapped;
+                    }
 
                     var r = status.Compute(id, DestType.SORTER_3D);
                     if (r.Paused) return DestinationBlock.Paused;  // 소터 정지는 예외 없이 차단(우선).
@@ -101,6 +120,18 @@ public sealed class RcsController : ControllerBase
         // ── FULL/PAUSED 인메모리 집계: IF-05 OK 예약 반영 (슈트만) ───────────────
         if (result == "OK" && destId.HasValue && destType == DestinationType.Chute)
             capacity.OnReserved(destId.Value, req.Qty);
+
+        // ── 인덕션 기반 2층 제어: 소터 목적지 OK → 파생 층 F를 그 소터 큐에 IF-05 순서대로 enqueue ─
+        // TgtFloor 쓰기는 IF-05 순간이 아니라 관측 루프(SorterFloorReturnService)가 TgtFloor==0 관측 시
+        // 큐 머리 층을 게이트로 기입한다(§2-C). FULL/PAUSED/OFFLINE이면 위 availability가 NG로 차단해
+        // enqueue에 도달하지 않는다. floor는 소터 OK 경로에선 항상 non-null(위 Unmapped 게이트 통과).
+        if (result == "OK" && destId.HasValue && destType == DestinationType.Sorter3D && floor is int fFloor)
+        {
+            floorQueues.Enqueue(destId.Value, fFloor);
+            _log.LogInformation(
+                "[IF-05] pId={PId} 소터 destId={DestId} pending-floor 큐 enqueue F={Floor}(inductionNo={Ind})",
+                req.PId, destId.Value, fFloor, req.InductionNo);
+        }
 
         _log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason(내부)={Reason}",
             req.PId, req.Barcode, result, chuteNo, reason);
@@ -119,17 +150,16 @@ public sealed class RcsController : ControllerBase
     // ── IF-09 도착 보고 ───────────────────────────────────────────────────────
     // 요청: pId·chuteNo·agvNo·timeStamp
     // 응답: 200 {result:"OK"} / 400(검증 실패)
-    // 도착을 piece_event(IF09_ARRIVAL)로 기록(상태 전이 없음).
-    // 3D 소터면 운영층(OperationalFloor, 기본 2)으로 정렬(TgtFloor 쓰기 큐 경유) — 조건·핑퐁 차단 준수.
-    // 슈트 전용이면 도착만 기록(정렬 없음). 미존재/비활성 chuteNo는 200 + 기록만(500 금지).
+    // 도착을 piece_event(IF09_ARRIVAL)로 **기록만** 한다(상태 전이 없음).
+    //
+    // 인덕션 기반 2층 제어(2026-07-21): IF-09는 더 이상 정렬(TgtFloor 쓰기)을 트리거하지 않는다.
+    //   정렬은 IF-05 시점의 소터별 pending-floor 큐 enqueue + 관측 루프(SorterFloorReturnService)의
+    //   TgtFloor==0 관측 기입으로 이동했다(§2-C). IF-09에 정렬 트리거를 남기면 이중 기입(경합)이
+    //   발생하므로 제거(A의 핵심 전환). 미존재/비활성 chuteNo도 200 + 기록만(500 금지).
     [HttpPost("arrival-report")]
     public IActionResult ArrivalReport(
         [FromBody] ArrivalReportRequest         req,
-        [FromServices] IArrivalRecorder          arrival,
-        [FromServices] WcsDbContext              db,
-        [FromServices] ISorterGatewayRegistry    sorterRegistry,
-        [FromServices] IOptions<WcsOptions>      wcsOptions,
-        [FromServices] IHostApplicationLifetime  lifetime)
+        [FromServices] IArrivalRecorder          arrival)
     {
         // ── 검증 (D-4: timeStamp 상한 포함 — ClientTs 절단 500 방지) ─────────────────
         if (req.PId is < 1 or > 30000)
@@ -143,79 +173,13 @@ public sealed class RcsController : ControllerBase
         _opLog.Log(OperationLogCategory.API, "IF09", sorterChuteNo: req.ChuteNo, pId: req.PId,
             detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo}}}");
 
-        // ── 도착 기록 (piece_event IF09_ARRIVAL — 상태 전이 없음) ───────────────
+        // ── 도착 기록 (piece_event IF09_ARRIVAL — 상태 전이·정렬 트리거 없음) ────────
         var recorded = arrival.RecordArrival(req.PId, req.ChuteNo, req.AgvNo, req.TimeStamp);
         if (!recorded)
             _log.LogWarning("[IF-09] pId={PId} 활성 piece 없음 — 도착 기록 생략(IF-05 선행 없음?)", req.PId);
 
-        // ── 목적지 조회 → 3D 소터면 운영층 정렬 ─────────────────────────────────
-        var dest = db.Destinations
-            .FirstOrDefault(d => d.ChuteNo == req.ChuteNo && d.IsActive);
-
-        if (dest is null)
-        {
-            // 미존재/비활성 chuteNo — 도착 기록은 남기되 정렬 스킵(500 금지, 사용자 확정).
-            _log.LogWarning("[IF-09] pId={PId} chuteNo={ChuteNo} — 목적지 없음(비활성/미존재). 정렬 스킵",
-                req.PId, req.ChuteNo);
-            return Ok(new ArrivalReportResponse("OK"));
-        }
-
-        if (dest.DestType == DestType.SORTER_3D)
-            AlignSorterToOperationalFloor(dest, sorterRegistry, wcsOptions.Value.OperationalFloor, lifetime, req.PId);
-        else
-            _log.LogInformation("[IF-09] pId={PId} chuteNo={ChuteNo} 슈트 전용 — 도착만 기록(정렬 없음)",
-                req.PId, req.ChuteNo);
-
+        // 정렬은 IF-05 enqueue + 관측 루프가 담당(IF-09는 도착 기록만). 목적지 조회·정렬 없음.
         return Ok(new ArrivalReportResponse("OK"));
-    }
-
-    /// <summary>
-    /// 3D 소터를 운영층으로 고정 정렬한다.
-    /// DepositDecider(순수)로 쓸지/값 판단 → 쓰기는 번들 전용 큐(SetTgtFloor) 경유(절대규칙 #1).
-    /// 조건: TgtFloor==0 && (CurFloor≠운영층 || Ready==0). 진행 중·FULL/PAUSED/OFFLINE이면 쓰지 않음.
-    /// WCS는 TgtFloor를 클리어하지 않음(절대규칙 #3 — PLC가 분류 시작 시 클리어).
-    /// fire-and-forget: 응답 완료 대기 없이 큐 투입, 예외는 삼키지 않고 로깅.
-    /// </summary>
-    private void AlignSorterToOperationalFloor(
-        Destination               dest,
-        ISorterGatewayRegistry    sorterRegistry,
-        int                       operationalFloor,
-        IHostApplicationLifetime  lifetime,
-        int                       pId)
-    {
-        var bundle = sorterRegistry.GetBundle(dest.Id);
-        if (bundle is null)
-        {
-            _log.LogWarning("[IF-09] destId={DestId} 소터 번들 없음(OFFLINE) — 정렬 스킵", dest.Id);
-            return;
-        }
-
-        var snap = bundle.Latest;
-        // FULL/PAUSED는 hold 산출이 필요하나 IF-09 시점엔 정렬만 — Decide에 None을 전달하고
-        // Offline/진행중/정렬완료를 Decider가 판단(쓸지/값). FULL/PAUSED는 OFFLINE처럼 쓰기 안 함이
-        // 아니라 IF-05에서 이미 차단됐으므로 도착한 AGV는 정렬 대상. 정렬 자체는 Hold 무관 진행.
-        var decision = DepositDecider.Decide(snap, operationalFloor, WcsHold.None);
-
-        if (!decision.WriteTgtFloor)
-        {
-            _log.LogInformation(
-                "[IF-09] destId={DestId} 정렬 쓰기 불필요(ready={Ready} reason={Reason} TgtFloor={Tgt}) — 핑퐁 차단/이미 정렬",
-                dest.Id, decision.Ready, decision.Reason, snap.TgtFloor);
-            return;
-        }
-
-        // 운영층 정렬 — 번들 전용 큐 경유(단일 쓰기 큐, 절대규칙 #1). fire-and-forget.
-        _ = bundle.EnqueueSetTgtFloorAsync(decision.TgtFloorValue, lifetime.ApplicationStopping)
-                   .AsTask()
-                   .ContinueWith(t =>
-                   {
-                       if (t.IsFaulted)
-                           _log.LogError(t.Exception,
-                               "[IF-09] SetTgtFloor 번들 큐 투입 예외 destId={DestId} pId={PId}", dest.Id, pId);
-                   }, TaskScheduler.Default);
-
-        _log.LogInformation("[IF-09] pId={PId} destId={DestId} → 운영층({Floor}) 정렬 큐 투입",
-            pId, dest.Id, decision.TgtFloorValue);
     }
 
     // ── IF-10 투입 보고 ───────────────────────────────────────────────────────
@@ -278,7 +242,8 @@ public sealed class RcsController : ControllerBase
         // ── FULL/PAUSED 인메모리 집계: IF-10 투입 반영 ───────────────────────────
         if (dest is not null && destType == DestinationType.Chute)
         {
-            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive);
+            // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
+            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null);
             var qty   = piece?.Qty ?? req.Qty ?? 1;
             capacity.OnDeposited(dest.Id, qty);
         }
@@ -325,10 +290,14 @@ public sealed class RcsController : ControllerBase
         }
 
         // piece.id / cell.id 조회 (sorter_command 연결 키 — 백그라운드 콜백에서 사용)
-        long pieceId = db.Pieces
-            .Where(p => p.PId == req.PId && p.IsActive)
-            .Select(p => p.Id)
+        //   C1: depositedAt(IF-10 투입 보고 시각 = piece.DepositedAt)를 함께 조회해 저널에 유입(계약 (e)).
+        //   단일 진실(piece.DepositedAt) 재사용 — 요청 스코프 db로 지금 읽어 클로저로 넘긴다(백그라운드는 스코프 종료).
+        var pieceRow = db.Pieces
+            .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)   // S-B2C-DATAGEN: 아카이브 제외.
+            .Select(p => new { p.Id, p.DepositedAt })
             .FirstOrDefault();
+        long pieceId = pieceRow?.Id ?? 0;
+        DateTime? depositedAt = pieceRow?.DepositedAt;
         long cellId = db.Cells
             .Where(c => c.DestinationId == dest.Id && c.CellNo == selectedCell)
             .Select(c => c.Id)
@@ -388,7 +357,7 @@ public sealed class RcsController : ControllerBase
                         {
                             try
                             {
-                                var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell);
+                                var cmdId = journal.CreateSent(pieceId, cellId, result.SentCSeq, selectedCell, depositedAt);
                                 journal.Finalize(cmdId, result);
                             }
                             catch (Exception ex)
@@ -414,6 +383,21 @@ public sealed class RcsController : ControllerBase
                                 catch (Exception ex)
                                 {
                                     SafeLog(() => _log.LogError(ex, "[IF-11] alarm 영속화 예외: pId={PId}", pId));
+                                }
+                            }
+                            // C1: 성공했으나 복귀(Ready==1)를 상한 내 관측하지 못한 경우(returnedAt=NULL) — 소터 정체
+                            //   경보. 분류 자체는 완료(status=COMPLETED)라 !IsSuccess 게이트 밖의 별도 분기.
+                            //   즉시-clear 성공(무-이동)은 returnedAt non-NULL이므로 여기 미해당.
+                            else if (result.ReturnedAt is null)
+                            {
+                                try
+                                {
+                                    alarmSink.Append("RETURN_TIMEOUT", Wcs.Data.AlarmSeverity.WARN, pieceId,
+                                        $"pId={pId} cellNo={selectedCell} detail={result.Detail}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    SafeLog(() => _log.LogError(ex, "[IF-11] RETURN_TIMEOUT alarm 영속화 예외: pId={PId}", pId));
                                 }
                             }
                         }

@@ -1,206 +1,212 @@
-# Sprint Contract — S-IF08-READY-PUSH
+[Sprint Contract] — S-B2C-DATAGEN-UPLOAD (통합: 좌측 폼 콤팩트화 + 엑셀 업로드 오더-컬럼 도입)
 
-> Planner Subagent · 2026-07-13
-> 계약 정본: `docs/wcs_rcs_interface_kr.html` §IF-08 (PR #55~58 병합됨). 이 스프린트는 계약을
-> 재정의하지 않는다 — **코드를 그 계약에 맞추는** 것이다. 배경(RCS 수신 API는 `UpdateChuteState`
-> 하나뿐 · destination-status 와이어 폐지 · ready 의미는 `next_state` 3/2로 운반)은 2026-07-11 확정된
-> 사실이며 재논의 대상이 아니다.
+════════════════════════════════════════════════════════════════════════════
+- Goal:
+  두 개의 확정 작업을 한 스프린트로 완료한다.
+  (A) 프론트 레이아웃 콤팩트화 — B2C 데이터 생성 페이지(frontend/src/pages/B2cDataGenPage.tsx)의
+      좌측 생성 카드 안 "엑셀 업로드 블록"을 접기/펼치기(disclosure, 기본 접힘) 로 감싸 좌측 폼의
+      자연높이를 줄인다. 그 결과 하단 "배치 상세" 그리드가 헤더만이 아니라 **오더 행을 실제로
+      표시**하게 만든다. S-UI-LAYOUT-FIX 폼 오버랩 회귀는 절대 금지.
+  (B) 엑셀 업로드 오더-컬럼 도입 — 업로드 경로를 orderNo==barcode(1행=1오더=1바코드) 강제에서
+      **1 오더 : N 바코드** 로 바꾼다. 엑셀에 "오더번호" 컬럼을 바코드 앞에 신설(총 6열).
+      같은 (작업일자·배치명·차수·오더번호) 행들을 하나의 WcsOrder 로 묶고, 각 행의 바코드를 그
+      오더의 order_item(planned_qty=행 수량)으로 만든다. 셀 할당은 오더 단위(기존 모델 그대로),
+      업로드는 목적지 미할당 유지. 배치 내 바코드 유일. Q4 원자성·멱등 append 보존. 6열 양식 파일
+      재생성. **생성 폼(GenerateAsync 5-파라미터)은 변경하지 않는다** — 업로드 경로 한정.
 
----
+  ⚠ DB 스키마 변경 0 (마이그레이션 0). 데이터 모델(wcs_order 1:N order_item, cell_assignment 는
+     OrderId 단위)은 이미 1오더:N바코드를 지원한다 — 업로드 파싱/그룹핑만 바꾼다.
 
-## Goal
+════════════════════════════════════════════════════════════════════════════
+- Implementation Scope (파일별 · A/B 구분):
 
-WCS의 아웃바운드 "목적지 수용 상태 알림"을 확정 계약(단일 와이어 `UpdateChuteState`)에 정합시킨다.
+  [A · 프론트 레이아웃 — frontend/src/pages/B2cDataGenPage.tsx]
+  A1. B2cExcelUpload 컴포넌트(현 491~566)를 disclosure 로 재구성:
+      · 헤더 행(항상 표시): "엑셀 업로드" 라벨 + 접기/펼치기 토글 컨트롤. "양식 다운로드" 링크는
+        접힘 상태에서도 접근 가능하도록 배치(헤더에 유지 권장).
+      · 본문(파일 선택 input + 업로드 버튼 + 안내 문구 + 행오류 목록)은 토글로 펼칠 때만 렌더/표시.
+      · **기본 접힘**(useState 초기값 false). 신규 공용 UI 컴포넌트 생성 금지 —
+        components/ui 에 disclosure 없음. 이 파일 내 **로컬 구현**(버튼 + 조건부 표시).
+      · 접근성: 토글은 <button type="button"> · aria-expanded={open} · aria-controls 로 본문 연결 ·
+        키보드 Enter/Space 로 토글(native button 이면 기본 동작으로 충족). 회전 chevron 등 시각 표시.
+      · 스페이싱 정리로 접힘 시 좌측 폼 자연높이 최소화(mt-4/pt-4/gap 등 콤팩트화 — 과함 금지).
+  A2. 상단/하단 flex 배치 골격은 유지. 좌측 Card 의 self-start 자연높이 · 상단 grid min-h-0 ·
+      하단 상세 min-h-0 flex-1 · <main> overflow-auto 계약은 그대로 둔다(레이아웃 주석 160~180·
+      316~321 은 회귀 계약 — 삭제·약화 금지, disclosure 도입 사실을 반영해 주석만 갱신 가능).
+  A3. 업로드 안내 문구(현 546~549) 갱신: 컬럼 "작업일자·배치명·차수·**오더번호**·바코드·수량",
+      "한 오더에 여러 바코드(1 오더:N)" 사용법 · 미할당 · 멱등 · 원자성 문구 반영.
+  A4. B2cExcelUpload 상단 설명 주석(현 488~490 "행 = 오더/바코드 1건")을 새 시맨틱으로 정정.
+  ⚠ B2cGenerateForm(402~486) 및 그 안내 문구(474 "오더번호 = 바코드")는 **무접촉**(생성 폼 1:1 불변).
 
-- 폐지된 `destination-status` 와이어(`POST {RCS}/api/v1/destination-status` + `{chuteNo, ready, timeStamp}`)로
-  ready 전이를 발신하던 경로를, 확정 와이어 `PUT {RCS}/api/UpdateChuteState` +
-  `{chute_numbers:[n], next_states:[2|3]}`로 재배선한다. `3`=받을 수 있음 / `2`=받을 수 없음.
-- 현재 **두 개**로 갈라진 발신 소스(`DestinationStatusPusher`의 ready 전이 발신 +
-  `ChuteStatePusher`의 운영자 pause/resume 발신)를 목적지당 **단일 발신 소스**로 통합해, 같은
-  `chuteNo`에 이중/모순 발신(한쪽 `3`·다른 쪽 `2`)이 물리적으로 불가능하게 만든다.
-- 발신 상태 합성을 계약대로 바꾼다: 소터의 수용상태 = **운영 ready ∧ 비정지**, 슈트 = 비만재 ∧ 비정지.
-  **셀 만재는 발신에 반영하지 않는다**(IF-05 dispatch 차단만 유지).
-- 폐지 와이어의 코드·설정 잔재를 **전부 제거**한다(0 잔재).
+  [B · 백엔드 파싱/그룹핑 — backend/src/Wcs.Api/B2C/B2cTestDataService.cs]
+  B1. ValidateUploadRows(순수 함수): OrderNo 파싱·검증 추가.
+      · OrderNo 필수 + 안전문자(바코드와 동일 규칙 재사용 또는 전용 상수) 검증.
+      · 배치 내 바코드 유일: 중복 판정 키는 **(작업일자·배치명·차수·바코드)** 유지
+        (이 키가 "다른 오더가 같은 바코드" + "같은 오더에 같은 바코드 반복" 을 모두 잡는다).
+        OrderNo 는 유일성 키에 넣지 않는다(같은 오더가 여러 행에 정당하게 반복되므로).
+      · 파싱 결과 ParsedRow 에 OrderNo·Barcode 를 별도로 담는다.
+      · 한 행 복수 사유는 기존대로 공백 결합 1개 RowError.
+  B2. UploadExcelAsync(영속화): 그룹핑을 2단으로.
+      · 1단 (작업일자·배치명·차수) → work_batch upsert(멱등, UQ(work_date,batch_no,wave_no)).
+      · 2단 OrderNo 별 → WcsOrder upsert(멱등, UQ(WorkBatchId,OrderNo), 미할당 유지
+        DestinationId=null·DestAssignType=null·RUNNING·GENERAL).
+      · 3단 각 행 → order_item(Barcode=행 바코드, PlannedQty=행 수량) INSERT 만
+        (기존 (OrderId,Barcode) 는 스킵 — reserved/sorted 실적 보존).
+      · Q4 원자성 유지(행오류 하나라도 → 커밋 0, 트랜잭션 진입 전 조기 반환).
+      · counts: ordersCreated(=신규 distinct 오더)·orderItemsCreated(=신규 바코드)·batches·dataRows.
+        성공 메시지의 "오더 신규/항목 신규" 의미가 1:N 을 반영하도록 문구 점검.
+      · (설계 판단) 배치 내 바코드 유일은 파일 내 검증이 정본. 재업로드 시 **다른** 오더가 기존
+        배치 바코드를 재사용하는 교차-업로드 충돌 처리 여부는 Generator 가 결정(최소한 파일 내
+        (배치·바코드) 중복은 반드시 행오류). 결정 사항을 docs 에 명시.
 
-이 스프린트는 순수 `Wcs.Api` 서비스 계층 재배선이다. PLC 레지스터·핸드셰이크·`Wcs.PlcGateway`·
-`Wcs.Core` 판정 로직은 무접촉이다.
+  [B · 헤더 상수/DTO — backend/src/Wcs.Api/B2C/B2cTestDataDtos.cs]
+  B3. B2cConstants 헤더 상수 6열화: HdrOrderNo(예 "오더번호") 신설, 파싱 순서
+      [작업일자][배치명][차수][오더번호][바코드][수량]. UploadHeaderMismatch 메시지 문구도 6열로.
+  B4. B2cUploadRawRow / B2cUploadParsedRow 에 OrderNo 필드 추가(위치기반 6열 반영).
+      OrderNo 안전문자 상수(UploadOrderNoRegex) 필요 시 추가(바코드 규칙 재사용 가능).
+  B5. (선택·craft) 코드리뷰 후속 minor 동시 정리 가능(같은 파일 국소): batchNo 길이 100 상수화 ·
+      DefaultPlannedQty 상수 추가 · zip-bomb 계약 문구 "materialize 전 캡" → 실동작 정정.
+      과확장 금지 — 스코프 파일 내에서만, 위험 0 인 것만.
 
----
+  [B · 컨트롤러 — backend/src/Wcs.Api/Controllers/B2C/B2cTestDataController.cs]
+  B6. 조사 결과 컨트롤러 Upload 는 파일 레벨 검증(없음/0바이트/크기/확장자/MIME)만 수행하고
+      컬럼 파싱을 하지 않는다 → **무변경 예상**. 헤더 문자열·컬럼 수에 의존하는 코드 없음(확인 완료).
+      만약 변경이 필요해지면 그 사유를 sprint-log 에 명시(기본 가정: 0 diff).
 
-## Implementation Scope (Generator가 구현할 것 — WHAT)
+  [B · 양식 파일 — frontend/public/b2c-order-upload-template.xlsx]
+  B7. 6열로 **프로그램적 재생성**(바이너리 xlsx). 헤더 문자열은 B2cConstants.Hdr* 와 **정확히 일치**
+      (위치기반 파싱 · 드리프트 0). 예시 행에 "**한 오더에 바코드 2건 이상**" 케이스 포함
+      (예: 같은 오더번호 2행, 서로 다른 바코드). "설명" 시트가 있으면 6열로 갱신(오더번호 컬럼 설명 +
+      1오더:N바코드 사용법 + 미할당·멱등·원자성·최대 행수).
+      · 생성 경위 조사 결과: repo 에 **커밋된 양식 생성 스크립트 없음**(tools/·scripts/·*.csx 부재.
+        기존 양식은 S-B2C-EXCEL-UPLOAD 커밋 e6afe05 에서 일회성 openpyxl/ClosedXML 로 생성된 것으로
+        확인). → Generator 가 ClosedXML(백엔드에 이미 의존) 로 일회성 재생성한다(테스트 헬퍼 BuildXlsx
+        패턴 재사용 가능). 재생성 방법을 sprint-log 에 남긴다. 헤더 정합은 라운드트립 테스트가 잠근다.
 
-> 기술 상세(어떻게 통합할지, 어느 클래스로 흡수할지)는 Generator 재량. 아래는 계약이 요구하는 WHAT만.
+  [B · 테스트 — backend/tests/Wcs.Tests/B2C/B2cUploadTests.cs]
+  B8. BuildXlsx/Xlsx 헬퍼 헤더를 6열(오더번호 포함)로, 모든 데이터 행을 6열로 갱신.
+      추가/갱신 테스트(최소):
+      · ValidateUploadRows 순수 단위: OrderNo 필수·안전문자, 배치 내 (배치·바코드) 중복 = 행오류,
+        같은 오더 같은 바코드 반복 = 중복오류, 서로 다른 오더가 같은 바코드 = 배치내 중복오류,
+        1 오더:N 바코드 정상 파싱(오더 1·item N).
+      · UploadExcelAsync 서비스: 1 오더 2 바코드 xlsx → ordersCreated=1·orderItemsCreated=2 ·
+        각 order_item.planned_qty=행 수량 · 미할당(DestinationId=null) · orderNo≠barcode 케이스 실증.
+      · 원자성: 배치 내 바코드 중복 파일 → 200 F · rowErrors · 커밋 0.
+      · 멱등: 재업로드 신규 0 · 기존 reserved/sorted 보존.
+      · 정적양식 라운드트립(StaticTemplate_RoundTrips_ThroughParser): 새 6열 양식 재투입 → S ·
+        예시행 단언을 새 예시 바코드/오더번호로 갱신(1오더:N 예시행 커버).
+      · API 왕복(multipart): happy 200 S · batches 반영 · 배치내바코드중복 200 F.
 
-### SC-1. ready 전이 발신 재배선 (폐지 와이어 → 확정 와이어)
-현재 `DestinationStatusPusher`가 폐지된 `IRcsPushClient`(destination-status 와이어)로 ready 불리언을
-발신한다. 이를 확정 `UpdateChuteState` 와이어로 발신하도록 재배선한다. 발신 값은 ready 불리언이 아니라
-`next_state`(수용가능 `3` / 불가 `2`)로 접어 보낸다.
+  [B · 문서 — docs/B2C-DATAGEN.md]
+  B9. §7 업로드 스펙 갱신: §7.1 컬럼표 6열화(오더번호 행 추가·바코드↔오더번호 분리·배치 그룹핑 =
+      (작업일자·배치명·차수)·오더 그룹핑 = +오더번호), §7 서문 "한 행 = 오더/바코드 1건" → "1 오더:N
+      바코드", §7.3 양식 예시행 설명 갱신, §7.5 검증 갱신, 배치내 바코드 유일 규칙 명시.
 
-### SC-2. 발신 상태 합성 변경 (계약 매핑 정합)
-목적지당 "발신할 수용상태"를 계약대로 합성한다:
-- **소터:** `next_state=3` ⇔ 온라인 ∧ 운영층 정렬 ∧ 비분류(Ready=1) ∧ **비정지**. 하나라도 아니면 `2`
-  (분류중·이동중·미정렬·오프라인·운영자정지 → `2`). 즉 발신 수용상태 = **운영 ready ∧ !paused**
-  (현재 `DestinationStatusService.Compute().Ready`(운영 ready)는 paused를 제외하고 있으므로, 발신
-  합성에서 paused를 다시 접어 넣어야 한다).
-- **슈트:** `next_state=3` ⇔ 비만재 ∧ 비정지. 아니면 `2`.
-- **셀 만재(SorterFull)는 발신 합성에서 제외.** 만재여도 운영상태 OK ∧ 비정지면 `3`을 유지한다
-  (만재는 IF-05 dispatch에서만 차단 — 2단계 게이트 분리 현행 유지).
+  [무접촉 경계 — diff 0 이어야 함]
+  · GenerateAsync / BuildOrderNumbers(생성 폼 5-파라미터 1:1) · ResetAsync/초기화 · GetBatches/
+    GetSummary/GetDetail 조회 · 마스터/디테일 그리드 조회 경로 · Wcs.Core · Wcs.PlcGateway ·
+    HandshakeOrchestrator · 마이그레이션/스키마 · CLAUDE.md · tasks/workflow-*.md.
+  · frontend/src/lib/b2cTestData.ts 는 파일만 POST 하므로 **무변경 예상**(B2C_UPLOAD_TEMPLATE_URL
+    파일명 불변). 변경 필요 시 사유를 sprint-log 에 명시.
 
-### SC-3. 두 발신 소스를 단일 소스로 통합
-`DestinationStatusPusher`(ready 전이)와 `ChuteStatePusher`(운영자 pause/resume 전이)를 목적지당 단일
-발신 소스로 통합한다. 통합 방식(둘 중 하나로 흡수 / 새 단일 서비스)은 Generator 재량이되:
-- 같은 `chuteNo`에 대해 이중·모순 발신이 발생하지 않아야 한다.
-- 전이 감지·전이당 정확히 1회·복구 재푸시의 동시성 멱등(중복 0·누락 0)이 보존되어야 한다.
-- 관심사 분리(전이 감지 → 1건 전송+재시도)가 유지되어야 한다.
+════════════════════════════════════════════════════════════════════════════
+- Evaluation Criteria (가중치):
+  1. 업로드 오더-그룹핑 정확성 (★★★, B) — 1 오더:N 바코드 그룹핑, 배치 내 바코드 유일, orderNo≠
+     barcode 케이스, planned_qty=행 수량, 미할당 유지. 순수 ValidateUploadRows 가 스펙.
+  2. 프론트 레이아웃 정합 (★★★, A) — 접힘(기본) 상태에서 하단 상세 오더 행 실제 표시, 3뷰포트,
+     폼 오버랩 0. disclosure 접근성(aria-expanded·키보드).
+  3. 회귀 안전 (★★) — S-UI-LAYOUT-FIX 폼 오버랩 회귀 0 · 업로드 원자성(Q4) · 멱등 append ·
+     **생성 폼 불변** · 마이그레이션 0 · 무접촉 경계 diff 0.
+  4. Craft (★★) — 콘솔 청결(React dev-warning·pageerror 0) · 회귀 계약 주석 보존/정정 ·
+     하드코딩 금지(헤더·상한 상수화 · 절대규칙 #6/#7) · 순수함수 분리(#8) · 양식↔파서 헤더 단일 소스.
+  5. Scope 준수 — 명시 스코프 파일로 한정, 무접촉 영역 손대지 않음.
 
-### SC-4. 폐지 와이어 완전 제거
-- `RcsPushClient` + `IRcsPushClient` + `DestinationStatusPushPayload` 제거.
-- `WcsOptions` 내 `RcsPushOptions` 제거, `appsettings.json`의 `Wcs:RcsPush` 섹션 제거.
-- `Program.cs`의 해당 DI 배선(named HttpClient `RcsPush` · `IRcsPushClient` · `DestinationStatusPusher`
-  중 폐지 대상) 정리.
-- 프로덕션 코드·설정에 `destination-status`·`RcsPush*`·`IRcsPushClient`·`DestinationStatusPushPayload`
-  심볼/문자열이 0건 남게 한다.
+════════════════════════════════════════════════════════════════════════════
+- Completion Conditions (전부 충족해야 PASS):
+  C1. `dotnet test backend/Wcs.sln` 전량 GREEN(신규 오더-컬럼/1:N/배치내바코드유일 테스트 포함) —
+      Evaluator 독립 재실행. ValidateUploadRows 는 순수함수라 단위테스트가 스펙(절대규칙 #8).
+  C2. frontend tsc / lint / build digit-exact 0 신규 에러·경고(Evaluator 독립 실행).
+  C3. 뷰포트 700 / 900 / 1080px 각각(Playwright 실측):
+      · 900 / 1080px 기본(접힘) 상태 → 하단 "배치 상세" 그리드에 오더 행이 **페이지 스크롤 없이
+        in-place 로** 실제 렌더(헤더만이 아님) · 폼 오버랩 0.
+      · 700px 기본(접힘) 상태 → 하단 "배치 상세" 오더 행이 **페이지 스크롤(main overflow-auto)로
+        도달 가능**하면 PASS. **사용자 결정(2026-07-26): 짧은 창에서 페이지 스크롤 허용** — 폼이
+        접혀도 ~540px 라 700px 에서 상세를 in-place 노출하는 것은 물리적으로 불가(폼은 계약상
+        무접촉). 상세 Card 에 최소 높이 하한을 줘 700px 에서 <main> overflow-auto 가 페이지 스크롤로
+        오더 행에 도달하게 한다(900/1080 은 하한 비활성·in-place 무변경). 폼 오버랩 0 은 불변 요건.
+      · 펼침 상태(전 뷰포트) → 폼 오버랩 0. (짧은 뷰포트 펼침 시 콘텐츠는 위 페이지-스크롤
+        에스컬레이션으로 도달 가능 — 오버랩 0 이 불변 요건, 이 메커니즘 허용.)
+  C4. 엑셀 접기/펼치기 동작 실증: 토글 클릭 + 키보드(Enter/Space) 로 열림/닫힘 전환 ·
+      aria-expanded 값이 상태와 일치 · 접힘 시 본문 미표시.
+  C5. E2E(cross-layer): 오더번호 컬럼이 있는 .xlsx(한 오더에 바코드 2건 포함) 업로드 →
+      **오더 1건·item 2건**(오더 단위) DB 생성 확인 + 마스터 그리드(오더 총/미할당·항목 수) ·
+      디테일 그리드에 반영. 잘못된 파일(배치 내 바코드 중복 등) → 행별 오류 목록 렌더 · 커밋 0
+      (해당 배치 미출현). 콘솔 에러 0.
+  C6. 새 양식 다운로드 → 그 파일 그대로 재업로드 성공(양식↔파서 헤더 왕복 정합 · 라운드트립 GREEN).
+  C7. git diff: 변경이 명시 스코프 파일로 한정. GenerateAsync·초기화·조회·백엔드 무관 영역·
+      **마이그레이션 diff 0**(DB 스키마 무변경 — 기존 order_item 1:N 재사용). 컨트롤러/ b2cTestData.ts
+      변경 시 사유가 sprint-log 에 기록되어 있을 것(기본 가정 0 diff).
 
-### SC-5. 관찰 주기 설정 이전
-폐지되는 `RcsPushOptions`의 `SorterObserveIntervalMs`(소터 스냅샷 관찰 주기 — 분류 사이클 ready 전이
-감지에 필수)를 존치되는 push 설정 섹션으로 이전한다. 운영자 pause/resume 이벤트만으로는 소터 분류
-사이클(3↔2) 전이를 감지할 수 없으므로 스냅샷 관찰은 반드시 유지된다. 관찰 주기는 설정값(하드코딩 금지).
+════════════════════════════════════════════════════════════════════════════
+- Parallel Modules: N/A (single module).
+    A·B 가 frontend/src/pages/B2cDataGenPage.tsx 를 **공유 편집**하므로(A=레이아웃/disclosure,
+    B=업로드 안내 문구·컬럼 안내) 병렬 워크트리 분할 시 동일 파일 쓰기 충돌. 단일 Generator 권장.
+- Evaluation Dimensions: functional only.
 
-### SC-6. 트리거 정합
-- 수용상태가 **실제로 전이할 때만** 발신(운영자 pause/resume 포함 — 값이 같으면 미발신). 고정 주기 아님.
-- 기동 시 전 활성 목적지(슈트+소터)의 현재 수용상태를 목적지당 1회 부트스트랩 발신.
+════════════════════════════════════════════════════════════════════════════
+- Detected Project Type: Full-stack
+  (저장소 신호: frontend React 컴포넌트 트리(frontend/src/pages·components) + 서버 라우트/컨트롤러
+   (backend/src/Wcs.Api/Controllers/B2C) 가 같은 repo 에 공존 → Full-stack.)
 
-### SC-7. 재시도 유지
-존치되는 push 클라이언트(`ChuteStatePushClient`)의 지수 백오프 재시도(설정값, 기본 3회 1s/2s/4s)를
-유지한다. 재시도·백오프·타임아웃·관찰 주기 전부 설정값(하드코딩 0 — 절대규칙 #7).
+- Verification Scenarios (Full-stack — 모든 슬롯 충족):
 
-### SC-8. 테스트 스위트 재작성·정합 (0 회귀 필수)
-- 폐지 와이어를 검증하던 테스트(`RcsPushTests` 및 `DestinationStatusPusher` 경로)를 존치 와이어(가짜
-  `UpdateChuteState` 수신 서버 — `FakeChuteStateServer` 재사용) 기준으로 재작성한다.
-- `ChuteStatePushTests`를 확장해 합성(ready∧!paused)·단일소스·부트스트랩·소터 분류 사이클 전이를 포함한다.
-- **공유 표면 정합(스코프 포함 — 이걸 놓치면 스위트 컴파일/실행 붕괴):**
-  - `RcsPushTests.cs`의 `RcsPushWebApplicationFactory`는 `SorterCellFullnessTests`·`Field20CellsGateTests`·
-    `SorterPushOperationalTests`가 **공유**하는 픽스처다. 폐지 심볼 제거 후에도 이 다운스트림 스위트가
-    컴파일·GREEN 유지되도록 픽스처를 이전/치환한다.
-  - `backend/tests/Wcs.Tests/E2E/E2EInfrastructure.cs`가 `Wcs:RcsPush:*` 키·`DestinationStatusPusher`를
-    배선한다. 존치 와이어 기준으로 갱신한다.
+  === Web/UI (프론트 surface: B2cDataGenPage 좌측 생성 카드 + 하단 배치 상세) ===
+  - Default state of each surface touched:
+      · 데이터 생성 페이지 로드 → 좌측 생성 카드 안 엑셀 업로드 블록 **접힘(기본)**: "엑셀 업로드"
+        라벨 + 양식 다운로드 링크 + 토글만 보이고 파일 input/업로드 버튼/안내 미표시.
+      · 하단 "배치 상세" 그리드: 배치 선택 시 오더 행이 실제로 표시(1080/900/700px 각 스냅샷).
+  - Each alternate state introduced:
+      · 업로드 블록 **펼침**: 토글 클릭/Enter/Space → 파일 input·업로드 버튼·안내 문구·행오류 슬롯 표시,
+        aria-expanded=true. 다시 토글 → 접힘, aria-expanded=false.
+      · 파일 선택 후 업로드 버튼 enabled(미선택 시 disabled) 상태 스냅샷.
+  - Relevant empty / error state surfaced:
+      · 배치 미선택 시 하단 상세 EmptyRow("상단에서 배치 행을 선택…").
+      · 배치 내 바코드 중복/오더번호 누락 파일 업로드 → 에러 토스트 + 행별 오류 목록(행번호+사유) 렌더.
+  - Dark mode variant:
+      N/A — 프로젝트는 단일 라이트 테마(docs/B2C-DATAGEN.md §4 "다크모드 N/A"). 사유 명시.
+  - Key interaction flow after the change:
+      접힘 기본 → 하단 상세 오더 행 가시(핵심 목표) → 토글 펼침 → 양식 다운로드 → 6열 파일 선택
+      (1오더:2바코드) → 업로드 → 성공 토스트 + 마스터(오더/미할당/항목) 갱신 + 행 선택 → 디테일
+      그리드에 그 오더의 2 바코드 item 표시.
 
----
+  === Backend/API (backend surface) ===
+  - Endpoints touched (method + path):
+      · POST /api/b2c/test-data/upload (유일 변경 경로 — 파싱/그룹핑). 컨트롤러 파일검증은 무변경 예상.
+      · (무접촉·회귀확인용) GET /api/b2c/test-data/batches · GET /api/b2c/facility/orders?batchId=.
+  - Happy path per endpoint (input → output shape):
+      · upload: 6열 xlsx, 동일 오더번호 2행(바코드 상이·수량 상이) → 200 {status:"S",
+        counts:{ordersCreated:1, orderItemsCreated:2, batches:1, dataRows:2}}. 다중 오더/다중 배치도 검증.
+      · batches: 업로드 후 해당 배치 orderTotal=오더수 · orderUnassigned=오더수 · itemTotal=바코드수.
+  - Relevant error cases per endpoint:
+      · upload 200 F(+rowErrors): 배치 내 바코드 중복(다른 오더 동일 바코드 / 같은 오더 반복 바코드) ·
+        오더번호 누락 · 작업일자/차수/수량 형식오류 · 헤더 6열 불일치 · 데이터행 0 · 행수>1000 ·
+        사용범위 팽창(행/열 상한). 전부 커밋 0(원자성).
+      · upload 400: 파일 없음/0바이트 · >10MB · 확장자≠.xlsx(.xls 거부) · MIME 불일치(컨트롤러 선행).
+      · ValidateUploadRows 순수 단위(I/O 무의존) = 위 판정의 스펙 테스트.
 
-## Absolute Rules Compliance (CLAUDE.md)
+  - At least one end-to-end data-flow scenario crossing 2+ layers:
+      양식 다운로드(GET 정적 /b2c-order-upload-template.xlsx) → 브라우저 파일 업로드(POST multipart)
+      → ClosedXML 파서/ValidateUploadRows → Wcs.Data 트랜잭션(work_batch UQ 멱등 → OrderNo 별
+      WcsOrder → 행별 order_item) → GET /batches(orderUnassigned) + 하단 디테일 그리드(1 오더 아래
+      N 바코드) 3계층 관통. + 역방향 왕복: 새 양식 재업로드 성공(헤더 정합).
 
-- **#1 (PLC 단일 큐):** 무접촉 — 아웃바운드 HTTP 재배선이지 PLC 쓰기가 아니다. Modbus/게이트웨이/쓰기큐 0 변경.
-- **#7 (하드코딩 금지):** BaseUrl·Path·재시도·백오프·타임아웃·관찰 주기 전부 appsettings. URL/타이밍 리터럴 0.
-- **#6 (필드명):** 이 와이어 필드는 **RCS 계약**(`chute_numbers`/`next_states`, snake_case) — WCS 내부
-  camelCase(`chuteNo` 등)와 다르다. 계약 필드명 정확 준수(camelCase 직렬화 의존 금지).
-- **예외 삼킴 금지:** 푸시 최종 실패는 명시 로깅 + false 반환(Fail-Loud). 연결 실패를 성공 위장 금지.
-- **#2/#3/#4/#5/#8:** 전부 무관(PLC/TgtFloor/Ready/판정엔진 무접촉). `Wcs.Core`·`Wcs.PlcGateway`·
-  `HandshakeOrchestrator` diff 0.
+  검증 환경: 프론트 Playwright MCP 헤드리스(vite dev, 기본 http://localhost:5173 — 존재 시
+  .claude/ports.local.json 우선). 백엔드는 Evaluator 가 필요 시 기동하되 **포트는
+  .claude/ports.local.json 의 이번 스프린트 할당값을 읽어 구성**한다(하드코딩 금지). ⚠ 사용자 로컬
+  실 서비스 포트(5205/1502·COM1/RTU)는 **절대 사용 금지**(ports.local.json note 명시). 스크린샷은
+  screenshots/S-B2C-DATAGEN-UPLOAD_{YYYYMMDD-HHMMSS}/ 에 번호순 저장 + console.log 캡처(dev-warning/
+  pageerror 0 BLOCKING).
 
----
-
-## Evaluation Criteria (Backend/API — 가중치)
-
-1. **API 계약 정합성 (★★★)** — 발신 와이어가 계약 정본(§IF-08)과 바이트 수준 일치: `PUT`, snake_case
-   `chute_numbers`/`next_states`, 인덱스 정렬 단건 배열, 값 ∈ {2,3}, 상태 매핑(3/2)이 계약대로. 소터
-   합성 = 운영 ready ∧ !paused, 슈트 = !full ∧ !paused, 셀 만재 미반영.
-2. **아키텍처 (★★★)** — 목적지당 단일 발신 소스(이중/모순 발신 구조적 불가). 전이당 1회·복구 재푸시의
-   동시성 멱등(중복 0·누락 0) 보존. 관심사 분리(전이 감지 vs 1건 전송) 유지.
-3. **Craft (★★)** — 하드코딩 0(전 타이밍 설정값). 폐지 와이어 잔재 0(grep-clean). DORMANT(BaseUrl
-   미설정) 시 크래시 0·발신 0. 예외 삼킴 0(Fail-Loud). teardown 경쟁 방어 유지.
-4. **Functionality (★★)** — 계약의 트리거·합성·부트스트랩·재시도가 실제 동작으로 재현. IF-05 dispatch
-   (셀 만재 차단 포함) 회귀 0.
-
----
-
-## Completion Conditions (Evaluator PASS 최소 조건 — 전부 충족)
-
-1. 아래 §Verification Scenarios **전부**가 자동 xUnit(가짜 `UpdateChuteState` 수신 서버 + Sim3ds(TCP) +
-   SQLite)로 재현되어 PASS. 인메모리 단언만으로 PASS 금지 — "가짜 RCS 서버가 실제 수신한 JSON 본문"으로 입증.
-2. `dotnet test backend/Wcs.sln` 전체 스위트가 **독립 실행**에서 GREEN(0 회귀). Evaluator가 처음부터 재실행.
-   단일 run 신뢰 금지(실-Sim I/O 테스트 부하 flake 이력 — 관련군 반복 또는 ≥5회로 결정성 확인).
-3. 폐지 와이어 grep-clean: 프로덕션 코드·`appsettings.json`에 `destination-status`·`RcsPush*`·
-   `IRcsPushClient`·`DestinationStatusPushPayload` 0건(grep 증거).
-4. `dotnet build backend/Wcs.sln` 경고/에러 0(프로젝트 설정 기준). 정적 검사 결과를 sprint-feedback.md에 기록.
-5. 스키마 무변경 → **마이그레이션 0**(신규 마이그레이션 파일 생성 시 계약 위반).
-6. 실 PLC/COM1·현장 DB 미접촉(검증은 Sim3ds TCP + in-memory SQLite로만).
-
----
-
-## Scope OUT (이 계약에 흡수 금지)
-
-- **PLC 레지스터/핸드셰이크/`Wcs.PlcGateway` 변경** — 무접촉(절대규칙 #1 보존).
-- **IF-05/09/10 인바운드 계약·판정 로직 변경** — 무접촉(회귀만 방지). `Wcs.Core` diff 0.
-- **셀 만재를 발신에 반영** — 계약상 만재는 IF-05 dispatch만 차단(발신 미반영). 현행 유지.
-- **배치(다건) 발신·전이 코얼레싱** — 계약 배열 구조는 유지하되 전이당 단건. 배치는 후속.
-- **프론트/모니터링 UI** — 요청 없음. 이 스프린트는 백엔드 서비스 계층 전용.
-- **신규 인바운드 WCS 엔드포인트** — 이 와이어는 WCS가 **호출하는** 아웃바운드.
-
----
-
-## Parallel Modules
-
-N/A (단일 모듈). 두 pusher·존치 클라이언트·옵션·DI·테스트가 상호 의존하고 파일을 공유하므로
-경계-청정 분할 불가. 기본 1 Generator.
-
-## Evaluation Dimensions
-
-functional only. 신규 보안/성능 민감 표면 없음(내부 아웃바운드 HTTP 재배선). 동시성 정합(단일소스·
-이중발신 금지)은 별도 전문 dimension이 아니라 기능 정합의 일부로 검증. 기본 1 Evaluator.
-
----
-
-## Detected Project Type: Backend/API
-
-> 리포 구조 신호: `backend/src/Wcs.Api`에 ASP.NET Core Controller + 서버 진입점(`Program.cs`)이 있고,
-> `frontend/`에 React SPA(브라우저 진입점)도 함께 존재한다 — 리포 전체로는 Full-stack 신호다. 그러나
-> **이 스프린트의 변경 표면은 `Wcs.Api` 백엔드 서비스 계층(HostedService·아웃바운드 HTTP 클라이언트·옵션·
-> DI) + xUnit 테스트로 한정**되며 프론트엔드 파일·브라우저 진입점·HTTP 엔드포인트 라우팅을 일절 건드리지
-> 않는다. 발신 채널 상대역은 협력사 RCS(외부 시스템)이지 이 리포의 프론트엔드가 아니다. 따라서 검증 타입은
-> **Backend/API**로 확정한다(자동 xUnit 대 가짜 RCS 수신 서버 — 이 리포의 동종 아웃바운드 push 스프린트
-> RcsPush Phase 2·ChuteStatePush·SorterPushOperational이 확립한 패턴). 브라우저 검증은 이 스프린트에
-> 검증할 프론트엔드 델타가 없어 N/A.
-
----
-
-## Verification Scenarios (Backend/API — 필수)
-
-### 이 스프린트가 건드리는 엔드포인트 / 와이어 (method + path)
-
-- **아웃바운드(WCS = 클라이언트 · 재배선 대상):** `PUT {RCS base}/api/UpdateChuteState`
-  — body `{chute_numbers:[n], next_states:[2|3]}` (snake_case, 전이당 단건). 이 스프린트가 재배선하는
-  유일한 아웃바운드 채널. (폐지 제거 대상: `POST {RCS}/api/v1/destination-status`.)
-- **인바운드(무변경 · 회귀 방지):** `POST /api/v1/destination-query`(IF-05) — 발신과 상태 서비스를 공유
-  (`DestinationStatusService`)하므로 회귀 없음을 확인. `POST /api/ops/destinations/{id}/pause|resume`
-  (운영자 전이 발원지) — 전이가 통합 발신으로 이어짐을 확인.
-- **검증 대역:** 가짜 RCS 수신 서버(in-process Kestrel 동적 포트, `PUT /api/UpdateChuteState` 수신·기록·
-  거부토글) — 기존 `FakeChuteStateServer` 재사용.
-
-### Happy path (입력 → 기대 출력 형태)
-
-- **VS-1 소터 분류 사이클(전이당 1건·순서):** 소터 수용상태 `3`→`2`→`3` 전이 시 가짜 서버가
-  `{[chuteNo],[2]}` → `{[chuteNo],[3]}`를 그 순서로 각 1건 수신. 값이 안 바뀌는 폴에서는 **미발신**
-  (폴마다 폭주 0).
-- **VS-2 기동 부트스트랩:** 기동 시 전 활성 목적지(슈트+소터)의 현재 수용상태가 목적지당 정확히 1회 발신됨.
-- **VS-3 운영자 pause 합성(핵심):** 소터가 운영상태 OK(온라인·정렬·Ready=1)여도 운영자 PAUSED면 발신값
-  `2`(합성 `ready ∧ !paused` 검증), RESUME 시 `3`. 폐지 전 두 소스로 갈렸던 값이 단일 소스로 정합됨.
-- **VS-4 슈트 만재/정지:** 슈트 만재 또는 정지 전이 → `2`, 해소 → `3`.
-- **VS-5 소터 셀 만재 무영향(핵심):** 소터 셀이 만재(SorterFull)여도 운영상태 OK ∧ 비정지면 발신값 `3`
-  유지(만재로 `2` 발신 없음). 동시에 IF-05 dispatch는 그 piece를 여전히 차단(회귀 0) — 2단계 게이트 분리.
-- **VS-9 와이어 형태 정합:** 메서드 `PUT`, 키가 정확히 `chute_numbers`·`next_states`(camelCase 아님),
-  두 배열 동일 길이·인덱스 정렬·길이 1, 값 ∈ {2,3}. 성공 응답 판정(2xx ∧ `flag==1`)이 기존과 동형.
-
-### 관련 오류·경계·회귀 케이스 (골라 채움 — 패딩 아님)
-
-- **VS-6 DORMANT(BaseUrl 미설정):** RCS base URL 미설정 시 발신 0·크래시 0, 전이 여러 번 발생시켜도 수신 0,
-  인바운드 IF-05 정상(200). (현재 테스트 배포 상태 = DORMANT.)
-- **VS-7 단일 소스·이중/모순 발신 금지(핵심):** 같은 `chuteNo`에 운영자 pause 전이와 ready 전이가 겹쳐
-  발생해도 중복·모순 발신 없음. 최종 발신값이 최종 합성 상태와 일치(중복 0·누락 0 멱등).
-- **VS-8 폐지 와이어 완전 제거:** 프로덕션 코드·`appsettings.json`에 `destination-status`·`RcsPush*`·
-  `IRcsPushClient`·`DestinationStatusPushPayload` 심볼/설정 0건(grep 증거).
-- **VS-11 재시도·복구(RCS 미도달):** RCS가 비2xx/실패 응답 → 지수 백오프 재시도(설정 3회) 후 명시 실패
-  (Fail-Loud, 조용한 드롭 0) → 복구 후 최신 수용상태가 RCS에 도달.
-- **VS-10 전체 스위트 GREEN(0 회귀):** 공유 픽스처(`RcsPushWebApplicationFactory` 소비 스위트) + E2E
-  하네스 정합 후, `dotnet test backend/Wcs.sln` 전체가 독립 실행에서 GREEN.
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints touched [method+path], happy path per endpoint, relevant error/edge/regression cases per endpoint). All slots filled: yes — endpoints(아웃바운드 UpdateChuteState 재배선 + 무변경 인바운드 IF-05/pause·resume + 가짜 RCS 대역) · happy(VS-1 분류사이클 / VS-2 부트스트랩 / VS-3 pause 합성 / VS-4 슈트 full·pause / VS-5 셀만재 무영향 / VS-9 와이어 형태) · error·regression(VS-6 DORMANT / VS-7 단일소스 이중발신 금지 / VS-8 폐지와이어 제거 / VS-11 재시도·복구 / VS-10 전체 GREEN). Web/UI 슬롯은 이 스프린트에 프론트 표면이 없어 정당하게 부재. 배경 계약(destination-status 폐지·next_state 3/2 운반)은 2026-07-11 확정 — open question 없음.
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 8
+  (UI-default, UI-alternate, UI-empty/error, UI-darkmode(N/A+사유), UI-key-interaction,
+   API-endpoints, API-happy, API-error; + cross-layer E2E). All slots filled: yes.

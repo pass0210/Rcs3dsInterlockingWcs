@@ -34,6 +34,15 @@ public abstract record PlcWrite
 
     /// <summary>R 영역 처리 완료: R_CellNo·R_Seq=0 + D4 RMW로 R_Flag clear.</summary>
     public sealed record ClearR : PlcWrite;
+
+    /// <summary>
+    /// 콜드스타트(프로세스 기동/재시작) 1회 복구 리셋 — WCS가 소유·기입하는 레지스터를 0으로 위생 초기화.
+    /// C 영역(D0/D1)·R 영역(D2/D3)=0(FC16) + TgtFloor(D6)=0(FC06, 핑퐁 가드 우회 — "목표 설정"이 아닌
+    /// "복구 리셋") + D4 RMW로 C_Flag·R_Flag 비트만 clear(Ready(D4.2) 보존). CurFloor(D5)는 미접촉.
+    /// 규칙 #3 개정(SPEC §4-B — 콜드스타트 1회 허용)·#1(단일 큐 경유)·#4(D4 RMW·CurFloor 미접촉) 준수.
+    /// 정상 운영 중에는 절대 투입되지 않는다(기동 첫 유효 Online 폴 1회만 PlcPollingService가 투입).
+    /// </summary>
+    public sealed record StartupClear : PlcWrite;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -82,6 +91,12 @@ public sealed record PlcGatewayOptions
     // 하드코딩 금지(절대규칙 #7). 분류 최대 소요와 무관한 "클리어 반영" 대기이므로
     // RFlagTimeoutMs보다 짧게(현장 폴 주기 몇 배) 잡는다. 초과 시 C 미기입 종결(§2C).
     public int RFlagClearConfirmTimeoutMs { get; init; } = 2000;
+
+    // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
+    // R 클리어를 "R_Flag==1 즉시"가 아니라 "복귀 완료(Ready 0→1)"로 지연하는 성공 경로 전용 데드라인.
+    // 복귀 이동(MoveDuration)이 RFlagTimeoutMs(분류 최대+여유)와 독립이라 별도 키로 분리(계약 (d-iii)).
+    // 하드코딩 금지(절대규칙 #7). 초과 시 ClearR ack + 알람 + returnedAt=NULL(측정 실패), outcome=Success 유지.
+    public int ReturnReadyTimeoutMs { get; init; } = 30000;
 
     // S-CLEANUP-FIELD D-1 — OFFLINE 지속 중 로그 스팸 억제용 요약 주기.
     // OFFLINE '전이'는 1회만 상세(스택 포함) 로깅하고, 이후 '지속' 폴 실패는 스택 없이 Debug로
@@ -144,7 +159,41 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     // 소켓/직렬 직렬화 세마포 — 폴 읽기 / 쓰기 / RMW 가 같은 _master를 동시에 사용하지 않도록 보호.
     // FluentModbus 클라이언트는 단일 트랜잭션 버퍼라 thread-safe 아님.
     // RMW의 read+write는 반드시 하나의 임계구역(lock 획득 상태)으로 수행.
-    private readonly SemaphoreSlim _clientLock = new(1, 1);
+    //
+    // S-MULTISORTER-SHARED-BUS(B3): 공유 버스 모드에서는 이 락이 버스 단위 공유 락으로 대체된다
+    // (ConfigureForBus). 그러면 한 물리 버스의 폴 read·write·D4 RMW·재연결 Disconnect가 전부
+    // 버스 단위 단일 임계구역에서 직렬화되어 슬레이브 간 프레임이 절대 교차하지 않는다.
+    // 단독(standalone) 모드는 자기 인스턴스 락 1개(현행 동작 — 버스=자기 1개).
+    private SemaphoreSlim _clientLock = new(1, 1);
+    private bool          _ownsClientLock = true;   // 공유 락으로 대체되면 false(Dispose에서 미해제)
+
+    // ── 공유 버스 멤버 상태 (S-MULTISORTER-SHARED-BUS) ───────────────────────
+    // _bus != null 이면 이 서비스는 ModbusBus의 멤버 슬레이브다. 버스가 폴 사이클(주기당 1회 대기,
+    // 멤버 순회)과 단일 쓰기 컨슈머를 구동하며, EnqueueAsync는 버스 공유 큐로 라우팅된다.
+    // 단독 모드(_bus==null)는 자기 폴 루프·자기 쓰기 큐로 현행과 동일하게 동작한다.
+    private ModbusBus? _bus;
+    private byte       _unitId;        // 버스 멤버일 때 이 슬레이브 주소(큐 라우팅용)
+    private bool       _isBusMember;
+
+    // 단일 멤버 버스(solo) 재연결 의미 복원 (S-MULTISORTER-SHARED-BUS Phase 2 — C4 fix).
+    // 버스에 멤버가 이 슬레이브 하나뿐이면 형제가 없어 공유 포트 재연결(reopen)이 안전하고, 그것이
+    // 현행(pre-Phase-2 단독) 복구 경로다. ModbusBus.StartAsync가 멤버 수==1이면 true로 설정한다.
+    // 다중 멤버 버스(≥2)는 false 유지 → read 타임아웃 SOFT·공유 연결 미절단(형제 보호, Phase 1 I1).
+    private bool       _soloBusReconnect;
+
+    // ── 폴 사이클 상태 (폴 스레드 단독 소유 — 단독: 자기 폴 루프 / 버스: 버스 폴 루프가 순차 호출) ──
+    // B5: 슬레이브별 독립 상태(최신 스냅샷·연속 실패·arming·R_Flag 에지·기동 reconcile)를 인스턴스 필드로.
+    private int          _failures;
+    private bool         _prevRFlag;
+    private PlcSnapshot? _prevSnap;
+    private bool         _startupReconciled;
+
+    // S-TWO-FLOOR-CONTROL C2 — 콜드스타트 레지스터 클리어(StartupClear) 완료 신호.
+    // 첫 유효 Online 폴이 StartupClear를 단일 큐에 투입하고, 쓰기 컨슈머가 처리 완료하면 완료된다.
+    // IF-08 부트스트랩 push가 이 Task를 대기해 "클리어 before push" 순서를 보장한다(계약 S3/CC3).
+    // RunContinuationsAsynchronously — 쓰기 컨슈머 스레드에서 대기자 연속을 인라인 실행하지 않게 한다.
+    private readonly TaskCompletionSource _startupClearTcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // R_Flag 상승 통지 채널 — 핸드셰이크 오케스트레이터가 구독
     private readonly Channel<PlcSnapshot> _rFlagChannel =
@@ -193,13 +242,57 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
 
     public PlcSnapshot Latest => _latest;
 
+    /// <summary>
+    /// 콜드스타트 레지스터 클리어(StartupClear)가 쓰기 큐 컨슈머에서 처리 완료되면 완료되는 Task(C2 S3).
+    /// IF-08 부트스트랩 push가 이 Task를 기다려 클리어가 push보다 먼저 나가도록 순서를 보장한다.
+    /// PLC가 끝내 Online이 안 되면(오프라인 기동) 완료되지 않으므로 대기자는 설정 타임아웃으로 진행한다.
+    /// </summary>
+    public Task StartupClearCompleted => _startupClearTcs.Task;
+
+    /// <summary>버스 멤버일 때 이 슬레이브의 unitId(단독 모드에선 기본 0 — 의미 없음).</summary>
+    public byte UnitId => _unitId;
+
+    // 쓰기 큐 투입 — 단독: 자기 큐 / 버스: 버스 공유 큐(대상 unitId 실어서, B6).
     public ValueTask EnqueueAsync(PlcWrite write, CancellationToken ct = default) =>
-        _writeQueue.EnqueueAsync(write, ct);
+        _bus is not null
+            ? _bus.EnqueueAsync(_unitId, write, ct)
+            : _writeQueue.EnqueueAsync(write, ct);
+
+    // ── 공유 버스 결선 (S-MULTISORTER-SHARED-BUS — ModbusBus.AddSlave 전용) ────
+
+    /// <summary>
+    /// 이 서비스를 <see cref="ModbusBus"/> 멤버로 결선한다. 자체 폴/쓰기 루프를 띄우지 않고
+    /// (버스가 구동), _clientLock을 버스 공유 락으로 대체(B3)하며, EnqueueAsync를 버스 큐로 라우팅(B6)한다.
+    /// AddSlave에서 생성 직후 1회 호출(StartAsync 이전).
+    /// </summary>
+    internal void ConfigureForBus(ModbusBus bus, byte unitId, SemaphoreSlim sharedLock)
+    {
+        _bus         = bus;
+        _unitId      = unitId;
+        _isBusMember = true;
+        _clientLock.Dispose();      // 자체 생성 락 폐기 → 버스 공유 락으로 대체
+        _clientLock     = sharedLock;
+        _ownsClientLock = false;
+    }
+
+    /// <summary>
+    /// 이 멤버가 속한 버스가 단일 멤버(solo)인지 설정한다(C4 fix). ModbusBus.StartAsync가 멤버 수를
+    /// 확정한 뒤(AddSlave 완료 후·폴 루프 기동 직전) 호출한다. true면 read 타임아웃/비연결 예외를
+    /// 단독 모드와 동일하게 HARD(재연결/reopen)로 취급 — 형제가 없어 공유 포트 재연결이 안전하고
+    /// 현행(pre-Phase-2 단독) 복구 의미를 보존한다. false(다중 멤버)면 Phase 1 I1(soft·무-churn) 유지.
+    /// </summary>
+    internal void SetSoloBusReconnect(bool solo) => _soloBusReconnect = solo;
 
     // ── 시작·종료 ────────────────────────────────────────────────────────────
 
     public async Task StartAsync(CancellationToken outerCt = default)
     {
+        if (_isBusMember)
+        {
+            // 버스가 폴 사이클·쓰기 컨슈머를 구동 — 멤버는 자체 루프를 띄우지 않는다(B4 단일 폴 루프).
+            await Task.Yield();
+            return;
+        }
         _cts      = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
         _pollTask  = Task.Run(() => RunPollLoopAsync(_cts.Token));
         _writeTask = Task.Run(() => RunWriteConsumerAsync(_cts.Token));
@@ -214,7 +307,14 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return;
 
         if (_cts is not null)
-            await _cts.CancelAsync().ConfigureAwait(false);
+        {
+            // teardown 경쟁 방어: 종료 순서(호스트 dispose·형제 정리)에 따라 _cts가 이미 dispose된 뒤
+            // CancelAsync가 호출되면 ObjectDisposedException이 폴 스레드 밖으로 새어 testhost/서비스를
+            // 종료시킬 수 있다. SorterFloorReturnService·DestinationStatusPusher와 동일 패턴으로 흡수한다
+            // (쓰기 큐 경로·취소 의미 불변 — 취소 자체는 어차피 이미 dispose로 종결됨).
+            try { await _cts.CancelAsync().ConfigureAwait(false); }
+            catch (ObjectDisposedException) { /* 이미 dispose됨(teardown 경쟁) */ }
+        }
 
         foreach (var t in new[] { _pollTask, _writeTask }.Where(t => t is not null))
         {
@@ -230,167 +330,208 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
         await StopAsync().ConfigureAwait(false);
         _master.Dispose();
         _cts?.Dispose();
-        _clientLock.Dispose();
+        if (_ownsClientLock) _clientLock.Dispose();  // 공유 락은 버스가 소유·해제(형제 슬레이브 보호)
     }
 
     // ── 폴링 루프 ────────────────────────────────────────────────────────────
 
     private async Task RunPollLoopAsync(CancellationToken ct)
     {
-        int failures = 0;
-        bool prevRFlag = false;
-        // S-OBSERVABILITY: 전체 레지스터 전이 감지용 직전 스냅샷(변화분 정책 — 무변화는 발화 0).
-        // null = 첫 폴(직전값 없음 → 전이 기록 안 함, baseline만 설정).
-        PlcSnapshot? prevSnap = null;
-        // S-HANDSHAKE-RESIDUE §2B: 기동 잔류 R_Flag reconciliation 1회 게이트(첫 유효 폴 기준).
-        bool startupReconciled = false;
-
         while (!ct.IsCancellationRequested)
         {
+            try { await Task.Delay(_opt.PollIntervalMs, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+
+            try { await PollCycleAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    /// <summary>
+    /// 폴 1회(1 트랜잭션): _clientLock(단독) 또는 버스 공유 락(버스 멤버) 안에서 D0~D6 FC03 read →
+    /// 스냅샷 갱신·전이·기동 reconcile·R_Flag 에지 처리. 실패 시 슬레이브별 연속 실패 누적·OFFLINE 전이.
+    ///
+    /// 단독 모드: <see cref="RunPollLoopAsync"/>가 주기(PollIntervalMs)마다 1회 호출(현행과 동일).
+    /// 버스 모드: <see cref="ModbusBus"/>의 단일 폴 루프가 주기당 1회 대기 후 멤버마다 1회 호출(B4) —
+    ///   한 주기 ≈ N×트랜잭션 + 대기 1회. 상태(_failures/_prevRFlag/_prevSnap/_startupReconciled/
+    ///   _latest/_online)는 슬레이브별 인스턴스 필드라 서로 간섭하지 않는다(B5).
+    /// 프레임 무결성: read는 락 임계구역 안 → 쓰기 컨슈머·형제 슬레이브 트랜잭션과 절대 교차 없음(B3).
+    /// </summary>
+    internal async Task PollCycleAsync(CancellationToken ct)
+    {
+        try
+        {
+            // 폴 읽기 직렬화 — 쓰기 컨슈머·형제 슬레이브와 소켓/시리얼 충돌 방지(버스 모드=버스 공유 락).
+            await _clientLock.WaitAsync(ct).ConfigureAwait(false);
+            PlcSnapshot snap;
             try
             {
-                await Task.Delay(_opt.PollIntervalMs, ct).ConfigureAwait(false);
+                EnsureConnected();
 
-                // _clientLock으로 폴 읽기 직렬화 — 쓰기 컨슈머와 소켓/시리얼 충돌 방지
-                await _clientLock.WaitAsync(ct).ConfigureAwait(false);
-                PlcSnapshot snap;
+                // D0~D6 일괄 FC03 → ushort 변환
+                var raw = await _master.ReadHoldingRegistersAsync(
+                    0, RegisterMap.BlockLength, ct).ConfigureAwait(false);
+                snap = PlcSnapshot.FromRegisters(raw, online: true, at: DateTimeOffset.Now);
+            }
+            finally
+            {
+                _clientLock.Release();
+            }
+
+            // ── S-TWO-FLOOR-CONTROL C2 §4-B: 콜드스타트 1회 레지스터 클리어 (첫 유효 폴 1회·무조건) ──
+            // 프로세스 기동/재시작 직후 WCS 소유 레지스터(C 영역 D0/D1·R 영역 D2/D3·TgtFloor D6)를 0으로
+            // 위생 초기화한다 — 잔류 핸드셰이크·잔류 목표층 없이 깨끗하게 시작(에러 복구). 쓰기는 반드시 단일 큐
+            // 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지. 규칙 #3 개정(콜드스타트 1회 복구 리셋 허용).
+            // 이미 0이면 결과 동일(무해 — 매 폴 반복 아님·기동 1회뿐). 이 클리어가 R_Flag 잔류(§4-A 실측
+            // R_CellNo=20/R_Seq=123)도 함께 0으로 지운다(R 영역 reconcile 포섭). IF-08 부트스트랩 push는
+            // StartupClearCompleted를 대기해 이 클리어 뒤에 나간다(계약 S3).
+            //
+            // ★ 순서(중요): StartupClear 를 **Online 스냅샷 게시(_latest=snap) 이전에** 큐 투입한다. 관측 루프
+            //   (SorterFloorReturnService)의 정렬 기입 SetTgtFloor 는 이 클리어와 **같은 단일 쓰기 큐(#1)**를
+            //   공유하며, 관측 루프는 Online 스냅샷을 본 뒤에야 SetTgtFloor 를 투입한다. 따라서 스냅샷을
+            //   Online 으로 게시하기 전에 StartupClear 를 넣으면 큐 순서상 StartupClear 가 항상 앞선다
+            //   — 관측 정렬 기입(재파생 큐 머리 층)이 클리어에 의해 0으로 되돌려지는 전이 클로버를 원천 차단.
+            // A-2: 이 폴에 한해 spurious 상승 에지 발화를 억제한다.
+            bool suppressRFlagEdge = false;
+
+            if (!_startupReconciled)
+            {
+                _startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
+
+                bool hadResidue = snap.CCellNo != 0 || snap.CSeq != 0 || snap.CFlag
+                               || snap.RCellNo != 0 || snap.RSeq != 0 || snap.RFlag
+                               || snap.TgtFloor != 0;
                 try
                 {
-                    EnsureConnected();
-
-                    // D0~D6 일괄 FC03 → ushort 변환
-                    var raw = await _master.ReadHoldingRegistersAsync(
-                        0, RegisterMap.BlockLength, ct).ConfigureAwait(false);
-                    snap = PlcSnapshot.FromRegisters(raw, online: true, at: DateTimeOffset.Now);
+                    if (hadResidue)
+                        _log.LogWarning(
+                            "[폴링] 기동 첫 폴 콜드스타트 클리어(단일 큐 경유) — 잔류: C_CellNo={CCell} C_Seq={CSeq} " +
+                            "C_Flag={CFlag} R_CellNo={RCell} R_Seq={RSeq} R_Flag={RFlag} TgtFloor={Tgt} " +
+                            "(Ready·CurFloor 보존)",
+                            snap.CCellNo, snap.CSeq, snap.CFlag,
+                            snap.RCellNo, snap.RSeq, snap.RFlag, snap.TgtFloor);
+                    else
+                        _log.LogInformation(
+                            "[폴링] 기동 첫 폴 콜드스타트 클리어(단일 큐 경유) — 잔류 없음(위생 리셋·no-op)");
                 }
-                finally
-                {
-                    _clientLock.Release();
-                }
+                catch { /* 로거 disposed — 무시 */ }
 
-                var prevOnline = _latest.Online;
-                _latest  = snap;
-                failures = 0;
-                _offlineFailureCount = 0;   // D-1: 지속 실패 카운트 리셋(정상 폴 성공 — 다음 OFFLINE 요약 새로 시작)
-                // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
-                Interlocked.Exchange(ref _online, 1);
+                // 큐 경유 StartupClear(컨슈머가 C/R 영역 0 + TgtFloor 0 + D4 RMW C_Flag·R_Flag clear).
+                // 단독=자기 큐 / 버스=공유 큐(대상 unitId). Online 게시 이전 투입(위 순서 근거).
+                EnqueueStartupClear();
 
-                // ONLINE 복구 전이(false→true) — 로그 1회(D-1 (c)) + 부수 기록(STATE/ONLINE). 핸들러 예외 격리.
-                if (!prevOnline)
-                {
-                    try { _log.LogInformation("[폴링] ONLINE — 폴 성공(기동/복구)"); } catch { /* 로거 disposed — 무시 */ }
-                    try { OnOnlineTransition?.Invoke(snap); } catch { }
-                }
-
-                // 레지스터 전이(변화분만) — 직전 스냅샷과 다른 값만 1건씩 발화. 핸들러 예외 격리(fail-safe).
-                if (prevSnap is { } p)
-                    EmitRegisterChanges(p, snap);
-                prevSnap = snap;
-
-                // ── S-HANDSHAKE-RESIDUE §2B: 기동 잔류 R_Flag reconciliation (첫 유효 폴 1회) ──
-                // PLC 기동 직후 R 영역 잔류(실측: R_CellNo=20, R_Seq=123)를 새 핸드셰이크가
-                // 소비하기 전에 차단한다. 근거: 기동 잔류를 지우면 그 응답을 기다리는 대기자는 없고
-                // C_Seq 카운터도 리셋 상태이므로, 잔류를 유지하면 후속 전(全) 건이 "직전 응답"을
-                // 오소비하는 off-by-one 연쇄를 낳는다 → 클리어가 정당한 복구(§A3).
-                // 쓰기는 반드시 단일 큐 경유(절대규칙 #1) — 폴 루프가 직접 Modbus 호출 금지.
-                // 관측: WARN 로그(잔류값 포함) + ClearR의 OnWrite(PLC_WRITE) + 이후 폴의
-                //       OnRegisterChange(R_CellNo 20→0·R_Seq 123→0·R_Flag 1→0)로 잔류값이 기록됨.
-                // A-2: 기동 reconcile 폴에서 잔류 R_Flag=1을 ClearR로 지울 때, 같은 폴의
-                // RFlagRaised 상승 에지(아래)도 함께 발화하면 "지금 지우는 잔류값"을 상승 에지로도
-                // 흘리게 된다(spurious edge). 이 폴에 한해 에지 발화를 억제한다.
-                bool suppressRFlagEdge = false;
-
-                if (!startupReconciled)
-                {
-                    startupReconciled = true; // 첫 유효(Online) 폴에서만 1회 판정(§A3)
-                    if (snap.RFlag)
-                    {
-                        try
-                        {
-                            _log.LogWarning(
-                                "[폴링] 기동 첫 폴 R_Flag=1 잔류 감지 — ClearR 대사(단일 큐 경유): " +
-                                "R_CellNo={RCellNo} R_Seq={RSeq}", snap.RCellNo, snap.RSeq);
-                        }
-                        catch { /* 로거 disposed — 무시 */ }
-
-                        // 큐 경유 ClearR(컨슈머가 RMW로 R_Flag clear + R 영역 0). TryWrite = 논블로킹.
-                        _writeQueue.Writer.TryWrite(new PlcWrite.ClearR());
-
-                        // A-2: 이 잔류를 RFlagRaised 상승 에지로도 흘리지 않는다(reconcile가 지울 값이므로).
-                        suppressRFlagEdge = true;
-                    }
-                }
-
-                // R_Flag 상승 (0→1) 감지 — RFlagRaised 채널에 게시.
-                // F-3: 이 채널(RFlagRaised)은 현재 소비자가 없다. HandshakeOrchestrator는 자체 arming
-                //   (ArmRFlagZeroAsync)에서 _gw.Latest를 직접 폴링해 R_Flag 상승을 감지하며, RFlagRaised
-                //   reader를 구독하지 않는다. 게시는 향후 이벤트 구동 소비자를 위한 후크로 남겨둔다(무해).
-                //   reconcile 폴에서는 spurious 게시를 억제한다(A-2).
-                if (!prevRFlag && snap.RFlag && !suppressRFlagEdge)
-                {
-                    _log.LogInformation("[폴링] R_Flag 상승 감지 — RFlagRaised 채널 게시(현재 소비자 없음)");
-                    _rFlagChannel.Writer.TryWrite(snap);
-                }
-                prevRFlag = snap.RFlag;
+                // A-2: 기동 R_Flag 잔류를 RFlagRaised 상승 에지로 흘리지 않는다(클리어가 지울 값이므로).
+                if (snap.RFlag)
+                    suppressRFlagEdge = true;
             }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
+
+            var prevOnline = _latest.Online;
+            _latest  = snap;   // 이제 관측 루프가 Online 관찰 가능 — StartupClear는 이미 큐 앞에 있음.
+            _failures = 0;
+            _offlineFailureCount = 0;   // D-1: 지속 실패 카운트 리셋(정상 폴 성공 — 다음 OFFLINE 요약 새로 시작)
+            // ONLINE 복구 시 _online 플래그 리셋 — 다음 OFFLINE 전이에서 이벤트 재발화 허용
+            Interlocked.Exchange(ref _online, 1);
+
+            // ONLINE 복구 전이(false→true) — 로그 1회(D-1 (c)) + 부수 기록(STATE/ONLINE). 핸들러 예외 격리.
+            if (!prevOnline)
             {
-                // 호스트 종료 시 CTS 취소 → SocketException 경로로 여기 진입 가능.
-                // 이 시점에서 _log(EventLogInternal 등)가 이미 disposed일 수 있으므로
-                // 모든 로깅 호출을 try로 보호해 폴 루프 예외 전파 방지.
-                failures++;
+                try { _log.LogInformation("[폴링] ONLINE — 폴 성공(기동/복구)"); } catch { /* 로거 disposed — 무시 */ }
+                try { OnOnlineTransition?.Invoke(snap); } catch { }
+            }
 
-                // 예외 종류 불문(SocketException·IOException·시리얼 타임아웃 모두) OFFLINE 판단.
-                // TCP: SocketException·IOException / RTU: IOException·TimeoutException
-                bool isHardEx = ex is System.Net.Sockets.SocketException
-                             || ex is System.IO.IOException
-                             || ex is TimeoutException
-                             || ex.InnerException is System.Net.Sockets.SocketException
-                             || ex.InnerException is System.IO.IOException;
+            // 레지스터 전이(변화분만) — 직전 스냅샷과 다른 값만 1건씩 발화. 핸들러 예외 격리(fail-safe).
+            if (_prevSnap is { } p)
+                EmitRegisterChanges(p, snap);
+            _prevSnap = snap;
 
-                bool shouldGoOffline = failures >= _opt.OfflineAfterFailures || isHardEx;
+            // R_Flag 상승 (0→1) 감지 — RFlagRaised 채널에 게시(현재 소비자 없음 — 향후 훅). reconcile 폴은 억제.
+            if (!_prevRFlag && snap.RFlag && !suppressRFlagEdge)
+            {
+                _log.LogInformation("[폴링] R_Flag 상승 감지 — RFlagRaised 채널 게시(현재 소비자 없음)");
+                _rFlagChannel.Writer.TryWrite(snap);
+            }
+            _prevRFlag = snap.RFlag;
+        }
+        catch (OperationCanceledException) { throw; }  // 호출 루프가 break
+        catch (Exception ex)
+        {
+            // 호스트 종료 시 CTS 취소 → SocketException 경로로 여기 진입 가능.
+            // 이 시점에서 _log가 이미 disposed일 수 있으므로 모든 로깅 호출을 try로 보호.
+            _failures++;
 
-                if (!shouldGoOffline)
+            // ── 예외 분류 (S-MULTISORTER-SHARED-BUS I1 — 공유 버스 슬레이브 격리 핵심) ──────
+            // 연결 레벨 오류(소켓/IO): 물리 버스(소켓/포트)가 실제로 끊긴 것 → 공유 연결 drop+reopen 정당.
+            bool isConnLevel = ex is System.Net.Sockets.SocketException
+                            || ex is System.IO.IOException
+                            || ex.InnerException is System.Net.Sockets.SocketException
+                            || ex.InnerException is System.IO.IOException;
+
+            // read 타임아웃 취급 (C4 fix — "포트 독점 소유" 기준):
+            //   포트 독점 소유(단독 _isBusMember==false 또는 단일 멤버 버스 _soloBusReconnect==true) — 형제가
+            //     없어 재연결(reopen)이 안전하고 그것이 현행(pre-Phase-2 단독) 복구 경로다 → 타임아웃 '하드'.
+            //   다중 멤버 버스(_isBusMember && !_soloBusReconnect) — '죽은/부재 슬레이브'의 read 타임아웃이므로
+            //     SOFT. 그 슬레이브만 연속 실패 누적으로 OFFLINE 시키되 공유 포트는 절대 끊지 않는다(형제 보호·B5).
+            //     (실 RTU 배치에서 부재 슬레이브는 Modbus 예외/무응답=read timeout으로 신호. 다중 버스에서 이를
+            //      '하드'로 처리하면 매 폴 공유 포트를 close+open 해 형제가 ReadTimeout 동안 정지 — Phase 1 I1.)
+            bool ownsPortExclusively = !_isBusMember || _soloBusReconnect;
+            bool isTimeout = ex is TimeoutException;
+            bool isHardEx  = isConnLevel || (isTimeout && ownsPortExclusively);
+
+            bool shouldGoOffline = _failures >= _opt.OfflineAfterFailures || isHardEx;
+
+            if (!shouldGoOffline)
+            {
+                try { _log.LogWarning(ex, "[폴링] 폴 실패 {Cnt}/{Max} (OFFLINE 전이 임계 접근)", _failures, _opt.OfflineAfterFailures); }
+                catch { /* 로거 disposed — 무시 */ }
+            }
+            else
+            {
+                // D-1: OFFLINE '전이'는 1회만 상세(스택 포함), 이후 '지속' 실패는 스택 없이 강등/요약.
+                bool transitioned = PublishOffline();  // Online 1→0에 성공한 폴만 true(전이당 1회 — 슬레이브별).
+                if (transitioned)
                 {
-                    // 아직 OFFLINE 전이 임계 미달(soft 실패 누적 중) — 전이 진단을 위해 스택 포함 경고 유지.
-                    // (임계에 도달하지 않은 간헐 실패는 저빈도라 스팸이 아니다.)
-                    try { _log.LogWarning(ex, "[폴링] 폴 실패 {Cnt}/{Max} (OFFLINE 전이 임계 접근)", failures, _opt.OfflineAfterFailures); }
+                    _offlineFailureCount = 0;
+                    try { _log.LogError(ex, "[폴링] OFFLINE 전이 — 연속 실패 {Cnt}회(HardEx={HardEx}). 지속 실패는 억제(요약 {Every}폴마다).",
+                        _failures, isHardEx, _opt.OfflineLogSummaryEveryPolls); }
                     catch { /* 로거 disposed — 무시 */ }
                 }
                 else
                 {
-                    // D-1: OFFLINE '전이'는 1회만 상세(스택 포함), 이후 '지속' 실패는 스택 없이 강등/요약(로그 스팸 억제).
-                    // isHardEx가 매 폴 true여도 전이 라벨(LogError)이 매 폴 반복되지 않는다(거짓 전이 라벨 제거).
-                    bool transitioned = PublishOffline();  // Online 1→0에 성공한 폴만 true(전이당 1회).
-                    if (transitioned)
-                    {
-                        _offlineFailureCount = 0;
-                        try { _log.LogError(ex, "[폴링] OFFLINE 전이 — 연속 실패 {Cnt}회(HardEx={HardEx}). 지속 실패는 억제(요약 {Every}폴마다).",
-                            failures, isHardEx, _opt.OfflineLogSummaryEveryPolls); }
+                    _offlineFailureCount++;
+                    int every = _opt.OfflineLogSummaryEveryPolls;
+                    if (every > 0 && _offlineFailureCount % every == 0)
+                        try { _log.LogWarning("[폴링] OFFLINE 지속 — 누적 폴 실패 {Cnt}회(요약, 스택 생략).", _failures); }
                         catch { /* 로거 disposed — 무시 */ }
-                    }
                     else
-                    {
-                        // 지속 OFFLINE — 스택 없는 강등(Debug) + 요약 주기마다 WARN 1줄(스택 없음).
-                        _offlineFailureCount++;
-                        int every = _opt.OfflineLogSummaryEveryPolls;
-                        if (every > 0 && _offlineFailureCount % every == 0)
-                            try { _log.LogWarning("[폴링] OFFLINE 지속 — 누적 폴 실패 {Cnt}회(요약, 스택 생략).", failures); }
-                            catch { /* 로거 disposed — 무시 */ }
-                        else
-                            try { _log.LogDebug("[폴링] OFFLINE 지속 폴 실패 {Cnt}회(스택 생략).", failures); }
-                            catch { /* 로거 disposed — 무시 */ }
-                    }
+                        try { _log.LogDebug("[폴링] OFFLINE 지속 폴 실패 {Cnt}회(스택 생략).", _failures); }
+                        catch { /* 로거 disposed — 무시 */ }
+                }
 
-                    // Disconnect는 _clientLock 임계구역 안에서 실행 — 쓰기 컨슈머가 진행 중인
-                    // 트랜잭션이 완료된 뒤에 소켓/포트를 끊어 프레임/버퍼 손상 방지.
+                // 재연결 Disconnect는 락 임계구역 안에서 실행(프레임/버퍼 손상 방지).
+                // 포트 독점 소유(단독·단일 멤버 버스): 현행대로 항상 재연결(reopen) — 현행 복구 의미 보존(C4).
+                // 다중 멤버 버스(B5): 하드 연결오류(소켓/IO)일 때만 공유 연결을 끊는다 — 한 슬레이브의
+                //   soft 실패(Modbus 예외 응답·유닛 타임아웃)로 물리 버스를 끊으면 형제 슬레이브까지
+                //   죽으므로 금지. 이 슬레이브만 OFFLINE 전이하고 공유 연결은 보존한다.
+                if (ownsPortExclusively || isHardEx)
+                {
                     await _clientLock.WaitAsync(ct).ConfigureAwait(false);
                     try { TryReconnect(); }
                     finally { _clientLock.Release(); }
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// 콜드스타트 레지스터 클리어(StartupClear) 투입. 단독 모드는 자기 큐에 직접 TryWrite(현행), 버스 모드는
+    /// EnqueueAsync로 버스 공유 큐(대상 unitId)에 라우팅(절대규칙 #1 — 폴 루프가 직접 Modbus 호출 금지).
+    /// </summary>
+    private void EnqueueStartupClear()
+    {
+        if (_bus is not null)
+            _ = _bus.EnqueueAsync(_unitId, new PlcWrite.StartupClear(), CancellationToken.None);
+        else
+            _writeQueue.Writer.TryWrite(new PlcWrite.StartupClear());
     }
 
     private void EnsureConnected()
@@ -459,16 +600,34 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
     {
         await foreach (var write in _writeQueue.ReadAllAsync(ct).ConfigureAwait(false))
         {
-            try
-            {
-                await ProcessWriteAsync(write, ct).ConfigureAwait(false);
-            }
+            try { await HandleWriteAsync(write, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "[쓰기 큐] 처리 예외: {Write}", write);
-                PublishOffline();
-            }
+        }
+    }
+
+    /// <summary>
+    /// 쓰기 1건 처리(예외 격리 포함). 단독 컨슈머와 <see cref="ModbusBus"/> 공유 컨슈머가 공통 호출한다.
+    /// ProcessWriteAsync가 _clientLock(버스 모드=공유 락) 임계구역에서 FC06/16 + D4 RMW를 원자 수행(B3/B6).
+    /// 처리 예외는 이 슬레이브만 OFFLINE 전이(PublishOffline) — 형제 슬레이브 무영향(B5).
+    /// </summary>
+    internal async Task HandleWriteAsync(PlcWrite write, CancellationToken ct)
+    {
+        try
+        {
+            await ProcessWriteAsync(write, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }  // 컨슈머 루프가 break
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[쓰기 큐] 처리 예외: {Write}", write);
+            PublishOffline();
+        }
+        finally
+        {
+            // C2: 콜드스타트 클리어는 성공/실패 무관하게 순서 배리어(StartupClearCompleted)를 신호해
+            // 대기자(IF-08 부트스트랩 push)가 영원히 막히지 않게 한다. 실제 반영 여부는 레지스터 read-back으로 검증.
+            if (write is PlcWrite.StartupClear)
+                _startupClearTcs.TrySetResult();
         }
     }
 
@@ -538,6 +697,33 @@ public sealed class PlcPollingService : IPlcGateway, IAsyncDisposable
                     await RmwD4LockedAsync(set: 0, clear: RegisterMap.D4.R_Flag, ct).ConfigureAwait(false);
                     _log.LogInformation("[쓰기 큐] ClearR → D2·D3=0, R_Flag=0");
                     EmitWrite("CLEAR_R", "{\"reg\":\"D2,D3\",\"rFlag\":0}");
+                    break;
+
+                case PlcWrite.StartupClear:
+                    // ── C2 §4-B: 콜드스타트 1회 복구 리셋 — WCS 소유 레지스터를 0으로 위생 초기화 ──
+                    // C 영역(D0·D1) FC16 = 0,0
+                    await _master.WriteMultipleRegistersAsync(
+                        RegisterMap.C_CellNo, new short[] { 0, 0 }, ct).ConfigureAwait(false);
+                    // R 영역(D2·D3) FC16 = 0,0
+                    await _master.WriteMultipleRegistersAsync(
+                        RegisterMap.R_CellNo, new short[] { 0, 0 }, ct).ConfigureAwait(false);
+                    // TgtFloor(D6) — 핑퐁 가드 우회(복구 리셋 — "목표 설정" 아님), 무조건 0 기입(FC06).
+                    await _master.WriteSingleRegisterAsync(
+                        RegisterMap.TgtFloor, 0, ct).ConfigureAwait(false);
+                    // D4 RMW — C_Flag·R_Flag 비트만 clear, Ready(D4.2) 보존. CurFloor(D5)는 미접촉.
+                    await RmwD4LockedAsync(
+                        set: 0, clear: (ushort)(RegisterMap.D4.C_Flag | RegisterMap.D4.R_Flag), ct)
+                        .ConfigureAwait(false);
+                    _log.LogInformation(
+                        "[쓰기 큐] StartupClear → D0·D1·D2·D3·D6=0, C_Flag·R_Flag=0 (Ready·CurFloor 보존)");
+                    EmitWrite("STARTUP_CLEAR",
+                        "{\"reg\":\"D0,D1,D2,D3,D6\",\"cFlag\":0,\"rFlag\":0,\"note\":\"cold-start reset\"}");
+                    break;
+
+                default:
+                    // 알 수 없는 PlcWrite 타입 — fail-loud(로그). throw는 금지: HandleWriteAsync가 잡아
+                    // 슬레이브를 잘못 OFFLINE 전이시키므로(무해 드롭 + 진단 로그).
+                    _log.LogError("[쓰기 큐] 알 수 없는 PlcWrite 타입: {T}", write.GetType().Name);
                     break;
             }
         }
