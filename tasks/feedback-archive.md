@@ -676,3 +676,12 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - [CODE-REVIEW] sprint=S-B2C-EXCEL-UPLOAD critical=0 important=0 minor=0 iter=0 (Evaluator 6축 PASS·브라우저 실검증·3×448 GREEN — Step 4.5 독립 코드리뷰는 오케스트레이터 후속)
 
 - [CODE-REVIEW] sprint=S-B2C-EXCEL-UPLOAD critical=0 important=1(zip-bomb 가드 post-materialize — B2B 선례 동일·10MB 캡 바운드) minor=5 iter=1(0 fix) → Ready-to-merge
+
+## S-B2C-DATAGEN-UPLOAD (2026-07-26) — APPROVED (1 fix iter)
+- **핵심**: A(엑셀 업로드 블록 disclosure 접힘 기본→좌 폼 콤팩트) + B(엑셀 6열·오더번호 컬럼 신설·1 오더:N 바코드·미할당·멱등·원자성). 마이그레이션 0(기존 wcs_order 1:N order_item 재사용).
+- **iter0 FAIL → iter1 APPROVED**: C3 뷰포트 700px 접힘 기본에서 하단 "배치 상세"가 **헤더만 렌더**(상세 카드 41px·본문 0·`<main>` 비스크롤 → 오더 행 화면 밖·도달 불가). disclosure 접힘이 900/1080은 해소했으나 700 미달(좌 폼 자연높이 540px가 상단 점유). 수정 = BatchDetailGrid Card `min-h-0`→`min-h-[10rem]`(160 하한) → `<main>` overflow-auto 페이지-스크롤 에스컬레이션(Layout.tsx 기존 계약) 발동 → 700px 상세 h160(본문 114px)·main scrollable·99px 스크롤 후 오더 행 도달. 폼 오버랩 0 불변 유지.
+- **교훈(Evaluator)**: "오더 행 실제 렌더" 요건은 **뷰포트별 flex 공유공간 실측**으로 검증해야 잡힌다 — DOM에 행이 있어도(detailRows>0) 상세 카드가 헤더높이로 압착되면 본문 0·행 화면밖·비스크롤로 사용자 도달 불가. getBoundingClientRect(카드/스크롤컨테이너/첫행/main scrollHeight vs clientHeight) + 스크롤 후 재측정이 필수. Generator sprint-log의 "700px≈98px 상세 본문" 자기 실측 주장은 clean-env와 불일치(0px) — 자기보고 수치 불신·독립 재측정 원칙 재확인.
+- **교훈(인프라)**: 이전 세션의 stale vite(IPv6 [::1]:5174 리스너)가 살아남아 `--strictPort` 신규 vite를 EADDRINUSE로 죽이고, netstat -p tcp(IPv4)는 그 리스너를 놓침 → curl 200은 stale 인스턴스 응답(수정 반영 불확실). `netstat -ano | grep :PORT`(전 프로토콜)로 PID 색출·kill 후 청정 포트(5175)로 재기동해야 수정본 검증 신뢰.
+- 백엔드 452 GREEN(iter0·iter1 각 독립 재실행)·업로드 1:N(EVAL-UP 오더2/항목3·EVAL-ORD-1=2item)·dup 원자성(행오류1·커밋0)·양식 라운드트립(8452B·ORD-0001 2item)·콘솔 0err/0warn.
+
+- [CODE-REVIEW] sprint=S-B2C-DATAGEN-UPLOAD critical=0 major=0 minor=4 iter=1

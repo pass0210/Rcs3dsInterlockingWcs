@@ -37,6 +37,8 @@ internal static class B2cConstants
     public const int DefaultCellCapacity = 3;   // 셀 작업 투입 수량 기본.
     public const int DefaultWorkFullQty  = 100; // 슈트 만재 임계 기본(시드 동등).
     public const int DefaultWaveNo       = 1;
+    public const int DefaultPlannedQty   = 1;   // 업로드 수량 컬럼 공백 시 order_item.planned_qty 기본.
+    public const int BatchNoMaxLength    = 100;  // 배치명 최대 길이(생성 요청·업로드 검증 공용 상수 — 하드코딩 금지).
 
     // 오더번호/바코드 안전 문자(패턴 인젝션 방지) — 숫자·영문·하이픈·언더스코어만.
     public const string BarcodePrefixRegex = @"^[A-Za-z0-9_\-]{1,50}$";
@@ -65,16 +67,21 @@ internal static class B2cConstants
     public const int UploadPlannedQtyMax = Wcs.Api.B2B.AppConstants.QtyMaxPerRequest;
 
     // 양식 헤더 문자열(파서·정적 템플릿이 공유하는 단일 소스 — 헤더 드리프트 0).
-    //   컬럼 순서(위치 기반 파싱): [작업일자][배치명][차수][바코드][수량].
+    //   컬럼 순서(위치 기반 파싱): [작업일자][배치명][차수][오더번호][바코드][수량].
+    //   ★ S-B2C-DATAGEN-UPLOAD: 오더번호 컬럼 신설(바코드 앞) — 1 오더:N 바코드 지원(오더≠바코드).
     public const string HdrWorkDate = "작업일자";
     public const string HdrBatchNo  = "배치명";
     public const string HdrWaveNo   = "차수";
+    public const string HdrOrderNo  = "오더번호";
     public const string HdrBarcode  = "바코드";
     public const string HdrQty      = "수량";
 
-    // 바코드(=오더번호) 안전 문자(패턴 인젝션 방지) — 숫자·영문·하이픈·언더스코어(1~100자).
+    // 바코드 안전 문자(패턴 인젝션 방지) — 숫자·영문·하이픈·언더스코어(1~100자).
     //   생성 폼 접두(1~50)보다 길게 허용(임의 실바코드 직접 업로드 — 확정 결정 Q1).
     public const string UploadBarcodeRegex = @"^[A-Za-z0-9_\-]{1,100}$";
+
+    // 오더번호 안전 문자 — 바코드와 동일 규칙 재사용(단일 소스 · 드리프트 0). 오더번호는 wcs_order.order_no.
+    public const string UploadOrderNoRegex = UploadBarcodeRegex;
 
     // ── 파일 레벨 검증 메시지(HTTP 400 — 컨트롤러 선행) ─────────────────────────
     public const string UploadNoFile        = "파일을 선택하세요.";
@@ -85,7 +92,7 @@ internal static class B2cConstants
     // ── 파싱/구조 검증 메시지(HTTP 200 + status "F") ──────────────────────────
     public const string UploadNoData         = "엑셀에 데이터가 없습니다.";
     public const string UploadTooLarge        = "엑셀 파일이 너무 큽니다(허용 범위를 초과).";
-    public const string UploadHeaderMismatch  = "양식 헤더가 올바르지 않습니다. 첫 행은 작업일자·배치명·차수·바코드·수량 이어야 합니다.";
+    public const string UploadHeaderMismatch  = "양식 헤더가 올바르지 않습니다. 첫 행은 작업일자·배치명·차수·오더번호·바코드·수량 이어야 합니다.";
     public const string UploadNoValidData     = "업로드할 유효한 데이터가 없습니다.";
     public static string UploadTooManyRows(int rows)
         => $"데이터 행이 너무 많습니다({rows}행) — 한 번에 최대 {UploadDataRowsMax}행까지 업로드할 수 있습니다.";
@@ -194,16 +201,19 @@ public sealed record B2cUploadResponse(
 /// <summary>
 /// 업로드 원시 행(엑셀에서 위치 기반으로 읽은 문자열 셀 — 파싱 전) — 순수 검증 입력(절대규칙 #8·테스트 가능).
 /// <see cref="RowNumber"/> = 엑셀 실제 행 번호(오류 리포트 귀속).
+/// 컬럼 순서(위치 기반): [WorkDate][BatchNo][WaveNo][OrderNo][Barcode][Qty](6열).
 /// </summary>
 public sealed record B2cUploadRawRow(
-    int RowNumber, string WorkDate, string BatchNo, string WaveNo, string Barcode, string Qty);
+    int RowNumber, string WorkDate, string BatchNo, string WaveNo, string OrderNo, string Barcode, string Qty);
 
 /// <summary>
 /// 검증 통과 후 파싱된 행(영속화 준비 완료). <see cref="WorkDate"/> = 정규화("yyyy-MM-dd").
-/// Barcode == OrderNo(멱등 계약). PlannedQty = order_item.planned_qty.
+/// ★ S-B2C-DATAGEN-UPLOAD: <see cref="OrderNo"/>(wcs_order.order_no) 와 <see cref="Barcode"/>
+///   (order_item.barcode)는 **별개**(1 오더:N 바코드 — 같은 OrderNo 여러 행이 하나의 오더로 묶임).
+///   PlannedQty = order_item.planned_qty.
 /// </summary>
 public sealed record B2cUploadParsedRow(
-    int RowNumber, string WorkDate, string BatchNo, int WaveNo, string Barcode, int PlannedQty);
+    int RowNumber, string WorkDate, string BatchNo, int WaveNo, string OrderNo, string Barcode, int PlannedQty);
 
 // ── 조회 응답(원시 JSON) ────────────────────────────────────────────────────────
 

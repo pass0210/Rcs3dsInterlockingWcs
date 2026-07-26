@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Download, Plus, RotateCcw, Upload } from 'lucide-react'
+import { ChevronRight, Download, Plus, RotateCcw, Upload } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -164,6 +164,9 @@ export function B2cDataGenPage() {
     //   콘텐츠 기반 최소(= grid min-content)로 잡히는 것. 그 min-content 는 마스터 카드가 min-h-0 라 0 을 기여하고
     //   폼은 self-start 자연높이라, 곧 폼 카드 자연높이와 같아진다 → 상단이 폼보다 작게 줄지 않음(폼 오버랩 제거).
     //   폼은 self-start 자연높이로 '+ 데이터 생성' 버튼까지 온전히 보인다.
+    //   ★ S-B2C-DATAGEN-UPLOAD(A): 좌측 폼 안 "엑셀 업로드" 블록을 disclosure(기본 접힘)로 감싸 폼의
+    //   자연높이를 더 줄였다 → 하단 "배치 상세" 그리드가 헤더만이 아니라 오더 행을 실제로 표시(회귀 계약:
+    //   접힘이 기본, 이 블록 펼침은 사용자 토글 시에만). 폼 오버랩 0 불변은 그대로 유지(약화 금지).
     //   xl:grid-rows-1 = minmax(0,1fr)(min-track=0, auto 아님)은 하한이 아니라: 위에서 확정된 상단 높이를 1fr 로 채우되
     //   행이 표 전체 높이로 부풀지 않게 캡해, 마스터 그리드(min-h-0·overflow-auto)가 그 확정 높이 안에서 내부 스크롤하게 한다.
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -313,13 +316,17 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
   const truncated = orders.length >= ORDERS_FETCH_MAX
 
   return (
-    // 하단 상세 = 남은 높이를 갖는 flex-1. min-h-0 으로 낮은 뷰포트에서 상단(폼 자연높이 하한)에 자리를 양보하고
-    //   자체 바운드 스크롤(아래 overflow-auto)로 접힌다 — 빈/짧은 상세가 상단을 밀어내거나 폼을 덮지 않음.
+    // 하단 상세 = 남은 높이를 갖는 flex-1. 낮은 뷰포트에서 상단(폼 자연높이 하한)에 자리를 양보하고
+    //   자체 바운드 스크롤(아래 overflow-auto)로 접힌다 — 빈/짧은 상세가 상단을 밀어내거나 폼을 덮지 않음(폼 오버랩 0).
     //   상단이 폼 자연높이 하한을 가지므로 detail.height <= topRegion.height 가 항상 성립(빈 상세 50% 점유 해소).
-    //   ★ 상세는 min-h-0 라 헤더(~40px) 아래로 하한이 없다: 뷰포트 높이가 대략 620px 미만이면 폼 자연높이+상세 최소
-    //   합이 가용을 넘어 <main> 이 스크롤하기 시작한다(의도된 에스컬레이션 — 폼을 줄이는 대신 페이지가 스크롤). 목표
-    //   ≥680px 에서는 상세 본문이 자체 바운드 스크롤과 함께 사용 가능하게 남는다(실측 680px≈78px, 700px≈98px).
-    <Card className="flex min-h-0 min-w-0 flex-1 flex-col">
+    //   ★ S-B2C-DATAGEN-UPLOAD(A · 사용자 결정 2026-07-26 "짧은 창 페이지-스크롤 허용"): 상세 Card 에 min-h-[10rem]
+    //   (≈160px = 헤더 + 오더 수 행) 하한을 부여한다. 좌 폼 자연높이(≈540px)가 큰 낮은 뷰포트(대략 ≤~800px, 예 700px)
+    //   에서는 폼(≈540)+갭(16)+상세하한(160) 합이 <main>(overflow-auto) 가용을 넘어 페이지 스크롤로 에스컬레이션한다
+    //   (폼을 줄이는 대신 페이지가 스크롤 — 접힘 기본 상태에서도 오더 행이 스크롤로 도달 가능). ≥~900px(예 900/1080)에서는
+    //   상세 자연높이가 하한을 넘어 하한이 비활성이라 상세 본문이 자체 바운드 스크롤로 in-place 표시된다
+    //   (C3: 700px 페이지-스크롤 도달 · 900/1080 in-place). Layout.tsx <main> 주석의 "min-height 하한 합 초과 시 스크롤"
+    //   에스컬레이션 계약과 정합. (구 주석의 "620px/680px/700px≈98px" 수치는 disclosure 도입 전·부정확 측정이라 정정.)
+    <Card className="flex min-h-[10rem] min-w-0 flex-1 flex-col">
       <CardHeader className="shrink-0">
         <CardTitle>
           배치 상세{batch ? ` — ${batch.batchNo} #${batch.waveNo}` : ''}
@@ -485,15 +492,21 @@ function B2cGenerateForm({ onGenerated }: { onGenerated: () => void }) {
   )
 }
 
-// ── 엑셀 업로드 블록(S-B2C-EXCEL-UPLOAD) ──────────────────────────────────────
-//   생성 폼의 대안 입력 경로 — 정적 양식 다운로드 + .xlsx 업로드(행 = 오더/바코드 1건, 미할당).
+// ── 엑셀 업로드 블록(S-B2C-DATAGEN-UPLOAD · 접기/펼치기 disclosure) ──────────────
+//   생성 폼의 대안 입력 경로 — 정적 양식 다운로드 + 6열 .xlsx 업로드(1 오더:N 바코드, 미할당).
+//   ★ 레이아웃(S-B2C-DATAGEN-UPLOAD A): 본문을 disclosure(기본 접힘)로 감싸 좌측 폼의 자연높이를
+//     줄인다 → 하단 "배치 상세" 그리드가 헤더만이 아니라 오더 행을 실제로 표시(회귀 계약: 접힘 기본).
+//     신규 공용 UI 컴포넌트 없이 이 파일 내 로컬 구현(버튼 + 조건부 렌더). 접근성: 토글은 native
+//     <button type="button"> · aria-expanded · aria-controls(본문 id) · 키보드 Enter/Space(native).
 //   성공 시 배치 그리드 invalidate + 입력 리셋. 실패 시 에러 토스트 + 행별 오류 목록(Fail-Loud).
 function B2cExcelUpload({ onUploaded }: { onUploaded: () => void }) {
   const { toast } = useToast()
+  const [open, setOpen] = useState(false)   // 기본 접힘(좌측 폼 자연높이 최소화 — 회귀 계약).
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [rowErrors, setRowErrors] = useState<UploadRowError[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
+  const bodyId = useId()   // aria-controls 로 토글↔본문 연결.
 
   async function onUpload() {
     if (!file || uploading) return
@@ -516,9 +529,19 @@ function B2cExcelUpload({ onUploaded }: { onUploaded: () => void }) {
   }
 
   return (
-    <div className="mt-4 flex flex-col gap-3 border-t border-line pt-4">
-      <div className="flex items-center justify-between">
-        <span className="text-[12px] font-semibold text-ink">엑셀 업로드</span>
+    <div className="mt-3 border-t border-line pt-3">
+      {/* 헤더 행(항상 표시): 토글(라벨+chevron) + 양식 다운로드(접힘에서도 접근 가능). */}
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((o) => !o)}
+          className="-mx-1 inline-flex items-center gap-1 rounded-lg px-1 py-0.5 text-[12px] font-semibold text-ink hover:bg-elevated focus-visible:outline-2 focus-visible:outline-ink"
+        >
+          <ChevronRight className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
+          엑셀 업로드
+        </button>
         {/* 양식 다운로드 — 정적 파일 링크(동일 출처). download 속성으로 파일 저장 트리거. */}
         <a
           href={B2C_UPLOAD_TEMPLATE_URL}
@@ -528,37 +551,45 @@ function B2cExcelUpload({ onUploaded }: { onUploaded: () => void }) {
           <Download className="size-3.5" />양식 다운로드
         </a>
       </div>
-      <input
-        ref={inputRef}
-        type="file"
-        accept=".xlsx"
-        aria-label="엑셀 파일 선택"
-        onChange={(e) => {
-          setFile(e.target.files?.[0] ?? null)
-          setRowErrors([])
-        }}
-        className="block w-full text-[12px] text-muted file:mr-3 file:cursor-pointer file:rounded-lg file:border file:border-line file:bg-panel file:px-3 file:py-1.5 file:text-[12px] file:font-medium file:text-ink hover:file:bg-elevated"
-      />
-      <Button type="button" variant="solid" disabled={!file || uploading} onClick={onUpload} className="w-full">
-        <Upload className="size-4" />
-        {uploading ? '업로드 중…' : '업로드'}
-      </Button>
-      <p className="text-[11px] text-faint">
-        컬럼: 작업일자·배치명·차수·바코드·수량. <b>목적지 미할당</b> 오더/바코드로 추가됩니다(멱등 —
-        같은 데이터 재업로드 시 중복 0). 한 행이라도 오류가 있으면 전체 취소됩니다.
-      </p>
-      {rowErrors.length > 0 && (
-        <div className="rounded-lg border border-offline/40 bg-offline/5 p-2.5">
-          <p className="text-[12px] font-semibold text-offline">
-            행 오류 {rowErrors.length}건 — 전체 취소됨(반영 0건)
+
+      {/* 본문 — 펼침(open)일 때만 렌더/표시(접힘 시 좌측 폼 자연높이 최소화). */}
+      {open && (
+        <div id={bodyId} className="mt-3 flex flex-col gap-3">
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".xlsx"
+            aria-label="엑셀 파일 선택"
+            onChange={(e) => {
+              setFile(e.target.files?.[0] ?? null)
+              setRowErrors([])
+            }}
+            className="block w-full text-[12px] text-muted file:mr-3 file:cursor-pointer file:rounded-lg file:border file:border-line file:bg-panel file:px-3 file:py-1.5 file:text-[12px] file:font-medium file:text-ink hover:file:bg-elevated"
+          />
+          <Button type="button" variant="solid" disabled={!file || uploading} onClick={onUpload} className="w-full">
+            <Upload className="size-4" />
+            {uploading ? '업로드 중…' : '업로드'}
+          </Button>
+          <p className="text-[11px] leading-relaxed text-faint">
+            컬럼: 작업일자·배치명·차수·<b>오더번호</b>·바코드·수량. 같은 오더번호를 여러 행에 반복하면
+            <b> 한 오더에 여러 바코드</b>(1 오더:N)가 묶입니다. <b>목적지 미할당</b> 오더로 추가됩니다(멱등 —
+            같은 데이터 재업로드 시 중복 0). 배치 안에서 바코드는 유일해야 하며, 한 행이라도 오류가 있으면
+            전체가 취소됩니다(원자성).
           </p>
-          <ul className="mt-1.5 max-h-40 list-disc overflow-auto pl-4 text-[11px] leading-relaxed text-offline">
-            {rowErrors.map((e, i) => (
-              <li key={`${e.row}-${i}`}>
-                <b className="tabular-nums">{e.row}행</b>: {e.message}
-              </li>
-            ))}
-          </ul>
+          {rowErrors.length > 0 && (
+            <div className="rounded-lg border border-offline/40 bg-offline/5 p-2.5">
+              <p className="text-[12px] font-semibold text-offline">
+                행 오류 {rowErrors.length}건 — 전체 취소됨(반영 0건)
+              </p>
+              <ul className="mt-1.5 max-h-40 list-disc overflow-auto pl-4 text-[11px] leading-relaxed text-offline">
+                {rowErrors.map((e, i) => (
+                  <li key={`${e.row}-${i}`}>
+                    <b className="tabular-nums">{e.row}행</b>: {e.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>

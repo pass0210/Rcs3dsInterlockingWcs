@@ -31,7 +31,7 @@
 | 메서드 | 경로 | 용도 | 요청 | 응답 |
 |---|---|---|---|---|
 | POST | `/api/b2c/test-data/generate` | 멱등 생성(슬림 — 미할당 오더 N) | `B2cGenerateRequest`(body) | `B2cManagementResponse` |
-| POST | `/api/b2c/test-data/upload` | 엑셀 업로드(행=오더/바코드 1건 · S-B2C-EXCEL-UPLOAD) | multipart `IFormFile file`(.xlsx) | `B2cUploadResponse` |
+| POST | `/api/b2c/test-data/upload` | 엑셀 업로드(6열 · 1 오더:N 바코드 · S-B2C-DATAGEN-UPLOAD) | multipart `IFormFile file`(.xlsx) | `B2cUploadResponse` |
 | GET  | `/api/b2c/test-data/batches?take=` | 최근 배치 요약(생성 결과 view) | query `take?` | `B2cBatchSummary[]` |
 | GET  | `/api/b2c/test-data/summary?sorterChuteNo=` | 소터별 요약 집계(선택 필터) | query `sorterChuteNo?` | `B2cSorterSummary[]` |
 | GET  | `/api/b2c/test-data/detail?sorterChuteNo=` | 셀 상세(그리드) | query `sorterChuteNo`(필수) | `B2cCellDetail[]` |
@@ -164,45 +164,66 @@ wcs_order.WorkBatchId` 를 통해 배치에 귀속(스코프 술어 = `p.OrderIt
 
 ---
 
-## 7. 엑셀 업로드 + 정적 양식 (S-B2C-EXCEL-UPLOAD · 2026-07-26)
+## 7. 엑셀 업로드 + 정적 양식 (S-B2C-DATAGEN-UPLOAD · 2026-07-26)
 
-파라미터 생성 폼의 **대안 입력 경로** — 엑셀 한 행 = **오더/바코드 1건**(사용자가 실제 바코드값 직접 입력).
-생성과 동일하게 **목적지 미할당 오더**(`DestinationId=null`·`orderNo==barcode`)를 만든다. 확정 결정(사용자 게이트 2026-07-26).
+파라미터 생성 폼의 **대안 입력 경로** — 엑셀 6열(작업일자·배치명·차수·**오더번호**·바코드·수량).
+**1 오더 : N 바코드** — 같은 (작업일자·배치명·차수·오더번호) 행들을 하나의 `WcsOrder` 로 묶고, 각 행의
+바코드를 그 오더의 `order_item`(planned_qty = 행 수량)으로 만든다. 생성과 동일하게 **목적지 미할당 오더**
+(`DestinationId=null`)를 만든다(셀/목적지 배정은 설비 관리 2b 소관). 확정 결정(사용자 게이트 2026-07-26).
+DB 스키마 무변경(마이그레이션 0) — 데이터 모델(`wcs_order` 1:N `order_item`)이 이미 1 오더:N 을 지원.
+
+> **오더번호 ≠ 바코드**(과거 S-B2C-EXCEL-UPLOAD 의 `orderNo==barcode` 강제 폐지). 오더번호 컬럼 신설로
+> 한 오더가 여러 바코드를 가질 수 있다.
 
 ### 7.1 양식 컬럼 (헤더 고정 · 위치 기반 파싱 · 파서/템플릿 단일 소스 `B2cConstants.Hdr*`)
 
 | 순서 | 헤더 | 필수 | 기입 대상 | 검증 |
 |---|---|---|---|---|
 | 1 | 작업일자 | 필수 | `work_batch.work_date` | `YYYYMMDD`\|`YYYY-MM-DD` + 달력 유효(`NormalizeBizDay`) |
-| 2 | 배치명 | 필수 | `work_batch.batch_no` | 1~100자 |
+| 2 | 배치명 | 필수 | `work_batch.batch_no` | 1~`BatchNoMaxLength`(100)자 |
 | 3 | 차수 | 선택(기본 1) | `work_batch.wave_no` | 정수 1~9999 |
-| 4 | 바코드 | 필수 | `wcs_order.order_no` = `order_item.barcode` | `^[A-Za-z0-9_\-]{1,100}$` |
-| 5 | 수량 | 선택(기본 1) | `order_item.planned_qty` | 정수 1~9999 |
+| 4 | 오더번호 | 필수 | `wcs_order.order_no` | `^[A-Za-z0-9_\-]{1,100}$`(`UploadOrderNoRegex`) |
+| 5 | 바코드 | 필수 | `order_item.barcode` | `^[A-Za-z0-9_\-]{1,100}$`(`UploadBarcodeRegex`) |
+| 6 | 수량 | 선택(기본 1) | `order_item.planned_qty` | 정수 1~9999 |
 
-- 배치 그룹핑 = (작업일자·배치명·차수). 목적지/셀 컬럼 **없음**(2b 소관 — 미할당 유지).
+- **배치 그룹핑** = (작업일자·배치명·차수). **오더 그룹핑** = 배치 + 오더번호(같은 오더번호 여러 행 = 오더 1건).
+- **배치 내 바코드 유일**: 파일 내 중복 판정 키 = (작업일자·배치명·차수·**바코드**) — 오더번호는 키에 넣지
+  않는다(같은 오더가 여러 행에 정당하게 반복되므로). 이 키가 "다른 오더가 같은 바코드" + "같은 오더에 같은
+  바코드 반복" 을 모두 잡는다.
+- 목적지/셀 컬럼 **없음**(2b 소관 — 미할당 유지).
 
 ### 7.2 엔드포인트 `POST /api/b2c/test-data/upload` (multipart `IFormFile file`)
 
-- **파일 레벨 검증(400 선행 · 컨트롤러)**: 파일 없음/0바이트 · 크기 > 10MB(`UploadMaxBytes`) · 확장자 ≠ `.xlsx`(**`.xls` 거부**) · MIME 화이트리스트 불일치.
-- **구조/행 검증(200 + `status:"F"`)**: 헤더 불일치 · 사용범위 팽창(행 `UploadMaxRows`/열 `UploadMaxColumns` — zip-bomb 방어) · 데이터 행 0 · 데이터 행 > 1000(`UploadDataRowsMax=GenerateCountMax`) · **행별 검증 오류**(→ `rowErrors[{row,message}]`).
-- **원자성(Q4 확정)**: 행 검증 오류가 하나라도 있으면 **커밋 0**(트랜잭션 진입 전 조기 반환) + 전체 `rowErrors` 반환. 파일 내 중복 (작업일자·배치명·차수·바코드)도 오류.
-- **멱등 append**: 기존 (배치·오더번호)/(오더·바코드) 는 upsert 스킵 → 재업로드 시 신규 카운트 0, 기존 `reserved/sorted` 보존(생성과 동형).
-- **응답 `B2cUploadResponse`** = `{ status, message, counts?, rowErrors? }`. `counts` = `ordersCreated·orderItemsCreated·batches·dataRows`. 성공 판정 = `res.ok && status==="S"`.
+- **파일 레벨 검증(400 선행 · 컨트롤러)**: 파일 없음/0바이트 · 크기 > 10MB(`UploadMaxBytes`) · 확장자 ≠ `.xlsx`(**`.xls` 거부**) · MIME 화이트리스트 불일치. (컨트롤러는 컬럼 파싱을 하지 않아 무변경.)
+- **구조/행 검증(200 + `status:"F"`)**: 헤더 6열 불일치 · 사용범위 팽창(행 `UploadMaxRows`/열 `UploadMaxColumns` — zip-bomb 방어) · 데이터 행 0 · 데이터 행 > 1000(`UploadDataRowsMax=GenerateCountMax`) · **행별 검증 오류**(→ `rowErrors[{row,message}]`).
+- **원자성(Q4 확정)**: 행 검증 오류가 하나라도 있으면 **커밋 0**(트랜잭션 진입 전 조기 반환) + 전체 `rowErrors` 반환. 배치 내 바코드 중복(다른 오더/같은 오더 반복 무관)도 행 오류.
+- **그룹핑 2단(영속화)**: (작업일자·배치명·차수) → `work_batch` upsert(UQ 멱등) → 배치 내 distinct 오더번호 → `WcsOrder` upsert(UQ `(WorkBatchId,OrderNo)`·미할당·RUNNING·GENERAL) → 각 행 → `order_item`(barcode=행 바코드·planned_qty=행 수량) INSERT.
+- **멱등 append**: 기존 (배치·오더번호) 오더는 upsert 스킵 · 기존 (오더·바코드) `order_item` 은 INSERT 스킵 → 재업로드 시 신규 카운트 0, 기존 `reserved/sorted` 보존(생성과 동형).
+- **응답 `B2cUploadResponse`** = `{ status, message, counts?, rowErrors? }`. `counts` = `ordersCreated`(신규 distinct 오더)·`orderItemsCreated`(신규 바코드)·`batches`·`dataRows`. 성공 판정 = `res.ok && status==="S"`.
 - **파싱 예외**는 삼키지 않고 명시 `F`(`엑셀 파싱 오류: …`) + 감사 WARN. 순수 파싱/검증(`B2cTestDataService.ValidateUploadRows`)은 I/O 무의존(절대규칙 #8 · 테스트 가능).
 - **감사**: `operation_log` `STATE`/`B2C_UPLOAD`(성공 INFO · 거부/실패 WARN — 전수). 마이그레이션 0(기존 오더 테이블 재사용).
+- **교차-업로드 충돌 범위(설계 결정)**: 배치 내 바코드 유일은 **파일 내 검증이 정본**이다. 별도 업로드에서
+  **다른** 오더가 기존 배치의 바코드를 재사용하는 교차-업로드 충돌은 이 스프린트에서 추가로 막지 않는다
+  (재테스트 데이터 생성 도구의 멱등 append 철학·`ValidateUploadRows` 순수성 보존과 정합 · DB `UQ(OrderId,Barcode)`
+  는 방어선). IF-05 동일-바코드 다중목적지 비결정성은 선재 미확정 항목과 동류(운영 다중 배치·동일 바코드 도입
+  시 재검토).
 
 ### 7.3 정적 양식 파일 (동적 엔드포인트 없음 — 확정 결정)
 
-- `frontend/public/b2c-order-upload-template.xlsx`(헤더행 + 예시행 2건 + "설명" 시트). vite build 시 `wwwroot/` 로 복사 → 동일 출처 서빙(`UseStaticFiles`). dev 는 vite 가 `public/` 서빙.
+- `frontend/public/b2c-order-upload-template.xlsx`(6열 헤더행 + 예시행 3건 + "설명" 시트). vite build 시 `wwwroot/` 로 복사 → 동일 출처 서빙(`UseStaticFiles`). dev 는 vite 가 `public/` 서빙.
+- **예시행**: `ORD-0001`(바코드 `BC-0001`·`BC-0002` 2행 = **한 오더에 바코드 2건** · 1 오더:N 실증) + `ORD-0002`(바코드 `BC-0003` 단일·수량 2). 헤더는 `B2cConstants.Hdr*` 와 정확히 일치.
+- 재생성: 커밋된 양식 생성 스크립트는 리포에 없다 — `ClosedXML`(백엔드 의존)로 일회성 재생성(테스트 헬퍼 `BuildXlsx` 패턴). 헤더 정합은 라운드트립 테스트가 잠근다.
 - 프론트 "양식 다운로드" 버튼 = 이 정적 파일 링크(`/b2c-order-upload-template.xlsx`). **동적 `GET /template` 미구현**.
-- 드리프트 방지: 커밋된 양식을 파서에 재투입하는 **라운드트립 테스트**(`StaticTemplate_RoundTrips_ThroughParser`)가 헤더 정합을 잠근다.
+- 드리프트 방지: 커밋된 양식을 파서에 재투입하는 **라운드트립 테스트**(`StaticTemplate_RoundTrips_ThroughParser`)가 헤더·1:N 예시행 정합을 잠근다.
 
 ### 7.4 프론트 (`B2cDataGenPage` 생성 카드 좌측 — 생성 폼과 공존)
 
-- 양식 다운로드 버튼 + 파일 선택(`accept=".xlsx"`) + 업로드 버튼(파일 미선택 시 disabled · 업로드 중 로딩). 클라 `b2cTestData.upload(file)`(FormData · Content-Type 수동지정 금지).
-- 성공 → 성공 토스트 + 배치 그리드 invalidate + 파일 입력 리셋. 실패 → 에러 토스트 + **행별 오류 목록**(행번호+사유) 렌더(Fail-Loud).
+- **엑셀 업로드 블록 = 접기/펼치기 disclosure**(기본 접힘 · S-B2C-DATAGEN-UPLOAD A). 헤더 행(항상 표시) = 토글 버튼("엑셀 업로드" + chevron) + 양식 다운로드 링크(접힘에서도 접근 가능). 본문(파일 선택·업로드 버튼·안내·행오류)은 펼침일 때만 렌더. 접힘 기본으로 좌측 폼 자연높이를 줄여 하단 "배치 상세" 그리드가 오더 행을 실제로 표시(폼 오버랩 회귀 0 유지).
+- 접근성: 토글은 native `<button type="button">` · `aria-expanded` · `aria-controls`(본문 id) · 키보드 Enter/Space(native button 기본). 신규 공용 UI 컴포넌트 없이 이 파일 내 로컬 구현.
+- 파일 선택(`accept=".xlsx"`) + 업로드 버튼(파일 미선택 시 disabled · 업로드 중 로딩). 클라 `b2cTestData.upload(file)`(FormData · Content-Type 수동지정 금지 · 파일만 POST — 클라 무변경).
+- 성공 → 성공 토스트 + 배치 그리드 invalidate + 파일 입력 리셋. 실패 → 에러 토스트 + **행별 오류 목록**(행번호+사유) 렌더(Fail-Loud). 생성 폼(`B2cGenerateForm` 5-파라미터 `orderNo==barcode`)은 **무접촉**(업로드 경로 한정).
 
 ### 7.5 검증 (실증)
 
-- 백엔드: `dotnet test backend/Wcs.sln` 448 GREEN(회귀 0 · 신규 17). `B2cUploadServiceTests`(순수 검증·정상·전체롤백·멱등·상한·빈파일·헤더불일치·정적양식 라운드트립) + `B2cUploadApiTests`(happy 200S·200F+rowErrors·`.xls` 400·빈파일 400·MIME 400).
-- 브라우저(Playwright): 양식 다운로드 링크 표시 · 파일 선택→업로드→성공 토스트+DEMO-OK 배치 출현+미할당 상세 · 오류 파일→행별 오류 렌더+DEMO-ERR 미생성(원자성) · 콘솔 에러 0.
+- 백엔드: `dotnet test backend/Wcs.sln` 전량 GREEN(회귀 0). `B2cUploadServiceTests`(순수 검증 = OrderNo 필수·안전문자·배치내 바코드중복[다른 오더/같은 오더 반복]·1 오더:N 파싱 / 서비스 = 1 오더 2 바코드→`ordersCreated=1`·`orderItemsCreated=2`·planned_qty=행 수량·미할당·orderNo≠barcode·전체롤백·멱등·상한·빈파일·헤더불일치·정적양식 라운드트립) + `B2cUploadApiTests`(happy 200S[1 오더 2 바코드]·200F+rowErrors·배치내 바코드중복 200F·`.xls` 400·빈파일 400·MIME 400).
+- 브라우저(Playwright): 엑셀 업로드 블록 접힘(기본)→하단 상세 오더 행 실제 표시 · 토글/키보드로 펼침(aria-expanded) · 양식 다운로드 링크 표시 · 6열(1 오더:2 바코드) 파일 선택→업로드→성공 토스트+배치 출현+오더 1건·항목 2건 · 배치내 바코드중복 파일→행별 오류 렌더+미생성(원자성) · 3뷰포트 폼 오버랩 0 · 콘솔 에러 0.

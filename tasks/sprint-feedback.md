@@ -1018,3 +1018,74 @@ APPROVED
 ### 코드리뷰(4-Tier) 후속 등재 — S-B2C-EXCEL-UPLOAD, Critical 0 · Ready-to-merge
 - [Important·비블로킹·B2B 선례 동일] zip-bomb 가드가 post-materialization(XLWorkbook가 DOM 전체 로드 후 RowCount/ColumnCount 캡). 악성 ≤10MB xlsx의 sharedStrings 반복 팽창이 로드 중 수백MB 가능 — 실 바운드=10MB 컨트롤러 캡+Kestrel ~28MB. 계약 문구("materialize 전 캡")를 실제 동작에 맞게 정정 권고(코드 변경 불요·기존 B2B와 동일 수용).
 - [Minor] batchName charset 미제한(=/+/@ 허용, 현재 live sink 없음 — 미래 export 시 방어) / batchNo 길이 100 magic number(상수화) / DefaultPlannedQty 상수 추가(대칭) / 재업로드 qty 변경은 silent no-op(멱등 계약 부합·UI 문구 오해 소지) / FailUpload가 raw ex.Message 클라이언트 반환(Esc 개행 미이스케이프·B2B 동일).
+
+═══════════════════════════════════════════════════════════════════════════════
+# S-B2C-DATAGEN-UPLOAD — Evaluator (2026-07-26, clean-env fresh evidence)
+
+검증 스택: 백엔드 SQL Server(localhost/Rcs3dsInterlockingWcs) 전용 포트 :5206(소터 dead-TCP override → PLC 무접촉·0소터) + vite dev :5174(VITE_API_TARGET=:5206). 사용자 실서비스 포트(5205/1502·COM1) 무접촉. 스크린샷 `screenshots/S-B2C-DATAGEN-UPLOAD_20260726-210900/`(01~05) + console.log.
+
+## 판정: **FAIL** — C3(뷰포트 700px, 접힘 기본)에서 하단 "배치 상세" 그리드가 헤더만 렌더(오더 행 미표시·도달 불가). 나머지 전 시나리오 PASS.
+
+### C1 백엔드 테스트 — PASS (독립 재실행)
+`dotnet test backend/Wcs.sln` (MSBUILDDISABLENODEREUSE=1·DOTNET_CLI_USE_MSBUILD_SERVER=0) → **실패 0 · 통과 452 · 건너뜀 0 · 전체 452**(1m20s, 클린 exit 0). 신규 B2cUploadServiceTests(순수 ValidateUploadRows 6 + 서비스 8 + 라운드트립 1) + B2cUploadApiTests(6) 포함. StaticTemplate_RoundTrips_ThroughParser GREEN = 커밋된 양식 헤더 정합.
+
+### C2 프론트 정적검사 — PASS (독립 재실행)
+`npm run typecheck`(tsc --noEmit) exit 0 · `npm run lint`(eslint) exit 0 · `vite build`(scratch outDir·wwwroot 무접촉) exit 0. 신규 에러·경고 0. 선재 경고만(NU1903 x5·signalr `/*#__PURE__*/`·>500kB chunk).
+
+### C3 뷰포트 3종(접힘 기본·배치 선택 후 하단 상세) — **1080 PASS / 900 PASS / 700 FAIL**
+측정(Playwright getBoundingClientRect, width 1440):
+- **1080px PASS**: 좌 폼카드 t83–b623(h540) · 배치상세 카드 t639–b1060(h421) · **formVsDetailVerticalOverlap=0** · 생성버튼 폼 내부 · **detail tbody 400행 가시** · 페이지 비스크롤. (01-1080-collapsed-detail.png)
+- **900px PASS**: 폼 h540 · 상세 t639–b880(h241) · 오버랩 0 · 오더 행 가시. (02-900-collapsed-detail.png)
+- **700px FAIL**: 폼 h540(t83–b623) · **상세 카드 t639–b680 = h41(헤더만)** · **상세 스크롤 컨테이너 h0**(t684–b684) · **첫 오더 행 t719–b750 = 뷰포트(700) 아래 화면 밖** · `<main>` 비스크롤(scrollHeight 637 == clientHeight 637) · document 비스크롤. → 접힘 기본에서 하단 상세가 **헤더만 표시**되고 오더 행은 보이지도, 스크롤로 도달하지도 못함. (03-700-collapsed-detail-headeronly.png)
+  - **기대(C3)**: "뷰포트 700/900/1080px 각각 · 기본(접힘) 상태 → 하단 배치 상세 그리드에 오더 행이 실제로 렌더(헤더만이 아님)". Sprint goal(A) 자체 = "헤더만이 아니라 오더 행을 실제로 표시".
+  - **실제 vs sprint-log 주장 불일치**: sprint-log/코드 주석(B2cDataGenPage.tsx L322–324)은 "실측 680px≈78px, 700px≈98px 상세 본문"이라 주장하나, clean-env 실측은 700px에서 상세 본문 0px. 에스컬레이션(<620px main 스크롤) 주장도 700px에선 main이 비스크롤이라 오더 행 도달 경로 없음.
+  - **근본 원인**: 좌 폼카드 자연높이 540px가 상단 영역을 점유 → 700px 뷰포트에서 flex 공유 잔여가 상세를 헤더(41px)로 압착. 엑셀 업로드 disclosure 접힘으로 900/1080은 해소됐으나 700은 미달.
+  - **수정 방향(Generator 결정)**: (a) 좌 폼 자연높이 추가 축소(필드 수직 스페이싱 압축·일부 2열·헬퍼 문구 축약)로 700px에서 상세 ≥1행 노출, 또는 (b) 700px 접힘에서 main/page 스크롤 에스컬레이션이 실제 도달 가능하도록(현재 700px main 비스크롤이라 도달 불가). 겸하여 L322–324 주석의 "700px≈98px" 수치를 실동작에 맞게 정정.
+
+### C4 disclosure 접기/펼치기 — PASS
+접힘 기본: aria-expanded="false" · aria-controls 본문 미렌더(fileInput 부재). 토글 클릭 → aria-expanded="true" + 본문(파일 input accept=.xlsx · 업로드 버튼 disabled · 6열 안내) 렌더. 키보드: 포커스 후 **Space → 접힘**(aria-expanded false·본문 제거), **Enter → 펼침**(true·본문 렌더). 양식 다운로드 링크는 접힘에서도 접근(href=/b2c-order-upload-template.xlsx·download).
+
+### C5 E2E 업로드(1 오더:N) + 오류 원자성 — PASS
+- happy(eval-valid.xlsx: EVAL-ORD-1[EVAL-BC-1 qty1·EVAL-BC-2 qty3] + EVAL-ORD-2[EVAL-BC-3 qty2]) → POST /upload 200 S. `GET /batches`: EVAL-UP **orderTotal=2 · orderUnassigned=2 · itemTotal=3**. `GET /facility/orders?batchId=2`: EVAL-ORD-1 **planned=4(=1+3, 2 item 합)**·EVAL-ORD-2 planned=2·dest=null. 마스터/디테일 그리드 React Query invalidate 반영 · 파일 input 리셋. (04)
+- error(eval-dup.xlsx: 다른 오더 동일 바코드 EVAL-DUPBC 2행) → 200 F · UI **"행 오류 1건 — 전체 취소됨(반영 0건)" + "3행: 같은 배치 안에서 바코드가 중복…"** · `GET /batches`에 **EVAL-DUP 부재(커밋 0·원자성)**. (05)
+
+### C6 양식 라운드트립 — PASS
+`GET http://localhost:5174/b2c-order-upload-template.xlsx` → 200 · 8452B(커밋 파일 크기 일치) · 헤더 6열(작업일자·배치명·차수·오더번호·바코드·수량) · 예시 ORD-0001[BC-0001,BC-0002]+ORD-0002[BC-0003]. 그 파일 그대로 UI 재업로드 → 200 S · UPLOAD-A에 ORD-0001(2 item·planned=2)+ORD-0002 추가(orderTotal 400→402·itemTotal 400→403). 헤더 왕복 정합.
+
+### C7 스코프/마이그레이션 — PASS
+`git diff --stat`: 계약 6파일(B2cTestDataDtos.cs·B2cTestDataService.cs·B2cUploadTests.cs·docs/B2C-DATAGEN.md·b2c-order-upload-template.xlsx·B2cDataGenPage.tsx) + 프로세스 파일(sprint-contract.md·sprint-log.md). **마이그레이션 diff 0**(Wcs.Data/Migrations 무변경). b2cTestData.ts·컨트롤러·GenerateAsync·Wcs.Core·Wcs.PlcGateway 무접촉. 순수함수 분리(#8)·하드코딩 0(#7 — HdrOrderNo·UploadOrderNoRegex·DefaultPlannedQty·BatchNoMaxLength 상수화) 준수.
+
+### 콘솔/네트워크 — PASS (BLOCKING 청결)
+내 :5174 navigation 이후 콘솔 **0 errors · 0 warnings · 0 pageerror**(console.log). 네트워크: 업로드 POST 3건 전부 200(dup의 200-F는 의도된 비즈니스 실패) · 4xx/5xx 없음. `/batches` GET 1건 ERR_ABORTED = React Query 중복요청 취소(AbortSignal·클라이언트측·양성). (스폰 시 브라우저가 stale :5215 탭에서 167 errors를 보였으나 이는 내 서버가 아닌 이전 세션 잔존 탭 — :5174 navigation 후 청결.)
+
+## 결론
+백엔드·정적검사·disclosure·업로드 1:N·원자성·라운드트립·스코프·콘솔 전부 충족하나, **C3의 700px 뷰포트에서 접힘 기본 상태가 하단 상세를 헤더만 렌더(오더 행 미표시·도달 불가)** → 스프린트 핵심 목표(A)의 명시 요건(700/900/1080 각각) 미달. **FAIL** — Generator 수정 후 재평가.
+
+───────────────────────────────────────────────────────────────────────────────
+## FIX ITERATION 1 재평가 (2026-07-26, clean-env 독립 재검증) — **APPROVED**
+
+수정: frontend/src/pages/B2cDataGenPage.tsx 1파일 — BatchDetailGrid Card `min-h-0` → **`min-h-[10rem]`**(160px 하한). Layout.tsx `<main>`(flex overflow-auto)의 "내부 min-height 하한 합 초과 시 페이지 스크롤" 에스컬레이션(기존 의도 설계)을 발동 → 700px 접힘에서 상세가 헤더만이 아닌 본문(오더 행)을 갖고 페이지 스크롤로 도달 가능. 부정확 주석 수치도 정정. (사용자 결정 "짧은 창 페이지-스크롤 허용" + 오케스트레이터 확정 = option b.)
+
+검증 스택: 백엔드 SQL Server :5206(소터 dead-TCP·0소터·PLC 무접촉) + vite dev :5175(stale :5174 인스턴스 kill 후 청정 기동). 스크린샷 06(700px 페이지-스크롤 후 오더 행 도달)·07(700px 접힘 기본).
+
+- **C1 백엔드 재실행 — PASS**: `dotnet test backend/Wcs.sln`(node-reuse off) → **실패 0 · 통과 452 · 건너뜀 0 · 전체 452**(1m20s·exit 0). 백엔드 3파일 mtime·diff 이전 GREEN과 동일(byte-identical) — 회귀 0.
+- **C2 정적검사 — PASS**: tsc --noEmit exit 0 · eslint exit 0 · vite build(scratch) exit 0. 신규 에러·경고 0(선재 signalr PURE·>500kB만).
+- **C3 뷰포트 3종 — 전부 PASS**(width 1440·Playwright getBoundingClientRect):
+  - **700px(수정 확인)**: detail Card `min-h-[10rem]` 적용 · 폼 t83–b623(h540) · **상세 t639–b799(h160·헤더+본문 114px)** · **formVsDetailVerticalOverlap=0** · **`<main>` scrollable=true(scrollHeight 736 > clientHeight 637)** · 페이지 99px 스크롤 후 첫 오더 행 t620–b651 **뷰포트 내 가시**(도달 가능·402행 DOM). 이전 FAIL(상세 41px 헤더만·본문 0·main 비스크롤·행 도달불가)에서 **해소**. (06·07)
+  - **900px**: 상세 h241·오버랩 0·main 비스크롤·행 in-place 가시(하한 비활성). 회귀 0.
+  - **1080px**: 상세 h421·오버랩 0·main 비스크롤·행 in-place 가시·402행 · disclosure aria-expanded=false(접힘 기본)·fileInput 부재. 회귀 0.
+- **C4 disclosure — PASS(회귀 확인)**: 접힘 기본(aria-expanded=false·본문 미렌더·fileInput 부재) 유지. 토글 클릭 → aria-expanded=true·본문(파일 input accept=.xlsx) 렌더. (B2cExcelUpload 코드 byte-identical — iter0의 click+Space/Enter·aria 정합 검증 유효.)
+- **C5/C6 — PASS(불변 확인)**: 업로드 1:N·dup 원자성·양식 라운드트립은 iter0에서 실검증 완료. 백엔드(UploadExcelAsync/ValidateUploadRows)·B2cExcelUpload·양식 파일 이번 수정에서 무접촉(diff 0) → 판정 유지.
+- **C7 스코프 — PASS**: 수정 = B2cDataGenPage.tsx 1파일(+프로세스 파일). 마이그레이션 diff 0 · 백엔드/컨트롤러/b2cTestData.ts/B2cGenerateForm 무접촉.
+- **콘솔 — PASS**: 청정 :5175 세션 0 errors · 0 warnings · 0 pageerror.
+
+## 최종 — APPROVED
+C1(452/0 GREEN)·C2(정적 0신규)·C3(700 에스컬레이션 해소·900/1080 in-place·전 뷰포트 폼 오버랩 0)·C4(disclosure 접힘기본·토글)·C5/C6(불변)·C7(스코프 1파일·마이그레이션0)·콘솔 청결 — 전부 충족. **→ APPROVED.**
+
+APPROVED
+
+## Step 4.5 코드리뷰 Minor (S-B2C-DATAGEN-UPLOAD · Critical 0 · Important 0 · Ready-to-merge=Yes) — 다음 스프린트 Generator 참고
+- [Minor·계약 명시 이연] 교차-업로드 배치내 바코드 유일성 미보장: 배치내 유일은 파일 내(seen HashSet)에서만 강제. 다른 업로드로 *다른* 오더가 같은 배치 기존 바코드를 재사용하면 existingItemKeys 가 (OrderId,Barcode) 기준이라 미검출 → 배치에 동일 바코드가 두 오더로 존재. 계약 B2 가 명시 허용·docs §7.2 설계결정 기록·DB UQ(OrderId,Barcode) 방어선. 후속 백로그.
+- [Minor·craft] B2cTestDataService.cs:397-399 existingOrders 가 WcsOrder 를 change-tracker 에 전체 로드(ContainsKey 만 사용) → .AsNoTracking().Select(o=>o.OrderNo) HashSet 로 경량화 가능(배치당 소규모라 영향 작음).
+- [Minor·수용] B2cDataGenPage.tsx:331 min-h-[10rem] 임의값 하드코딩(근거 주석 있음·코드베이스가 임의 유틸 관용). 디자인 토큰화 여지.
+- [Minor·선재·무관] B2cTestDataService.cs:725 Esc 가 \n·제어문자 미이스케이프(파싱예외 ex.Message 경로만 자유입력 유입). 이번 OrderNo/Barcode 는 정규식으로 개행 불가 → pre-existing 사안(이번 변경 무관).
