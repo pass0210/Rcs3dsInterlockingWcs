@@ -35,8 +35,10 @@ public interface IB2cTestDataService
     Task<B2cManagementResponse> GenerateAsync(B2cGenerateRequest req, CancellationToken ct = default);
 
     /// <summary>
-    /// 엑셀 업로드(S-B2C-EXCEL-UPLOAD) — 행 단위 = 오더/바코드 1건. ClosedXML 파싱 → 행별 검증 →
-    /// 멱등 append + 오류 시 전체 거부(atomic). 미할당 유지(DestinationId=null·orderNo==barcode).
+    /// 엑셀 업로드(S-B2C-DATAGEN-UPLOAD) — 6열(작업일자·배치명·차수·오더번호·바코드·수량). ClosedXML 파싱
+    /// → 행별 검증 → 멱등 append + 오류 시 전체 거부(atomic). 미할당 유지(DestinationId=null).
+    /// ★ 1 오더:N 바코드 — 같은 (배치·오더번호) 행들을 하나의 WcsOrder 로 묶고, 각 행의 바코드를
+    ///   그 오더의 order_item(planned_qty=행 수량)으로 만든다(오더번호 ≠ 바코드). 배치 내 바코드 유일.
     /// 파일 레벨 검증(없음/크기/확장자·MIME)은 컨트롤러가 400 으로 선행. 여기선 구조/행오류를 200 F 로.
     /// </summary>
     Task<B2cUploadResponse> UploadExcelAsync(Stream excelStream, CancellationToken ct = default);
@@ -201,10 +203,13 @@ public sealed class B2cTestDataService : IB2cTestDataService
     /// <summary>
     /// 업로드 원시 행(문자열 셀)을 검증·파싱한다. 순수(부수효과·I/O·DB 0) — 같은 입력 → 같은 출력.
     ///   · 작업일자: 필수·형식(YYYYMMDD|YYYY-MM-DD)·달력 유효(NormalizeBizDay). 정규화("yyyy-MM-dd").
-    ///   · 배치명: 필수(1~100자).  · 차수: 선택(빈=기본1)·정수 1~9999.
-    ///   · 바코드(=오더번호): 필수·안전문자(영문·숫자·하이픈·언더스코어 1~100).
+    ///   · 배치명: 필수(1~<see cref="B2cConstants.BatchNoMaxLength"/>자).  · 차수: 선택(빈=기본1)·정수 1~9999.
+    ///   · 오더번호: 필수·안전문자(영문·숫자·하이픈·언더스코어 1~100). wcs_order.order_no.
+    ///   · 바코드: 필수·안전문자(동일 규칙). order_item.barcode. **오더번호와 별개**(1 오더:N 바코드).
     ///   · 수량(계획수량): 선택(빈=기본1)·정수 1~상한.
-    ///   · 파일 내 중복 (작업일자·배치명·차수·바코드) → 오류(멱등 키 충돌).
+    ///   · 파일 내 중복 (작업일자·배치명·차수·**바코드**) → 오류(배치 내 바코드 유일 — 멱등 키 충돌).
+    ///     ⚠ 오더번호는 유일성 키에 넣지 않는다: 같은 오더가 여러 행에 정당하게 반복되기 때문(1 오더:N).
+    ///     이 키가 "다른 오더가 같은 바코드" + "같은 오더에 같은 바코드 반복"을 모두 잡는다.
     /// 한 행에 사유가 여럿이면 공백으로 결합해 1개 <see cref="B2cUploadRowError"/> 로 반환. Q4 원자성은
     /// 호출측(UploadExcelAsync)이 "오류가 하나라도 있으면 커밋 0"으로 강제(이 함수는 순수 판정만).
     /// </summary>
@@ -231,10 +236,11 @@ public sealed class B2cTestDataService : IB2cTestDataService
                 catch (ArgumentException) { rowErrs.Add($"작업일자가 존재하지 않는 날짜입니다: {r.WorkDate.Trim()}"); }
             }
 
-            // 배치명 — 필수(1~100).
+            // 배치명 — 필수(1~BatchNoMaxLength).
             var batchNo = r.BatchNo.Trim();
             if (batchNo.Length == 0) rowErrs.Add("배치명은 필수입니다.");
-            else if (batchNo.Length > 100) rowErrs.Add("배치명은 100자 이하여야 합니다.");
+            else if (batchNo.Length > B2cConstants.BatchNoMaxLength)
+                rowErrs.Add($"배치명은 {B2cConstants.BatchNoMaxLength}자 이하여야 합니다.");
 
             // 차수 — 선택(빈=기본1)·정수 1~9999.
             int waveNo = B2cConstants.DefaultWaveNo;
@@ -243,39 +249,48 @@ public sealed class B2cTestDataService : IB2cTestDataService
                     || waveNo < 1 || waveNo > B2cConstants.WaveNoMax))
                 rowErrs.Add($"차수는 1~{B2cConstants.WaveNoMax} 사이 정수여야 합니다.");
 
-            // 바코드 — 필수·안전문자.
+            // 오더번호 — 필수·안전문자(wcs_order.order_no).
+            var orderNo = r.OrderNo.Trim();
+            if (orderNo.Length == 0) rowErrs.Add("오더번호는 필수입니다.");
+            else if (!Regex.IsMatch(orderNo, B2cConstants.UploadOrderNoRegex))
+                rowErrs.Add("오더번호는 영문·숫자·하이픈·언더스코어(1~100자)만 허용합니다.");
+
+            // 바코드 — 필수·안전문자(order_item.barcode · 오더번호와 별개).
             var barcode = r.Barcode.Trim();
             if (barcode.Length == 0) rowErrs.Add("바코드는 필수입니다.");
             else if (!Regex.IsMatch(barcode, B2cConstants.UploadBarcodeRegex))
                 rowErrs.Add("바코드는 영문·숫자·하이픈·언더스코어(1~100자)만 허용합니다.");
 
             // 수량 — 선택(빈=기본1)·정수 1~상한.
-            int qty = 1;
+            int qty = B2cConstants.DefaultPlannedQty;
             if (!string.IsNullOrWhiteSpace(r.Qty)
                 && (!int.TryParse(r.Qty.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out qty)
                     || qty < 1 || qty > B2cConstants.UploadPlannedQtyMax))
                 rowErrs.Add($"수량은 1~{B2cConstants.UploadPlannedQtyMax} 사이 정수여야 합니다.");
 
-            // 파일 내 중복 — 키 필드가 전부 유효할 때만 판정(무효 행은 이미 오류).
+            // 배치 내 바코드 유일 — 키 필드가 전부 유효할 때만 판정(무효 행은 이미 오류).
+            //   키에 OrderNo 없음: 같은 오더 반복(1:N)은 정당, 바코드 중복만 오류.
             if (rowErrs.Count == 0)
             {
                 if (!seen.Add((workDateNorm, batchNo, waveNo, barcode)))
-                    rowErrs.Add("같은 파일 내 중복된 (작업일자·배치명·차수·바코드) 입니다.");
+                    rowErrs.Add("같은 배치 안에서 바코드가 중복되었습니다 (작업일자·배치명·차수·바코드).");
             }
 
             if (rowErrs.Count > 0)
                 errors.Add(new B2cUploadRowError(r.RowNumber, string.Join(" ", rowErrs)));
             else
-                parsed.Add(new B2cUploadParsedRow(r.RowNumber, workDateNorm, batchNo, waveNo, barcode, qty));
+                parsed.Add(new B2cUploadParsedRow(r.RowNumber, workDateNorm, batchNo, waveNo, orderNo, barcode, qty));
         }
 
         return (parsed, errors);
     }
 
-    // ── 엑셀 업로드(S-B2C-EXCEL-UPLOAD) — 행 단위 = 오더/바코드 1건 ──────────────────
+    // ── 엑셀 업로드(S-B2C-DATAGEN-UPLOAD) — 6열 · 1 오더:N 바코드 ─────────────────────
     //   파일 레벨(없음/크기/확장자·MIME)은 컨트롤러가 400 으로 선행. 여기선 구조/행오류를 200 F 로.
     //   Q4 확정 원자성: 행 검증 오류가 하나라도 있으면 커밋 0(트랜잭션 진입 전 조기 반환) + 행별 리포트.
-    //   멱등 append: 기존 (배치·오더번호) 는 upsert 스킵(재업로드 시 신규 카운트 0). GenerateAsync 구조 재사용.
+    //   멱등 append: 기존 (배치·오더번호) 오더는 upsert 스킵 · 기존 (오더·바코드) order_item 은 INSERT 스킵
+    //   (재업로드 시 신규 카운트 0·기존 reserved/sorted 보존).
+    //   ★ 그룹핑 2단: (작업일자·배치명·차수)→work_batch, (그 배치·오더번호)→WcsOrder, 각 행→order_item.
     public async Task<B2cUploadResponse> UploadExcelAsync(Stream excelStream, CancellationToken ct = default)
     {
         // ── 1) 워크북 로드 + 헤더 검증 + 원시 행 수집(파싱 예외는 명시 F 로 표면화 — 삼킴 0) ──
@@ -296,11 +311,11 @@ public sealed class B2cTestDataService : IB2cTestDataService
             var lastRow  = used.LastRow().RowNumber();
             var firstCol = used.FirstColumn().ColumnNumber();
 
-            // 헤더 필수(구조 검증) — 첫 행 5개 셀이 기대 헤더와 정확히 일치(위치 기반 파싱).
+            // 헤더 필수(구조 검증) — 첫 행 6개 셀이 기대 헤더와 정확히 일치(위치 기반 파싱).
             string Hdr(int off) => ws.Cell(firstRow, firstCol + off).GetString().Trim();
             if (Hdr(0) != B2cConstants.HdrWorkDate || Hdr(1) != B2cConstants.HdrBatchNo
-             || Hdr(2) != B2cConstants.HdrWaveNo   || Hdr(3) != B2cConstants.HdrBarcode
-             || Hdr(4) != B2cConstants.HdrQty)
+             || Hdr(2) != B2cConstants.HdrWaveNo   || Hdr(3) != B2cConstants.HdrOrderNo
+             || Hdr(4) != B2cConstants.HdrBarcode  || Hdr(5) != B2cConstants.HdrQty)
                 return FailUpload(B2cConstants.UploadHeaderMismatch);
 
             rawRows = new List<B2cUploadRawRow>();
@@ -310,15 +325,16 @@ public sealed class B2cTestDataService : IB2cTestDataService
                 var workDate = Col(0);
                 var batchNo  = Col(1);
                 var waveNo   = Col(2);
-                var barcode  = Col(3);
-                var qty      = Col(4);
+                var orderNo  = Col(3);
+                var barcode  = Col(4);
+                var qty      = Col(5);
 
                 // 전 셀 공백 = 빈 행 skip(오류 아님 — 관용).
                 if (workDate.Length == 0 && batchNo.Length == 0 && waveNo.Length == 0
-                    && barcode.Length == 0 && qty.Length == 0)
+                    && orderNo.Length == 0 && barcode.Length == 0 && qty.Length == 0)
                     continue;
 
-                rawRows.Add(new B2cUploadRawRow(rn, workDate, batchNo, waveNo, barcode, qty));
+                rawRows.Add(new B2cUploadRawRow(rn, workDate, batchNo, waveNo, orderNo, barcode, qty));
             }
         }
         catch (Exception ex)
@@ -376,18 +392,19 @@ public sealed class B2cTestDataService : IB2cTestDataService
                     await _db.SaveChangesAsync(ct).ConfigureAwait(false);
                 }
 
-                // 미할당 오더 upsert(DestinationId=null·orderNo==barcode) — UQ(batch,order_no).
+                // 미할당 오더 upsert(DestinationId=null) — UQ(batch,order_no). 오더번호별 1건(1 오더:N 바코드).
+                //   distinct OrderNo 로 묶어 같은 오더가 여러 행에 반복돼도 오더는 1건만 생성.
                 var existingOrders = await _db.Orders
                     .Where(o => o.WorkBatchId == batch.Id)
                     .ToDictionaryAsync(o => o.OrderNo, ct).ConfigureAwait(false);
 
-                foreach (var r in group)
+                foreach (var orderNo in group.Select(r => r.OrderNo).Distinct())
                 {
-                    if (!existingOrders.ContainsKey(r.Barcode))
+                    if (!existingOrders.ContainsKey(orderNo))
                     {
                         _db.Orders.Add(new WcsOrder
                         {
-                            WorkBatchId = batch.Id, OrderNo = r.Barcode, OrderType = OrderType.GENERAL,
+                            WorkBatchId = batch.Id, OrderNo = orderNo, OrderType = OrderType.GENERAL,
                             DestinationId = null, DestAssignType = null, DestAssignedAt = null,  // 미할당(2b 소관)
                             Status = OrderStatus.RUNNING, StartedAt = now, ClosedAt = null,
                             CreatedAt = now, UpdatedAt = now,
@@ -400,7 +417,9 @@ public sealed class B2cTestDataService : IB2cTestDataService
                 var orderByNo = await _db.Orders.Where(o => o.WorkBatchId == batch.Id)
                     .ToDictionaryAsync(o => o.OrderNo, o => o.Id, ct).ConfigureAwait(false);
 
-                // order_item(barcode==orderNo, planned_qty=행 수량) — 기존 실적 보존(INSERT 만).
+                // order_item(barcode=행 바코드, planned_qty=행 수량) — 오더번호 → 그 오더로 연결. INSERT 만.
+                //   기존 (OrderId,Barcode) 는 스킵(멱등 · reserved/sorted 실적 보존). 배치 내 바코드 유일은
+                //   ValidateUploadRows 가 파일 내에서 이미 보장(한 배치의 한 바코드는 한 오더에만 귀속).
                 var existingItemKeys = (await _db.OrderItems
                     .Where(i => orderByNo.Values.Contains(i.OrderId))
                     .Select(i => new { i.OrderId, i.Barcode })
@@ -409,7 +428,7 @@ public sealed class B2cTestDataService : IB2cTestDataService
 
                 foreach (var r in group)
                 {
-                    long orderId = orderByNo[r.Barcode];
+                    long orderId = orderByNo[r.OrderNo];
                     if (!existingItemKeys.Contains((orderId, r.Barcode)))
                     {
                         _db.OrderItems.Add(new OrderItem
