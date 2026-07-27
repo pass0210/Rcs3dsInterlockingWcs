@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-B2C-BARCODE-MULTI-FIX (Fix1 배치상세 per-item + Fix2 IF-05 배정-우선 결정적 선택, Full-stack) — APPROVED (2026-07-27, 1 iteration)
+
+- **"비결정적 선택" 수정의 진짜 게이트 = 순수 규칙을 EF 무의존 함수로 분리(절대규칙 #8) + 라이브 IF-05 HTTP 왕복으로 "배정 오더가 더 큰 OrderId여도 선택됨"을 응답 본문으로 실증**: 구 `QueryDestination`의 무정렬 `.FirstOrDefault()`는 교차-배치 중복 바코드에서 임의 오더(작은 OrderId 미배정)를 골라 NG/NO_DEST를 뱉었다. fix는 `Wcs.Core.BarcodeDestinationSelector`(순수·10 단위테스트) + 호출자 `.ToList()`→projection→Select 교체(선택 이후 상태판정·예약·piece·트랜잭션 전부 불변). 검증의 핵심은 **배정 오더에 일부러 더 큰 OrderId를 부여**(DUP-ORD-B orderId=3 배정 vs DUP-ORD-A orderId=2 미배정)해 라이브 IF-05가 `{"result":"OK","chuteNo":501}`(배정 목적지)를 반환함을 응답 본문으로 확인 — "min-OrderId 폴백이 아니라 배정-우선"임을 역증. 단위 GREEN만으론 통합 경로 함정(예약이 엉뚱한 항목에)을 못 잡으므로 예약=1이 배정 오더 항목에만 반영되는지 UI/DB로 병치.
+- **tiebreak 결정성은 순열 불변 단위테스트로 잠근다**: 최신 DestAssignedAt(desc·null=MinValue) → 최소 OrderId → 최소 OrderItemId(PK 전순서). `Deterministic_AcrossPermutations`가 6 순열 전부 동일 승자를 단언 → EF 기본순서 의존 제거를 잠금. 라이브에서도 pId만 바꿔 2회 호출해 동일 chuteNo(결정성) 확인.
+- **1오더:N바코드 표시 수정은 "표시 경로 신설 + 배정 경로 무손상"을 브라우저로 양쪽 실측**: per-item 표시는 신규 `GET /batch-items`(order_item 행) — 기존 `orders?batchId=`(오더 집계·대표바코드 FirstOrDefault·수량 Sum) 재사용은 계약(GetOrdersAsync 오더단위 무접촉) 위반이라 신설이 정답. 검증은 N≥2 배치=N행 + **N=1 배치=1행** 대조(계측 `detailRowCount`) + 같은 3바코드 오더가 **설비 관리 미할당 패널엔 오더 1행**으로만 뜸(GetOrdersAsync 오더단위 무손상 역증) 양쪽을 브라우저로. 배정/해제 클릭스루로 OQ-3(시작 오더 스킵)까지 동작 확인.
+- **경로 일관성 조사(계약 요건)의 결론 기록 = 모호성 국소화**: "바코드→목적지" 다중 매칭 모호성은 IF-05 QueryDestination 고유. IF-09/IF-10은 활성 piece를 **PId로 조회**(바코드 아님·piece는 IF-05에서 목적지 확정), SelectCell/ReleaseEmptyAssignment는 이미 destination(chuteNo) 스코프 → 교차-목적지 모호성 구조적 부재. 동일 규칙을 다른 경로에 적용 불요 — SPEC §7-B에 확정 기록.
+- **격리 스택 정석 재확인 + foreign-buffer 함정 재발**: Wcs.Api :5299(`--urls`로 appsettings Urls=:5205 오버라이드 — Urls 키 함정) + Sqlite scratch(현장 SqlServer 무접촉) + Sorters 0-DB→폴링 미개통 + dead-TCP override(COM1/1502 무접촉) + Vite :5290(strictPort·VITE_API_TARGET). 콘솔 BLOCKING 판정 시 `all:true`가 **타 세션 :5175 에러 177줄**을 혼입 — 내 포트(:5290) grep 0건 + 타임스탬프 사전(pre-nav)으로 분리, `all:false`(현재 페이지)로 0/0/0 확정. (lessons foreign-buffer 재적용.)
+- **결정성**: full 466 GREEN(=452 baseline + 14 신규, 산술 일치)·신규 필터 14/14·tsc/lint/build exit 0(scratch outDir·wwwroot 무접촉)·PlcGateway/Wcs.Core 판정로직/마이그레이션/GetOrdersAsync·B2cOrderDto·useFacilityOrders diff 0(가산만). 빌드 경고=선재 NU1903뿐.
+
 ## S-TWO-FLOOR-CONTROL 서브 스프린트 A (인덕션 기반 2층 제어 — 층맵+소터별 FIFO 큐+TgtFloor==0 관측 기입+ready 층별, 백엔드) — APPROVED (2026-07-23, 3 iterations: iter-1 FAIL 1 flake → FIX ITER 1 PASS(flake) → FIX ITER 2 PASS(코드리뷰 I-1 pop 재설계))
 
 - **[FIX ITER 2 — 코드리뷰 I-1] "도착 즉시 pop" 엣지가 [A,A,B]에서 2번째 동일층 피스를 고립 — pop을 분류사이클(Ready 1→0→1) 단위로 재설계**: 사용자 확정 #2의 "머리 F==CurFloor면 즉시 pop(스톨 방지)" 엣지가, 큐 [1,1,2]·소터 1층에서 관측 루프가 두 1을 연속 즉시-pop해 큐를 [2]로 조기 드레인 → 2번째 A-AGV 미투하 고립. fix: per-sorter ObserveState(PrevReady·CycleStartFloor)로 **제자리 분류(Ready 1→0 시점 CurFloor==0→1 시점 CurFloor) && head==CurFloor일 때만** 1건 pop, 정렬 이동에 의한 0→1은 pop 안 함. 기입은 **유휴(Ready=1)·CurFloor!=head에서만**(분류 중 선기입 폐지 — 분류+이동 융합이 사이클 감지 깨는 것 방지). DepositDecider(순수) diff 0 — pop 로직은 서비스(트리거)에만. 교훈: **사용자-게이트 결정이라도 코드리뷰가 latent 버그를 잡으면 정정하되, 문언 변경은 SPEC 갱신 + 사용자 고지로 닫는다**(구현 정합≠사용자 재확인 면제).
@@ -685,3 +694,5 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - 백엔드 452 GREEN(iter0·iter1 각 독립 재실행)·업로드 1:N(EVAL-UP 오더2/항목3·EVAL-ORD-1=2item)·dup 원자성(행오류1·커밋0)·양식 라운드트립(8452B·ORD-0001 2item)·콘솔 0err/0warn.
 
 - [CODE-REVIEW] sprint=S-B2C-DATAGEN-UPLOAD critical=0 major=0 minor=4 iter=1
+
+- [CODE-REVIEW] sprint=S-B2C-BARCODE-MULTI-FIX critical=0 important=1(scope: 무관 DEPLOY-ONPREM.md → 오케스트레이터가 별도 브랜치로 분리) minor=3 iter=1

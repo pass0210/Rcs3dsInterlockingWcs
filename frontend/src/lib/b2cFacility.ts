@@ -36,6 +36,24 @@ export interface FacilityOrder {
   canReassign: boolean
 }
 
+// ── 배치 상세(데이터 생성 페이지 하단 그리드) per-item 행 — 백엔드 B2cBatchItemDto 미러(camelCase) ──
+//   Fix 1(S-B2C-BARCODE-MULTI-FIX): 행 = order_item(바코드). 1 오더:N 바코드 → N행. 수량은 항목별,
+//   상태·목적지·할당셀은 오더 레벨(오더에서 반복). row key = orderItemId.
+export interface FacilityBatchItem {
+  orderItemId: number
+  orderId: number
+  orderNo: string
+  barcode: string
+  plannedQty: number
+  reservedQty: number
+  sortedQty: number
+  status: string
+  destinationId: number | null
+  destinationChuteNo: number | null
+  destType: string | null
+  assignedCellNo: number | null
+}
+
 /** 관리 액션 결과 — ok(= res.ok && status "S") + message + counts(선택). */
 export interface ActionOutcome {
   ok: boolean
@@ -117,6 +135,13 @@ export const b2cFacility = {
     return getJson<FacilityOrder[]>(`/orders${parts.length ? `?${parts.join('&')}` : ''}`, signal)
   },
 
+  // 배치 상세 per-item(order_item 단위) — 데이터 생성 페이지 하단 그리드 전용(Fix 1). orders 와 별개 경로.
+  batchItems: (batchId: number, take?: number, signal?: AbortSignal) => {
+    const parts = [`batchId=${batchId}`]
+    if (take !== undefined) parts.push(`take=${take}`)
+    return getJson<FacilityBatchItem[]>(`/batch-items?${parts.join('&')}`, signal)
+  },
+
   createDestination: (req: CreateDestinationRequest) => runAction('/destinations', req),
 
   // 목적지 수정(floor·workFullQty) — status 는 제외(pause/resume 이 정본). 백엔드 POST /destinations/{id}.
@@ -147,13 +172,14 @@ export function useFacilityOrders(assigned: boolean | undefined, refetchInterval
   })
 }
 
-// ★ S-B2C-UX: 데이터 생성 페이지 하단 디테일 그리드 소스 — 선택 배치의 오더/바코드/수량/할당 상태.
-//   `orders?batchId=` 을 그대로 재사용(백엔드 신설 0 · F2). batchId=null 이면 비활성(미선택 상태).
-//   queryKey 는 'facility-orders' 접두 공유 → 배정/해제/초기화의 invalidate 가 함께 갱신한다.
-export function useFacilityBatchOrders(batchId: number | null, refetchInterval: number | false = false) {
+// ★ 데이터 생성 페이지 하단 배치 상세 그리드 소스 — 선택 배치의 **바코드(order_item)당 1행**(Fix 1).
+//   전용 per-item 엔드포인트(GET /batch-items?batchId=)를 쓴다 — 오더 단위 집계(orders)는 첫 바코드만
+//   보여 1 오더:N 바코드가 1행으로 접혔던 근본을 해소(신규 엔드포인트 · 근거 sprint-log). batchId=null 이면
+//   비활성(미선택). queryKey 는 'facility-orders' 접두를 공유 → 배정/해제/초기화 invalidate 가 함께 갱신.
+export function useFacilityBatchItems(batchId: number | null, refetchInterval: number | false = false) {
   return useQuery({
-    queryKey: ['facility-orders', 'batch', batchId],
-    queryFn: ({ signal }) => b2cFacility.orders(undefined, batchId!, ORDERS_FETCH_MAX, signal),
+    queryKey: ['facility-orders', 'batch-items', batchId],
+    queryFn: ({ signal }) => b2cFacility.batchItems(batchId!, ORDERS_FETCH_MAX, signal),
     enabled: batchId !== null,
     refetchInterval,
     placeholderData: keepPreviousData,

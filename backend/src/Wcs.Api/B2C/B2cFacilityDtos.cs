@@ -131,3 +131,24 @@ public sealed record B2cOrderDto(
     int?    AssignedCellNo,      // 소터 활성 배정 셀(없으면 null)
     bool    HasActivePiece,      // 차단 피스 존재(활성·비아카이브·**비-DENIED**) — OQ-3 보완: DENIED 는 제외
     bool    CanReassign);        // OQ-3: 미시작(예약=0·분류=0·차단 피스 0)이면 배정/재배정 허용
+
+/// <summary>
+/// 데이터 생성 페이지 하단 "배치 상세" 그리드 행 — **order_item(바코드) 단위**(Fix 1, S-B2C-BARCODE-MULTI-FIX).
+/// 한 오더에 바코드가 N개면 N행(1 오더:N 바코드). B2cOrderDto(오더 단위 집계 — 설비 관리 배정용)와 별개.
+///
+/// 수량(계획/예약/분류)은 **항목별**(order_item), 상태·목적지·할당셀은 **오더 레벨**(오더에서 반복).
+/// batchId 단일 조회로 join/materialize(N+1 회피). row key = OrderItemId(order_item.id).
+/// </summary>
+public sealed record B2cBatchItemDto(
+    long    OrderItemId,         // order_item 대리키(프론트 row key)
+    long    OrderId,
+    string  OrderNo,
+    string  Barcode,             // 항목 바코드(집계 아님 — 항목별 실값)
+    int     PlannedQty,          // order_item.planned_qty(항목별)
+    int     ReservedQty,         // order_item.reserved_qty(항목별)
+    int     SortedQty,           // order_item.sorted_qty(항목별)
+    string  Status,              // 오더 레벨 — OrderStatus(WAITING/RUNNING/COMPLETED/CANCELLED)
+    long?   DestinationId,       // 오더 레벨 — 미할당이면 null
+    int?    DestinationChuteNo,  // 오더 레벨
+    string? DestType,            // 오더 레벨 — "CHUTE" | "SORTER_3D" | null
+    int?    AssignedCellNo);     // 오더 레벨 — 소터 활성 배정 셀(없으면 null)
