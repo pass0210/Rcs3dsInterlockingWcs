@@ -18,13 +18,14 @@ import {
   type BatchSummary,
   type UploadRowError,
 } from '@/lib/b2cTestData'
-import { ORDERS_FETCH_MAX, useFacilityBatchOrders } from '@/lib/b2cFacility'
+import { ORDERS_FETCH_MAX, useFacilityBatchItems } from '@/lib/b2cFacility'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // B2cDataGenPage — B2C(3D 소터) 데이터 생성 + 생성 결과 마스터-디테일 + 배치 초기화(S-B2C-UX).
 //   · 좌: 5-파라미터 생성 폼(작업일자·배치명·차수·계획수량·바코드 접두) — 미할당 오더/바코드 생성.
 //   · 우: 생성 결과 그리드 = 마스터. 행별 체크박스(초기화 다중 선택) + 상단 초기화 버튼 + 행 선택(디테일 로드).
-//   · 하단: 선택 배치의 오더/바코드/수량/할당 상태 디테일 그리드(GET /api/b2c/facility/orders?batchId=).
+//   · 하단: 선택 배치의 바코드(order_item)당 1행 배치 상세 그리드(GET /api/b2c/facility/batch-items?batchId=
+//     — Fix 1 S-B2C-BARCODE-MULTI-FIX: 1 오더:N 바코드 → N행. 오더 단위 집계가 아님).
 // ★ 초기화 이관(S-B2C-UX): reset 을 설비 관리 → 여기로 이관하고 스코프를 소터 → **배치**로 재정의.
 //   "초기화 = 생성한 테스트 데이터를 되돌린다"는 도메인 판단. 파괴 액션 = ConfirmDialog + 작업자 이름(감사) +
 //   in-flight 거부 시 강제 초기화(force) 체이닝. 다건은 체크된 배치별 순차 호출 + 집계 토스트. docs/B2C-DATAGEN.md.
@@ -309,11 +310,12 @@ export function B2cDataGenPage() {
 
 // ── 하단 디테일 그리드(선택 배치의 오더/바코드/수량/할당 상태) ────────────────────
 function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
-  const ordersQ = useFacilityBatchOrders(batch?.batchId ?? null, false)
-  const orders = useMemo(() => ordersQ.data ?? [], [ordersQ.data])
-  // Fail-Loud(FIX ITER 2): 반환수가 조회 상한과 같으면 초과 오더가 표시에서 누락됐을 수 있음 → 힌트 표면화.
+  // Fix 1(S-B2C-BARCODE-MULTI-FIX): per-item(order_item 단위) 소스 — 1 오더:N 바코드 → N행.
+  const itemsQ = useFacilityBatchItems(batch?.batchId ?? null, false)
+  const items = useMemo(() => itemsQ.data ?? [], [itemsQ.data])
+  // Fail-Loud(FIX ITER 2): 반환수가 조회 상한과 같으면 초과 항목이 표시에서 누락됐을 수 있음 → 힌트 표면화.
   //   (초기화는 배치키 서버 스코프라 표시 절단과 무관하게 배치 전량에 적용됨 — 별도 명시.)
-  const truncated = orders.length >= ORDERS_FETCH_MAX
+  const truncated = items.length >= ORDERS_FETCH_MAX
 
   return (
     // 하단 상세 = 남은 높이를 갖는 flex-1. 낮은 뷰포트에서 상단(폼 자연높이 하한)에 자리를 양보하고
@@ -331,27 +333,27 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
         <CardTitle>
           배치 상세{batch ? ` — ${batch.batchNo} #${batch.waveNo}` : ''}
         </CardTitle>
-        {batch && orders.length > 0 && (
+        {batch && items.length > 0 && (
           <span className="text-[11px] text-faint tabular-nums">
-            {truncated ? `상위 ${ORDERS_FETCH_MAX.toLocaleString()}건 표시` : `${orders.length.toLocaleString()}건`}
+            {truncated ? `상위 ${ORDERS_FETCH_MAX.toLocaleString()}건 표시` : `${items.length.toLocaleString()}건`}
           </span>
         )}
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
         {truncated && (
           <p className="shrink-0 border-b border-warn/30 bg-warn/10 px-3 py-2 text-[11px] text-warn">
-            표시 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달했습니다 — 이 배치에 초과 오더가 있으면 목록에 표시되지 않을 수 있습니다.
+            표시 상한 {ORDERS_FETCH_MAX.toLocaleString()}건에 도달했습니다 — 이 배치에 초과 항목이 있으면 목록에 표시되지 않을 수 있습니다.
             (초기화는 배치 전량에 적용되므로 표시 절단과 무관합니다.)
           </p>
         )}
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {batch === null ? (
           <EmptyRow label="상단에서 배치 행을 선택하면 오더 상세가 표시됩니다." />
-        ) : ordersQ.isLoading ? (
+        ) : itemsQ.isLoading ? (
           <LoadingRow />
-        ) : ordersQ.isError ? (
-          <ErrorRow message={(ordersQ.error as Error)?.message ?? '오더 상세 조회 실패'} />
-        ) : orders.length === 0 ? (
+        ) : itemsQ.isError ? (
+          <ErrorRow message={(itemsQ.error as Error)?.message ?? '오더 상세 조회 실패'} />
+        ) : items.length === 0 ? (
           <EmptyRow label="이 배치에 오더가 없습니다." />
         ) : (
           <table className="w-full text-[12px]">
@@ -368,8 +370,8 @@ function BatchDetailGrid({ batch }: { batch: BatchSummary | null }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
-              {orders.map((o) => (
-                <tr key={o.orderId} className="text-ink">
+              {items.map((o) => (
+                <tr key={o.orderItemId} className="text-ink">
                   <td className="px-3 py-1.5 font-mono">{o.orderNo}</td>
                   <td className="px-3 py-1.5 font-mono text-muted">{o.barcode}</td>
                   <td className="px-3 py-1.5 font-mono tabular-nums text-muted">{o.plannedQty}</td>

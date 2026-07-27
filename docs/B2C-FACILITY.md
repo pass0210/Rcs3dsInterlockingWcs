@@ -32,7 +32,8 @@
 | POST | `/api/b2c/facility/destinations/{id}/activate` | 활성/비활성 토글(`isActive·force`) — OQ-2 가드 |
 | POST | `/api/b2c/facility/destinations/{id}` | 수정(`status·floor·workFullQty`) — chuteNo/type 변경 없음(OQ-2) |
 | POST | `/api/b2c/facility/sorters/{id}/cells` | 소터 셀 벌크(`rows·cols·capacity?·enabled?`) — 순차 cellNo(OQ-1) |
-| GET  | `/api/b2c/facility/orders?assigned=&batchId=&take=` | 오더 목록(할당 UI 소스) — `B2cOrderDto[]`. ★ take 상한 = `GenerateCountMax`(1000, 기본값도 동일). 프론트는 항상 상한을 명시 전달하고 반환수==상한이면 절단 힌트를 표면화(Fail-Loud — S-B2C-UX FIX ITER 2). 과거 200/500 침묵 절단 제거 |
+| GET  | `/api/b2c/facility/orders?assigned=&batchId=&take=` | 오더 목록(할당 UI 소스 — **오더 단위**) — `B2cOrderDto[]`. ★ take 상한 = `GenerateCountMax`(1000, 기본값도 동일). 프론트는 항상 상한을 명시 전달하고 반환수==상한이면 절단 힌트를 표면화(Fail-Loud — S-B2C-UX FIX ITER 2). 과거 200/500 침묵 절단 제거 |
+| GET  | `/api/b2c/facility/batch-items?batchId=&take=` | 배치 상세 **per-item(order_item 단위)** — `B2cBatchItemDto[]`(S-B2C-BARCODE-MULTI-FIX Fix 1). 데이터 생성 페이지 하단 그리드 전용 — 1 오더:N 바코드 → N행(항목별 수량 + 오더 레벨 status·목적지·할당셀). take 상한 = `GenerateCountMax`(orders 와 동형). 설비 관리 배정 UI(오더 단위 `orders`)와 별개 경로 |
 | POST | `/api/b2c/facility/orders/assign` | 오더→목적지 할당(`orderId·destinationId·cellNo?`) — 소터면 cell_assignment |
 | POST | `/api/b2c/facility/orders/unassign` | 할당 해제/재배정(`orderId`) — OQ-3 |
 | (재사용·무변경) POST | `/api/ops/chutes/{id}/clear`·`/api/ops/destinations/{id}/pause`·`/resume` | 슈트 제어(O1·O2·O3) |
@@ -95,7 +96,7 @@ CHUTE `workFullQty·lastClearedAt`(chute_detail) / SORTER_3D `cellTotal·cellEna
   - G2 소터 셀은 펼침 시 렌더되는 지연 로딩 행이지만 DOM 기반 훅이라 자동 포함(전체선택/하이라이트 대상 = 렌더된 행, OQ-1).
   - **공존**: G2 소터 행 펼침(행 클릭)·개별 체크박스 토글·기존 `배정`/`해제` 버튼 카운트 반영 무손상.
 - 신규 UI 프리미티브: `context-menu.tsx`(전 그리드 공용).
-- API 클라이언트: `b2cFacility.ts`(facility 표면 미러 + `useFacilityBatchOrders`) · `ops.ts`(`clearChute`·pause/resume) · `queries.ts`(`useDestinations`·`useCells` — 소터 셀 드롭다운 소스).
+- API 클라이언트: `b2cFacility.ts`(facility 표면 미러 + `useFacilityOrders` 오더단위 · `useFacilityBatchItems` 배치상세 per-item) · `ops.ts`(`clearChute`·pause/resume) · `queries.ts`(`useDestinations`·`useCells` — 소터 셀 드롭다운 소스).
 
 ---
 
