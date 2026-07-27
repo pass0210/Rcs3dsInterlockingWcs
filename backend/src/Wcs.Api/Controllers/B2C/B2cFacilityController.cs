@@ -57,6 +57,17 @@ public sealed class B2cFacilityController : ControllerBase
         return Ok(await _svc.GetOrdersAsync(assigned, batchId, clamped, ct));
     }
 
+    // ── GET /batch-items?batchId=&take= — 배치 상세 per-item(order_item 단위) ─────
+    //   Fix 1(S-B2C-BARCODE-MULTI-FIX): 데이터 생성 페이지 하단 "배치 상세" 그리드 전용 — 바코드(order_item)당 1행.
+    //   take 상한·기본 = GenerateCountMax(orders 엔드포인트와 동형 — 침묵 절단 방지, 프론트가 절단 힌트 표면화).
+    [HttpGet("batch-items")]
+    public async Task<IActionResult> GetBatchItems([FromQuery] long batchId, [FromQuery] int? take, CancellationToken ct)
+    {
+        int max     = B2cConstants.GenerateCountMax;
+        int clamped = take is null or <= 0 ? max : Math.Min(take.Value, max);
+        return Ok(await _svc.GetBatchItemsAsync(batchId, clamped, ct));
+    }
+
     // ── POST /orders/assign — 오더→목적지(+셀) 할당/재배정(OQ-3) ────────────────
     [HttpPost("orders/assign")]
     public async Task<IActionResult> Assign([FromBody] B2cAssignOrderRequest req, CancellationToken ct)

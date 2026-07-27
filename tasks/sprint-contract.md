@@ -1,212 +1,168 @@
-[Sprint Contract] — S-B2C-DATAGEN-UPLOAD (통합: 좌측 폼 콤팩트화 + 엑셀 업로드 오더-컬럼 도입)
+[Sprint Contract] — S-B2C-BARCODE-MULTI-FIX
 
-════════════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════════
+현장 온프레미스 배포 중 실발생한 두 결함 수정 — "1 오더:N 바코드" 기능의 후속 갭.
+브랜치: feat/b2c-barcode-multi-fix (develop 기준).
+═══════════════════════════════════════════════════════════════════════════════
+
+## 미확정 — 사용자 확인 필요
+- 없음. 두 수정 방향은 사용자 지시로 확정.
+
+────────────────────────────────────────────────────────────────────────────────
 - Goal:
-  두 개의 확정 작업을 한 스프린트로 완료한다.
-  (A) 프론트 레이아웃 콤팩트화 — B2C 데이터 생성 페이지(frontend/src/pages/B2cDataGenPage.tsx)의
-      좌측 생성 카드 안 "엑셀 업로드 블록"을 접기/펼치기(disclosure, 기본 접힘) 로 감싸 좌측 폼의
-      자연높이를 줄인다. 그 결과 하단 "배치 상세" 그리드가 헤더만이 아니라 **오더 행을 실제로
-      표시**하게 만든다. S-UI-LAYOUT-FIX 폼 오버랩 회귀는 절대 금지.
-  (B) 엑셀 업로드 오더-컬럼 도입 — 업로드 경로를 orderNo==barcode(1행=1오더=1바코드) 강제에서
-      **1 오더 : N 바코드** 로 바꾼다. 엑셀에 "오더번호" 컬럼을 바코드 앞에 신설(총 6열).
-      같은 (작업일자·배치명·차수·오더번호) 행들을 하나의 WcsOrder 로 묶고, 각 행의 바코드를 그
-      오더의 order_item(planned_qty=행 수량)으로 만든다. 셀 할당은 오더 단위(기존 모델 그대로),
-      업로드는 목적지 미할당 유지. 배치 내 바코드 유일. Q4 원자성·멱등 append 보존. 6열 양식 파일
-      재생성. **생성 폼(GenerateAsync 5-파라미터)은 변경하지 않는다** — 업로드 경로 한정.
+  Fix 1 — 데이터 생성 페이지(B2cDataGenPage.tsx) 하단 "배치 상세" 그리드를 **오더당 1행**에서
+    **바코드(order_item)당 1행**으로 바꾼다. 한 오더에 바코드가 N개면 N행이 뜨고, 각 행은
+    오더번호·바코드·계획·예약·분류·상태·목적지·할당셀을 표시한다. 데이터(order_item)는 이미
+    전량 저장돼 있고, 표시만 1행/오더로 집계돼 있던 것이 근본(첫 바코드만 FirstOrDefault·수량 Sum).
+  Fix 2 — IF-05 목적지 조회(DbRepositories.QueryDestination)가 한 바코드에 **여러 order_item**이
+    매칭될 때(교차-배치 중복 업로드로 발생) 정렬 없는 .FirstOrDefault()로 **임의 오더**를 골라
+    미배정 오더를 집으면 NG/NO_DEST를 반환하던 것을, **배정된(order.DestinationId != null) 오더를
+    우선** 선택하도록 결정적으로 고친다. 배정 오더가 없으면 기존 동작(미할당 → AUTO 슈트배정 시도 →
+    없으면 NO_DEST) 유지. 정상 1:1(단건 매치)은 동작 불변.
 
-  ⚠ DB 스키마 변경 0 (마이그레이션 0). 데이터 모델(wcs_order 1:N order_item, cell_assignment 는
-     OrderId 단위)은 이미 1오더:N바코드를 지원한다 — 업로드 파싱/그룹핑만 바꾼다.
+────────────────────────────────────────────────────────────────────────────────
+- Implementation Scope (파일별 · Generator가 "어떻게"를 결정):
 
-════════════════════════════════════════════════════════════════════════════
-- Implementation Scope (파일별 · A/B 구분):
+  【Fix 2 — 배정-우선 결정적 선택】
+  · backend/src/Wcs.Api/Repositories/DbRepositories.cs — EfOrderRepository.QueryDestination (44~50):
+      현재 `.Where(barcode 일치 && Order.Status ∉ {COMPLETED,CANCELLED}).FirstOrDefault()`를
+      **후보 전량 materialize → 순수 선택 규칙 적용**으로 교체. 선택 규칙:
+        (1) 후보 중 order.DestinationId != null(배정)이 있으면 그 그룹을 우선.
+        (2) 우선 그룹 내 tiebreak = **결정적**(다중 배정 오더가 같은 바코드를 갖는 최악 케이스).
+            Generator가 규칙을 정하고 근거를 sprint-log에 기록(권장: 배정확정 최신 DestAssignedAt,
+            그 다음 최소 OrderId — 또는 반대. 무엇이든 **결정적**이면 됨).
+        (3) 배정 후보가 없으면 미배정 후보에서 **결정적**으로 1건 선택(예: 최소 OrderId) →
+            이후 기존 AUTO 슈트배정/NO_DEST 흐름 그대로.
+      선택 이후의 상태판정(COMPLETED/PAUSED/OVER/availability FULL·PAUSED·Unmapped)·예약차감·
+      piece 삽입·트랜잭션·RecordDenied 경로는 **불변**(선택만 결정적으로 교체). 단건 매치 시
+      기존과 동일 결과(회귀 0).
+  · 순수 선택 규칙 분리(절대규칙 #8) — 위치는 Generator 결정(권장: Wcs.Core에 EF 무의존 순수
+      static + 최소 projection record, 또는 Wcs.Api 내 pure static). 요건: I/O·DI·EF 타입 유입 0,
+      입력=후보 projection 리스트, 출력=선택된 후보(또는 index) — 단위테스트로 규칙 고정.
 
-  [A · 프론트 레이아웃 — frontend/src/pages/B2cDataGenPage.tsx]
-  A1. B2cExcelUpload 컴포넌트(현 491~566)를 disclosure 로 재구성:
-      · 헤더 행(항상 표시): "엑셀 업로드" 라벨 + 접기/펼치기 토글 컨트롤. "양식 다운로드" 링크는
-        접힘 상태에서도 접근 가능하도록 배치(헤더에 유지 권장).
-      · 본문(파일 선택 input + 업로드 버튼 + 안내 문구 + 행오류 목록)은 토글로 펼칠 때만 렌더/표시.
-      · **기본 접힘**(useState 초기값 false). 신규 공용 UI 컴포넌트 생성 금지 —
-        components/ui 에 disclosure 없음. 이 파일 내 **로컬 구현**(버튼 + 조건부 표시).
-      · 접근성: 토글은 <button type="button"> · aria-expanded={open} · aria-controls 로 본문 연결 ·
-        키보드 Enter/Space 로 토글(native button 이면 기본 동작으로 충족). 회전 chevron 등 시각 표시.
-      · 스페이싱 정리로 접힘 시 좌측 폼 자연높이 최소화(mt-4/pt-4/gap 등 콤팩트화 — 과함 금지).
-  A2. 상단/하단 flex 배치 골격은 유지. 좌측 Card 의 self-start 자연높이 · 상단 grid min-h-0 ·
-      하단 상세 min-h-0 flex-1 · <main> overflow-auto 계약은 그대로 둔다(레이아웃 주석 160~180·
-      316~321 은 회귀 계약 — 삭제·약화 금지, disclosure 도입 사실을 반영해 주석만 갱신 가능).
-  A3. 업로드 안내 문구(현 546~549) 갱신: 컬럼 "작업일자·배치명·차수·**오더번호**·바코드·수량",
-      "한 오더에 여러 바코드(1 오더:N)" 사용법 · 미할당 · 멱등 · 원자성 문구 반영.
-  A4. B2cExcelUpload 상단 설명 주석(현 488~490 "행 = 오더/바코드 1건")을 새 시맨틱으로 정정.
-  ⚠ B2cGenerateForm(402~486) 및 그 안내 문구(474 "오더번호 = 바코드")는 **무접촉**(생성 폼 1:1 불변).
+  【Fix 2 — 경로 일관성 조사·명시 (계약 요건)】
+  · DbRepositories.cs의 다른 바코드-해소 경로를 조사하고 sprint-log에 결론 기록:
+      - IF-09 EfArrivalRecorder.RecordArrival — 활성 piece를 **PId**로 조회(바코드 아님).
+      - IF-10 EfDepositRecorder.RecordDeposit — 활성 piece를 **PId**로 조회(fallback은
+        chuteNo로 destination 조회 · 바코드→오더 아님).
+      - EfCellSelector.SelectCell(chuteNo,barcode)·ReleaseEmptyAssignment — 바코드로 조회하나
+        이미 **destination(chuteNo) 스코프**라 교차-목적지 모호성 없음.
+    → 조사 결과 "바코드→목적지" 모호성은 IF-05 QueryDestination 고유임을 확인/반증하고 기록.
+      IF-05는 필수. 다른 경로에도 동일 모호성이 실재하면 같은 결정적 규칙 적용(Generator 결정 + 근거).
 
-  [B · 백엔드 파싱/그룹핑 — backend/src/Wcs.Api/B2C/B2cTestDataService.cs]
-  B1. ValidateUploadRows(순수 함수): OrderNo 파싱·검증 추가.
-      · OrderNo 필수 + 안전문자(바코드와 동일 규칙 재사용 또는 전용 상수) 검증.
-      · 배치 내 바코드 유일: 중복 판정 키는 **(작업일자·배치명·차수·바코드)** 유지
-        (이 키가 "다른 오더가 같은 바코드" + "같은 오더에 같은 바코드 반복" 을 모두 잡는다).
-        OrderNo 는 유일성 키에 넣지 않는다(같은 오더가 여러 행에 정당하게 반복되므로).
-      · 파싱 결과 ParsedRow 에 OrderNo·Barcode 를 별도로 담는다.
-      · 한 행 복수 사유는 기존대로 공백 결합 1개 RowError.
-  B2. UploadExcelAsync(영속화): 그룹핑을 2단으로.
-      · 1단 (작업일자·배치명·차수) → work_batch upsert(멱등, UQ(work_date,batch_no,wave_no)).
-      · 2단 OrderNo 별 → WcsOrder upsert(멱등, UQ(WorkBatchId,OrderNo), 미할당 유지
-        DestinationId=null·DestAssignType=null·RUNNING·GENERAL).
-      · 3단 각 행 → order_item(Barcode=행 바코드, PlannedQty=행 수량) INSERT 만
-        (기존 (OrderId,Barcode) 는 스킵 — reserved/sorted 실적 보존).
-      · Q4 원자성 유지(행오류 하나라도 → 커밋 0, 트랜잭션 진입 전 조기 반환).
-      · counts: ordersCreated(=신규 distinct 오더)·orderItemsCreated(=신규 바코드)·batches·dataRows.
-        성공 메시지의 "오더 신규/항목 신규" 의미가 1:N 을 반영하도록 문구 점검.
-      · (설계 판단) 배치 내 바코드 유일은 파일 내 검증이 정본. 재업로드 시 **다른** 오더가 기존
-        배치 바코드를 재사용하는 교차-업로드 충돌 처리 여부는 Generator 가 결정(최소한 파일 내
-        (배치·바코드) 중복은 반드시 행오류). 결정 사항을 docs 에 명시.
+  【Fix 1 — 배치 상세 per-barcode 조회 + DTO】
+  · 배치 상세 전용 **per-item(order_item 단위) 조회 경로**를 둔다 — 신규 엔드포인트 vs 기존 재사용은
+      Generator 결정(근거 sprint-log 기록). 제약:
+      - GET /api/monitor/orders/{id}/items(OrderItemDto)는 (Id,Barcode,PlannedQty,ReservedQty,
+        SortedQty)만 반환 → 배치 상세가 요구하는 orderNo·상태·목적지·할당셀이 없다. 재사용하려면
+        오더-레벨 필드 보강이 필요하다.
+      - 권장(비강제): B2cFacility에 batchId 스코프 per-item 조회 신설
+        (예: GET /api/b2c/facility/batch-items?batchId= → 행=order_item, 각 행에
+         orderId·orderNo·barcode·plannedQty·reservedQty·sortedQty(항목별) + 오더-레벨
+         status·destinationId·destinationChuteNo·destType·assignedCellNo(오더에서 반복)).
+      - 무엇을 택하든 **N+1 회피**(오더별 개별 호출 금지 — batchId 단일 조회로 join/materialize).
+  · backend DTO — per-item 응답 record 정의(camelCase 미러).
+  · ⚠ **B2cFacilityService.GetOrdersAsync(383~434)는 오더 단위 유지** — 설비 관리 배정 UI
+      (useFacilityOrders / AssignOrderAsync — 배정은 오더 단위)가 이 경로를 쓴다. GetOrdersAsync·
+      B2cOrderDto **무변경**.
 
-  [B · 헤더 상수/DTO — backend/src/Wcs.Api/B2C/B2cTestDataDtos.cs]
-  B3. B2cConstants 헤더 상수 6열화: HdrOrderNo(예 "오더번호") 신설, 파싱 순서
-      [작업일자][배치명][차수][오더번호][바코드][수량]. UploadHeaderMismatch 메시지 문구도 6열로.
-  B4. B2cUploadRawRow / B2cUploadParsedRow 에 OrderNo 필드 추가(위치기반 6열 반영).
-      OrderNo 안전문자 상수(UploadOrderNoRegex) 필요 시 추가(바코드 규칙 재사용 가능).
-  B5. (선택·craft) 코드리뷰 후속 minor 동시 정리 가능(같은 파일 국소): batchNo 길이 100 상수화 ·
-      DefaultPlannedQty 상수 추가 · zip-bomb 계약 문구 "materialize 전 캡" → 실동작 정정.
-      과확장 금지 — 스코프 파일 내에서만, 위험 0 인 것만.
+  【Fix 1 — 프론트 그리드 per-barcode】
+  · frontend/src/lib/b2cFacility.ts — 배치 상세용 per-item 조회 함수 + 훅 신설(또는 교체).
+      기존 useFacilityOrders(설비 관리 배정용)는 **무변경**.
+  · frontend/src/pages/B2cDataGenPage.tsx — BatchDetailGrid(311~399): 소스를 per-item 훅으로
+      바꾸고 per-item 행 렌더. row key는 order_item.id. 컬럼 유지(오더·바코드·계획·예약·분류·상태·
+      목적지·할당). 한 오더 N바코드 → N행. 빈/로딩/에러/절단 상태·낮은 뷰포트 레이아웃
+      (min-h-[10rem]·페이지 스크롤 에스컬레이션) 보존.
 
-  [B · 컨트롤러 — backend/src/Wcs.Api/Controllers/B2C/B2cTestDataController.cs]
-  B6. 조사 결과 컨트롤러 Upload 는 파일 레벨 검증(없음/0바이트/크기/확장자/MIME)만 수행하고
-      컬럼 파싱을 하지 않는다 → **무변경 예상**. 헤더 문자열·컬럼 수에 의존하는 코드 없음(확인 완료).
-      만약 변경이 필요해지면 그 사유를 sprint-log 에 명시(기본 가정: 0 diff).
+  【테스트】
+  · backend — IF-05 다중오더 배정우선(신규): 같은 바코드가 (배정 오더, 미배정 오더) 둘에 존재 →
+      QueryDestination이 **배정 오더 목적지로 OK·chuteNo**. 미배정만이면 기존(AUTO/NO_DEST) 불변.
+      단건 1:1 불변. 다중배정 tiebreak 결정성.
+  · backend — 순수 선택 규칙 단위테스트: 후보 리스트 입력 → 결정적 선택(배정우선·tiebreak·폴백).
+  · backend — per-item 배치 조회 테스트: 1 오더:N 바코드 배치 → 항목 N행·오더-레벨 필드 정확·
+      batchId 스코프.
+  · 기존 테스트(IF-05 1:1·설비 배정·업로드) 회귀 0.
 
-  [B · 양식 파일 — frontend/public/b2c-order-upload-template.xlsx]
-  B7. 6열로 **프로그램적 재생성**(바이너리 xlsx). 헤더 문자열은 B2cConstants.Hdr* 와 **정확히 일치**
-      (위치기반 파싱 · 드리프트 0). 예시 행에 "**한 오더에 바코드 2건 이상**" 케이스 포함
-      (예: 같은 오더번호 2행, 서로 다른 바코드). "설명" 시트가 있으면 6열로 갱신(오더번호 컬럼 설명 +
-      1오더:N바코드 사용법 + 미할당·멱등·원자성·최대 행수).
-      · 생성 경위 조사 결과: repo 에 **커밋된 양식 생성 스크립트 없음**(tools/·scripts/·*.csx 부재.
-        기존 양식은 S-B2C-EXCEL-UPLOAD 커밋 e6afe05 에서 일회성 openpyxl/ClosedXML 로 생성된 것으로
-        확인). → Generator 가 ClosedXML(백엔드에 이미 의존) 로 일회성 재생성한다(테스트 헬퍼 BuildXlsx
-        패턴 재사용 가능). 재생성 방법을 sprint-log 에 남긴다. 헤더 정합은 라운드트립 테스트가 잠근다.
+  【docs】
+  · docs/B2C-DATAGEN.md — 하단 디테일 그리드 표시 규칙을 "바코드(order_item)당 1행"으로 갱신.
+  · docs/SPEC.md §7-B — "IF-05 동일 바코드 다중 목적지 선택 규칙 미정"을 **확정 규칙(배정-우선
+      결정적 선택)**으로 갱신 + 조사 결론(IF-09/IF-10 PId 기반) 반영. todo.md 대응 항목 닫음.
 
-  [B · 테스트 — backend/tests/Wcs.Tests/B2C/B2cUploadTests.cs]
-  B8. BuildXlsx/Xlsx 헬퍼 헤더를 6열(오더번호 포함)로, 모든 데이터 행을 6열로 갱신.
-      추가/갱신 테스트(최소):
-      · ValidateUploadRows 순수 단위: OrderNo 필수·안전문자, 배치 내 (배치·바코드) 중복 = 행오류,
-        같은 오더 같은 바코드 반복 = 중복오류, 서로 다른 오더가 같은 바코드 = 배치내 중복오류,
-        1 오더:N 바코드 정상 파싱(오더 1·item N).
-      · UploadExcelAsync 서비스: 1 오더 2 바코드 xlsx → ordersCreated=1·orderItemsCreated=2 ·
-        각 order_item.planned_qty=행 수량 · 미할당(DestinationId=null) · orderNo≠barcode 케이스 실증.
-      · 원자성: 배치 내 바코드 중복 파일 → 200 F · rowErrors · 커밋 0.
-      · 멱등: 재업로드 신규 0 · 기존 reserved/sorted 보존.
-      · 정적양식 라운드트립(StaticTemplate_RoundTrips_ThroughParser): 새 6열 양식 재투입 → S ·
-        예시행 단언을 새 예시 바코드/오더번호로 갱신(1오더:N 예시행 커버).
-      · API 왕복(multipart): happy 200 S · batches 반영 · 배치내바코드중복 200 F.
+  【무접촉 (변경 금지)】
+  · 설비 관리 오더 배정 흐름(오더 단위) — GetOrdersAsync·B2cOrderDto·AssignOrderAsync·useFacilityOrders.
+  · GenerateAsync·엑셀 업로드 파싱. DB 스키마·마이그레이션(조회/표시/선택만 — 새 마이그레이션 0).
+  · Wcs.Core 판정 로직·PlcGateway·핸드셰이크. 절대규칙 #1~#8(특히 #7·#8) 준수.
 
-  [B · 문서 — docs/B2C-DATAGEN.md]
-  B9. §7 업로드 스펙 갱신: §7.1 컬럼표 6열화(오더번호 행 추가·바코드↔오더번호 분리·배치 그룹핑 =
-      (작업일자·배치명·차수)·오더 그룹핑 = +오더번호), §7 서문 "한 행 = 오더/바코드 1건" → "1 오더:N
-      바코드", §7.3 양식 예시행 설명 갱신, §7.5 검증 갱신, 배치내 바코드 유일 규칙 명시.
-
-  [무접촉 경계 — diff 0 이어야 함]
-  · GenerateAsync / BuildOrderNumbers(생성 폼 5-파라미터 1:1) · ResetAsync/초기화 · GetBatches/
-    GetSummary/GetDetail 조회 · 마스터/디테일 그리드 조회 경로 · Wcs.Core · Wcs.PlcGateway ·
-    HandshakeOrchestrator · 마이그레이션/스키마 · CLAUDE.md · tasks/workflow-*.md.
-  · frontend/src/lib/b2cTestData.ts 는 파일만 POST 하므로 **무변경 예상**(B2C_UPLOAD_TEMPLATE_URL
-    파일명 불변). 변경 필요 시 사유를 sprint-log 에 명시.
-
-════════════════════════════════════════════════════════════════════════════
+────────────────────────────────────────────────────────────────────────────────
 - Evaluation Criteria (가중치):
-  1. 업로드 오더-그룹핑 정확성 (★★★, B) — 1 오더:N 바코드 그룹핑, 배치 내 바코드 유일, orderNo≠
-     barcode 케이스, planned_qty=행 수량, 미할당 유지. 순수 ValidateUploadRows 가 스펙.
-  2. 프론트 레이아웃 정합 (★★★, A) — 접힘(기본) 상태에서 하단 상세 오더 행 실제 표시, 3뷰포트,
-     폼 오버랩 0. disclosure 접근성(aria-expanded·키보드).
-  3. 회귀 안전 (★★) — S-UI-LAYOUT-FIX 폼 오버랩 회귀 0 · 업로드 원자성(Q4) · 멱등 append ·
-     **생성 폼 불변** · 마이그레이션 0 · 무접촉 경계 diff 0.
-  4. Craft (★★) — 콘솔 청결(React dev-warning·pageerror 0) · 회귀 계약 주석 보존/정정 ·
-     하드코딩 금지(헤더·상한 상수화 · 절대규칙 #6/#7) · 순수함수 분리(#8) · 양식↔파서 헤더 단일 소스.
-  5. Scope 준수 — 명시 스코프 파일로 한정, 무접촉 영역 손대지 않음.
+  ★★★ Fix 2 정확성 — 같은 바코드가 배정/미배정 두 오더에 있을 때 IF-05가 **배정 오더 목적지로
+       OK+chuteNo** / 미배정만이면 기존 AUTO·NO_DEST 불변 / 단건 1:1 불변 / 다중배정 tiebreak 결정적 /
+       경로 일관성 조사·결론 sprint-log 기록.
+  ★★★ Fix 1 표시 — 배치 상세가 1 오더:N 바코드에서 **N행**(order_item 단위) 실측 + 설비 관리
+       배정 UI **무손상**(오더 단위 유지).
+  ★★  회귀 — 기존 IF-05 1:1·설비 배정·엑셀 업로드·모니터 표면 불변.
+  ★★  Craft — 순수 선택 규칙 분리(단위테스트)·주석·콘솔 청결·N+1 회피.
+  (Scope) — 무접촉 경계 준수(GetOrdersAsync 오더단위·스키마·마이그레이션 0·git diff 한정).
 
-════════════════════════════════════════════════════════════════════════════
-- Completion Conditions (전부 충족해야 PASS):
-  C1. `dotnet test backend/Wcs.sln` 전량 GREEN(신규 오더-컬럼/1:N/배치내바코드유일 테스트 포함) —
-      Evaluator 독립 재실행. ValidateUploadRows 는 순수함수라 단위테스트가 스펙(절대규칙 #8).
-  C2. frontend tsc / lint / build digit-exact 0 신규 에러·경고(Evaluator 독립 실행).
-  C3. 뷰포트 700 / 900 / 1080px 각각(Playwright 실측):
-      · 900 / 1080px 기본(접힘) 상태 → 하단 "배치 상세" 그리드에 오더 행이 **페이지 스크롤 없이
-        in-place 로** 실제 렌더(헤더만이 아님) · 폼 오버랩 0.
-      · 700px 기본(접힘) 상태 → 하단 "배치 상세" 오더 행이 **페이지 스크롤(main overflow-auto)로
-        도달 가능**하면 PASS. **사용자 결정(2026-07-26): 짧은 창에서 페이지 스크롤 허용** — 폼이
-        접혀도 ~540px 라 700px 에서 상세를 in-place 노출하는 것은 물리적으로 불가(폼은 계약상
-        무접촉). 상세 Card 에 최소 높이 하한을 줘 700px 에서 <main> overflow-auto 가 페이지 스크롤로
-        오더 행에 도달하게 한다(900/1080 은 하한 비활성·in-place 무변경). 폼 오버랩 0 은 불변 요건.
-      · 펼침 상태(전 뷰포트) → 폼 오버랩 0. (짧은 뷰포트 펼침 시 콘텐츠는 위 페이지-스크롤
-        에스컬레이션으로 도달 가능 — 오버랩 0 이 불변 요건, 이 메커니즘 허용.)
-  C4. 엑셀 접기/펼치기 동작 실증: 토글 클릭 + 키보드(Enter/Space) 로 열림/닫힘 전환 ·
-      aria-expanded 값이 상태와 일치 · 접힘 시 본문 미표시.
-  C5. E2E(cross-layer): 오더번호 컬럼이 있는 .xlsx(한 오더에 바코드 2건 포함) 업로드 →
-      **오더 1건·item 2건**(오더 단위) DB 생성 확인 + 마스터 그리드(오더 총/미할당·항목 수) ·
-      디테일 그리드에 반영. 잘못된 파일(배치 내 바코드 중복 등) → 행별 오류 목록 렌더 · 커밋 0
-      (해당 배치 미출현). 콘솔 에러 0.
-  C6. 새 양식 다운로드 → 그 파일 그대로 재업로드 성공(양식↔파서 헤더 왕복 정합 · 라운드트립 GREEN).
-  C7. git diff: 변경이 명시 스코프 파일로 한정. GenerateAsync·초기화·조회·백엔드 무관 영역·
-      **마이그레이션 diff 0**(DB 스키마 무변경 — 기존 order_item 1:N 재사용). 컨트롤러/ b2cTestData.ts
-      변경 시 사유가 sprint-log 에 기록되어 있을 것(기본 가정 0 diff).
+────────────────────────────────────────────────────────────────────────────────
+- Completion Conditions (전부 충족):
+  1. dotnet test 전량 GREEN — 신규(다중오더 배정우선·순수 선택규칙·per-item 조회) 포함, Evaluator
+     독립 재실행. baseline 대조 `총 - 신규 = 기존`.
+  2. 프론트 tsc / lint / build 각 exit 0 (build 스크래치 outDir — 유저 서빙 wwwroot 무접촉).
+  3. Playwright(MCP 헤드리스): 배치 상세가 1 오더:N 바코드에서 **N행 표시** 실측(행 수 계측) +
+     설비 관리 배정 UI 정상(오더 단위·배정/해제 동작).
+  4. E2E(cross-layer): 같은 바코드가 배정 오더 + 미배정 오더에 존재하도록 조성 → 업로드/생성 →
+     한쪽만 배정 → IF-05가 **배정 오더 목적지로 OK + chuteNo**(응답 본문 증거) + 그 배치 상세 per-barcode N행.
+  5. 마이그레이션 diff 0 · git diff 스코프 한정(무접촉 경계 파일 diff 0).
+  6. 콘솔 캡처 BLOCKING 0(React dev-warning·pageerror·의도치 않은 4xx/5xx 없음).
+  7. sprint-log.md에 `## IMPLEMENTATION COMPLETE` + 경로 일관성 조사 결론 + Generator 재량 결정
+     (엔드포인트 신규 vs 재사용·tiebreak 규칙) 근거 기록.
 
-════════════════════════════════════════════════════════════════════════════
-- Parallel Modules: N/A (single module).
-    A·B 가 frontend/src/pages/B2cDataGenPage.tsx 를 **공유 편집**하므로(A=레이아웃/disclosure,
-    B=업로드 안내 문구·컬럼 안내) 병렬 워크트리 분할 시 동일 파일 쓰기 충돌. 단일 Generator 권장.
-- Evaluation Dimensions: functional only.
+────────────────────────────────────────────────────────────────────────────────
+- Parallel Modules: N/A (single module — 백/프론트 per-item DTO 계약 강결합·공유 파일 가능). 1/1/1.
+- Evaluation Dimensions: functional only (N+1·인덱스는 Craft에 흡수).
 
-════════════════════════════════════════════════════════════════════════════
+────────────────────────────────────────────────────────────────────────────────
 - Detected Project Type: Full-stack
-  (저장소 신호: frontend React 컴포넌트 트리(frontend/src/pages·components) + 서버 라우트/컨트롤러
-   (backend/src/Wcs.Api/Controllers/B2C) 가 같은 repo 에 공존 → Full-stack.)
+  (frontend/src/*.tsx(Vite React) + backend/src/Wcs.Api/Controllers/*.cs 공존 → Full-stack.)
 
-- Verification Scenarios (Full-stack — 모든 슬롯 충족):
+────────────────────────────────────────────────────────────────────────────────
+- Verification Scenarios (Full-stack — 필수 슬롯 전부):
 
-  === Web/UI (프론트 surface: B2cDataGenPage 좌측 생성 카드 + 하단 배치 상세) ===
-  - Default state of each surface touched:
-      · 데이터 생성 페이지 로드 → 좌측 생성 카드 안 엑셀 업로드 블록 **접힘(기본)**: "엑셀 업로드"
-        라벨 + 양식 다운로드 링크 + 토글만 보이고 파일 input/업로드 버튼/안내 미표시.
-      · 하단 "배치 상세" 그리드: 배치 선택 시 오더 행이 실제로 표시(1080/900/700px 각 스냅샷).
-  - Each alternate state introduced:
-      · 업로드 블록 **펼침**: 토글 클릭/Enter/Space → 파일 input·업로드 버튼·안내 문구·행오류 슬롯 표시,
-        aria-expanded=true. 다시 토글 → 접힘, aria-expanded=false.
-      · 파일 선택 후 업로드 버튼 enabled(미선택 시 disabled) 상태 스냅샷.
-  - Relevant empty / error state surfaced:
-      · 배치 미선택 시 하단 상세 EmptyRow("상단에서 배치 행을 선택…").
-      · 배치 내 바코드 중복/오더번호 누락 파일 업로드 → 에러 토스트 + 행별 오류 목록(행번호+사유) 렌더.
-  - Dark mode variant:
-      N/A — 프로젝트는 단일 라이트 테마(docs/B2C-DATAGEN.md §4 "다크모드 N/A"). 사유 명시.
-  - Key interaction flow after the change:
-      접힘 기본 → 하단 상세 오더 행 가시(핵심 목표) → 토글 펼침 → 양식 다운로드 → 6열 파일 선택
-      (1오더:2바코드) → 업로드 → 성공 토스트 + 마스터(오더/미할당/항목) 갱신 + 행 선택 → 디테일
-      그리드에 그 오더의 2 바코드 item 표시.
+  === Web/UI (배치 상세 그리드 · 설비 관리 배정 UI) ===
+  · Default state: 배치 미선택 시 빈 안내(EmptyRow); 배치 선택 후 per-item 행(1오더:N바코드면 N행).
+    설비 관리 오더 목록은 오더 단위 1행/오더(무손상).
+  · Alternate states: 배치 상세 loading/error/절단힌트 정상; N=1 배치와 N≥2 배치 각각 선택 시
+    행 수 = 그 배치 order_item 수와 일치(계측).
+  · Empty/error: 오더 없는 배치 → "이 배치에 오더가 없습니다."; per-item 조회 실패 → ErrorRow.
+  · Dark mode: N/A (프로젝트 단일 테마).
+  · Key interaction flow: 마스터 그리드에서 1오더:N바코드 배치 클릭 → 하단 배치 상세가 바코드마다
+    1행으로 확장. 설비 관리는 여전히 오더 단위 목록·배정/해제 동작.
 
-  === Backend/API (backend surface) ===
-  - Endpoints touched (method + path):
-      · POST /api/b2c/test-data/upload (유일 변경 경로 — 파싱/그룹핑). 컨트롤러 파일검증은 무변경 예상.
-      · (무접촉·회귀확인용) GET /api/b2c/test-data/batches · GET /api/b2c/facility/orders?batchId=.
-  - Happy path per endpoint (input → output shape):
-      · upload: 6열 xlsx, 동일 오더번호 2행(바코드 상이·수량 상이) → 200 {status:"S",
-        counts:{ordersCreated:1, orderItemsCreated:2, batches:1, dataRows:2}}. 다중 오더/다중 배치도 검증.
-      · batches: 업로드 후 해당 배치 orderTotal=오더수 · orderUnassigned=오더수 · itemTotal=바코드수.
-  - Relevant error cases per endpoint:
-      · upload 200 F(+rowErrors): 배치 내 바코드 중복(다른 오더 동일 바코드 / 같은 오더 반복 바코드) ·
-        오더번호 누락 · 작업일자/차수/수량 형식오류 · 헤더 6열 불일치 · 데이터행 0 · 행수>1000 ·
-        사용범위 팽창(행/열 상한). 전부 커밋 0(원자성).
-      · upload 400: 파일 없음/0바이트 · >10MB · 확장자≠.xlsx(.xls 거부) · MIME 불일치(컨트롤러 선행).
-      · ValidateUploadRows 순수 단위(I/O 무의존) = 위 판정의 스펙 테스트.
+  === Backend/API ===
+  · Endpoints touched: IF-05 목적지 조회(RcsController → QueryDestination, 배정-우선 선택으로 행위
+    변경) · 배치 상세 per-item 엔드포인트(신규/보강 — Generator 확정 후 method+path 확정) ·
+    (무변경 확인) GET /api/b2c/facility/orders 오더 단위.
+  · Happy path: IF-05(다중매칭·배정존재) → OK+배정오더 chuteNo; IF-05(단건 1:1) → 불변 OK/chuteNo;
+    per-item 조회 batchId → order_item 배열(항목별+오더레벨 필드), 1오더:N → N개.
+  · Error cases: IF-05(다중매칭·배정없음·슈트 자동배정 불가) → NG/NO_DEST(불변); IF-05(매칭 없음)
+    → NG/NO_DEST(불변); per-item 미존재 batchId → 빈 배열 200; 잘못된 파라미터 → 400.
 
-  - At least one end-to-end data-flow scenario crossing 2+ layers:
-      양식 다운로드(GET 정적 /b2c-order-upload-template.xlsx) → 브라우저 파일 업로드(POST multipart)
-      → ClosedXML 파서/ValidateUploadRows → Wcs.Data 트랜잭션(work_batch UQ 멱등 → OrderNo 별
-      WcsOrder → 행별 order_item) → GET /batches(orderUnassigned) + 하단 디테일 그리드(1 오더 아래
-      N 바코드) 3계층 관통. + 역방향 왕복: 새 양식 재업로드 성공(헤더 정합).
+  === Full-stack — cross-layer 데이터 흐름 ===
+  · 중복 바코드 E2E: 같은 바코드를 두 오더(A=미배정, B=배정)에 조성(업로드/생성 + 설비 관리에서 B만
+    배정) → RCS IF-05 호출(HTTP) → WCS가 배정 오더 B 목적지로 OK+chuteNo(응답 본문 증거) → 그 배치
+    데이터 생성 페이지 배치 상세가 per-barcode N행(브라우저 실측).
 
-  검증 환경: 프론트 Playwright MCP 헤드리스(vite dev, 기본 http://localhost:5173 — 존재 시
-  .claude/ports.local.json 우선). 백엔드는 Evaluator 가 필요 시 기동하되 **포트는
-  .claude/ports.local.json 의 이번 스프린트 할당값을 읽어 구성**한다(하드코딩 금지). ⚠ 사용자 로컬
-  실 서비스 포트(5205/1502·COM1/RTU)는 **절대 사용 금지**(ports.local.json note 명시). 스크린샷은
-  screenshots/S-B2C-DATAGEN-UPLOAD_{YYYYMMDD-HHMMSS}/ 에 번호순 저장 + console.log 캡처(dev-warning/
-  pageerror 0 BLOCKING).
+────────────────────────────────────────────────────────────────────────────────
+- 검증 인프라 격리 (현장 오염 0):
+  · 백엔드: 유저 실서비스 포트(5205/5173) **미사용**. 격리 백엔드는 전용 여유 포트
+    (`-- --urls http://127.0.0.1:<port>`가 appsettings 5205를 이기도록 최우선 지정 — Urls 키 함정).
+  · DB: env override(Sqlite scratch 또는 전용 SQL Server DB) + MigrateOnStartup — 현장 운영 DB 무접촉.
+  · 소터: 0-DB-소터면 폴링 미개통(실 PLC 무접촉); 소터 경로 필요 시 dead-TCP override. NEVER COM1/RTU.
+  · 프론트: Vite 격리 포트(strictPort) + VITE_API_TARGET을 격리 백엔드로. 콘솔 캡처는 세션 격리 판독.
 
+────────────────────────────────────────────────────────────────────────────────
 > Planner self-check — Detected project type: Full-stack. Required scenario slots: 8
-  (UI-default, UI-alternate, UI-empty/error, UI-darkmode(N/A+사유), UI-key-interaction,
-   API-endpoints, API-happy, API-error; + cross-layer E2E). All slots filled: yes.
+  (Web/UI: default-state, alternate-state, empty/error-state, dark-mode(N/A), key-interaction-flow;
+   Backend/API: endpoints-touched, happy-path, error-cases;
+   Full-stack: cross-layer-data-flow). All slots filled: yes.

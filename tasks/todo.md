@@ -18,7 +18,7 @@
 - 신규 minor/info 20건(IF-10 chuteNo 불일치 회계·Pusher stale 역전·SetTgtFloor 캐시 재확인·TeardownGuard InvalidOperationException 과포괄·마스터데이터 재시작 요구·AUTO 이중 배정·CHECK 미구현·SQLite 토큰 사문화 등)은 보고서 §C 참조 — 해당 영역 스프린트 착수 시 함께.
 
 ## IF-05 동일 바코드 다중 목적지 (2026-06-30 조사 — 사용자 결정: SPEC 미확정 등재·후속)
-- [ ] [SPEC·동작갭] **동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**: `DbRepositories.QueryDestination`이 `FirstOrDefault()`(정렬 없음)라 다중 매치 시 반환 목적지 미정의. SPEC §7-B에 미확정 등재함. 운영 다중 슈트·동일 바코드 도입 시 규칙 확정(1:1 불변식+방어 / 우선순위 규칙) → 결정적 처리 + 테스트(현재 커버리지 0). **단일 소터/1:1 환경 미발생**(내일 현장 무관).
+- [x] [SPEC·동작갭] ~~**동일 바코드가 여러 활성 목적지에 걸릴 때 IF-05 비결정적**~~ **✅ 해소(2026-07-27, S-B2C-BARCODE-MULTI-FIX Fix 2)**: `DbRepositories.QueryDestination`의 정렬없는 `FirstOrDefault()`를 순수 `Wcs.Core.BarcodeDestinationSelector`(배정-우선 결정적 선택 — 배정확정 최신 DestAssignedAt → 최소 OrderId → 최소 OrderItemId)로 교체. 단위(`BarcodeDestinationSelectorTests`)+통합(`B2cBarcodeMultiFixTests`) 커버리지 추가. SPEC §7-B 확정 규칙으로 갱신.
 - [ ] [동작갭] IF-05 조회에 **work_batch 필터 부재** → 교차 배치(어제/오늘) 동일 바코드 매칭 가능. 활성/당일 배치로 좁힐지 정책 확정 필요.
 
 ## S-CHUTESTATE-PUSH 이연 (고객사 UpdateChuteState 아웃바운드 — dormant)

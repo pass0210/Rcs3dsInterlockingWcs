@@ -25,6 +25,7 @@ public interface IB2cFacilityService
     Task<B2cManagementResponse> UpdateDestinationAsync(long destinationId, B2cUpdateDestinationRequest req, CancellationToken ct = default);
     Task<B2cManagementResponse> ConfigureCellsAsync(long destinationId, B2cCellBulkRequest req, CancellationToken ct = default);
     Task<List<B2cOrderDto>>     GetOrdersAsync(bool? assigned, long? batchId, int take, CancellationToken ct = default);
+    Task<List<B2cBatchItemDto>> GetBatchItemsAsync(long batchId, int take, CancellationToken ct = default);
     Task<B2cManagementResponse> AssignOrderAsync(B2cAssignOrderRequest req, CancellationToken ct = default);
     Task<B2cManagementResponse> UnassignOrderAsync(B2cUnassignOrderRequest req, CancellationToken ct = default);
 }
@@ -431,6 +432,50 @@ public sealed class B2cFacilityService : IB2cFacilityService
                 o.DestinationId, o.DestChuteNo, o.DestType?.ToString(), o.DestAssignType?.ToString(),
                 o.AssignedCellNo, o.HasActivePiece, canReassign);
         }).ToList();
+    }
+
+    // ── 배치 상세(데이터 생성 페이지 하단 그리드) — per-item(order_item 단위) ────────────
+    //   Fix 1(S-B2C-BARCODE-MULTI-FIX): 배치 상세는 **바코드(order_item)당 1행**이어야 한다(1 오더:N 바코드).
+    //   기존 GetOrdersAsync 는 오더 단위 집계(대표 바코드 FirstOrDefault·수량 Sum)라 첫 바코드만 보였다.
+    //   ⚠ GetOrdersAsync·B2cOrderDto(설비 관리 배정 UI — 배정은 오더 단위)는 무변경 — 이 메서드는 신설.
+    //   batchId 단일 조회로 join/materialize(N+1 회피 — 오더별 개별 호출 금지).
+    public async Task<List<B2cBatchItemDto>> GetBatchItemsAsync(long batchId, int take, CancellationToken ct = default)
+    {
+        // 값변환 enum(Status·DestType)은 익명형으로 materialize 후 C#에서 조립(GetOrdersAsync 와 동형).
+        //   행 = order_item(항목별 수량) · 오더 레벨 필드(status·목적지·할당셀)는 오더에서 반복.
+        //   결정적 정렬: 오더 최신(OrderId desc) → 항목 안정(OrderItemId asc) — 한 오더의 N 바코드가 인접.
+        var rows = await _db.OrderItems.AsNoTracking()
+            .Where(i => i.Order.WorkBatchId == batchId)
+            .OrderByDescending(i => i.OrderId)
+            .ThenBy(i => i.Id)
+            .Take(take)
+            .Select(i => new
+            {
+                OrderItemId = i.Id,
+                i.OrderId,
+                i.Order.OrderNo,
+                i.Barcode,
+                i.PlannedQty,
+                i.ReservedQty,
+                i.SortedQty,
+                Status        = i.Order.Status,
+                i.Order.DestinationId,
+                DestChuteNo   = i.Order.Destination != null ? (int?)i.Order.Destination.ChuteNo : null,
+                DestType      = i.Order.Destination != null ? (DestType?)i.Order.Destination.DestType : null,
+                // 활성 배정 셀(소터) — released_at IS NULL(오더 레벨, GetOrdersAsync 와 동형).
+                AssignedCellNo = i.Order.CellAssignments
+                    .Where(a => a.ReleasedAt == null)
+                    .Select(a => (int?)a.Cell.CellNo)
+                    .FirstOrDefault(),
+            })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        return rows.Select(r => new B2cBatchItemDto(
+            r.OrderItemId, r.OrderId, r.OrderNo, r.Barcode,
+            r.PlannedQty, r.ReservedQty, r.SortedQty,
+            r.Status.ToString(),
+            r.DestinationId, r.DestChuteNo, r.DestType?.ToString(),
+            r.AssignedCellNo)).ToList();
     }
 
     // ── 오더 → 목적지(+셀) 할당/재배정 (OQ-3 미시작 가드) ─────────────────────────

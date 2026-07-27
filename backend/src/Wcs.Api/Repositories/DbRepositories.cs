@@ -41,19 +41,33 @@ public sealed class EfOrderRepository : IOrderRepository
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
 
         // ── 오더 항목 조회 (바코드 → order_item → wcs_order → destination) ──
-        var item = _db.OrderItems
+        // Fix 2(S-B2C-BARCODE-MULTI-FIX): 한 바코드가 여러 order_item 에 매칭될 때(교차-배치 중복
+        //   업로드로 발생) 정렬 없는 .FirstOrDefault() 는 **비결정적**으로 미배정 오더를 골라 NG/NO_DEST 를
+        //   반환할 수 있었다. 후보를 전량 materialize 한 뒤 **순수 선택 규칙**(BarcodeDestinationSelector,
+        //   절대규칙 #8 — Wcs.Core·EF 무의존)으로 배정-우선·결정적으로 1건 선택한다. 단건 1:1 매치는
+        //   그 후보를 그대로 반환 → 기존 동작과 동일(회귀 0). 선택 이후의 상태판정·예약차감·piece 삽입·
+        //   트랜잭션·RecordDenied 경로는 전부 불변(선택만 결정적으로 교체).
+        var candidateItems = _db.OrderItems
             .Include(i => i.Order)
                 .ThenInclude(o => o.Destination)
             .Where(i => i.Barcode == barcode
                      && i.Order.Status != OrderStatus.COMPLETED
                      && i.Order.Status != OrderStatus.CANCELLED)
-            .FirstOrDefault();
+            .ToList();
 
-        if (item is null)
+        if (candidateItems.Count == 0)
         {
             RecordDenied(pId, agvNo, barcode, inductionNo, qty, "NO_DEST", clientTs, effective);
             return ("NG", null, "NO_DEST", null, null);
         }
+
+        // 순수 선택 규칙: EF 엔티티 → 최소 projection → 결정적 선택(배정-우선·tiebreak). 후보≥1 → non-null.
+        var projections = candidateItems
+            .Select(i => new Wcs.Core.BarcodeDestinationCandidate(
+                i.Id, i.OrderId, i.Order.DestinationId != null, i.Order.DestAssignedAt))
+            .ToList();
+        var chosen = Wcs.Core.BarcodeDestinationSelector.Select(projections)!;
+        var item   = candidateItems.First(i => i.Id == chosen.OrderItemId);
 
         var order = item.Order;
 
