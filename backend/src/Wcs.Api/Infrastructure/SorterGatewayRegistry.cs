@@ -76,9 +76,14 @@ public sealed class SorterBundleHandle
     public ValueTask EnqueueCellAssignAsync(int cellNo, int seq, CancellationToken ct = default) =>
         _polling.EnqueueAsync(new PlcWrite.CellAssign(cellNo, seq), ct);
 
-    /// <summary>셀 지정 핸드셰이크 1건 수행(백그라운드 태스크로 호출).</summary>
-    public Task<HandshakeResult> ExecuteHandshakeAsync(int cellNo, CancellationToken ct = default) =>
-        _handshake.ExecuteAsync(cellNo, ct);
+    /// <summary>
+    /// 셀 지정 핸드셰이크 1건 수행(백그라운드 태스크로 호출).
+    /// S-IF10-CWRITE-SETTLE-DELAY — <paramref name="depositedAtUtc"/>(IF-10 수신 시각·anchor)를 선택적으로
+    /// 받아 오케스트레이터에 위임한다(역호환 — 기존 호출부는 지정 안 함 → null). 번들 코어 로직 무변경(박막 위임).
+    /// </summary>
+    public Task<HandshakeResult> ExecuteHandshakeAsync(
+        int cellNo, CancellationToken ct = default, DateTime? depositedAtUtc = null) =>
+        _handshake.ExecuteAsync(cellNo, ct, depositedAtUtc);
 
     // ── IHostedService 위임 ──────────────────────────────────────────────────
 

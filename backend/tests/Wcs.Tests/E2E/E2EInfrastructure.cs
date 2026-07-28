@@ -65,6 +65,10 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     private readonly int      _initialCurFloor;       // Sim 초기 CurFloor(2=즉시 정렬 / 1=미정렬)
     private readonly int      _rFlagTimeoutMs;
     private readonly int      _sorterObserveIntervalMs;
+    private readonly int      _settleDelayMs;         // S-IF10-CWRITE-SETTLE-DELAY — 안착 지연(0=미주입·현행).
+    private readonly string?  _traceLogDir;           // S-TRACE-LOG-VIEWER — 전용 추적 로그 per-test scratch 디렉터리(null=env 기본).
+    private readonly int      _simLoopMs;             // Sim 상태기계 루프 주기(ms). 기본 10. 크게 주면 C_Flag=1 dwell↑
+                                                      //   (현장 PLC 처럼 C_Flag 유지 → WCS 폴이 1→0 델타를 관측 — 이벤트 6 결정성).
 
     // 인덕션 기반 2층 제어: inductionNo→floor 맵. 기본은 1→2·2→2(기존 E2E는 induction=1로 층2 정렬 기대).
     // 폐루프 1↔2 테스트는 커스텀 맵({1:1,2:2})을 주입해 induction 1→층1·2→층2를 구동한다.
@@ -121,8 +125,13 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         bool      injectTimeoutConnection  = false,
         IReadOnlyDictionary<int, int>? inductionFloorMap = null,
         IReadOnlyDictionary<int, string>? floorHosts = null,
-        Action<WcsDbContext, IReadOnlyList<SorterSimSlot>>? seedExtra = null)
+        Action<WcsDbContext, IReadOnlyList<SorterSimSlot>>? seedExtra = null,
+        int       settleDelayMs           = 0,
+        string?   traceLogDir             = null,
+        int       simLoopMs               = 10)
     {
+        _simLoopMs                  = simLoopMs;
+        _traceLogDir                = traceLogDir;
         _rcsBaseUrl                 = rcsBaseUrl;
         _floorHosts                 = floorHosts;
         _seedExtra                  = seedExtra;
@@ -130,6 +139,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         _initialCurFloor            = initialCurFloor;
         _rFlagTimeoutMs             = rFlagTimeoutMs;
         _sorterObserveIntervalMs    = sorterObserveIntervalMs;
+        _settleDelayMs              = settleDelayMs;
         _inductionFloorMap          = inductionFloorMap ?? new Dictionary<int, int> { [1] = 2, [2] = 2 };
         _sharedBusUnits             = sharedBusUnits ?? [];
         _induceSerialMismatch       = induceSerialMismatch;
@@ -163,7 +173,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 SortDurationMs  = 100,
                 MoveDurationMs  = 80,
                 InitialCurFloor = _initialCurFloor,
-                SimLoopMs       = 10,
+                SimLoopMs       = _simLoopMs,
             };
             var sim = new SimServer(simOpt, unitIds, timelineLog: line =>
             {
@@ -190,7 +200,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 SortDurationMs  = 100,
                 MoveDurationMs  = 80,
                 InitialCurFloor = _initialCurFloor,
-                SimLoopMs       = 10,
+                SimLoopMs       = _simLoopMs,
             };
             var sim = new SimServer(simOpt, timelineLog: line =>
             {
@@ -214,7 +224,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
             SortDurationMs  = 100,
             MoveDurationMs  = 80,
             InitialCurFloor = _initialCurFloor,
-            SimLoopMs       = 10,
+            SimLoopMs       = _simLoopMs,
         };
         var sim = new SimServer(simOpt, timelineLog: line =>
         {
@@ -247,6 +257,15 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
                 // 소터 pending-floor 큐 관측 주기(폐루프 트리거) — 폴 주기 동급으로 빠르게.
                 ["Wcs:SorterFloorReturn:ObserveIntervalMs"] = "30",
             };
+
+            // S-TRACE-LOG-VIEWER — 전용 추적 로그 per-test scratch 디렉터리(실경로 D:\ 무접촉). 지정 시 env 기본 override.
+            if (_traceLogDir is not null)
+                dict["TraceLog:Directory"] = _traceLogDir;
+
+            // S-IF10-CWRITE-SETTLE-DELAY — 안착 지연 주입(테스트 opt-in). 0(기본)이면 미주입 → 현행 동작
+            // 바이트 동일(기존 E2E 회귀 0). 양수면 공통 Timing:SettleDelayMs로 결선(소터 전체 적용).
+            if (_settleDelayMs > 0)
+                dict["Timing:SettleDelayMs"] = _settleDelayMs.ToString();
 
             // 인덕션 기반 2층 제어: inductionNo→floor 맵 결선(테스트별 커스텀 — 폐루프 1↔2 구동).
             foreach (var (induction, floorNo) in _inductionFloorMap)

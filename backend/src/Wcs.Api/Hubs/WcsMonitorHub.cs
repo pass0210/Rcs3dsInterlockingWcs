@@ -25,6 +25,8 @@ public sealed class WcsMonitorHub : Hub
     public const string GroupOpLog = "oplog";
     /// <summary>POLL_CHANGE 옵트인 그룹(고빈도 — 명시 구독 클라이언트만).</summary>
     public const string GroupOpLogPoll = "oplog-poll";
+    /// <summary>전용 추적 로그(6개 이벤트) 옵트인 그룹 — 뷰어 페이지 마운트 시만 구독(S-TRACE-LOG-VIEWER).</summary>
+    public const string GroupTrace = "trace";
 
     private readonly ISorterGatewayRegistry _registry;
 
@@ -61,4 +63,12 @@ public sealed class WcsMonitorHub : Hub
     /// <summary>POLL_CHANGE 테일 옵트아웃 — oplog-poll 그룹에서 탈퇴.</summary>
     public Task UnsubscribePollChange() =>
         Groups.RemoveFromGroupAsync(Context.ConnectionId, GroupOpLogPoll);
+
+    /// <summary>전용 추적 로그 옵트인 — 이 커넥션을 trace 그룹에 가입(뷰어 마운트 시).</summary>
+    public Task SubscribeTrace() =>
+        Groups.AddToGroupAsync(Context.ConnectionId, GroupTrace);
+
+    /// <summary>전용 추적 로그 옵트아웃 — trace 그룹에서 탈퇴(뷰어 언마운트/창닫힘 시 — 서버 push no-op).</summary>
+    public Task UnsubscribeTrace() =>
+        Groups.RemoveFromGroupAsync(Context.ConnectionId, GroupTrace);
 }

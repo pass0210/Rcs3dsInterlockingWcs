@@ -1,92 +1,62 @@
-# Sprint Feedback — S-B2C-BARCODE-MULTI-FIX (Fix1 + Fix2)
+# Sprint Feedback — S-TRACE-LOG-VIEWER
 
-Evaluator: 단일 (functional only — 계약 선언). 평가일: 2026-07-27.
-브랜치: feat/b2c-barcode-multi-fix. Ground-truth HEAD: d9b6acc (작업은 전부 워킹트리 미커밋 + 신규 3파일).
-방법: ground-truth git 확인 + 계약/코드 직독 + dotnet test 자체 재실행(466) + 프론트 tsc/lint/build 자체 실행 +
-      격리 라이브 스택(백엔드 :5299 Sqlite scratch · Vite :5290) Playwright(MCP 헤드리스) 실측 +
-      실 HTTP IF-05 왕복 응답 본문 캡처. 현장 실서비스(:5205/:5173/:1502/COM1/현장 SqlServer) 무접촉.
+## APPROVED (Evaluator, 2026-07-28, FIX ITERATION 1) — 최종 정본
 
----
+FIX ITERATION 1(4-Tier 코드리뷰 CRITICAL 1건 수정) 재검증 완료 — 전 완료조건 + 전 시나리오 GREEN.
+Ground truth: HEAD e46e77c(미커밋 fix) / branch feat/trace-log-viewer / SDK 10.0.301.
+※ iteration-1 APPROVED 는 조기종결(HS_C_SENT 미도달) 경로의 _pending 누수·pId 오귀속을 놓쳤음(해피패스만 검증한
+   Evaluator 사각 — evaluator-concurrency-blindspot). 4-Tier 코드리뷰가 CRITICAL 로 포착 → 수정 → 본 재검증으로 확정.
 
-## 판정: APPROVED (7/7 Completion Conditions PASS, functional 차원 PASS)
+### CRITICAL 수정 검증 (TraceCorrelator _pending 누수 + pId 오귀속)
+- 버그: RcsController 가 ExecuteHandshakeAsync 직전 RegisterHandshake 를 무조건 호출하나, HS_C_SENT(이벤트 4·유일
+  소비자 ResolveCSent) 前 조기 종결(시작 OFFLINE·잔류 실패·안착 OFFLINE·C_Flag 대기 OFFLINE·CFlagTimeout)하면 등록 head
+  미소비 → _pending 무한 증가 + FIFO 고아 head 가 다음 성공 핸드셰이크를 이전 피스 pId 로 오귀속(완료조건 #6 무력화).
+- 수정(전부 Wcs.Api·HandshakeOrchestrator/PlcGateway/Wcs.Core 무접촉): RegisterHandshake 가 **소비플래그(Consumed)
+  토큰** 반환 → ResolveCSent 가 head pop 시 Consumed=true → RcsController continuation **최상단에서 무조건**
+  `DiscardPending(destId, token)`(idempotent: 소비됐으면 no-op, 미소비면 그 토큰만 identity 로 제거). SentCSeq 판정 불요.
+  + 소터별 상한 MaxPending=32(WARN 축출) + PendingCount 진단.
+- **코드 분석 — 설계 타당**: (a) Consumed 는 ResolveCSent(실 이벤트4 소비자)만 set → "head 가 소비됐는가"의 ground truth
+  라, cSeq 증가 여부와 무관하게 정확. 코드리뷰의 `SentCSeq==0` 은 cSeq 증가 後·HS_C_SENT 前 종결(CFlagTimeout 등)을
+  놓치므로 토큰 방식이 **엄밀히 우월** — 생성자의 override 정당. (b) 모든 큐/Consumed 접근이 sp.Lock 하 직렬화. (c)
+  DiscardPending 위치가 continuation 최상단(`stopping` 조기 return·scope 생성 前) → 성공/실패/조기종결/호스트종료 전
+  경로 실행. `.ContinueWith` 기본 옵션(항상 실행). (d) LinkedList.Remove(reg)=참조 identity → 동시 등록된 다음 피스 무영향.
+- **격리 라이브 스택 실증(독립 재현)**: Sqlite scratch + 실 Sim TCP:1512 + API :5215 + TraceLog scratch(D:\실경로/5205/
+  COM1/1502/운영DB 무접촉). ① 소터 online → Sim kill → OFFLINE → 조기종결 피스 pId=26401 IF-05+IF-10 → 전용 파일에
+  **이벤트 1·3만(4·5·6 없음)** — HS_C_SENT 미도달 확인. ② Sim 재기동 → online → 성공 피스 pId=26402 IF-05+IF-10 →
+  **이벤트 4·5(·6) 가 pId=26402·cSeq=1 로 기입**(raw 파일 인용):
+  `[4] {"eventNo":4,...,"pId":26402,"cSeq":1,"cellNo":1,...}` / `[5] {"eventNo":5,...,"pId":26402,"cSeq":1,...}`.
+  raw grep: **event-4 라인 중 26401 언급 0건** → 고아 head 가 없어 오귀속 0·누수 0. (event 6 은 재기동 후 C_Flag 폴
+  샘플링 타이밍으로 본 ad-hoc run 에선 지연 — by-design 샘플링 의존·계약 명시. E2E N2 가 simLoopMs=150 으로 4·5·6 전량 +
+  PendingCount==0 을 결정적 단언·GREEN.)
 
----
+### 신규 회귀 테스트 3건 (자체 재실행 GREEN)
+- unit Correlator_AbortedBeforeCSent_DiscardCleansPending_NoMisattribution — 등록(100) discard → PendingCount 0 →
+  등록(200) ResolveCSent → **PId==200(≠100)** 오귀속 0. (구코드면 고아 head 100 pop → RED.)
+- unit Correlator_PendingCap_BoundsUnboundedGrowth — 미소비 200건 → PendingCount ≤ 32.
+- E2E N2_AbortedBeforeCSent_ThenSuccess_NoPendingLeak_NoMisattribution — 실 Sim OFFLINE-before-C → 재기동 → 성공 →
+  PendingCount==0 + 이벤트 4·5·6 전부 successPid(≠abortedPid). 강한 회귀 가드.
 
-## 조건 1 — dotnet test 전량 GREEN (독립 재실행) — PASS
-- `dotnet test backend/Wcs.sln` **자체 재실행**: `실패 0 · 통과 466 · 건너뜀 0`(1m23s, exit 0).
-- 신규 필터(`~BarcodeDestinationSelectorTests|~B2cBarcodeMultiFixTests`) 자체 재실행: `14/14 GREEN`(2s).
-- baseline 산술: `총 466 − 신규 14 = 452(기존)` — 일치. Generator 보고와 독립 확인 일치.
-- 빌드 경고 = 선재 NU1903(SQLitePCLRaw advisory) 5건뿐 · 신규 경고 0.
-- 빌드 함정 대응: 사전 dotnet/MSBuild/testhost/vstest 전수 kill + MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0.
+### 빌드·테스트 (자체 재실행)
+- `dotnet test backend/Wcs.sln` — **488 통과 / 0 실패 / 0 건너뜀**(독립 재실행). 485(iter-1) + 3(신규) = 488 산술 일치.
+- `~Trace` 필터 **11/11 GREEN × 3회(flake 0)**. 488 − 11 = 477 baseline 불변 → **회귀 0**.
+- 빌드 오류 0 / 경고 12 전부 선재(NU1903 ×10 + xUnit2013 ×2 untouched 라인). 신규 CS 경고 0.
+- 프론트 tsc/lint/build exit 0(scratch outDir·wwwroot 무접촉). 선재 경고만.
 
-## 조건 2 — 프론트 tsc/lint/build exit 0 (wwwroot 무접촉) — PASS
-- `npm run typecheck`(tsc --noEmit) exit 0.
-- `npm run lint`(eslint) exit 0.
-- `npx vite build --outDir <scratch> --emptyOutDir` exit 0("✓ built in 8.10s"). 스크래치 outDir → **wwwroot 무접촉**.
-- 신규 에러/경고 0 (유일 경고 = 선재 signalr PURE-annotation + >500kB chunk).
+### 회귀 0 (iter-1 검증 항목 재확인)
+- 6개 이벤트 번호 태깅·상관: 성공 피스에서 1·2·3·4·5(·6) 정확·pId+(chuteNo,cSeq) 재구성 유지.
+- additive: operation_log 종전대로(22행 STATE/PLC_WRITE/HANDSHAKE/API) · 전역 Serilog 트레이스 라인 0 · 전용 파일 6종만.
+  D:\Rcs3dsInterlockingWcsLogs 무접촉. IF-05/IF-10 형상·400 검증 불변.
+- 스코프/규칙: Wcs.Core/Migrations/WcsDbContext/Sim3ds소스/PlcGateway/HandshakeOrchestrator **zero-diff**(규칙 #8).
+  규칙 #1(관측/로깅 전용): DiscardPending 은 인메모리 정리(write-queue/PLC-write 0). fix 는 RcsController+TraceLogService+
+  TraceLogPage(note)만.
 
-## 조건 3 — Playwright 브라우저 실측(N행 표시 + 설비 배정 UI 무손상) — PASS
-격리 스택: Wcs.Api :5299(`--urls`로 appsettings :5205 오버라이드) · Sqlite scratch(`eval-wcs.db`, MigrateOnStartup) ·
-Sorters 0-DB → 폴링 미개통 + dead-TCP override(:59991) → 실 PLC/COM1 무접촉 · Vite :5290(strictPort, VITE_API_TARGET=:5299).
-- (a) **배치 상세 per-item N행**: EVAL-MULTI(1 오더 EVAL-ORD-M : 3 바코드) 선택 → 하단 그리드 **정확히 3행**
-  (evaluate `detailRowCount===3`) · 바코드 EVAL-BC-1/2/3 · 항목별 계획 5/7/3(집계 아님) · 헤더 "3건".
-  대조: EVAL-SINGLE(N=1) 선택 → **1행**(order-level 목적지 CHUTE #502·배정 표시). 스샷 01·02.
-- (b) **설비 관리 배정 UI 오더 단위·무손상**: `/b2c/facility` 미할당 오더 패널에 3 바코드 오더 EVAL-ORD-M 이
-  **오더 1행**으로만 표시(per-item 아님) — GetOrdersAsync/B2cOrderDto 오더단위 유지 실증. 스샷 03.
-  · 배정 클릭스루: 작업자 입력 → 슈트 501 + NOASSIGN-ORD 체크 → 배정 → 501 "2건 NOASSIGN-ORD, DUP-ORD-B",
-    미할당 목록에서 제거(스샷 04).
-  · 해제 클릭스루: 501 체크 → 해제 → confirm("해제될 오더 2건") → **NOASSIGN-ORD만 미할당 복귀**,
-    DUP-ORD-B(IF-05 예약=시작)는 **OQ-3로 스킵 유지** → 501 "1건 DUP-ORD-B"(스샷 05). 배정/해제 정상 동작.
+### IMPORTANT(문서만) — 한 소터 동시 IF-10 상관 교차 (계약 수용·스코프 밖)
+TraceCorrelator 상단 주석 + 프론트 뷰어 note(TraceLogPage L114-117: "상관(pId↔cSeq)은 소터별 순차 dispatch 전제 —
+한 소터 동시 투입 시 교차 가능") 로 알려진-한계 노출 완료. 직렬화는 시도 안 함(SPEC §6 순차 dispatch 전제) — **적정**.
+(프론트 note 는 정적 텍스트 — 코드 검사 + tsc/lint/build 로 검증. 뷰어 동작은 iter-1 브라우저 검증 W1~W6 에서 확인 완료.)
 
-## 조건 4 — cross-layer E2E(중복 바코드 → 배정 오더 목적지 OK+chuteNo, 응답 본문 증거) — PASS
-조성: 실 엑셀 업로드 API(`POST /api/b2c/test-data/upload`)로 교차-배치 중복 바코드 생성 + 설비 배정 API 로 한쪽만 배정.
-실 HTTP IF-05(`POST /api/v1/destination-query`) 응답 본문(fresh):
-- `DUPBC01`(배정 오더 DUP-ORD-B→슈트501, orderId=3 + **미배정** DUP-ORD-A, orderId=2[더 작음]) →
-  `{"result":"OK","chuteNo":501}` — **배정 오더 목적지 선택**(구 무정렬 .FirstOrDefault()면 작은 orderId 미배정을 골라 NG 위험). ★ THE FIX.
-- `SINGLEBC01`(단건 1:1, 배정 슈트502) → `{"result":"OK","chuteNo":502}` — 회귀 0.
-- `NOASSIGNBC01`(미배정만 + 두 슈트 이미 RUNNING 점유) → `{"result":"NG","chuteNo":null}` — AUTO 폴백→NO_DEST 불변.
-- `DUPBC01` 재호출(다른 pId) → `{"result":"OK","chuteNo":501}` — 결정성 확인(동일 목적지).
-- 예약 증거: 배치 상세/설비 UI 에서 DUP-ORD-B·SINGLE-ORD reserved=1(선택 오더에만 반영) 실측.
+### Minor (비블로킹 — tasks/todo.md 에 S-TRACE-LOG-VIEWER 섹션으로 등재 완료)
+reconnect 재시드 · path-literal 기본값 · TailLines 휴리스틱 · Detail JSON 보간 · one-shot 컨슈머 루프 · 필터 그룹 churn
+(코드리뷰 지시대로 미수정·오케스트레이터 후속 이관). 동시 IF-10 상관 교차는 문서화 완료·별도 스프린트.
 
-## 조건 5 — 마이그레이션 diff 0 · 무접촉 경계 diff 0 — PASS
-- 마이그레이션(Sqlite/SqlServer): `git status` 0건. PlcGateway: 0건. Wcs.Data 스키마: 0건.
-- Wcs.Core: **신규 파일 BarcodeDestinationSelector.cs 만**(Fix 2 순수 규칙·계약 명시 in-scope) — 기존 판정 로직(DepositDecider/RegisterMap/모델) 수정 0.
-- B2cFacilityService.cs: 삭제(`-`)행 0 → GetOrdersAsync 순수 무변경(GetBatchItemsAsync 가산만). B2cOrderDto: 삭제 0(B2cBatchItemDto 가산만).
-- frontend b2cFacility.ts: `useFacilityOrders`(설비 배정용) 무변경 — `useFacilityBatchOrders`→`useFacilityBatchItems` 교체만.
-- 변경 파일 = 계약 명시 파일 한정. (DEPLOY-ONPREM.md 503줄은 **이 스프린트 이전 브랜치 커밋**[2af3c98/d9b6acc]의 docs-only — 워킹트리 미변경·스프린트 스코프 외.)
-
-## 조건 6 — 콘솔 BLOCKING 0 — PASS
-- 내 세션(all:false, :5290): **총 3 메시지 · Errors 0 · Warnings 0**. React dev-warning/pageerror 0.
-- `all:true` 캡처의 177 에러줄은 **전부 foreign-buffer(:5175)** — 내 격리 포트 :5290 참조 0건(grep 확인) + 타임스탬프가
-  내 navigate(≈05:50) 이전(05:45~46). 공유 브라우저 프로필 타 세션 잔재(lessons foreign-buffer 재확인) — 앱 결함 아님.
-
-## 조건 7 — sprint-log.md 마커 + 조사 결론 + 재량 근거 — PASS
-- `## IMPLEMENTATION COMPLETE — S-B2C-BARCODE-MULTI-FIX` 마커 실재(파일 최말단·정본).
-- 경로 일관성 조사 결론 기록: "바코드→목적지" 모호성은 IF-05 QueryDestination 고유. IF-09/IF-10 은 PId 조회(바코드 아님),
-  SelectCell/ReleaseEmptyAssignment 은 destination(chuteNo) 스코프 → 교차-목적지 모호성 구조적 부재. SPEC §7-B 반영 확인.
-- 재량 결정 근거 기록: (1) 엔드포인트 신규(monitor items·orders 재사용 시 계약 위반·N+1) (2) tiebreak = 최신 DestAssignedAt → 최소 OrderId → 최소 OrderItemId(PK 전순서·완전 결정성).
-
----
-
-## Craft/성능 관찰 (비블로킹)
-- `GetBatchItemsAsync`: batchId 단일 쿼리 + AssignedCellNo 상관 서브쿼리(projection 내) — EF Core 가 단일 SQL 로 번역(N+1 아님). GetOrdersAsync 와 동형. OK.
-- `QueryDestination` 후보 `.ToList()` 후 LINQ-to-objects 선택 — 단건 1:1 은 1행 materialize(무시가능), 중복도 소수. Barcode 인덱스(S-HARDENING-1 `(Barcode)`) 존재. 성능 우려 없음.
-- 선택 `Select(...)!` null-forgiving 은 상위 `candidateItems.Count==0` 조기반환으로 후보≥1 보장 → 안전.
-- 절단 힌트: `items.length >= 1000` 이면 표면화(Fail-Loud). 항목 단위 절단이라 초과 시 한 오더 바코드가 경계에서 갈릴 수 있으나 힌트로 방어 — orders 와 동일 정책, 비블로킹.
-
-## 스크린샷/증거
-`screenshots/S-B2C-BARCODE-MULTI-FIX_20260727-145000/`: 01-datagen-batchdetail-3rows.png · 02-datagen-single-1row.png ·
-03-facility-orderlevel.png · 04-facility-after-assign.png · 05-facility-after-unassign.png · console-all.log.
-
-## 반복 이슈 검사
-feedback-archive.md 대조 — 이 스프린트의 결함/이슈(비결정적 FirstOrDefault·per-item 표시)와 동일 반복 항목 없음. lessons 승격 대상 없음.
-
----
-
-## APPROVED
-전 7개 Completion Condition + functional 차원 PASS. 코드 수정 없이 피드백만 수행. commit 전 4-Tier 코드리뷰는 orchestrator 몫.
-
-## Step 4.5 코드리뷰 Minor (S-B2C-BARCODE-MULTI-FIX · Critical 0 · Important 1(스코프-문서·분리처리) · Ready=With fixes) — 다음 스프린트 참고
-- [Minor] B2cFacilityController batch-items `take` 상한이 GenerateCountMax(=오더 수 1000)를 **항목(order_item) 수**에 적용 → 400오더×3바코드=1200항목이면 1000에서 절단(Fail-Loud 힌트 `items>=ORDERS_FETCH_MAX`로 표면화·침묵 아님). 항목 전용 상수 또는 "오더-수 상한을 항목-수에 적용" 한계 주석 권장.
-- [Minor] BarcodeDestinationSelector 배정 승자가 downstream 가용성 미고려 — 같은 바코드 다중 배정(서로 다른 목적지) 최악 케이스에서 최신 DestAssignedAt 승자 목적지가 FULL/PAUSED면 다른 가용 배정후보로 폴백 안 함(NG). 계약 인정 최악케이스·선택/가용성 분리 설계. SPEC §7-B에 "승자-blocked 시 무폴백" 한 줄 명시 권장.
-- [Minor·기존] DbRepositories.cs:75 `if (order.Status == COMPLETED)` 도달 불가(후보 쿼리가 이미 COMPLETED/CANCELLED 제외) — 이 스프린트가 만든 게 아니라 FirstOrDefault 시절부터 존재. 회귀 아님. 정리는 별건.
+전 완료조건(1~6) + 전 시나리오(W1~W6·B1~B3·E1~E2) GREEN — **APPROVED (fix iteration 1)**. 코드 수정/커밋/푸시 없음.

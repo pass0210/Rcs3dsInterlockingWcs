@@ -92,6 +92,7 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     private readonly IHostApplicationLifetime   _lifetime;
     private readonly IPendingFloorQueueRestorer _restorer;
     private readonly IOperationLogger           _opLog;
+    private readonly ITraceLogger               _trace;
     private readonly ILogger<SorterFloorReturnService> _log;
     private readonly int _intervalMs;
     private readonly int _stallSuspectTicks;   // ≤0이면 스톨 감지 비활성(C3).
@@ -121,6 +122,7 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         IHostApplicationLifetime  lifetime,
         IPendingFloorQueueRestorer restorer,
         IOperationLogger          opLog,
+        ITraceLogger              trace,
         IOptions<WcsOptions>      options,
         ILogger<SorterFloorReturnService> log)
     {
@@ -130,6 +132,7 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         _lifetime          = lifetime;
         _restorer          = restorer;
         _opLog             = opLog;
+        _trace             = trace;
         _log               = log;
         _intervalMs        = Math.Max(1, options.Value.SorterFloorReturn.ObserveIntervalMs);
         _stallSuspectTicks = options.Value.SorterFloorReturn.StallSuspectTicks;   // ≤0=비활성(클램프 안 함).
@@ -256,7 +259,16 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
             if (st.CycleStartFloor == snap.CurFloor
                 && _queues.TryPeek(destId, out int head) && head == snap.CurFloor)
             {
-                _queues.TryPop(destId, out _);
+                if (_queues.TryPop(destId, out int popped))
+                {
+                    // ── [트레이스 이벤트 2] TgtFloor 펜딩큐 디큐(분류 사이클 pop) — 관측/로깅 전용(S-TRACE-LOG-VIEWER) ──
+                    // 층-큐 흐름(소터+층 scope). 큐가 floor(int)만 저장하므로 pId 미포함(수용된 경계) — 소터+층+FIFO 상관.
+                    _trace.Log(new TraceRecord(
+                        EventNo: 2, Event: "TGTFLOOR_DEQUEUE", At: DateTimeOffset.Now,
+                        PId: null, CSeq: null, ChuteNo: bundle.ChuteNo, DestId: destId,
+                        CellNo: null, Floor: popped, InductionNo: null, Trigger: "SORT_CYCLE",
+                        Detail: $"{{\"curFloor\":{snap.CurFloor},\"remainingDepth\":{_queues.Count(destId)}}}"));
+                }
             }
         }
         st.PrevReady = ready;

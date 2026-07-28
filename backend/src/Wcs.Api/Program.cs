@@ -139,6 +139,17 @@ builder.Services.AddSingleton<Wcs.Data.IOperationLogger>(sp =>
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<OperationLogService>());
 
+// ── 전용 추적 로그 sink (S-TRACE-LOG-VIEWER — additive·관측/로깅 전용) ────────────
+// 6개 이벤트(1~6)를 전용 파일 + SignalR 로 발신하는 논블로킹 채널 sink. 기존 operation_log/Serilog 무영향.
+// 경로·롤링·크기·보존·파일명·백로그 take = appsettings "TraceLog"(하드코딩 금지·절대규칙 #7). 기본 D:\Rcs3dsInterlockingWcsLogs.
+builder.Services.Configure<TraceLogOptions>(builder.Configuration.GetSection("TraceLog"));
+builder.Services.AddSingleton<TraceLogService>();
+builder.Services.AddSingleton<ITraceLogger>(sp => sp.GetRequiredService<TraceLogService>());
+builder.Services.AddSingleton<ITraceBacklog>(sp => sp.GetRequiredService<TraceLogService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TraceLogService>());
+// C 흐름(이벤트 4·5·6) pId 실시간 상관(소터별 컨텍스트) — RcsController 등록·TraceWiring 해소.
+builder.Services.AddSingleton<TraceCorrelator>();
+
 // ── ChuteCapacityService 싱글톤 (FULL/PAUSED 인메모리 집계) ──────────────────
 builder.Services.AddSingleton<ChuteCapacityService>();
 builder.Services.AddSingleton<IChuteCapacityService>(sp =>
@@ -591,6 +602,12 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
         // 건너뛴다(게이트웨이 동작은 그대로 — 부수 기록만 비활성). 강제 의존을 만들지 않는다(fail-safe).
         var opLog = _sp.GetService<Wcs.Data.IOperationLogger>();
 
+        // S-TRACE-LOG-VIEWER: 전용 추적 로그 sink(이벤트 4·5·6) — operation_log 구독과 나란히 "추가 구독".
+        //   HandshakeOrchestrator/PlcGateway 무접촉 — 기존 콜백(HS_C_SENT·CELL_ASSIGN·C_Flag 델타)만 소비.
+        //   소프트 의존: 미등록(최소 호스트)이면 건너뜀(부수 관측만 비활성 — 게이트웨이 동작 불변).
+        var trace       = _sp.GetService<ITraceLogger>();
+        var correlator  = _sp.GetService<TraceCorrelator>();
+
         foreach (var bundle in bundles.Values)
         {
             // OFFLINE 이벤트 구독: 전이당 1회만 발화 — API 계층에서 alarm 기록
@@ -625,6 +642,10 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
                         sorterChuteNo: capturedChuteNo, destinationId: capturedDestId,
                         detail: $"{{\"destId\":{capturedDestId},\"chuteNo\":{capturedChuteNo}}}"));
             }
+
+            // ── S-TRACE-LOG-VIEWER: 전용 추적 이벤트 4·5·6 추가 구독(관측/로깅 전용·기존 구독 무변경) ──
+            if (trace is not null && correlator is not null)
+                TraceWiring.Wire(bundle, trace, correlator);
 
             bundle.SubscribeOffline(offlineSnap =>
             {
@@ -790,6 +811,10 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             // C1: 복귀 대기(Ready==1) 상한(소터별 오버라이드 or 공통).
             ReturnReadyTimeoutMs =
                 t?.ReturnReadyTimeoutMs ?? commonTiming.ReturnReadyTimeoutMs,
+            // S-IF10-CWRITE-SETTLE-DELAY: 안착 지연(소터별 오버라이드 or 공통). 소터마다 낙하 높이·기구가
+            //   달라 안착 시간이 다를 수 있어 소터별 오버라이드를 둔다(기존 Timing 키와 동형).
+            SettleDelayMs =
+                t?.SettleDelayMs ?? commonTiming.SettleDelayMs,
             // D-1: OFFLINE 지속 로그 요약 주기(소터별 오버라이드 or 공통).
             OfflineLogSummaryEveryPolls =
                 t?.OfflineLogSummaryEveryPolls ?? commonTiming.OfflineLogSummaryEveryPolls,
@@ -867,6 +892,9 @@ public sealed record SorterTimingOverride
     // S-TWO-FLOOR-CONTROL C1 — 소터별 복귀 대기(Ready==1) 상한 오버라이드(null=공통 상속).
     public int? ReturnReadyTimeoutMs { get; init; }
 
+    // S-IF10-CWRITE-SETTLE-DELAY — 소터별 안착 지연(ms) 오버라이드(null=공통 상속).
+    public int? SettleDelayMs { get; init; }
+
     // S-CLEANUP-FIELD D-1 — 소터별 OFFLINE 지속 로그 요약 주기 오버라이드(null=공통 상속).
     public int? OfflineLogSummaryEveryPolls { get; init; }
 }
@@ -926,4 +954,7 @@ public sealed record TimingOptions
 
     // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
     public int ReturnReadyTimeoutMs { get; init; } = 30000;
+
+    // S-IF10-CWRITE-SETTLE-DELAY — IF-10 수신 후 C 기입 전 안착 지연(ms). 코드 기본 0(비활성/현행).
+    public int SettleDelayMs { get; init; } = 0;
 }

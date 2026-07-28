@@ -139,8 +139,9 @@ FULL 판정: `SUM(piece.qty WHERE deposited_at > last_cleared_at) + in-flight(RE
 
 ## 4. C/R 핸드셰이크 (3D 목적지 한정, IF-11/12)
 셀 선택: 오더의 활성 cell_assignment 있으면 그 셀 재사용, 없으면 그 destination 소속 빈 셀(enabled·미점유) 할당 — 빈 셀 없으면 해당 3DS는 FULL(WCS 판단 요소)
+안착 지연(settle delay — S-IF10-CWRITE-SETTLE-DELAY): **3DS PLC에는 틸트 낙하 지연(TiltDelay)이 없다** — C를 읽는 즉시 그 셀로 라우팅/틸트한다(현장 벤더 확인). AGV는 틸트 시점에 IF-10을 보내므로, WCS가 IF-10 수신 후 C를 지연 없이 쓰면 제품이 물리적으로 안착하기 전에 소터가 움직여 오분류·낙하 위험이 있다. 그래서 WCS는 **arming 이후·C(CellAssign) 기입 이전**에 `Timing:SettleDelayMs`(공통 + `Sorters[].Timing` 오버라이드)만큼 안착 지연을 둔다. 기준(anchor)=**IF-10 수신 시각**, 실제 대기=`max(0, SettleDelayMs − (지연 지점 도달 − IF-10 수신))`(이미 경과한 DB 기록·셀 선택·arming 시간을 차감). **코드 기본 0**(=현행과 바이트 동일·무해)이며 **appsettings 출하값도 0**(비활성) — 현장 실측값을 양수로 넣는 순간 보호가 켜진다. 지연 도중 **OFFLINE·호스트 종료 시 C를 기입하지 않고** 종결(더티 진행 0). **IF-10 HTTP 응답은 즉시 200 ack(fire-and-forget)로 불변** — 지연은 오직 백그라운드 핸드셰이크 경로에만 둔다(폐기된 "C 완료 대기 후 응답" 접근 금지).
 C(셀 지정): WCS가 C_Flag==0 확인 → C_CellNo·C_Seq 쓰기 → C_Flag=1
-            → PLC가 C_Flag=1 감지 → C 읽기 → 읽은 직후 C_CellNo·C_Seq·C_Flag=0 클리어 → (틸트 낙하 N초는 PLC 지연) → 적재
+            → PLC가 C_Flag=1 감지 → C 읽기 → 읽은 직후 C_CellNo·C_Seq·C_Flag=0 클리어 → (**TiltDelay 0** — 즉시 라우팅/적재) → 적재
 R(적재 완료): PLC가 R_Flag==0 확인 → R_CellNo·R_Seq 쓰기 → R_Flag=1
             → WCS가 R_Flag 폴링(100ms, 타임아웃=분류 최대 소요+여유) → R 읽기 → R_Seq==C_Seq 대사(유실·중복 검출, 불일치=알람) + **틸트 시각(tiltedAt) 기록**
             → **R은 R_Flag==1 즉시 클리어하지 않는다.** **Ready==1(복귀 완료) 시점에** R_CellNo·R_Seq·R_Flag=0 클리어 + **복귀 시각(returnedAt) 기록**. (R_Flag==1 관측 시 이미 Ready==1이면 즉시 클리어.) 목적: **분류 시작~복귀 완료 전체 소요 측정**.
@@ -177,6 +178,7 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
   이때 **복귀 이동이 남았으면(TgtFloor≠0 && TgtFloor≠CurFloor) Ready=0을 유지한 채 곧바로 이동 시작**, 그 외에만 Ready=1.
 - **분류 중이 아닐 때** && TgtFloor≠0 && TgtFloor!=CurFloor → 이동 시작(Ready=0) → MoveDuration 후 CurFloor=TgtFloor 기입(TgtFloor는 유지!) → Ready=1
 - 설정: TiltDelay, SortDuration, MoveDuration, 초기 CurFloor / 고장 주입: R_Seq 불일치, R_Flag 지연, 무응답(OFFLINE 유발)
+- ⚠ **Sim `TiltDelayMs` ≠ WCS `SettleDelayMs`(§4 안착 지연)**: Sim의 `TiltDelayMs`는 "시뮬레이터가 흉내내는 PLC 내부 지연" 모델(별개 위치·용도)이고, §4의 `SettleDelayMs`는 "WCS가 C 기입 전에 두는 안착 대기"다. 실 3DS PLC의 TiltDelay는 0이며, 안착 보호는 전적으로 WCS `SettleDelayMs`로 수행한다. Sim 동작·설정은 본 스프린트에서 무변경.
 - **전송(S-SIM3DS-RTU)**: Sim3ds는 `Transport=Tcp`(기본·현행 :1502 보존) 또는 `Rtu`(현장 리허설·RS-485)로 기동. 레지스터 맵·에코 지연·C_Flag 자체 클리어·ClearR까지 R 유지·잔류 프리셋 의미는 전송 무관 동일. 설정은 `appsettings.Sim3ds.json`(기본값) + 환경변수(`SIM3DS_*`) + CLI(`--transport rtu --port COMx …`). → **실 PLC 없이 WCS↔Sim RTU 리허설 절차·시리얼 페어 준비법: [docs/RTU-REHEARSAL.md](RTU-REHEARSAL.md)**
 
 ## 7. 미확정 사항 (구현 중 추측 금지 — 기록·질문)
@@ -184,6 +186,10 @@ R단계는 **레벨 읽기가 아니라 arming(=C 기입 전 R_Flag==0을 1회 �
 - RCS Q1~Q7 회신 대기(HTTP 클라이언트 사양, pId 초기화 정책, 인증 등)
 - PLC측: Ready=0에 이동 중 포함 / TgtFloor 분류 시작 클리어 — 3DS 담당 확정 대기
 - R_Flag 타임아웃 실측값은 현장 실측 후 appsettings 조정
+- **안착 지연(§4 `SettleDelayMs`) 미확정 3건(S-IF10-CWRITE-SETTLE-DELAY — 값은 현장 확정, 메커니즘은 결선 완료)**:
+  - Q1. 안착 물리 소요(ms) 실측값 — 미정. 출하 기본 0(비활성). IF-10 수신~제품 안착 물리 소요를 실측해 `Timing:SettleDelayMs`에 양수로 넣으면 활성. 소터별 상이하면 `Sorters[].Timing.SettleDelayMs` 오버라이드.
+  - Q2. IF-10 전송 시점이 틸트 "시작"인지 "완료"인지(불확실) — 시작이면 settle=(낙하+안착), 완료면 settle=(안착만). 메커니즘은 두 경우 동일(IF-10 수신 기준 지연). 실측 시 함께 확인.
+  - Q3. 3DS가 "제품 안착 감지" 레지스터/센서를 Modbus로 노출하는가 — 노출되면 시간지연 대신 신호 폴링(안착 확인 후 C)이 더 견고. 본 스프린트는 노출 없음 전제로 시간 지연을 구현했고, 지연 지점을 단일 훅(`SettleDelayAsync`)으로 캡슐화해 후속 스프린트에서 신호 폴링으로 교체 가능하도록 뒀다.
 
 ### 7-A. 전송 방식 확정 (S-RTU 스프린트 2026-06 반영)
 

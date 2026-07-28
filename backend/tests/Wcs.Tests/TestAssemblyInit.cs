@@ -16,5 +16,20 @@ namespace Wcs.Tests;
 internal static class TestAssemblyInit
 {
     [ModuleInitializer]
-    public static void Init() => WcsTeardownGuard.Install();
+    public static void Init()
+    {
+        WcsTeardownGuard.Install();
+
+        // ── S-TRACE-LOG-VIEWER: 전용 추적 로그 기본 경로를 테스트 프로세스 전역에서 scratch 로 강제 ──
+        // 절대규칙 #7 테스트 지침: 실경로(D:\Rcs3dsInterlockingWcsLogs)에 쓰지 않는다. 웹 호스트를 띄우는
+        // 모든 테스트(E2E·API·Hub…)가 이 env(TraceLog__Directory → 설정 TraceLog:Directory)를 기본값으로
+        // 집어 실 로그·머신 의존을 방지한다. 개별 테스트는 config 오버라이드로 per-test 디렉터리를 지정 가능
+        // (in-memory config 가 env 보다 나중에 병합돼 우선). 이 env 는 테스트 프로세스에만 설정된다.
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TraceLog__Directory")))
+        {
+            var dir = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "wcs-trace-tests", Guid.NewGuid().ToString("N"));
+            Environment.SetEnvironmentVariable("TraceLog__Directory", dir);
+        }
+    }
 }

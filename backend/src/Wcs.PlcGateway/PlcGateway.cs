@@ -98,6 +98,14 @@ public sealed record PlcGatewayOptions
     // 하드코딩 금지(절대규칙 #7). 초과 시 ClearR ack + 알람 + returnedAt=NULL(측정 실패), outcome=Success 유지.
     public int ReturnReadyTimeoutMs { get; init; } = 30000;
 
+    // S-IF10-CWRITE-SETTLE-DELAY — IF-10 수신 후 C(CellAssign) 큐 투입 전에 두는 "안착 지연"(ms).
+    // 현장 사실: 3DS PLC에는 틸트 낙하 지연(TiltDelay)이 없다 — C를 읽는 즉시 라우팅/틸트한다. AGV는
+    // 틸트 시작 시점에 IF-10을 보내므로, WCS가 지연 없이 C를 쓰면 제품이 물리적으로 안착하기 전에 소터가
+    // 움직여 오분류·낙하 위험이 있다. 그래서 arming 이후·C 기입 이전에 이 값만큼 대기해 안착 후 C를 쓴다.
+    // 기준(anchor) = IF-10 수신 시각, 실제 대기 = max(0, SettleDelayMs − 경과)(D2). 하드코딩 금지(절대규칙 #7).
+    // 코드 기본 0 = 지연 완전 생략(현행과 바이트 동일·회귀 0·무해). 운영은 현장 실측값을 appsettings에 양수로 넣어 활성화.
+    public int SettleDelayMs { get; init; } = 0;
+
     // S-CLEANUP-FIELD D-1 — OFFLINE 지속 중 로그 스팸 억제용 요약 주기.
     // OFFLINE '전이'는 1회만 상세(스택 포함) 로깅하고, 이후 '지속' 폴 실패는 스택 없이 Debug로
     // 강등하되 이 주기(연속 실패 N회)마다 WARN 요약 1줄만 남긴다(진단 로그 매몰 방지).
