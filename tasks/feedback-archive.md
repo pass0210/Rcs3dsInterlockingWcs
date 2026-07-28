@@ -2,6 +2,15 @@
 
 스프린트별 평가에서 도출된 재사용 가능한 핵심 피드백.
 
+## S-IF10-CWRITE-SETTLE-DELAY (IF-10 수신 후 arming 이후·C 기입 이전 설정기반 "안착 지연" 삽입 — 백그라운드 핸드셰이크 한정·IF-10 응답 즉시200 불변, 백엔드) — APPROVED (2026-07-28, 1 iteration)
+
+- **"백그라운드 지연이 응답을 안 붙잡는다"는 자동화 실증이 유일한 신뢰 증거 — 코드리뷰로 대체 금지(폐기된 WAIT 접근 부활 방지)**: SettleDelayMs≫응답시간(=1000ms)로 결선한 실 Sim+실 SorterRegistry+실 EF DB E2E에서 (a) IF-10 HTTP 왕복 200ms(<500·SettleDelayMs와 독립), (b) 응답 직후 sorter_command Count=0(핸드셰이크 미완), (c) sorter_command COMPLETED가 1336ms(≥settle−100)에 등장 — 세 축을 한 테스트에 병치해야 "즉시 ack + C는 지연 뒤"가 닫힌다. 응답시간이 settle에 붙잡히면 폐기된 "C 완료 대기 후 응답"이 부활한 것. RcsController diff가 anchor 캡처+파라미터 전달뿐이고 `_ = bundle.ExecuteHandshakeAsync(…).ContinueWith(…)` fire-and-forget·`return Ok(…OK)` 즉시응답 로직 무변경임을 코드로 병행 확인.
+- **안착 지연 정확성은 "발화 tick 기록 하니스 + post-hoc 순서/하한 단언"으로 mid-flight sleep 없이 결정적 실증**: Stage(OnStage)·Write(OnWrite)에 Environment.TickCount64를 붙여 기록 → S1(settle=400→C 406ms≥340 하한)·S1b(settle=0→C 0ms·HS_SETTLE_WAIT 부재)·S5(anchor 과거→remaining clamp 0·detail `"remainingMs":0`)·S4(residue≤clearArm≤armed≤settle≤cSent tick 순서로 arming후·C전 D1 실증)를 고정 sleep 없이 단언. 조건 폴링(WaitUntil)만 사용해 부하 무관 결정성 확보. 타이밍군은 단일 run 불신 — `~SettleDelay` 필터 11/11 GREEN×4반복(flake 0)으로 귀속.
+- **종결 안전의 게이트 = 지연을 cSeq 증가 "이전"에 배치 → 지연 중 종결이 구조적으로 C 미기입**: 안착 지연이 `Interlocked.Increment(ref _cSeq)` 앞에 있어 S2(실 Sim 중단→OFFLINE→Offline outcome)·S3(ct.Cancel→OCE 전파)에서 HS_C_SENT·CELL_ASSIGN 부재를 각각 단언 → 더티 진행 0. 매 대기 스텝 `_gw.Latest.Online` 관찰(조기 OFFLINE 종결) + Task.Delay(step,ct) 취소 존중. anchor=IF-10 수신 UtcNow, 잔여=max(0,settle−경과) clamp, 대기는 Environment.TickCount64 단조(벽시계 역행 방지) — D2 정확.
+- **역호환 하드제약 = 선택적 3번째 파라미터 + 전체 --no-build 재빌드 오류 0 + 기존 466 GREEN이 실증**: ExecuteAsync에 `DateTime? depositedAtUtc = null`을 ct 뒤 optional로 추가(필수 파라미터 추가 금지) → 기존 ~20 호출부 무수정 컴파일. 477−11=466 산술 대조로 기존 회귀 0 확인. SorterTimingOverride.SettleDelayMs(int? null=상속) + TimingOptions 미러(=0) + BuildGatewayOptions `t?.SettleDelayMs ?? common` 병합을 SettleDelayBindingTests(공통/오버라이드/미지정상속 3케이스)로 잠금.
+- **하드코딩 스캔의 정밀 판정 = "안착 지연량 리터럴 0"이지 "모든 리터럴 0"이 아님**: SettleDelayAsync의 `50`은 `RFlagPollMs<=0` 오설정 방어용 폴 스텝 granularity 폴백으로 안착 지연 duration과 무관(지연량=100% `_opt.SettleDelayMs`, deadline=config 유도) → 절대규칙 #7 위반 아님. appsettings SettleDelayMs=0 출하 + 주석 "★현장 실측 후 조정(양수=활성)". 무접촉 경계(Sim3ds/migration/frontend/.tsx/WcsDbContext) git status NONE.
+- **결정성**: full 477 GREEN(=466 baseline+11 신규 산술 일치)·`~SettleDelay` 11/11×4반복 flake 0·빌드 경고 10개 전부 선재 NU1903(신규 0·CS 0)·마이그레이션 0. 격리=실 Sim TCP+GetFreePort 에페메랄+scratch DB(현장 5205/COM1/운영DB 무접촉).
+
 ## S-B2C-BARCODE-MULTI-FIX (Fix1 배치상세 per-item + Fix2 IF-05 배정-우선 결정적 선택, Full-stack) — APPROVED (2026-07-27, 1 iteration)
 
 - **"비결정적 선택" 수정의 진짜 게이트 = 순수 규칙을 EF 무의존 함수로 분리(절대규칙 #8) + 라이브 IF-05 HTTP 왕복으로 "배정 오더가 더 큰 OrderId여도 선택됨"을 응답 본문으로 실증**: 구 `QueryDestination`의 무정렬 `.FirstOrDefault()`는 교차-배치 중복 바코드에서 임의 오더(작은 OrderId 미배정)를 골라 NG/NO_DEST를 뱉었다. fix는 `Wcs.Core.BarcodeDestinationSelector`(순수·10 단위테스트) + 호출자 `.ToList()`→projection→Select 교체(선택 이후 상태판정·예약·piece·트랜잭션 전부 불변). 검증의 핵심은 **배정 오더에 일부러 더 큰 OrderId를 부여**(DUP-ORD-B orderId=3 배정 vs DUP-ORD-A orderId=2 미배정)해 라이브 IF-05가 `{"result":"OK","chuteNo":501}`(배정 목적지)를 반환함을 응답 본문으로 확인 — "min-OrderId 폴백이 아니라 배정-우선"임을 역증. 단위 GREEN만으론 통합 경로 함정(예약이 엉뚱한 항목에)을 못 잡으므로 예약=1이 배정 오더 항목에만 반영되는지 UI/DB로 병치.
@@ -696,3 +705,5 @@ Step 4.5 코드리뷰 3건. 변경: useRowSelection.ts + B2cFacilityPage.tsx. HE
 - [CODE-REVIEW] sprint=S-B2C-DATAGEN-UPLOAD critical=0 major=0 minor=4 iter=1
 
 - [CODE-REVIEW] sprint=S-B2C-BARCODE-MULTI-FIX critical=0 important=1(scope: 무관 DEPLOY-ONPREM.md → 오케스트레이터가 별도 브랜치로 분리) minor=3 iter=1
+
+- [CODE-REVIEW] sprint=S-IF10-CWRITE-SETTLE-DELAY critical=0 important=0 minor=1 iter=1 (Minor: SettleDelayAsync `50` 폴스텝 폴백이 형제 루프 `_opt.RFlagPollMs`와 비일관 — 운영 도달불가·규칙#7 위반 아님·todo 등재. 벽시계 anchor+단조 대기 혼용은 NTP 노출 최소화 정설계로 확인)
