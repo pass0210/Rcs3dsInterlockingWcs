@@ -790,6 +790,10 @@ public sealed class SorterRegistryFactory : IHostedService, ISorterGatewayRegist
             // C1: 복귀 대기(Ready==1) 상한(소터별 오버라이드 or 공통).
             ReturnReadyTimeoutMs =
                 t?.ReturnReadyTimeoutMs ?? commonTiming.ReturnReadyTimeoutMs,
+            // S-IF10-CWRITE-SETTLE-DELAY: 안착 지연(소터별 오버라이드 or 공통). 소터마다 낙하 높이·기구가
+            //   달라 안착 시간이 다를 수 있어 소터별 오버라이드를 둔다(기존 Timing 키와 동형).
+            SettleDelayMs =
+                t?.SettleDelayMs ?? commonTiming.SettleDelayMs,
             // D-1: OFFLINE 지속 로그 요약 주기(소터별 오버라이드 or 공통).
             OfflineLogSummaryEveryPolls =
                 t?.OfflineLogSummaryEveryPolls ?? commonTiming.OfflineLogSummaryEveryPolls,
@@ -867,6 +871,9 @@ public sealed record SorterTimingOverride
     // S-TWO-FLOOR-CONTROL C1 — 소터별 복귀 대기(Ready==1) 상한 오버라이드(null=공통 상속).
     public int? ReturnReadyTimeoutMs { get; init; }
 
+    // S-IF10-CWRITE-SETTLE-DELAY — 소터별 안착 지연(ms) 오버라이드(null=공통 상속).
+    public int? SettleDelayMs { get; init; }
+
     // S-CLEANUP-FIELD D-1 — 소터별 OFFLINE 지속 로그 요약 주기 오버라이드(null=공통 상속).
     public int? OfflineLogSummaryEveryPolls { get; init; }
 }
@@ -926,4 +933,7 @@ public sealed record TimingOptions
 
     // S-TWO-FLOOR-CONTROL C1 — R_Seq 대사 성공 후 Ready==1(복귀 완료) 관측 대기 상한(ms).
     public int ReturnReadyTimeoutMs { get; init; } = 30000;
+
+    // S-IF10-CWRITE-SETTLE-DELAY — IF-10 수신 후 C 기입 전 안착 지연(ms). 코드 기본 0(비활성/현행).
+    public int SettleDelayMs { get; init; } = 0;
 }

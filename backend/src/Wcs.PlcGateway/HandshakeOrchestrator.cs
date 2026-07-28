@@ -107,7 +107,15 @@ public sealed class HandshakeOrchestrator
     /// 셀 지정 → R 완료 대기 → 대사 → 클리어의 완전한 핸드셰이크 1건 수행.
     /// 테스트에서 결과(성공/불일치/타임아웃) 관찰 가능.
     /// </summary>
-    public async Task<HandshakeResult> ExecuteAsync(int cellNo, CancellationToken ct = default)
+    /// <param name="cellNo">지정할 셀 번호.</param>
+    /// <param name="ct">호스트 종료 등 취소 토큰.</param>
+    /// <param name="depositedAtUtc">
+    /// S-IF10-CWRITE-SETTLE-DELAY — 안착 지연(D2)의 기준 시각(anchor) = IF-10 수신(≈틸트) 시각(UTC).
+    /// 선택적(역호환) 파라미터 — 기존 호출부(~20개)는 지정하지 않아 null → anchor=handshake-start(경과 0)로
+    /// 폴백하며, SettleDelayMs=0(코드 기본)이면 지연 자체가 생략돼 어떤 경우에도 기존 타이밍이 보존된다.
+    /// </param>
+    public async Task<HandshakeResult> ExecuteAsync(
+        int cellNo, CancellationToken ct = default, DateTime? depositedAtUtc = null)
     {
         // OFFLINE 사전 확인
         var snap = _gw.Latest;
@@ -125,6 +133,14 @@ public sealed class HandshakeOrchestrator
         // C를 아직 기입하지 않았으므로(cSeq 미증가) 잔류 대사 실패 시 종결이 곧 "C 미기입".
         var armResult = await ArmRFlagZeroAsync(ct).ConfigureAwait(false);
         if (armResult is not null) return armResult; // 잔류 대사 실패(타임아웃/OFFLINE) → 종결(C 미기입)
+
+        // ── 안착 지연 (S-IF10-CWRITE-SETTLE-DELAY — D1: arming 이후·C 기입 이전) ──────────
+        // 3DS PLC는 TiltDelay가 0이라 C를 읽는 즉시 라우팅한다. IF-10 수신 후 C를 지연 없이 쓰면 제품이
+        // 물리적으로 안착하기 전에 소터가 움직여 오분류·낙하 위험 → 여기서 SettleDelayMs만큼 안착을 기다린다.
+        // arming(읽기·잔류 ClearR)은 소터를 움직이지 않으므로 지연을 그 뒤로 두어도 안전하고, arming이 조기
+        // 종결(잔류 타임아웃/OFFLINE)되면 지연을 낭비하지 않는다. cSeq 증가 전이라 지연 중 종결이 곧 "C 미기입".
+        var settleResult = await SettleDelayAsync(depositedAtUtc, ct).ConfigureAwait(false);
+        if (settleResult is not null) return settleResult; // 지연 중 OFFLINE → 종결(C 미기입·더티 진행 0·D3)
 
         // C_Seq 증가
         int cSeq = Interlocked.Increment(ref _cSeq);
@@ -144,6 +160,81 @@ public sealed class HandshakeOrchestrator
         // ── R단계: R_Flag 폴링 → 타임아웃 → 대사 → 클리어 ──────────────────
 
         return await WaitRFlagAndProcessAsync(cellNo, cSeq, ct).ConfigureAwait(false);
+    }
+
+    // ── 안착 지연 (S-IF10-CWRITE-SETTLE-DELAY — D1/D2/D3/D5) ─────────────────────
+
+    /// <summary>
+    /// C(CellAssign) 기입 직전 "안착 지연"을 둔다(arming 이후·C 이전 — D1). 반환값:
+    ///   - null: 지연 완료(또는 생략) → C 기입 진행 가능.
+    ///   - non-null: 지연 도중 OFFLINE 감지 → C 미기입 종결(더티 진행 0 — D3, Offline outcome).
+    ///
+    /// 기준(anchor·D2) = IF-10 수신 시각(<paramref name="depositedAtUtc"/>, ≈틸트 시각). 실제 대기 =
+    ///   max(0, SettleDelayMs − (지연 지점 도달 − anchor)). anchor가 null이면 handshake-start 기준(경과 0).
+    ///   IF-10 수신 이후 지연 지점 도달까지 이미 경과한 시간(DB 기록·셀 선택·번들 조회·OFFLINE 사전확인·
+    ///   arming)을 잔여에서 차감해 과대 지연을 막는다. 잔여는 ≥0으로 clamp(S5).
+    ///
+    /// SettleDelayMs<=0이면 지연을 완전히 생략한다 — 추가 대기 0, 경로 무변경(코드 기본 0 = 현행과 바이트
+    ///   동일·회귀 0 — D5). 이 조기 반환 덕에 ~20개 기존 호출부의 타이밍이 보존된다.
+    ///
+    /// 취소·종결(D3): 대기는 취소 토큰(<paramref name="ct"/> — 현행 stopping)을 존중해 즉시 중단하고
+    ///   OperationCanceledException을 전파한다(호스트 종료 시 C 미기입·깔끔 종결). 대기 도중 OFFLINE도
+    ///   관찰해 조기 종결(응답성) — 최소 요구인 "C 기입 직전 Online 재확인"(WaitCFlagZeroAsync)의 선반영.
+    ///   어느 경우에도 절대규칙 #1 유지 — 지연은 순수 대기이며 큐/Modbus를 건드리지 않는다.
+    ///
+    /// 경과 계산의 "대기" 구간은 단조 시계(<see cref="Environment.TickCount64"/>)로 재어 벽시계 역행을
+    ///   방지한다(D2). anchor→now 초기 경과만 벽시계이며 음수는 0으로 clamp한다.
+    /// </summary>
+    private async Task<HandshakeResult?> SettleDelayAsync(DateTime? depositedAtUtc, CancellationToken ct)
+    {
+        int settleMs = _opt.SettleDelayMs;
+
+        // 지연 완전 생략(코드 기본 0) — 추가 대기 0·경로 무변경·회귀 0(D5). Stage 발화도 없음(현행 동일).
+        if (settleMs <= 0)
+            return null;
+
+        // 잔여 대기 = max(0, SettleDelayMs − (now − anchor)). anchor=null이면 경과 0(전량 대기).
+        long remainingMs = settleMs;
+        if (depositedAtUtc is DateTime anchor)
+        {
+            double elapsed = (DateTime.UtcNow - anchor).TotalMilliseconds;
+            if (elapsed < 0) elapsed = 0;                 // 벽시계 역행 clamp(D2).
+            remainingMs = settleMs - (long)elapsed;
+            if (remainingMs < 0) remainingMs = 0;         // 잔여 clamp ≥0(S5 — anchor 경과가 지연 초과).
+        }
+
+        EmitStage("HS_SETTLE_WAIT",
+            $"{{\"settleMs\":{settleMs},\"remainingMs\":{remainingMs}}}");
+
+        // anchor 경과가 지연을 이미 초과 → 추가 대기 ≈0(S5). C 기입 즉시 진행.
+        if (remainingMs == 0)
+            return null;
+
+        _log.LogInformation(
+            "[핸드셰이크] 안착 지연 — {Remaining}ms 대기(SettleDelayMs={Settle}, anchor=IF-10 수신 시각)",
+            remainingMs, settleMs);
+
+        // 단조 시계 기준 잔여 대기. 매 스텝 Online 관찰(OFFLINE 조기 종결)·취소 존중.
+        int pollMs = _opt.RFlagPollMs > 0 ? _opt.RFlagPollMs : 50;
+        long deadlineTick = Environment.TickCount64 + remainingMs;
+        while (true)
+        {
+            long left = deadlineTick - Environment.TickCount64;
+            if (left <= 0)
+                return null; // 안착 지연 완료 → C 기입 진행.
+
+            // 지연 도중 OFFLINE — C 미기입 종결(더티 진행 0·D3). WaitCFlagZeroAsync Online 재확인의 선반영.
+            var s = _gw.Latest;
+            if (!s.Online)
+            {
+                _log.LogError("[핸드셰이크] 안착 지연 중 OFFLINE — C 미기입 종결");
+                EmitStage("HS_OFFLINE", "{\"phase\":\"settleDelay\"}");
+                return new(HandshakeOutcome.Offline, 0, 0, 0, "OFFLINE during settle delay");
+            }
+
+            // 호스트 종료(ct 취소) → OperationCanceledException 전파(C 미기입·깔끔 종결·D3).
+            await Task.Delay((int)Math.Min(left, pollMs), ct).ConfigureAwait(false);
+        }
     }
 
     // ── arming: 시작 시 R_Flag==0 관찰 보장 (잔류 대사 — S-HANDSHAKE-RESIDUE §2A/§2C) ──

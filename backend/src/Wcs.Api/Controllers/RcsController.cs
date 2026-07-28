@@ -198,6 +198,11 @@ public sealed class RcsController : ControllerBase
         [FromServices] IServiceScopeFactory       scopeFactory,
         [FromServices] IOptions<WcsOptions>       wcsOptions)
     {
+        // S-IF10-CWRITE-SETTLE-DELAY — 안착 지연(D2)의 기준 시각(anchor). IF-10 HTTP 수신 시점(≈AGV 틸트
+        // 시점)을 컨트롤러 진입 즉시 UTC로 캡처해 백그라운드 핸드셰이크로 넘긴다. 이 캡처는 응답 경로를
+        // 전혀 지연시키지 않는다(값 하나 읽기) — IF-10은 아래에서 즉시 200 ack(fire-and-forget) 불변.
+        var if10ReceivedAtUtc = DateTime.UtcNow;
+
         // ── 검증 (D-4: 입력 상한 — 음수/과대 qty·과길이 barcode/timeStamp를 DB 도달 전 거부) ─────
         if (req.PId is < 1 or > 30000)
             return BadRequest(new { error = "pId는 1~30000 범위여야 합니다." });
@@ -249,7 +254,7 @@ public sealed class RcsController : ControllerBase
         }
 
         if (destType == DestinationType.Sorter3D && dest is not null)
-            TriggerSorterHandshake(req, dest, cellSelector, db, sorterRegistry, lifetime, scopeFactory);
+            TriggerSorterHandshake(req, dest, cellSelector, db, sorterRegistry, lifetime, scopeFactory, if10ReceivedAtUtc);
         else
             _log.LogInformation("[IF-10] pId={PId} 슈트 보고 → IF-11 트리거 없음", req.PId);
 
@@ -267,7 +272,8 @@ public sealed class RcsController : ControllerBase
         WcsDbContext              db,
         ISorterGatewayRegistry    sorterRegistry,
         IHostApplicationLifetime  lifetime,
-        IServiceScopeFactory      scopeFactory)
+        IServiceScopeFactory      scopeFactory,
+        DateTime                  if10ReceivedAtUtc)
     {
         var cellNo = cellSelector.SelectCell(req.ChuteNo, req.Barcode);
 
@@ -309,7 +315,9 @@ public sealed class RcsController : ControllerBase
         // IF-11 핸드셰이크: 번들 핸들 경유 — 소터별 독립 _cSeq·RFlag 채널
         // ContinueWith에서 sorter_command + alarm 영속화 (P3 결선 — 별도 스코프).
         var stopping = lifetime.ApplicationStopping;
-        _ = bundle.ExecuteHandshakeAsync(selectedCell, stopping)
+        // S-IF10-CWRITE-SETTLE-DELAY — anchor(IF-10 수신 시각)를 백그라운드 핸드셰이크로 전달(D2). 핸드셰이크
+        //   내부에서 arming 이후·C 기입 이전에 SettleDelayMs 안착 지연을 둔다(응답은 이미 fire-and-forget·불변).
+        _ = bundle.ExecuteHandshakeAsync(selectedCell, stopping, if10ReceivedAtUtc)
             .ContinueWith((Task<Wcs.PlcGateway.HandshakeResult> t) =>
             {
                 // 백그라운드 콜백은 HTTP 응답 완료 후 실행 → 요청 스코프는 이미 dispose.
