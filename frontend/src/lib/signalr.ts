@@ -63,6 +63,23 @@ export interface OpLogEntry {
   detail: string | null
 }
 
+// 전용 추적 로그 이벤트(S-TRACE-LOG-VIEWER) — 백엔드 TraceRecord 미러(카멜케이스).
+//   eventNo(1~6) = 이벤트 종류 태그. 피스 흐름(3~6)은 pId+(chuteNo,cSeq)로 상관.
+export interface TraceEvent {
+  eventNo: number
+  event: string
+  at: string
+  pId: number | null
+  cSeq: number | null
+  chuteNo: number | null
+  destId: number | null
+  cellNo: number | null
+  floor: number | null
+  inductionNo: number | null
+  trigger: string | null
+  detail: string | null
+}
+
 export type ConnStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
 
 // 레지스터 키 — 백엔드 EmitRegisterChanges의 reg 문자열 + Online(전이).
@@ -100,6 +117,9 @@ class MonitorHubClient {
   private state: MonitorState = { status: 'disconnected', sorters: new Map(), version: 0 }
   private stateListeners = new Set<() => void>()
   private opLogListeners = new Set<(e: OpLogEntry) => void>()
+  // 전용 추적(trace) 그룹 — 뷰어 페이지 마운트 시만 옵트인 구독(창 닫히면 해제 → 서버 push no-op).
+  private traceListeners = new Set<(e: TraceEvent) => void>()
+  private traceOptIn = false
 
   // ── React 바인딩(useSyncExternalStore) ────────────────────────────────────
   getState = (): MonitorState => this.state
@@ -120,6 +140,23 @@ class MonitorHubClient {
 
   isPollChangeOptIn = (): boolean => this.pollOptIn
 
+  // 전용 추적 스트림 구독 — 첫 구독자에서 서버 trace 그룹 가입, 마지막 해제에서 탈퇴(페이지 수명 종속).
+  //   연결(monitorHub)은 앱 수명 유지하고 trace 구독만 여닫는다 → "창 닫히면 스트림 종료" 요건(W6).
+  subscribeTrace = (l: (e: TraceEvent) => void): (() => void) => {
+    this.traceListeners.add(l)
+    if (this.traceListeners.size === 1) {
+      this.traceOptIn = true
+      void this.syncTraceOptIn()
+    }
+    return () => {
+      this.traceListeners.delete(l)
+      if (this.traceListeners.size === 0) {
+        this.traceOptIn = false
+        void this.syncTraceOptIn()
+      }
+    }
+  }
+
   // ── 연결 수명 ──────────────────────────────────────────────────────────────
   connect(): void {
     const conn = this.ensureConnection()
@@ -134,6 +171,7 @@ class MonitorHubClient {
         this.startPromise = null
         this.setStatus('connected')
         await this.syncPollOptIn()
+        await this.syncTraceOptIn()
       })
       .catch((err: unknown) => {
         this.startPromise = null
@@ -158,6 +196,16 @@ class MonitorHubClient {
     }
   }
 
+  private async syncTraceOptIn(): Promise<void> {
+    const conn = this.connection
+    if (!conn || conn.state !== HubConnectionState.Connected) return
+    try {
+      await conn.invoke(this.traceOptIn ? 'SubscribeTrace' : 'UnsubscribeTrace')
+    } catch (err) {
+      console.warn('[hub] trace 옵트인 동기화 실패', err)
+    }
+  }
+
   private ensureConnection(): HubConnection {
     if (this.connection) return this.connection
     const conn = new HubConnectionBuilder()
@@ -179,12 +227,14 @@ class MonitorHubClient {
     conn.on('RegisterDelta', (d: RegisterDelta) => this.applyDelta(d))
     conn.on('SorterTransition', (t: SorterTransition) => this.applyTransition(t))
     conn.on('OpLog', (e: OpLogEntry) => this.emitOpLog(e))
+    conn.on('Trace', (e: TraceEvent) => this.emitTrace(e))
 
     conn.onreconnecting(() => this.setStatus('reconnecting'))
     conn.onreconnected(async () => {
       // 서버 OnConnectedAsync가 재접속 시 Bootstrap을 다시 보냄 → 워드 상태 자동 복구.
       this.setStatus('connected')
       await this.syncPollOptIn()
+      await this.syncTraceOptIn()
     })
     conn.onclose(() => {
       // 안전망(F2-CR-M2): 무한 재시도 정책으로 재시도 소진 onclose는 정상 도달하지 않으나,
@@ -258,6 +308,16 @@ class MonitorHubClient {
         l(e)
       } catch (err) {
         console.warn('[hub] oplog 리스너 예외', err)
+      }
+    }
+  }
+
+  private emitTrace(e: TraceEvent): void {
+    for (const l of this.traceListeners) {
+      try {
+        l(e)
+      } catch (err) {
+        console.warn('[hub] trace 리스너 예외', err)
       }
     }
   }

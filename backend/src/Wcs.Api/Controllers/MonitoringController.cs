@@ -24,10 +24,12 @@ namespace Wcs.Api.Controllers;
 public sealed class MonitoringController : ControllerBase
 {
     private readonly IMonitoringQueries _queries;
+    private readonly ITraceBacklog      _trace;
 
-    public MonitoringController(IMonitoringQueries queries)
+    public MonitoringController(IMonitoringQueries queries, ITraceBacklog trace)
     {
         _queries = queries;
+        _trace   = trace;
     }
 
     // ── E1 GET /api/monitor/batches ────────────────────────────────────────────
@@ -90,4 +92,16 @@ public sealed class MonitoringController : ControllerBase
         [FromQuery] long? cursor)
         => Ok(_queries.GetOperationLog(
             category, level, sorterChuteNo, MonitoringQueries.ClampTake(take), cursor));
+
+    // ── GET /api/monitor/trace?take=&eventNo=&pId=&cSeq= (S-TRACE-LOG-VIEWER) ────
+    // 전용 추적 로그 백로그(뷰어 시드 — 파일 tail·읽기 전용). 최근 N개 구조화 트레이스 레코드(시계열 오름차순).
+    // take 는 TraceLogOptions 상한으로 clamp. 로그 디렉터리 부재 시 생성 후 빈 목록(500 금지).
+    // 필터: eventNo(1~6)·pId·cSeq(한 피스 흐름으로 좁혀 시드).
+    [HttpGet("trace")]
+    public IActionResult GetTrace(
+        [FromQuery] int? take,
+        [FromQuery] int? eventNo,
+        [FromQuery] int? pId,
+        [FromQuery] int? cSeq)
+        => Ok(_trace.Read(take, eventNo, pId, cSeq));
 }

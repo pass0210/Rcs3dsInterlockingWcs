@@ -114,6 +114,22 @@ export interface Paged<T> {
   nextCursor: number | null
 }
 
+// 전용 추적 로그 백로그 레코드(S-TRACE-LOG-VIEWER) — 백엔드 TraceRecord 미러(SignalR TraceEvent와 동형).
+export interface TraceRecord {
+  eventNo: number
+  event: string
+  at: string
+  pId: number | null
+  cSeq: number | null
+  chuteNo: number | null
+  destId: number | null
+  cellNo: number | null
+  floor: number | null
+  inductionNo: number | null
+  trigger: string | null
+  detail: string | null
+}
+
 // ── fetch 래퍼 (실패 시 명확한 에러 — TanStack Query가 에러 상태로 표면화) ─────
 const BASE = '/api/monitor'
 
@@ -172,6 +188,20 @@ export const api = {
         sorterChuteNo: opts.sorterChuteNo,
         take: opts.take ?? 100,
         cursor: opts.cursor,
+      })}`,
+    ),
+
+  // 전용 추적 로그 백로그(S-TRACE-LOG-VIEWER). 최근 N개 트레이스 레코드(시계열 오름차순).
+  // 필터: eventNo(1~6)·pId·cSeq. 로그 디렉터리 부재 시 빈 배열(200).
+  trace: (
+    opts: { take?: number; eventNo?: number; pId?: number; cSeq?: number } = {},
+  ) =>
+    getJson<TraceRecord[]>(
+      `/trace${qs({
+        take: opts.take ?? 100,
+        eventNo: opts.eventNo,
+        pId: opts.pId,
+        cSeq: opts.cSeq,
       })}`,
     ),
 }

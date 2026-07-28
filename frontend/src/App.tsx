@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { MonitorPage } from './pages/MonitorPage'
 import { SortersPage } from './pages/SortersPage'
+import { TraceLogPage } from './pages/TraceLogPage'
 import { OpsPage } from './pages/OpsPage'
 import { B2cDataGenPage } from './pages/B2cDataGenPage'
 import { B2cFacilityPage } from './pages/B2cFacilityPage'
@@ -28,6 +29,8 @@ export default function App() {
         <Route path="/monitor" element={<MonitorPage />} />
         {/* 페이지 ② 운영 로그(B2C·operation_log 라이브 테일). 레지스터 워드는 /ops로 통합됨 */}
         <Route path="/sorters" element={<SortersPage />} />
+        {/* 추적 로그(S-TRACE-LOG-VIEWER): 6개 핵심 이벤트 전용 뷰어(백로그 시드 + 실시간 append) */}
+        <Route path="/trace" element={<TraceLogPage />} />
         {/* 페이지 ③ 운영 제어(B2C·소터 제어·F3b) */}
         <Route path="/ops" element={<OpsPage />} />
         {/* 페이지 ④ B2C 데이터 생성(S-B2C-DATAGEN → 슬림 S-B2C-FACILITY) */}

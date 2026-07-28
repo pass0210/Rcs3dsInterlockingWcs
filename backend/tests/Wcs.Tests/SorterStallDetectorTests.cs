@@ -126,7 +126,7 @@ public class SorterStallDetectorTests
             SorterFloorReturn = new SorterFloorReturnOptions { ObserveIntervalMs = 20, StallSuspectTicks = stallTicks },
         });
         var svc = new SorterFloorReturnService(
-            registry, queues, status, new FakeLifetime(), new NoopQueueRestorer(), opLog, opts,
+            registry, queues, status, new FakeLifetime(), new NoopQueueRestorer(), opLog, new NopTraceLogger(), opts,
             NullLogger<SorterFloorReturnService>.Instance);
 
         return (svc, master, wq, polling);

@@ -61,6 +61,7 @@ public sealed class PendingFloorQueueRestorerTests : IAsyncLifetime
     private PendingFloorQueueRestorer NewRestorer() => new(
         _sp.GetRequiredService<IServiceScopeFactory>(),
         _queues,
+        new NopTraceLogger(),
         Options.Create(new WcsOptions
         {
             InductionFloorMap = new Dictionary<string, int> { ["1"] = 1, ["2"] = 2 },

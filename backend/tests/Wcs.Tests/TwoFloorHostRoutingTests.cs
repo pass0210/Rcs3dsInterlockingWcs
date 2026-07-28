@@ -603,7 +603,7 @@ public class TwoFloorWriteGateI2Tests
         });
         var svc = new SorterFloorReturnService(
             registry, queues, spy, new FakeLifetime(), new NoopQueueRestorer(),
-            new CapturingOperationLogger(), opts,
+            new CapturingOperationLogger(), new NopTraceLogger(), opts,
             NullLogger<SorterFloorReturnService>.Instance);
 
         return (svc, master, wq, polling);

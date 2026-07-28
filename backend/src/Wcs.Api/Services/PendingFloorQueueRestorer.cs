@@ -48,17 +48,20 @@ public sealed class PendingFloorQueueRestorer : IPendingFloorQueueRestorer
 {
     private readonly IServiceScopeFactory     _scopeFactory;
     private readonly SorterPendingFloorQueues _queues;
+    private readonly ITraceLogger             _trace;
     private readonly WcsOptions               _wcsOptions;
     private readonly ILogger<PendingFloorQueueRestorer> _log;
 
     public PendingFloorQueueRestorer(
         IServiceScopeFactory     scopeFactory,
         SorterPendingFloorQueues queues,
+        ITraceLogger             trace,
         IOptions<WcsOptions>     wcsOptions,
         ILogger<PendingFloorQueueRestorer> log)
     {
         _scopeFactory = scopeFactory;
         _queues       = queues;
+        _trace        = trace;
         _wcsOptions   = wcsOptions.Value;
         _log          = log;
     }
@@ -91,6 +94,7 @@ public sealed class PendingFloorQueueRestorer : IPendingFloorQueueRestorer
                 p.Id,
                 p.PId,
                 p.DestinationId!.Value,
+                p.Destination!.ChuteNo,
                 p.Induction != null ? (int?)p.Induction.InductionNo : null))
             .ToListAsync(ct)
             .ConfigureAwait(false);
@@ -122,6 +126,13 @@ public sealed class PendingFloorQueueRestorer : IPendingFloorQueueRestorer
 
             _queues.Enqueue(r.DestinationId, f);
             restored++;
+
+            // ── [트레이스 이벤트 1] TgtFloor 펜딩큐 인큐(재시작 복원 re-enqueue) — 트리거=RESTORE 로 구분 ──
+            _trace.Log(new TraceRecord(
+                EventNo: 1, Event: "TGTFLOOR_ENQUEUE", At: DateTimeOffset.Now,
+                PId: r.PId, CSeq: null, ChuteNo: r.ChuteNo, DestId: r.DestinationId,
+                CellNo: null, Floor: f, InductionNo: r.InductionNo, Trigger: "RESTORE",
+                Detail: $"{{\"queueDepth\":{_queues.Count(r.DestinationId)}}}"));
         }
 
         if (restored > 0 || unmapped > 0)
@@ -140,5 +151,5 @@ public sealed class PendingFloorQueueRestorer : IPendingFloorQueueRestorer
     }
 
     // piece 사영 행(EF 프로젝션 대상 — struct record).
-    private readonly record struct RestoreRow(long Id, int PId, long DestinationId, int? InductionNo);
+    private readonly record struct RestoreRow(long Id, int PId, long DestinationId, int ChuteNo, int? InductionNo);
 }
