@@ -1,6 +1,7 @@
 # TODO (sprint 간 추적 — Minor·이연 항목)
 
-## S-BACKEND-FOLDER 후속 (Minor — 비차단·기존 부채)
+## S-IF10-CWRITE-SETTLE-DELAY 후속 (Evaluator Minor — 비차단)
+- [ ] [일관성] `HandshakeOrchestrator.SettleDelayAsync`의 폴 스텝 폴백 `_opt.RFlagPollMs > 0 ? _opt.RFlagPollMs : 50`이 타 루프(arming·복귀 대기·C_Flag 대기)의 `_opt.RFlagPollMs` 직접 사용과 미세 비일관(그쪽은 폴백 없음). 지연량과 무관한 방어용 폴백이나(RFlagPollMs는 항상 >0), 스타일 통일 시 폴백 제거 또는 공용 상수화 검토. (APPROVED 시 Evaluator 지적 — 현 스프린트 비차단.)
 - [ ] [S-BACKEND-FOLDER][기존부채·보안] **SQLitePCLRaw.lib.e_sqlite3 2.1.10 high-severity advisory (NU1903 / GHSA-2m69-gcr7-jv3q)** — 빌드 경고 10건(Wcs.Data/Migrations.SqlServer/Migrations.Sqlite/Api/Tests). 폴더 이동과 무관·base develop 선재. EF Core Sqlite provider 상향 또는 명시적 SQLitePCLRaw pin으로 해소. 계약의 "빌드 경고 0" 게이트를 다시 만족시키려면 필요.
 - [ ] [S-BACKEND-FOLDER][config·스코프밖] `.claude/settings.json` 권한 allowlist가 구 `src/Wcs.Api/...` 경로 참조 — 이동 후 최악의 경우 권한 프롬프트 추가뿐(빌드/실행 실패 아님). 사용자 후속 결정(config·미승인 영역).
 
