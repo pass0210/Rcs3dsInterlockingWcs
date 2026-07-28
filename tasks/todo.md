@@ -1,5 +1,14 @@
 # TODO (sprint 간 추적 — Minor·이연 항목)
 
+## S-TRACE-LOG-VIEWER 후속 (4-Tier 코드리뷰 Minor 6건 — 비차단·오케스트레이터 이관, Evaluator APPROVED 시 등재)
+- [ ] [S-TRACE-LOG-VIEWER][reconnect] 뷰어 SignalR 재접속(onreconnected) 시 백로그 재시드 미수행 — 재연결 갭 동안 놓친 트레이스 이벤트가 테이블에 안 채워질 수 있음(하트비트 없음). 재접속 훅에서 REST 백로그 재조회 검토.
+- [ ] [S-TRACE-LOG-VIEWER][config] `TraceLogOptions.Directory` 기본값이 코드 리터럴 `@"D:\Rcs3dsInterlockingWcsLogs"`(옵션 기본값·appsettings 오버라이드 가능하나, 절대규칙 #7 정신상 리터럴 0을 원하면 appsettings-only 로 이동 검토). — 현 상태 비차단(설정 바인딩됨).
+- [ ] [S-TRACE-LOG-VIEWER][perf] `TraceLogService.TailLines`가 `need*4` 줄을 전 롤링파일에서 역순 수집 후 필터 — 큰 파일·좁은 필터에서 비효율(전량 스캔 근접). 인덱스/역방향 스트리밍 read 검토(현 clamp≤500·저빈도라 비차단).
+- [ ] [S-TRACE-LOG-VIEWER][robustness] 이벤트 detail JSON을 문자열 보간(`$"{{\"barcode\":\"{req.Barcode}\"...}}"`)으로 생성 — barcode에 `"`/`\` 포함 시 깨진 JSON 가능(현 바코드 검증이 위생하나 방어적으로 JsonSerializer 사용 권장).
+- [ ] [S-TRACE-LOG-VIEWER][robustness] 컨슈머 루프가 `WaitToReadAsync` false(채널 완료) 후 종료하는 one-shot 구조 — 정상 수명엔 문제없으나 예외로 루프 이탈 시 이후 레코드 드롭(로그만). 재기동/감시 검토.
+- [ ] [S-TRACE-LOG-VIEWER][perf] 뷰어 필터 변경마다 subscribeTrace 해제/재구독(그룹 churn) — SubscribeTrace/UnsubscribeTrace 왕복 발생. 클라 필터는 로컬 유지하고 구독은 페이지 수명 1회로 분리 검토.
+- [ ] [S-TRACE-LOG-VIEWER][concurrency·문서화됨·스코프밖] 한 소터 **동시** IF-10 시 pId↔cSeq 상관 교차 가능(순차 dispatch 전제·SPEC §6). 코드 주석 + 뷰어 note로 노출 완료. 동시 IF-10 직렬화는 별도 스프린트(lessons: single-sorter-concurrent-handshake-gap).
+
 ## S-IF10-CWRITE-SETTLE-DELAY 후속 (Evaluator Minor — 비차단)
 - [ ] [일관성] `HandshakeOrchestrator.SettleDelayAsync`의 폴 스텝 폴백 `_opt.RFlagPollMs > 0 ? _opt.RFlagPollMs : 50`이 타 루프(arming·복귀 대기·C_Flag 대기)의 `_opt.RFlagPollMs` 직접 사용과 미세 비일관(그쪽은 폴백 없음). 지연량과 무관한 방어용 폴백이나(RFlagPollMs는 항상 >0), 스타일 통일 시 폴백 제거 또는 공용 상수화 검토. (APPROVED 시 Evaluator 지적 — 현 스프린트 비차단.)
 - [ ] [S-BACKEND-FOLDER][기존부채·보안] **SQLitePCLRaw.lib.e_sqlite3 2.1.10 high-severity advisory (NU1903 / GHSA-2m69-gcr7-jv3q)** — 빌드 경고 10건(Wcs.Data/Migrations.SqlServer/Migrations.Sqlite/Api/Tests). 폴더 이동과 무관·base develop 선재. EF Core Sqlite provider 상향 또는 명시적 SQLitePCLRaw pin으로 해소. 계약의 "빌드 경고 0" 게이트를 다시 만족시키려면 필요.
@@ -133,3 +142,7 @@
 ## S-B2C-DATAGEN 후속(Evaluator minor — 비차단)
 - [ ] [S-B2C-DATAGEN] 프론트 테스트 러너(vitest/jest) 미구성 — 다이얼로그 체이닝(초기화→force 재요청) 회귀 테스트를 자동화할 수단이 없음. iter-1 BLOCKING(React 배칭에 의한 force 다이얼로그 silent close)이 정적검사·xUnit 어디에도 안 잡혔음. 프레임워크 도입 시 B2cDataGenPage onConfirm→requestForceReset 체이닝 케이스를 최우선 등재.
 - [ ] [S-B2C-DATAGEN] B2B 모드에서 /b2c/test-data 직접 URL 진입 시 배너 제목이 b2b NAV 항목("데이터 생성")으로 표시 — Layout 배너가 현재 uiMode NAV_SETS 에서 title 을 찾는 구조. 정상 nav 경로에선 미발생(cosmetic).
+
+## S-TRACE-LOG-VIEWER 코드리뷰 Minor 추가(포커스 재리뷰 — 비차단·cosmetic)
+- [ ] [S-TRACE-LOG-VIEWER] TraceLogService.cs cap-eviction WARN 로깅이 `sp.Lock` 보유 중 실행 — >32 degraded 영역(직렬 dispatch에선 도달 불가)만 도달. 정리: 축출 pId를 락 안에서 수집→락 해제 후 로그.
+- [ ] [S-TRACE-LOG-VIEWER] TraceCorrelator.RegisterHandshake 반환 토큰이 opaque `object`(DiscardPending에서 `is PendingReg` 재확인) — 타입드 핸들(마커 인터페이스/readonly struct)로 바꾸면 무관 객체 전달 원천 차단. 순수 스타일.
