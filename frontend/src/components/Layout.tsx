@@ -10,6 +10,7 @@ import {
   Settings,
   RefreshCw,
   Warehouse,
+  Route as RouteIcon,
 } from 'lucide-react'
 import { useEffect, useState, type ComponentType } from 'react'
 import { StatusRail } from './StatusRail'
@@ -42,6 +43,7 @@ const NAV_SETS: Record<UiMode, NavItem[]> = {
     { to: '/b2c/facility', label: '설비 관리', icon: Warehouse, enabled: true, phase: null, title: '설비 관리', subtitle: '목적지 구성 · 소터 셀 설정 · 오더 할당 · 슈트 제어' },
     { to: '/monitor', label: '모니터링', icon: Activity, enabled: true, phase: null, title: '실시간 모니터링', subtitle: '작업 데이터 · 로봇 이동중 · 분류 현황' },
     { to: '/sorters', label: '운영 로그', icon: ScrollText, enabled: true, phase: null, title: '운영 로그', subtitle: 'operation_log 실시간 테일 · category/level 필터' },
+    { to: '/trace', label: '추적 로그', icon: RouteIcon, enabled: true, phase: null, title: '추적 로그', subtitle: '핸드셰이크·2층 제어 6개 이벤트 추적 · 번호/pId/cSeq 필터' },
     { to: '/ops', label: '운영 제어', icon: SlidersHorizontal, enabled: true, phase: null, title: '운영 제어', subtitle: 'Pause/Resume · 워드 편집(안전 3종)' },
   ],
   b2b: [

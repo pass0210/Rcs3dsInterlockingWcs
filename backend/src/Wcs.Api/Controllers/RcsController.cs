@@ -49,6 +49,7 @@ public sealed class RcsController : ControllerBase
         [FromServices] IChuteCapacityService  capacity,
         [FromServices] IDestinationStatusService status,
         [FromServices] SorterPendingFloorQueues floorQueues,
+        [FromServices] ITraceLogger           trace,
         [FromServices] IOptions<WcsOptions>   wcsOptions)
     {
         // ── 검증 (D-4: 입력 상한 — DB 도달 전 거부, 위반 시 400. 정상 입력 경로 불변) ─────
@@ -131,6 +132,14 @@ public sealed class RcsController : ControllerBase
             _log.LogInformation(
                 "[IF-05] pId={PId} 소터 destId={DestId} pending-floor 큐 enqueue F={Floor}(inductionNo={Ind})",
                 req.PId, destId.Value, fFloor, req.InductionNo);
+
+            // ── [트레이스 이벤트 1] TgtFloor 펜딩큐 인큐(IF-05 트리거) — 관측/로깅 전용(S-TRACE-LOG-VIEWER) ──
+            // 층-큐 흐름(소터+층 scope). 트리거 pId·inductionNo 를 best-effort 컨텍스트로 남긴다(IF-05 시점 가용).
+            trace.Log(new TraceRecord(
+                EventNo: 1, Event: "TGTFLOOR_ENQUEUE", At: DateTimeOffset.Now,
+                PId: req.PId, CSeq: null, ChuteNo: chuteNo, DestId: destId.Value,
+                CellNo: null, Floor: fFloor, InductionNo: req.InductionNo, Trigger: "IF05",
+                Detail: $"{{\"queueDepth\":{floorQueues.Count(destId.Value)},\"agvNo\":{req.AgvNo}}}"));
         }
 
         _log.LogInformation("[IF-05] pId={PId} barcode={Barcode} → result={Result} chuteNo={ChuteNo} reason(내부)={Reason}",
@@ -196,6 +205,8 @@ public sealed class RcsController : ControllerBase
         [FromServices] ISorterGatewayRegistry     sorterRegistry,
         [FromServices] IHostApplicationLifetime   lifetime,
         [FromServices] IServiceScopeFactory       scopeFactory,
+        [FromServices] ITraceLogger               trace,
+        [FromServices] TraceCorrelator            correlator,
         [FromServices] IOptions<WcsOptions>       wcsOptions)
     {
         // S-IF10-CWRITE-SETTLE-DELAY — 안착 지연(D2)의 기준 시각(anchor). IF-10 HTTP 수신 시점(≈AGV 틸트
@@ -222,6 +233,14 @@ public sealed class RcsController : ControllerBase
         _opLog.Log(OperationLogCategory.API, "IF10", sorterChuteNo: req.ChuteNo,
             barcode: req.Barcode, pId: req.PId,
             detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo}}}");
+
+        // ── [트레이스 이벤트 3] IF-10 도착(DepositReport 진입) — 관측/로깅 전용(S-TRACE-LOG-VIEWER) ──
+        // 피스 흐름 시작점. pId·barcode·chuteNo·agvNo 가용(cSeq/cellNo 는 핸드셰이크 진행 시 이벤트 4·5 에서 부여).
+        trace.Log(new TraceRecord(
+            EventNo: 3, Event: "IF10_ARRIVAL", At: DateTimeOffset.Now,
+            PId: req.PId, CSeq: null, ChuteNo: req.ChuteNo, DestId: null,
+            CellNo: null, Floor: null, InductionNo: null, Trigger: "IF10",
+            Detail: $"{{\"barcode\":\"{req.Barcode}\",\"agvNo\":{req.AgvNo}}}"));
 
         // ── 투입 기록 + 멱등 ──────────────────────────────────────────────────────
         var isNewRecord = recorder.RecordDeposit(
@@ -254,7 +273,7 @@ public sealed class RcsController : ControllerBase
         }
 
         if (destType == DestinationType.Sorter3D && dest is not null)
-            TriggerSorterHandshake(req, dest, cellSelector, db, sorterRegistry, lifetime, scopeFactory, if10ReceivedAtUtc);
+            TriggerSorterHandshake(req, dest, cellSelector, db, sorterRegistry, lifetime, scopeFactory, correlator, if10ReceivedAtUtc);
         else
             _log.LogInformation("[IF-10] pId={PId} 슈트 보고 → IF-11 트리거 없음", req.PId);
 
@@ -273,6 +292,7 @@ public sealed class RcsController : ControllerBase
         ISorterGatewayRegistry    sorterRegistry,
         IHostApplicationLifetime  lifetime,
         IServiceScopeFactory      scopeFactory,
+        TraceCorrelator           correlator,
         DateTime                  if10ReceivedAtUtc)
     {
         var cellNo = cellSelector.SelectCell(req.ChuteNo, req.Barcode);
@@ -312,6 +332,13 @@ public sealed class RcsController : ControllerBase
         int    pId      = req.PId;
         long   destId   = dest.Id;
 
+        // ── [트레이스 상관] C 흐름(이벤트 4·5·6)에 pId 전파 — 핸드셰이크 직전 소터별 FIFO 등록 ──
+        // 핸드셰이크는 cSeq 만 알고 pId 를 모른다. 여기서 pId·cellNo·chuteNo 를 소터별 FIFO 에 등록해두면
+        // 이벤트 4(HS_C_SENT, cSeq 확정)에서 pop 되어 cSeq→pId 상관이 성립한다(소터 직렬 전제·절대규칙 #8).
+        // 반환 토큰은 종결 continuation 에서 DiscardPending 으로 넘겨, HS_C_SENT 미도달(조기 종결) 시 폐기한다
+        // (누수·pId 오귀속 방지 — idempotent, HS_C_SENT 도달 시 이미 소비돼 no-op).
+        var traceToken = correlator.RegisterHandshake(destId, pId, selectedCell, dest.ChuteNo);
+
         // IF-11 핸드셰이크: 번들 핸들 경유 — 소터별 독립 _cSeq·RFlag 채널
         // ContinueWith에서 sorter_command + alarm 영속화 (P3 결선 — 별도 스코프).
         var stopping = lifetime.ApplicationStopping;
@@ -333,6 +360,13 @@ public sealed class RcsController : ControllerBase
                 {
                     try { logAction(); } catch { /* 종료 중 로거 자체가 throw — 무시 */ }
                 }
+
+                // ── [트레이스 상관] 등록 토큰 폐기(무조건·최우선) — 누수·pId 오귀속 방지 ──
+                // 이 continuation 은 성공·실패·조기종결·호스트종료 어떤 경로에서도 항상 실행된다. DiscardPending 은
+                // idempotent: HS_C_SENT 도달 시 ResolveCSent 가 이미 토큰을 소비했으면 no-op, 미도달(시작 OFFLINE·
+                // 잔류 실패·안착지연 OFFLINE·C_Flag 대기 OFFLINE·CFlagTimeout)이면 그 토큰만 정확히 제거한다.
+                // stopping/scope 조기 return 前에 두어 어떤 경로에서도 상관 등록이 새지 않게 한다(관측 전용·fail-safe).
+                try { correlator.DiscardPending(destId, traceToken); } catch { }
 
                 if (stopping.IsCancellationRequested)
                     return;

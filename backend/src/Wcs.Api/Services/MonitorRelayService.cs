@@ -29,11 +29,14 @@ public sealed class MonitorRelayService : IHostedService, IAsyncDisposable
     private readonly IHubContext<WcsMonitorHub> _hub;
     private readonly ISorterGatewayRegistry     _registry;
     private readonly OperationLogService        _opLog;
+    private readonly ITraceLogger               _trace;
     private readonly MonitorOptions             _opt;
     private readonly ILogger<MonitorRelayService> _log;
 
     private CancellationTokenSource? _cts;
     private Task?                    _heartbeatTask;
+    // 전용 추적 sink OnEntry 핸들러(재구독 방지·StopAsync 해제용).
+    private Action<TraceRecord>?     _traceHandler;
 
     // StopAsync에서 해제하는 것은 **opLog(OnEntry) 핸들러 한정**(재구독 방지용 저장) — F2-CR-M1.
     // PLC 관측 훅(SorterBundleHandle.Subscribe*) 구독은 의도적으로 해제하지 않는다:
@@ -48,12 +51,14 @@ public sealed class MonitorRelayService : IHostedService, IAsyncDisposable
         IHubContext<WcsMonitorHub>    hub,
         ISorterGatewayRegistry        registry,
         OperationLogService           opLog,
+        ITraceLogger                  trace,
         IOptions<MonitorOptions>      opt,
         ILogger<MonitorRelayService>  log)
     {
         _hub      = hub;
         _registry = registry;
         _opLog    = opLog;
+        _trace    = trace;
         _opt      = opt.Value;
         _log      = log;
     }
@@ -88,6 +93,11 @@ public sealed class MonitorRelayService : IHostedService, IAsyncDisposable
         _opLogHandler = OnOperationLogEntry;
         _opLog.OnEntry += _opLogHandler;
 
+        // ③ 전용 추적 로그(S-TRACE-LOG-VIEWER) — 전용 sink OnEntry 를 구독해 trace 그룹으로 fire-and-forget.
+        //    옵트인 그룹이라 뷰어가 없으면 no-op(빈 그룹 push). operation_log 구독과 동형(예외 격리·논블로킹).
+        _traceHandler = OnTraceEntry;
+        _trace.OnEntry += _traceHandler;
+
         // 저빈도 하트비트 — 전체 스냅샷 재전송(델타 유실·재연결 갭 보정). ≤0이면 비활성.
         if (_opt.HeartbeatMs > 0)
             _heartbeatTask = Task.Run(() => RunHeartbeatLoopAsync(_cts.Token));
@@ -103,6 +113,12 @@ public sealed class MonitorRelayService : IHostedService, IAsyncDisposable
         {
             _opLog.OnEntry -= _opLogHandler;
             _opLogHandler = null;
+        }
+
+        if (_traceHandler is not null)
+        {
+            _trace.OnEntry -= _traceHandler;
+            _traceHandler = null;
         }
 
         if (_cts is not null)
@@ -135,6 +151,11 @@ public sealed class MonitorRelayService : IHostedService, IAsyncDisposable
             : WcsMonitorHub.GroupOpLog;
         Broadcast(group, "OpLog", OpLogEntryDto.From(e));
     }
+
+    // ── 전용 추적 엔트리 핸들러 ─────────────────────────────────────────────────
+    // TraceLogService 컨슈머 스레드에서 직접 호출된다 — 논블로킹·예외 격리. trace 그룹(옵트인)으로만 push.
+    private void OnTraceEntry(TraceRecord rec)
+        => Broadcast(WcsMonitorHub.GroupTrace, "Trace", rec);
 
     // ── 하트비트 루프 — 전체 소터 스냅샷 저빈도 재전송 ──────────────────────────
     private async Task RunHeartbeatLoopAsync(CancellationToken ct)
