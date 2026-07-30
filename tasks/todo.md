@@ -146,3 +146,7 @@
 ## S-TRACE-LOG-VIEWER 코드리뷰 Minor 추가(포커스 재리뷰 — 비차단·cosmetic)
 - [ ] [S-TRACE-LOG-VIEWER] TraceLogService.cs cap-eviction WARN 로깅이 `sp.Lock` 보유 중 실행 — >32 degraded 영역(직렬 dispatch에선 도달 불가)만 도달. 정리: 축출 pId를 락 안에서 수집→락 해제 후 로그.
 - [ ] [S-TRACE-LOG-VIEWER] TraceCorrelator.RegisterHandshake 반환 토큰이 opaque `object`(DiscardPending에서 `is PendingReg` 재확인) — 타입드 핸들(마커 인터페이스/readonly struct)로 바꾸면 무관 객체 전달 원천 차단. 순수 스타일.
+
+## S-TWO-FLOOR-WRITE-ON-CLEAR 후속(Evaluator minor — 비차단)
+- [ ] [S-TWO-FLOOR-WRITE-ON-CLEAR] `SorterFloorReturnService.FireStallWarning`의 Serilog WARN 메시지 문자열이 **구 스톨 조건**을 기술 — "유휴(Ready=1)·TgtFloor=0·머리 불변"이라고 찍지만, 재조정된 abandonment 조건은 CurFloor==머리(정렬)이고 이 발화 상태에선 WCS가 write-on-clear로 이미 F를 기입해 **TgtFloor==머리(비영)**이다(0 아님). 즉 사람이 읽는 WARN 라인이 실제 상태와 모순("TgtFloor=0"인데 실제 D6=1/2)되고 "정렬" 절도 누락. 구조화 operation_log detail(line ~409)은 실제 snap.TgtFloor를 정확히 기록하므로 기계판독 감사기록은 정합 — 결함은 콘솔/파일 WARN 문구 1줄뿐. 관측 전용(교정 동작 0)이라 오분류·pop·쓰기 영향 0이나, fail-loud 진단 정직성 차원에서 문구를 새 조건(정렬-유휴 abandonment·TgtFloor=머리)으로 정정 권고. 1줄 수정.
+- [ ] [S-TWO-FLOOR-WRITE-ON-CLEAR] E2EGroupK_TwoFloorReturnTests.cs:159(및 :154 WriteLine) 주석이 구식("pop=분류사이클 Ready 1→0→1 단위 검증")을 기술 — 테스트 본문은 clear-edge pop 검증으로 정확·GREEN. 주석만 새 트리거(TgtFloor 1→0 클리어 에지)로 정정. 주석-only.
