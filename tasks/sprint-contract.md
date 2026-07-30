@@ -1,343 +1,275 @@
-[Sprint Contract] — S-TWO-FLOOR-WRITE-ON-CLEAR
+[Sprint Contract] — S-TRACE-READY-PUSH-AND-DEFAULT
 
-──────────────────────────────────────────────────────────────────────────────
-Goal
-──────────────────────────────────────────────────────────────────────────────
-Make WCS write the pending-floor to TgtFloor(D6) the instant it observes the PLC
-clear it (TgtFloor 1→0 at sort-start), so the 3DS carriage never sits at
-TgtFloor==0. Per the vendor-confirmed physical model (2026-07-29), TgtFloor==0 is
-an ACTIVE "go to default (middle) floor" command, not "hold" — leaving it 0 makes
-the carriage drift to the default floor and then round-trip back to the target.
-The current observe loop (a) only writes while Ready==1 and (b) skips when
-CurFloor==head, so at the clear moment (Ready==0) it writes nothing until the
-sorter is idle again — producing the drift+round-trip. This sprint retargets the
-write trigger and the pop trigger to the clear edge, writes even while busy and
-even at the same floor, and preserves every absolute rule (#1/#2/#3/#7/#8).
+═══════════════════════════════════════════════════════════════════════════════
+■ Goal (WHAT — Planner 정의)
+═══════════════════════════════════════════════════════════════════════════════
+두 가지를 additive·관측/로깅 전용으로 추가한다(회귀 0).
 
-This is safety-critical: a wrong floor write or an early pop causes misclassification
-or machine damage. Zero behavioral regression is a completion condition.
+요청 1 — Ready 전이 + 슈트상태 push 시각 추적:
+  전용 추적 로그(전용 파일 D:\Rcs3dsInterlockingWcsLogs + /trace 실시간 뷰어)에 신규 이벤트를
+  추가해 아래 4개 시각을 관측·기록한다. 목적 = "Ready 전이 ↔ RCS 통지(IF-08 push) 지연" 측정.
+    (a) 소터 Ready 워드 1→0 전이 관측 시각
+    (b) 그 상태 변화로 WCS가 RCS로 나가는 IF-08 슈트상태 update push 전송 시각
+    (c) 소터 Ready 워드 0→1 전이 관측 시각
+    (d) 그 상태 변화로 나가는 IF-08 push 전송 시각
+  기존 TraceLogService 6이벤트 스킴을 확장(신규 EventNo 부여)해 전용 파일 `[N] {json}` +
+  SignalR `/trace` 둘 다 자동 기입되게 한다.
 
-──────────────────────────────────────────────────────────────────────────────
-Background the Generator MUST internalize before touching code
-──────────────────────────────────────────────────────────────────────────────
-B1. Absolute rules (CLAUDE.md §절대규칙, re-read before Phase 2). Unchanged and
-    binding: #1 (all TgtFloor writes go ONLY through the sorter's single write
-    queue via bundle.EnqueueSetTgtFloorAsync — never direct Modbus), #2 (write
-    TgtFloor ONLY when TgtFloor==0; NEVER overwrite a non-zero TgtFloor — the
-    ping-pong guard; the fresh-read `D6!=0` skip in PlcGateway.ProcessWriteAsync
-    SetTgtFloor case stays the dedup mechanism), #3 (WCS NEVER writes 0 to
-    TgtFloor; the PLC owns the clear), #7 (all periods/thresholds from
-    appsettings — ObserveIntervalMs, StallSuspectTicks), #8 (decision logic is a
-    pure Wcs.Core function; the observe loop only does I/O + state).
+요청 2 — 프론트 기본화면을 추적 로그(/trace)로 변경:
+  현재 기본 랜딩(B2C home = "데이터 생성" /b2c/test-data)을 추적 로그 /trace 로 바꾼다.
+  기존 라우팅·다른 페이지 접근을 깨뜨리지 않는다.
 
-B2. Vendor physical model (confirmed 2026-07-29):
-    - PLC clears TgtFloor→0 ONLY at sort-start (Ready 1→0). On arrival it writes
-      CurFloor and KEEPS TgtFloor. So a polled TgtFloor 1→0 transition is an
-      unambiguous sort-start signal (WCS is the only writer of non-zero; WCS never
-      writes 0). [Re-affirm with vendor — see Open Question 3.]
-    - Writing TgtFloor while the sorter is busy (Ready==0, mid-sort) is SAFE: the
-      PLC finishes the in-progress sort, then moves to the written floor. The
-      existing Sim3ds already models this (SimSlave.RunSortSequenceAsync re-reads
-      TgtFloor after the sort and moves if it differs) — so the honored-write path
-      is exercisable end-to-end WITHOUT changing the Sim. Sim3ds stays UNCHANGED
-      this sprint. (Note: the Sim models TgtFloor==0 as "stay", NOT as
-      drift-to-default; therefore drift-prevention is verified at the WCS
-      write-timing level, not via Sim drift — see Verification Scenarios.)
+═══════════════════════════════════════════════════════════════════════════════
+■ 코드 조사 결과 (설계 근거 — Generator/Evaluator 공유 사실)
+═══════════════════════════════════════════════════════════════════════════════
+기존 6이벤트 스킴 (EventNo = "이벤트 종류(KIND) 태그", per-instance 상관키 아님 —
+  TraceRecord docstring 명시):
+    1 TGTFLOOR_ENQUEUE  (RcsController IF-05 + PendingFloorQueueRestorer 복원)
+    2 TGTFLOOR_DEQUEUE  (SorterFloorReturnService 분류시작 클리어 pop)
+    3 IF10_ARRIVAL      (RcsController DepositReport 진입)
+    4 C_ENQUEUE         (TraceWiring — HS_C_SENT)
+    5 C_DEQUEUE         (TraceWiring — CELL_ASSIGN write)
+    6 C_CLEAR           (TraceWiring — C_Flag 1→0 register change delta)
+  TraceRecord 필드 = {EventNo, Event, At, PId, CSeq, ChuteNo, DestId, CellNo, Floor,
+  InductionNo, Trigger, Detail}. EventNo/Event/At 외 전부 nullable → 신규 이벤트 데이터
+  (chuteNo/destId/floor + 방향/next_state는 Detail)를 그대로 수용(스키마 변경 불요).
 
-B3. Why the OLD cycle-detection pop existed and why the NEW trigger must not
-    regress it (I-1 early-pop bug — MANDATORY understanding):
-    The original design popped speculatively when "head floor == CurFloor" →
-    immediately drained the queue for a floor before those pieces were ever
-    deposited, so in [A,A,B] the sorter left floor A before the 2nd A-AGV
-    deposited (2nd A-AGV stranded). The I-1 fix moved pop to an ACTUAL sort-cycle
-    completion (Ready 1→0→1 in-place). The NEW pop trigger (TgtFloor 1→0 clear)
-    is likewise gated on a REAL physical event — the PLC only clears when it
-    begins sorting a genuinely-deposited piece (deposit → C_Flag → sort). So each
-    clear == exactly one real piece consumed == one legitimate pop. It is NOT
-    speculative (not a floor-equality guess). The contract REQUIRES the Generator
-    to preserve the [A,A,B] invariant (K3): the sorter holds floor A until BOTH A
-    pieces have actually started sorting (two clears → two pops), and only then is
-    B the head.
+[조사 A] Ready 전이 관측 지점 — **확정**:
+  PlcGateway.EmitRegisterChanges 가 폴 스냅샷 델타에서 "Ready" 1→0·0→1 을 `OnRegisterChange
+  (reg,old,new)` 로 발화한다(PlcGateway.cs:598). 이는 이벤트 6(C_Flag)이 이미 쓰는
+  `bundle.SubscribeRegisterChange` 훅과 동일 경로 → 신규 Ready 이벤트는 **TraceWiring.Wire 안에
+  이벤트 6과 나란히 "reg=='Ready'" 핸들러를 추가 구독**하면 된다. PlcGateway/HandshakeOrchestrator
+  무접촉(절대규칙 #8 — 기존 콜백 얹기만).
 
-──────────────────────────────────────────────────────────────────────────────
-Implementation Scope (WHAT — the Generator decides HOW)
-──────────────────────────────────────────────────────────────────────────────
-S1. Retarget the WRITE trigger in SorterFloorReturnService.ObserveSorter:
-    - New rule: whenever the observed snapshot has TgtFloor==0 AND the sorter's
-      pending-floor queue is non-empty AND Online AND not Paused → write the
-      current queue HEAD floor to TgtFloor (via the single write queue, rule #1).
-    - This MUST fire even when Ready==0 (write-during-busy) and even when
-      CurFloor==head (write same floor to hold position and prevent drift). Remove
-      the two current guards that block this: the `!ready` early-return and the
-      `snap.CurFloor == f` skip (SorterFloorReturnService.cs ~line 282).
-    - Paused/Offline → no write (Paused via low-cost IsPaused, Online via the
-      existing snap.Online early-return). FULL is NOT a block for the physical
-      alignment write (큐 피스는 IF-05 수용 확정분 — FULL blocks only at IF-05
-      dispatch; unchanged from B/Q5 decision).
-    - The write value is supplied by the QUEUE (head), not by any sort-completion
-      event. Rule #2 is preserved structurally: WCS still only writes when
-      TgtFloor==0; it never overwrites a non-zero TgtFloor; the write-consumer
-      fresh-read `D6!=0` skip remains the dedup so re-asserting the same head on
-      every 0-tick is self-limiting (idempotent) and does not spam.
+[조사 B] IF-08 push 전송 지점 — **확정**:
+  실제 PUT 전송 = ChuteStatePushClient.PushAsync 의 `http.PutAsJsonAsync(url, payload)`
+  (ChuteStatePushClient.cs:117) → RCS 층 호스트로 `{chute_numbers:[chuteNo], next_states:[3|2]}`.
+  이 클라이언트는 이미 operation_log CHUTESTATE_PUSH(성공/실패)를 남긴다(그대로 유지).
+  push 결정은 DestinationStatusPusher.PumpAsync(전이당 1회 멱등, per-route).
 
-S2. Retarget the POP trigger:
-    - New rule: pop exactly ONE head on the TgtFloor 1→0 clear edge (sort-start),
-      NOT on the Ready 1→0→1 in-place cycle.
-    - The popped head is the piece whose sort just started (== CurFloor at clear
-      time). After popping, the NEW head becomes the write target for S1 in the
-      same observe tick (this is the write-during-busy of the NEXT piece's floor —
-      see Open Question 1 for the exact "which floor" resolution).
-    - Deterministic edge detection (see Open Question 3): track the previous
-      observed TgtFloor per sorter in ObserveState; pop only on a non-zero→zero
-      transition. Establish the baseline on the first observation and re-sync it
-      on OFFLINE (mirror the existing PrevReady handling) so that (a) the
-      post-StartupClear initial TgtFloor==0 is NOT mistaken for a clear edge (no
-      spurious pop) and (b) OFFLINE recovery does not fabricate an edge. The pop
-      is missed-edge-safe by construction: WCS is the only writer of non-zero and
-      only writes AFTER observing the 0, so the 0 state persists until WCS reacts.
+[조사 C — ★ 핵심] Ready 전이 ↔ push 상관관계 — **직접 인과 아님(코드 확정)**:
+  IF-08 push 는 Ready 레지스터 에지가 **직접 호출로 트리거하지 않는다.** 별개의 주기 관찰
+  루프(DestinationStatusPusher.RunSorterObserveLoopAsync, 주기 = Wcs:ChuteStatePush:
+  SorterObserveIntervalMs=150ms)가 매 틱 소터별 `accept = Ready && !Paused` 를 (dest, 층-호스트)
+  route 마다 재산출하고, route 의 next_state 가 직전 Acked 와 달라질 때만 PushAsync 를 호출한다.
+  결과:
+    · 시간적으로 분리됨(Ready 에지 이후 다음 관찰 틱에 발신).
+    · **route(층-호스트)별**로 발신 — 소터가 층-호스트 N개면 한 Ready 전이가 최대 N건의 push
+      전송을 낳는다(각 route 1건).
+    · Ready 1→0: accept→false → 모든 route next_state=2 → 3이던 route마다 push.
+    · Ready 0→1: accept→true, 그러나 next_state=3 은 **CurFloor==그 route 층**인 route만.
+      나머지 층 route 는 2 유지(변화 없음 → push 0건일 수 있음). 즉 0→1 전이는 push 0/1/N건.
+    · push 는 Ready 외 원인(pause/resume·capacity·CurFloor 변화)에서도 나감.
+  ⇒ "그 전이로 나간 그 push" 를 **인과 토큰으로 특정할 수 없다.** 상관은 chuteNo/destId(소터
+    scope) + 시각 순서 + next_state(2=1→0쪽 / 3=0→1쪽)로만 이뤄진다. 지연 지표는 이에 맞춰 정의
+    (아래 이벤트 구조 참조). 이 사실을 계약이 명문화하며 4개 시각을 이 비인과 모델 위에서 기록한다.
 
-S3. Adjust the safety-critical observability to the new triggers (meaning preserved):
-    - Trace event 2 (EventNo=2, "TGTFLOOR_DEQUEUE"): still emitted exactly once per
-      pop (one per real piece consumed). Fire it on the new clear-edge pop; update
-      the Trigger/Detail fields to reflect the clear-edge origin (event NUMBER,
-      NAME, and one-per-piece semantics are preserved — the trace viewer keeps
-      working; only the wall-clock timing shifts earlier to sort-start).
-    - DetectStall (SORTER_STALL_SUSPECT WARN + operation_log, once-per-episode,
-      re-arming, observe-only, no corrective action): re-derive its condition for
-      the new model. Under the new write model a non-empty queue no longer sits at
-      TgtFloor==0 (WCS writes head immediately), so the OLD condition
-      (idle ∧ TgtFloor==0 ∧ head present) can no longer detect a genuine
-      under-pop stall. The re-derived condition MUST still fire once-per-episode
-      for a real under-pop stall (head present but not being consumed — e.g. AGV
-      abandonment: aligned/held at head, no deposit, head unchanged for
-      StallSuspectTicks) and MUST keep ZERO false positives on the legitimate
-      states already covered (empty queue, normal cycling, offline, paused,
-      detector disabled). Keep it observe-only (no writes/pops/re-dispatch — that
-      is Sub-Sprint D scope) and off the pure core.
+[조사 D] 전송 파이프 EventNo-무관성 — **확정**:
+  · SignalR relay(MonitorRelayService.OnTraceEntry → Broadcast(GroupTrace,"Trace",rec)) EventNo 무관.
+  · REST 백로그(TraceLogService.Read / GET /trace) EventNo 필터 무관(TryParse+필터 제너릭).
+  · 프론트 전송 타입 TraceRecord/TraceEvent = `eventNo:number`(제너릭). api.trace(eventNo?) 제너릭.
+  ⇒ 신규 EventNo 는 전송 계층 무변경으로 파일·SignalR·REST 백로그에 자동 흐른다.
 
-S4. Pure decision function (Wcs.Core.DepositDecider) — see Open Question 4:
-    The write-decision must yield "write = head" for TgtFloor==0 in ALL non-hold,
-    online cases, INCLUDING the aligned-idle case (Ready==1 && CurFloor==head &&
-    TgtFloor==0) and the busy case (Ready==0 && TgtFloor==0). Recommended: keep the
-    logic in the pure function (rule #8). HARD CONSTRAINT: the push-facing outputs
-    consumed by DestinationStatusService.ComputeSorter and DestinationStatusPusher
-    — namely DepositDecision.Ready and DepositDecision.Reason — MUST remain
-    byte-identical (those callers pass floor=snap.CurFloor and read ONLY .Ready /
-    .Reason; only .WriteTgtFloor / .TgtFloorValue may change). Enumerate and update
-    the unit tests that encode the superseded "aligned = no write" contract (see
-    Completion Conditions test list).
+[조사 E] 프론트 /trace 뷰어 신규 이벤트 렌더 — **부분 자동/부분 하드코딩**:
+  · 테이블 행: TraceLine 이 `EVENT_META[eventNo] ?? {label: row.event, tone:'neutral'}` 폴백을
+    가져 **미등록 EventNo 도 자동 렌더**(서버 event 명·중립색·제너릭 컬럼). "전체" 필터에서 보임.
+  · 그러나 EVENT_META(1~6 하드코딩)·필터 드롭다운(`[1,2,3,4,5,6]` 하드코딩)·"6개 이벤트" 카피는
+    신규 이벤트를 반영 못 함 → 라벨/색·드롭다운 필터 항목·문구 갱신이 필요(아래 Scope).
 
-S5. Out of scope / no change (confirm untouched):
-    - PlcGateway.cs: the clear is observed via existing poll snapshots; the
-      SetTgtFloor fresh-read guard stays. No gateway change.
-    - RcsController IF-05 enqueue + trace event 1: unchanged (still enqueues each
-      sorter piece's floor in FIFO order).
-    - PendingFloorQueueRestorer: unchanged. VERIFY the restart interplay: after
-      StartupClear (D6=0) + restore, the observe loop's first observation
-      establishes the TgtFloor baseline at 0 and does NOT spuriously pop; it then
-      writes the restored head normally.
-    - SorterGatewayRegistry / SorterBundleHandle: no new hook — the write path uses
-      the existing EnqueueSetTgtFloorAsync. Sim3ds: unchanged.
-    - Absolutely NO WCS write of 0 to TgtFloor (rule #3). NO overwrite of non-zero
-      TgtFloor (rule #2).
+[조사 F] 기본화면 uiMode 분기 — **단일 소스 확인**:
+  · frontend/src/lib/uiMode.ts `homePathFor(mode)`: b2b→'/data-generator', b2c→'/b2c/test-data'.
+    기본 mode='b2c'. App.tsx ModeHome(`/`·`*`)·Layout.ModeToggle 가 이 함수를 공용.
+  · /trace 는 **b2c NAV 세트에만** 존재(Layout NAV_SETS.b2c). b2b NAV 엔 없음.
+  ⇒ 권장: homePathFor('b2c') → '/trace' 로 변경, b2b 는 '/data-generator' 유지(아래 Open Q4).
 
-──────────────────────────────────────────────────────────────────────────────
-Open Questions — ✅ 사용자 게이트 확정(2026-07-29): OQ1=다음 피스 층(pop 후 새 head) 기입 ·
-OQ2=빈 큐 시 TgtFloor 0 유지(디폴트층 park) · OQ3=PLC는 분류 시작 때만 클리어(도착 시 유지, 1→0 에지=
-분류시작 신호로 안전). 아래 권장 기본값 그대로 확정 — Generator는 이 확정대로 구현.
-(원문 이력)
-──────────────────────────────────────────────────────────────────────────────
-OQ1 ★ WHICH floor to write at the clear moment.
-    Queue semantics (verified from code): IF-05 enqueues each sorter piece's floor
-    in FIFO order; the head is the oldest not-yet-consumed piece; at a clear, the
-    piece being sorted == head (the sorter was aligned to head to receive it, so
-    head == CurFloor at clear).
-    RESOLUTION (recommended default): pop the head, then write the NEW head (the
-    NEXT piece's floor). Rationale traced against [A],[1,2],[1,1,2]:
-      • [1,1,2] @floor1: A1 clear → pop first 1 → new head 1 → write 1 (hold at 1
-        for A2). A2 clear → pop second 1 → new head 2 → write 2 (move to 2 after A2
-        sort — write-during-busy). B clear → pop 2 → empty. Matches K3 intent.
-      • Writing the POPPED head instead (= CurFloor) would only be correct for
-        same-floor-consecutive and DEADLOCKS on a floor change: the held non-zero
-        TgtFloor blocks the next differently-floored write (rule #2) and no further
-        clear arrives to release it. So "write new head" is the only FIFO-correct
-        choice, and it IS the vendor-confirmed write-during-busy (commit the sorter
-        to the next floor while the current piece finishes).
-    CONFIRM with user: that "그 층" means the post-pop new head (next piece), not
-    the popped floor. (Physical analysis is decisive; confirmation is a safety
-    checkpoint given the ambiguous phrasing.)
+═══════════════════════════════════════════════════════════════════════════════
+■ ★ 설계 논점 & Open Questions
+═══════════════════════════════════════════════════════════════════════════════
+✅ 사용자 게이트 확정(2026-07-30) — 아래 OQ 권장과 다른 부분은 **이 블록이 정본**:
+  · OQ1 = **신규 EventNo 4개(7·8·9·10)**, 각 시각 1개(사용자 선택 — 권장안 A가 아닌 대안 B):
+      7  = READY_1TO0           : Ready 워드 **1→0** 전이 관측   (Detail: reg,old=1,new=0,curFloor)
+      8  = CHUTESTATE_PUSH_BUSY : IF-08 push 전송 중 **next_state==2**(busy/not-ready) (Detail: next_state=2,result,attempts,host)
+      9  = READY_0TO1           : Ready 워드 **0→1** 전이 관측   (Detail: reg,old=0,new=1,curFloor)
+      10 = CHUTESTATE_PUSH_READY: IF-08 push 전송 중 **next_state==3**(ready)          (Detail: next_state=3,result,attempts,host)
+    4개 시각 매핑: (a)=7 · (b)=8 · (c)=9 · (d)=10. Ready 방향은 EventNo(7 vs 9)로, push 방향은
+    EventNo(8 vs 10)=next_state(2 vs 3)로 구분. (아래 OQ1 권장안 A[7·8 2개]는 채택 안 함 — 참고 이력.)
+  · OQ2 = **모든 IF-08 PUT 전송 계측**(전송 지점 단일 훅). 각 전송을 next_state로 8(==2)/10(==3)에
+    분기. 소터 chuteNo로 식별. Ready 에지와 인과 링크 없음(조사 C) — chuteNo+시각+next_state 상관.
+  · OQ4 = **B2C만 /trace**. homePathFor('b2c')→'/trace', b2b→'/data-generator' 유지.
+  · OQ3/OQ5 = 확정(소터 scope·pId/cSeq/cellNo=null; 뷰어 EVENT_META/필터/문구 갱신).
 
-OQ2 Empty queue at the clear moment (the just-sorted piece was the last).
-    RESOLUTION (recommended default): write NOTHING — leave TgtFloor==0. Rationale:
-    (a) no pending work → no round-trip waste, so drift-to-default is harmless
-    "park at default"; (b) it PRESERVES the "TgtFloor==0 → write head" trigger for
-    the next enqueued piece. The alternative "write CurFloor to hold" would set
-    TgtFloor non-zero and then DEADLOCK a subsequent differently-floored piece
-    (rule #2 forbids overwriting non-zero; rule #3 forbids WCS writing 0). K2
-    already asserts `TgtFloor:0, Ready:true` between sequential pieces — this
-    default keeps K2 green.
-    CONFIRM with user: (i) that the "default (middle) floor" is a SAFE park and
-    drift-on-empty-queue is operationally acceptable; (ii) if NOT acceptable,
-    holding position requires relaxing rule #2 or introducing an operator/WCS
-    re-target path — a larger design change that must escalate to re-planning.
+(원문 OQ 이력 — 참고용, 정본은 위 확정 블록)
+OQ1 — 이벤트 구조 (권장: 신규 EventNo 2개):
+  [권장안 A] 2개 신규 EventNo, 방향은 필드로:
+    · 7 = READY_TRANSITION : Ready 1→0 AND 0→1 둘 다(동일 KIND). 방향은 Detail의 old/new 로 구분
+        (이벤트 6 C_CLEAR 가 이미 old/new 를 Detail 로 담는 관례와 동형).
+        필드: ChuteNo·DestId·Floor(=관측 시점 CurFloor)·Trigger="READY_EDGE",
+        Detail={reg:"Ready", old, new, curFloor}.
+    · 8 = CHUTESTATE_PUSH_SEND : IF-08 PUT 전송 시각(전송 지점 계측). 방향은 Detail의 next_state
+        (2 vs 3)로 구분. 필드: ChuteNo·DestId·Floor(=route 층/host)·Trigger="IF08_PUSH",
+        Detail={next_state, result, attempts, host}.
+    4개 시각 매핑: (a)=7[old1new0] (b)=8[next_state2] (c)=7[old0new1] (d)=8[next_state3].
+  [근거] EventNo 는 기존 관례상 "이벤트 종류 태그"다 — 1→0 과 0→1 은 같은 KIND(방향만 다름)이므로
+    한 번호+방향필드가 정합. push 도 마찬가지(같은 전송 종류, next_state 로 방향 표현). 또한 조사 C
+    대로 push 는 전이당 0/1/N건이라 시각 4개를 EventNo 4개로 1:1 고정하는 모델이 물리적으로 성립
+    안 함 → 필드 기반이 정직. 레전드/필터도 2개만 늘어 단순.
+  [대안 B] 7/8/9/10 네 EventNo(각 시각 1개). 단점: KIND 관례 위반·레전드/필터 2배·8vs10 은 결국
+    next_state 로만 구분돼 필드 중복·0/N건 현실과 불일치.
+  ▶ 사용자 확정 요청: 권장안 A(7·8) 채택 여부. (미회신 시 A로 진행.)
 
-OQ3 Determinism of catching the clear (poll-snapshot based).
-    RESOLUTION (contract requirement, not really optional): track prevTgtFloor per
-    sorter; pop on non-zero→0 edge; baseline on first obs; re-sync on OFFLINE;
-    never pop the post-StartupClear initial 0. Missed-edge-safe by construction (0
-    persists until WCS reacts; poll samples the seconds-long window many times at
-    150ms).
-    CONFIRM with user/vendor: that the PLC clears TgtFloor→0 ONLY at sort-start and
-    at no other time (arrival keeps it) — this is the one assumption the edge
-    detector depends on. Already stated in SPEC §6 / rule #3; re-affirm because it
-    is safety-critical.
+OQ2 — Ready↔push 상관 방식 (권장: 비인과·소터 scope 상관):
+  조사 C 결론에 따라 이벤트 8은 "특정 Ready 에지가 유발한 push"를 인과로 잇지 않고 **실제 전송
+  지점에서 모든 IF-08 PUT 전송을 계측**한다(소터·슈트 공통 전송 chokepoint). 소터 push 는
+  chute_numbers=[소터 chuteNo]라 chuteNo 로 식별 가능. 지연 지표 = 뷰어/분석에서 같은 chuteNo 의
+  이벤트7(new값) → 그 직후 이벤트8(next_state 부합) 시각차. push 트랜지언트 특성(N route·0건 가능)은
+  Detail(host/next_state)로 노출.
+  ▶ 사용자 확정 요청: 이벤트 8을 (i) 모든 IF-08 전송 계측(권장·전송 지점 단일 훅) vs (ii) 소터
+    Ready-driven 전송만으로 제한. (미회신 시 (i)로 진행 — 정직·additive·최소침습.)
 
-OQ4 DepositDecider role. RESOLUTION: yes, the pure function needs the aligned-idle
-    case (Ready==1 && CurFloor==head && TgtFloor==0) to return write=head; the
-    busy case (Ready==0 && TgtFloor==0) already returns write. Push-facing .Ready /
-    .Reason stay identical (constraint S4). Test-update range is enumerated in
-    Completion Conditions. (No user decision needed — documented for transparency
-    since the user asked for the update scope.)
+OQ3 — 상관키/스코프 (확정 명시):
+  신규 이벤트 7·8 은 **소터 + chuteNo/destId(+층) scope**다. 피스 pId·cSeq·cellNo 없음
+  (PId/CSeq/CellNo=null). 기존 3~6 의 pId/cSeq 피스-상관과 다른 층/소터 scope 경계임을 명시
+  (이벤트 1·2가 이미 이 scope를 씀 — 이벤트 2는 pId=null). 뷰어 상관은 pId 대신 chuteNo 로.
 
-──────────────────────────────────────────────────────────────────────────────
-Evaluation Criteria (Backend/API weights per workflow-agents.md)
-──────────────────────────────────────────────────────────────────────────────
-1. Functionality / Data integrity (★★★): write-on-clear fires at the 1→0 edge even
-   when Ready==0 and CurFloor==head; exactly one pop per real piece (no early pop,
-   no double pop, no under-pop); FIFO order preserved; drift/round-trip eliminated;
-   all absolute rules (#1/#2/#3/#7/#8) provably intact (no direct Modbus, no
-   overwrite of non-zero TgtFloor, no WCS write of 0).
-2. Architecture / intentional design (★★★): decision stays pure (Wcs.Core); the
-   observe loop stays thin I/O + state; push-facing outputs untouched; change
-   localized to the observe loop + the pure write-decision; no new plumbing.
-3. Craft (★★): deterministic edge detection (baseline/OFFLINE re-sync, no spurious
-   pop); trace event 2 and stall detector correctly retargeted with meaning
-   preserved; no write spam (fresh-read dedup); exception isolation per sorter
-   preserved; config-driven (rule #7).
-4. Regression safety (★★): the FULL existing suite is green, with only the
-   explicitly-listed unit tests updated (and their INTENT — fire-once, FIFO,
-   no-false-positive, push readiness — preserved), plus new deterministic tests
-   for the new scenarios.
+OQ4 — 기본화면 uiMode 분기 (권장: b2c만 /trace):
+  homePathFor('b2c') → '/trace'. b2b → '/data-generator' 유지.
+  [근거] /trace 는 b2c(관제) NAV 전용 페이지다. b2b(작업 테스트 데이터 생성 도구)가 /trace 로
+    랜딩하면 (1) Layout 헤더 타이틀 매칭이 b2b NAV 에 /trace 부재로 b2b 첫 항목("데이터 생성")으로
+    폴백하는 cosmetic 불일치(todo.md 기존 항목과 동류), (2) b2b 우측 컨트롤(업무일자) 표시 등
+    의미 부정합이 생긴다. 사용자가 말한 "현재 기본화면=데이터 생성"은 기본 mode=b2c 의 랜딩
+    (/b2c/test-data)을 가리키므로, b2c 랜딩만 /trace 로 바꾸면 요구 충족.
+  ▶ 사용자 확정 요청: (i) b2c 만 /trace(권장) vs (ii) 양 모드 다 /trace vs (iii) 다른 조합.
+    (미회신 시 (i)로 진행.)
 
-──────────────────────────────────────────────────────────────────────────────
-Completion Conditions (minimum bar for Evaluator PASS)
-──────────────────────────────────────────────────────────────────────────────
-C1. `dotnet test backend/Wcs.sln` fully green (Evaluator re-runs from scratch,
-    independent of Generator's report).
-C2. Behavioral two-floor suites GREEN with NO weakening of their invariants:
-    E2EGroupK_TwoFloorReturnTests (K1 single-floor return, K2 FIFO 1-2-1
-    one-at-a-time, K3 [A,A,B] hold-until-both-classified), E2EGroupL/M
-    (host push / cold-start), TwoFloorHostRoutingTests, SorterPushOperationalTests,
-    RcsPushTests, ChuteStatePushTests. K3's [A,A,B] hold invariant is the primary
-    non-regression guard for I-1.
-C3. Updated unit tests reflect the NEW contract with intent preserved:
-    - DepositDeciderTests: Row1_Ready_AtOperationalFloor_IsReady and
-      FloorParam_F1_AtFloor1_IsReady flip WriteTgtFloor false→true (TgtFloor==0
-      aligned now writes), with .Ready still true and .Reason still None. Cases
-      with non-zero TgtFloor (C1_Row1_TgtFloorResidual_StillReady,
-      Row3/Row5/FloorParam ping-pong) stay write=false (rule #2). Audit all
-      DepositDecider.Decide call-sites in ScenarioTests for the same shift.
-    - SorterStallDetectorTests: re-target the stall condition to the new model
-      (the CC1.2/1.3 fixtures that set TgtFloor==0 + aligned head and expect a fire
-      encode the OLD condition; update them to the abandonment signature — head
-      present + held/aligned + no pop for N ticks). Preserve: once-per-episode,
-      re-arm, observe-only (D6 unchanged, no pop), zero false positives on empty /
-      cycling / offline / paused / disabled, cross-layer operation_log persistence.
-C4. New deterministic tests (observe-loop level, using FakeModbusMasterForApi so
-    timing is controllable — same harness as SorterStallDetectorTests.BuildService):
-    - write-on-clear: at a TgtFloor 1→0 edge while Ready==0, a SetTgtFloor(new head)
-      is enqueued (write-during-busy) — assert the D6 write happens during the
-      Ready==0 window.
-    - same-floor hold: with new head == CurFloor, WCS still writes that floor
-      (CurFloor==head no longer skipped) — the drift-prevention assertion.
-    - one-pop-per-clear: a single 1→0 edge pops exactly one head and emits exactly
-      one trace event 2; steady TgtFloor==0 (no new edge) does not re-pop.
-    - empty-queue: at a clear that empties the queue, no write is enqueued and
-      TgtFloor stays 0 (OQ2 default); a subsequently enqueued differently-floored
-      piece is then written on the next TgtFloor==0 observation (next-piece
-      recovery).
-    - no missed / no spurious edge: baseline-on-first-obs and OFFLINE re-sync
-      produce no spurious pop (esp. post-StartupClear initial 0).
-C5. Rule proofs in evidence: Sim/Fake timeline shows WCS writes to D6 are only
-    1/2 (never →0); no direct-Modbus write path added; no non-zero TgtFloor
-    overwrite (fresh-read skip logged when applicable).
-C6. Static checks: run the project's build/analyzers/formatter (check mode); record
-    pass/fail/not-configured in sprint-feedback.md.
+OQ5 — /trace 뷰어 신규 이벤트 렌더 범위 (확정):
+  테이블 행은 자동 렌더되나(조사 E), 신규 이벤트가 1급으로 보이려면 EVENT_META 라벨/색 추가 +
+  이벤트 필터 드롭다운 항목 추가 + "6개 이벤트" 문구 갱신이 필요 → Scope 에 포함. 백엔드 REST/
+  SignalR 전송은 제너릭이라 무변경.
 
-──────────────────────────────────────────────────────────────────────────────
-Parallel Modules: N/A (single module — the change is localized to
-SorterFloorReturnService + the pure DepositDecider write-decision + their tests;
-no boundary-clean partition exists and the pieces are causally coupled).
+═══════════════════════════════════════════════════════════════════════════════
+■ Implementation Scope (Generator 가 해야 할 것 — HOW 는 Generator 재량)
+═══════════════════════════════════════════════════════════════════════════════
+[백엔드 — 관측/로깅 전용]
+  S1. Ready 전이 이벤트(7·9) 발화: TraceWiring.Wire 안에서 `bundle.SubscribeRegisterChange`
+      로 reg=="Ready" 델타를 추가 구독 → **1→0이면 EventNo:7(READY_1TO0), 0→1이면 EventNo:9(READY_0TO1)**
+      trace.Log(TraceRecord{EventNo:7|9, ChuteNo/DestId/Floor=CurFloor, Detail={reg,old,new,curFloor}}).
+      기존 이벤트 6(C_Flag) 구독 무변경. 논블로킹(trace.Log=Channel.TryWrite)·예외 격리(폴 스레드 비차단·fail-safe).
+  S2. 슈트상태 push 전송 이벤트(8·10) 발화: **모든 IF-08 PUT 전송**을 전송 지점(ChuteStatePushClient.
+      PushAsync 의 실제 PUT, Wcs.Api 계층 내)에서 계측 → **next_state==2이면 EventNo:8(CHUTESTATE_PUSH_BUSY),
+      next_state==3이면 EventNo:10(CHUTESTATE_PUSH_READY)**. trace.Log(TraceRecord{EventNo:8|10,
+      ChuteNo=payload.chute_numbers[0], DestId(가용 시)·Floor/host, Detail={next_state, result,
+      attempts, host}}). 기존 operation_log CHUTESTATE_PUSH 유지(대체 금지). DORMANT(층호스트 미설정)
+      시 전송 없음 → 이벤트 8/10 미발화(자연스러운 no-op). 논블로킹·fail-safe(로깅 실패가 push 를 막지 않음).
+      · DestId 가 전송 지점에서 미가용하면 chuteNo 기반 best-effort(계약 허용) — HOW 는 Generator.
+      · next_state 가 2/3 외 값이면(이론상) 안전 처리(로깅 스킵 또는 일반 태그) — HOW 는 Generator.
+  S3. TraceLogService 헤더 주석/이벤트 목록(1~6 → 신규 포함)·관련 docstring 갱신(문서 정합).
+  S4. appsettings 무하드코딩 준수: 신규 이벤트는 기존 TraceLog 설정을 재사용(신규 설정 키 불요).
+      방향/next_state 는 런타임 데이터이지 설정값 아님(절대규칙 #7 무위반). 리터럴 경로/호스트 0.
 
-Evaluation Dimensions: functional only (regression-safety is folded into the
-functional re-run per C1–C5; safety-criticality raises the bar, not the dimension
-count).
+[프론트 — 뷰어 + 기본화면]
+  S5. TraceLogPage: EVENT_META 에 신규 이벤트(**7·8·9·10**) 라벨/색조 추가 + 이벤트 필터 드롭다운
+      배열에 신규 번호 4개 추가 + "6개 이벤트" 문구를 실제 개수(10)/설명으로 갱신. 기존 1~6 렌더 무변경.
+      (신규 이벤트는 chuteNo·floor·detail 컬럼으로 표현; pId/cSeq/cellNo 는 "—".)
+      권장 라벨: 7="Ready 1→0" · 8="슈트상태 push(busy)" · 9="Ready 0→1" · 10="슈트상태 push(ready)".
+  S6. 기본화면: uiMode.ts homePathFor('b2c') = '/trace'(OQ4 확정 반영). ModeHome/`/`·`*`·ModeToggle
+      단일 소스 반영. 다른 라우트·페이지 접근 무변경(회귀 0).
 
-──────────────────────────────────────────────────────────────────────────────
-Detected Project Type: Full-stack
-  (Repo signal: browser-facing entry point `frontend/index.html` + Vite/TS client
-  tree AND server-side controllers `backend/src/Wcs.Api/Controllers` with an
-  ASP.NET Core host. This sprint's SURFACE is backend-only — gateway/decision
-  timing — with a display-only consequence on the frontend TraceLogPage, where
-  trace event 2 now renders at the earlier clear-edge timing. No frontend code
-  changes.)
+[스코프 밖 — 명시 제외]
+  · PLC 쓰기·핸드셰이크·push 결정 로직·라우팅 변경 0(관측만).
+  · 동시 IF-10 직렬화·pId↔cSeq 갭(기존 알려진 한계) 미해결(스코프 밖).
+  · Ready↔push 인과 링크 신설(불가·조사 C) 0 — 소터 scope 상관만.
+  · TraceLog 전송 계층(SignalR/REST) 코드 변경 0(제너릭).
 
-──────────────────────────────────────────────────────────────────────────────
-Verification Scenarios (per-type, mandatory)
-──────────────────────────────────────────────────────────────────────────────
-=== Applicable Web/UI scenarios (frontend surface this sprint touches — display-only) ===
-- Default state — TraceLogPage (`frontend/src/pages/TraceLogPage.tsx`): navigate to
-  the trace log view; the event list renders with no console errors/pageerror; the
-  legend/columns for EventNo/Event are intact (no shape change to event 2).
-- Alternate state introduced by this sprint — event 2 timing: after driving a
-  closed-loop scenario (below), the viewer shows a TGTFLOOR_DEQUEUE (EventNo 2)
-  entry emitted at the sort-start/clear moment rather than at sort-completion;
-  event 2 still appears exactly once per consumed piece, correlated to its sorter
-  + floor. (Browser verification via Playwright MCP: navigate → run loop → screenshot
-  the trace list → READ it; capture console.log; URL from
-  frontend `.claude/ports.local.json`.)
+═══════════════════════════════════════════════════════════════════════════════
+■ 제약 (절대규칙 — 계약 명시)
+═══════════════════════════════════════════════════════════════════════════════
+  · #1 단일 쓰기 큐: 본 스프린트는 로깅 전용 — 제2 write 경로·PLC write 0. 훅은 관측만, sink 는
+    Channel.TryWrite. (해당 없음이나 명시: 신규 코드에 EnqueueSet*/WriteRegister/Modbus 호출 0.)
+  · #7 하드코딩 0: TraceLog 경로/롤링/보존·push 호스트 전부 설정값 재사용. 신규 리터럴 경로/호스트 0.
+  · #8 Wcs.Core 순수: 로깅은 Wcs.Api 계층에서만. PlcGateway/HandshakeOrchestrator/Wcs.Core/
+    ChuteStatePushClient 판정로직 무접촉(이벤트 8 계측은 Wcs.Api 소속 클라이언트 내 부수 훅).
+  · 논블로킹·fail-safe: 발화가 폴 루프·push 핫패스를 블로킹하지 않음(기존 논블로킹 sink 패턴 유지).
+    로깅/훅 예외는 격리 — 본 동작(폴·전송·응답) 무영향.
+  · 회귀 0: 기존 operation_log(REG_CHANGE(Ready) POLL_CHANGE · CHUTESTATE_PUSH API)·전역 Serilog·
+    모니터 SignalR·기존 6 트레이스 이벤트·기존 테스트 전부 무영향(additive). 기본화면 변경이 기존
+    라우팅/타 페이지 접근을 깨지 않음.
 
-=== Applicable Backend/API scenarios (the real surface — automated test code, not curl) ===
-- Endpoints touched (no signature change — behavior/timing reached through them):
-    IF-05  POST /api/v1/destination-query  (enqueues sorter piece floor — unchanged)
-    IF-09  POST /api/v1/arrival-report      (arrival record — drives the loop)
-    IF-10  POST /api/v1/deposit-report      (deposit → C_Flag → PLC sort-start →
-                                             TgtFloor clear — the trigger under test)
-    Trace read endpoint backing TraceLogPage (GET — event 2 timing surfaced)
-- Happy path:
-    IF-05 sorter piece (mapped inductionNo) → 200 {result:"OK"} + queue enqueue F.
-    IF-10 on a deposited piece at the aligned floor → 200 {result:"OK"} → handshake
-    → PLC clears TgtFloor → WCS observes 1→0 → pops head → writes new head
-    (write-during-busy) → Sim finishes sort then moves/holds → CurFloor tracks the
-    written floor. Assert: exactly one D6 write per piece, values ∈ {1,2}, never →0.
-- Relevant error / edge cases (Planner-selected — not padded):
-    • Empty-queue clear (OQ2): no D6 write, TgtFloor stays 0, next enqueued
-      differently-floored piece is served on the next TgtFloor==0 observation.
-    • Paused sorter: at a clear, NO write (DepositDecider Paused block) — still no
-      write while busy.
-    • Offline sorter: snapshot distrusted → no pop, no write, PrevReady/prevTgtFloor
-      re-synced (no spurious edge on recovery).
-    • Unmapped inductionNo (unchanged): IF-05 NG + IF05_NO_FLOOR (regression guard —
-      no behavioral change expected).
+═══════════════════════════════════════════════════════════════════════════════
+■ Evaluation Criteria (Evaluator 판정 기준 — Full-stack 4축 + 가중)
+═══════════════════════════════════════════════════════════════════════════════
+  1. Integration Quality (★★★): Ready 에지(PLC/Sim) → 이벤트7(파일 `[7]{json}` + SignalR + 뷰어 행)
+     → push 발신(fake RCS) → 이벤트8(`[8]{json}` + 뷰어) 의 층-scope 데이터 흐름이 끊김 없이 관통.
+     chuteNo 로 7↔8 상관 가능·지연 산출 가능. 전송 계층 무변경으로 자동 흐름.
+  2. Per-layer Quality (★★★): [BE] 훅이 기존 콜백 "추가 구독"만·논블로킹·fail-safe, 절대규칙
+     #1/#7/#8 코드 게이트 통과(write-queue/Modbus/리터럴 0). [FE] 신규 이벤트 라벨/필터/렌더가
+     기존 뷰어 패턴과 정합·기존 6이벤트 무회귀.
+  3. Craft (★★): 방향/결과(old/new·next_state·result)가 Detail 에 정직 기록. DORMANT·전송 실패·
+     디렉터리 부재 등 엣지에서 fail-safe(500 없음·본 동작 비차단). 문서/주석 정합(개수·목록).
+  4. Functionality (★★): 4개 시각 전부 관측·기록됨(요구 (a)~(d)). 기본화면이 /trace 로 랜딩.
+     회귀 0(operation_log 종전 카운트·전역 Serilog 트레이스 0줄·기존 테스트 GREEN).
 
-=== End-to-end data-flow scenario(s) crossing layers (HTTP ↔ in-memory queue ↔ Modbus
-    gateway ↔ real Sim3ds ↔ DB/trace) ===
-- Write-on-clear / no round-trip: IF-05→(align)→IF-09→IF-10→PLC sort-start clears
-  TgtFloor→WCS writes the (new head or same head) floor DURING Ready==0→Sim honors
-  the write after the sort→CurFloor lands on the target with NO intermediate write
-  of 0 and NO drift-then-return. (Drift-prevention is asserted at the WCS write
-  timing: a D6 write is emitted at the clear while Ready==0, including when
-  CurFloor==head — since the current Sim models TgtFloor==0 as "stay", the WCS-side
-  write-timing assertion is the definitive drift-prevention proof.)
-- [A,A,B] multi-AGV hold (K3, primary I-1 guard): enqueue [1,1,2] at floor 1; after
-  A1's sort the sorter HOLDS floor 1 and the queue is [1,2] (exactly one pop, no
-  D6→2 yet); only after A2's sort does the sorter move to floor 2; then B empties
-  the queue. Proves the new clear-edge pop does not reintroduce early-pop.
-- Empty-queue park + next-piece recovery: a single piece is deposited/sorted, queue
-  empties, TgtFloor stays 0; a later differently-floored IF-05 is then written and
-  served — proving the empty-queue default (OQ2) does not deadlock the next piece.
+═══════════════════════════════════════════════════════════════════════════════
+■ Completion Conditions (PASS 최소 조건)
+═══════════════════════════════════════════════════════════════════════════════
+  C1. 격리 라이브 스택(실 Sim + Sqlite scratch + API --Urls 오버라이드 + --TraceLog:Directory=
+      scratch + fake RCS 층호스트 설정)에서 소터 Ready 1→0·0→1 을 실제로 태워 전용 파일에
+      `[7] {json}`(old/new 정확)·`[8] {json}`(next_state 정확)이 raw 로 확인됨. 기존 1~6 무영향.
+  C2. GET /trace 가 eventNo=7·8 필터로 신규 레코드 반환(camelCase TraceRecord 형상 불변). 디렉터리
+      부재 시 [] (200). 백로그·SignalR 무변경 자동 흐름 확인.
+  C3. 회귀 3축 동시: (i) 전용 파일엔 신규 포함 이벤트만·전역 logs/wcs-*.log 에 트레이스 라인 0,
+      (ii) operation_log REG_CHANGE(Ready)·CHUTESTATE_PUSH 종전대로 기록(대체 아님),
+      (iii) 기존 테스트 전량 GREEN(신규분 산술 일치·회귀 0).
+  C4. 프론트: 기본 URL('/') 진입이 /trace 로 랜딩(b2c). 뷰어에서 신규 이벤트가 라벨/색으로 표시되고
+      이벤트 필터 드롭다운으로 선택 가능. 기존 6이벤트·타 페이지·b2b 랜딩(/data-generator) 무회귀.
+      브라우저 콘솔 pageerror 0·React dev-warning 0.
+  C5. 절대규칙 코드 게이트: 신규 코드 경로에 write-queue/PLC-write/리터럴경로/리터럴호스트 0,
+      Wcs.Core/PlcGateway/HandshakeOrchestrator/ChuteStatePushClient 판정로직 zero-diff, 논블로킹
+      (Channel.TryWrite + 예외격리) 확인. lint/tsc/build/format exit 0.
 
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 8
-  (Web/UI: default-state TraceLogPage, event-2-timing alternate state; Backend/API:
-  endpoints-touched, happy-path, error-edge-cases; End-to-end: write-on-clear-no-roundtrip,
-  AAB-hold, empty-queue-recovery). All slots filled: yes.
+═══════════════════════════════════════════════════════════════════════════════
+■ Parallel Modules (Generator fan-out)
+═══════════════════════════════════════════════════════════════════════════════
+  N/A (단일 응집 additive 변경). 기본 1/1/1 유지.
+
+■ Evaluation Dimensions (Evaluator expert pool)
+  functional only. (보안/성능 민감 신규 표면 없음 — 논블로킹은 functional 게이트로 흡수.)
+
+═══════════════════════════════════════════════════════════════════════════════
+- Detected Project Type: Full-stack
+  (신호: frontend/src 브라우저 진입 SPA(React Router) + backend/src/Wcs.Api 서버측 컨트롤러·
+   호스트가 동일 저장소에 공존 — Full-stack.)
+
+═══════════════════════════════════════════════════════════════════════════════
+■ Verification Scenarios (Full-stack — mandatory)
+═══════════════════════════════════════════════════════════════════════════════
+=== Applicable Web/UI scenarios (프론트 surface = TraceLogPage · uiMode/App 라우팅) ===
+  U1 [기본 상태/기본 라우트] '/' 진입(기본 mode=b2c) → /trace 로 redirect·랜딩(헤더 "추적 로그").
+     b2b 토글 후 랜딩 = /data-generator(불변). 스크린샷으로 확인.
+  U2 [기본 상태/뷰어 렌더] /trace 에 기존 1~6 + 신규 7·8 행이 렌더 — 신규 행이 라벨(예: "Ready 전이",
+     "슈트상태 push")·색조로 표시, chuteNo/floor/detail 컬럼 채워지고 pId/cSeq/cellNo="—".
+  U3 [대체 상태/필터 상호작용] 이벤트 드롭다운에 7·8 항목 존재 → 7 선택 시 Ready 전이 행만, 8 선택
+     시 push 전송 행만 필터. chuteNo 로 한 소터 흐름 좁혀 7→8 시각차 확인(navigate→select→assert).
+  U4 [빈/에러 상태] 로그 없을 때 "표시할 추적 로그가 없습니다" + 연결 배지 표시. 백엔드 일시 중단 시
+     graceful(연결 끊김 배지·auto-retry) — pageerror 0(의도적 5xx 는 예외 명시).
+  U5 [다크모드] N/A — 앱에 다크모드 토글/`.dark`/prefers-color-scheme 없음(단일 테마·CSS 토큰).
+
+=== Applicable Backend/API scenarios (엔드포인트: GET /trace — 기존, 신규 EventNo 반영) ===
+  B1 [엔드포인트·happy] GET /trace?eventNo=7 / ?eventNo=8 → 신규 레코드 배열(camelCase TraceRecord
+     형상 불변: eventNo/event/at/pId/cSeq/chuteNo/destId/cellNo/floor/detail). 필터 없는 GET /trace
+     는 기존+신규 혼재(시계열 오름차순).
+  B2 [파일 sink] 라이브 태운 뒤 전용 파일에 `[7] {…"old":1,"new":0…}`·`[8] {…"next_state":2…}` raw
+     확인 + 전역 Serilog 파일에 트레이스 라인 0(격리). 기존 1~6 형상 불변.
+  B3 [operation_log additive] REG_CHANGE(Ready) POLL_CHANGE 행 + CHUTESTATE_PUSH API 행이 종전대로
+     기록됨(트레이스가 대체하지 않음 — 카운트 병치 확인).
+  B4 [에러/DORMANT] 층호스트 미설정(DORMANT) → PUT 전송 0 → 이벤트 8 미발화(no-op). TraceLog
+     디렉터리 부재 → GET /trace = [] (200, 500 없음). 로깅 실패가 push/폴 비차단(fail-safe).
+
+=== End-to-end data-flow scenario (2+ 계층 관통) ===
+  E1 [Ready 1→0 → push=2 관통] 실 Sim 으로 소터 Ready 1→0 유도 → (PLC 폴)이벤트7[old1new0] 파일
+     +SignalR 도달 → (fake RCS 층호스트 설정)관찰루프가 accept=false 산출 → PushAsync PUT → 이벤트8
+     [next_state2] 파일+뷰어 도달. 같은 chuteNo 로 7→8 페어링·지연(Δt) 산출 가능함을 실증.
+  E2 [Ready 0→1 → push=3 관통] Ready 0→1(+CurFloor 해당 층) → 이벤트7[old0new1] → 그 route push
+     next_state=3 → 이벤트8[next_state3]. (조사 C: 해당 층 route 만 3, 타 층 route 는 미전이 가능 —
+     0/1/N건 특성이 detail(host/next_state)로 관측됨을 확인.)
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Web/UI, Backend/API, end-to-end). All slots filled: yes.

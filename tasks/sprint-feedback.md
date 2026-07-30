@@ -1,58 +1,78 @@
-# Sprint Feedback — S-TWO-FLOOR-WRITE-ON-CLEAR
+# Sprint Feedback — S-TRACE-READY-PUSH-AND-DEFAULT
 
-(Evaluator가 PASS/FAIL 및 APPROVED를 여기에 기록)
+(Evaluator가 PASS/FAIL·APPROVED 기록)
 
-════════════════════════════════════════════════════════════════════════════
-## Evaluation — 2026-07-29 (Evaluator, fresh self-run) — **APPROVED**
-════════════════════════════════════════════════════════════════════════════
+---
 
-Branch feat/two-floor-write-on-clear · HEAD 28b213f(develop merge base) · 구현 전량 working tree 미커밋(Generator no-commit 정합). 무접촉 경계 diff 0 확인: Wcs.Sim3ds / Wcs.PlcGateway / RcsController / PendingFloorQueueRestorer / SorterGatewayRegistry.
+## APPROVED (Evaluator, 2026-07-30)
 
-SAFETY-CRITICAL — bar HIGH. 열거된 위험(오층 기입·early/double/under pop)을 전수 실증 부재로 확인. 모든 Completion Condition C1–C6 + Verification Scenario를 fresh evidence로 통과.
+브랜치 feat/trace-ready-push-default · HEAD=8c5d8c4(develop 기준, 스프린트 변경 전부 uncommitted — 정상).
+Ground truth 확인: 변경 파일 = 코드 6 + 신규 테스트 1(TraceReadyPushTests) + 계약/로그/피드백 3. no-touch 존
+(Wcs.Core·Wcs.PlcGateway·Wcs.Sim3ds·HandshakeOrchestrator) `git diff --stat` 공란 = zero-diff 확인.
 
-### C1 — `dotnet test backend/Wcs.sln` 전량 GREEN (자체 재실행)
-- **493 passed / 0 failed / 0 skipped** (1m28s, 독립 재실행 — Generator 보고 불신 원칙). raw:
-  `통과!  - 실패: 0, 통과: 493, 건너뜀: 0, 전체: 493 - Wcs.Tests.dll (net10.0)`
-- baseline 회귀 0 **구조적 확인**: 수정 3개 테스트파일 Fact/Theory 수가 HEAD==working tree로 동일(DepositDeciderTests 17·SorterStallDetectorTests 8·E2EGroupAB 12) → 삭제/은닉 0. 신규 WriteOnClearTests 5 [Fact]만 추가. 실 baseline 488 + 신규 5 = 493(Generator "487+6" 라벨은 산술 오기 — 순증 493/0·삭제 0이라 무해).
+전 조건(C1~C5) 및 전 시나리오(U1~U5·B1~B4·E1~E2) fresh evidence로 통과. APPROVED.
 
-### C2 — 양층 거동 스위트 GREEN·불변식 무약화
-- **E2EGroupK 파일 HEAD 대비 diff 0**(K3 [A,A,B] I-1 가드가 새 구현에 무수정 GREEN = 최강 non-regression 증거).
-- 표적 스위트 3회 반복: WriteOnClear·E2EGroupK·SorterStallDetector·E2EGroupAB·TwoFloorHostRouting·TwoFloorWriteGateI2 = **39/39 ×3 GREEN·flake 0**.
-- K3 단언 실체(무약화): enqueue 후 큐 [1,1,2] 유지(조기 pop 0) → A1 분류 시작 후 정확히 [1,2]·`DoesNotContain "D6...→2"`(1층 hold, 조기 이동 0) → A2 후에야 2층 이동 → `DoesNotContain "D6...→0"`(규칙#3). K1/K2/L/M/push군 전부 무변경·GREEN.
+### 1. 빌드·정적·테스트 (자체 재실행)
+- **빌드**: `dotnet build backend/Wcs.sln` → 오류 0 / 경고 10(전부 선재 NU1903 SQLitePCLRaw). 신규 경고 0. SDK 10.0.301(net10.0 정합).
+- **프론트**: `eslint .` exit 0 · `tsc --noEmit` exit 0 · `vite build` exit 0(선재 chunk>500kB 경고만, wwwroot gitignored).
+- **전체 테스트 `dotnet test backend/Wcs.sln`**: **총 504**(= baseline 493 + 신규 11 — 생성자 주장과 산술 일치).
+  - run#1: 502통과/2실패, run#2: 503통과/1실패 — 실패 세트가 매 run 다름(간헐).
+  - **실패는 전부 RTU fake-serial 부하 flake — 회귀 아님**(§근거 아래). 트레이스 관련 테스트(N1·N2·N3·TraceReadyPush)는 두 run 전부 GREEN.
+- **신규 11 결정성**: TraceReadyPushTests(10) + N3(1) 격리 **3/3 반복 전부 GREEN**(각 ~3s).
 
-### C3 — 갱신 테스트 의도 보존(약화 아님)
-- DepositDeciderTests Row1·FloorParam_F1: `WriteTgtFloor false→true` + `TgtFloorValue==F` 단언 추가, **.Ready/.Reason(true/None) 단언 유지**(푸시 계약). 비영-TgtFloor 케이스(C1 residual·Row3/5·핑퐁) write=false 유지.
-- SorterStallDetectorTests: 재무장을 **Ready 토글**로(TgtFloor 토글은 클리어 에지 pop 유발하므로 배제 — 올바른 선택). 관측 전용 단언 `master.GetTgtFloor()==1`(감지기가 S1 정렬값 미변경)로 적응(구 `==0`과 동등 강도의 "무 side-effect"). once-per-episode·2에피소드·큐 불변 유지.
-- E2EGroupAB.A3: "D6 0건"→"same-floor hold D6=2 정확 1건(stableCount6)·`DoesNotContain "이동 시작"`·CurFloor 2 유지" — 의도(스퓨리어스 재정렬 이동 0) 보존이며 더 구체적.
-- ScenarioTests의 DepositDecider.Decide 콜사이트 전수 감사: S2(NotAligned)·S3(Busy)·S4/S9(핑퐁) — 전부 이 스프린트 무영향 케이스, 갱신 누락 0.
+#### RTU 실패 flake 귀속(회귀 아님 — 근거)
+실패 테스트 = `RtuTransportTests.VT2_...`(WaitUntil 2000ms: R_Flag=0 after ClearR) · `Sim3dsRtuTests.B1_...`(WaitUntil 3000ms: GW Online). 판정:
+1. RTU/Sim/PlcGateway 코드 **zero-diff** — 본 스프린트는 Wcs.Api 트레이스 로깅 + 프론트만 변경. RTU fake-serial 핸드셰이크 경로 무접촉.
+2. **격리 3/3 GREEN**(17 RTU 테스트 전부 sub-500ms) — 부하 없으면 여유롭게 통과.
+3. **간헐성**: full run 간 실패 세트가 2건→1건으로 달라짐(B1은 run#2에서 회복). 결정적 회귀라면 매 run 동일 실패.
+4. 두 RTU 클래스 모두 `[Collection]` 부재 → xUnit 기본 병렬로 무거운 실-Sim E2E와 동시 실행 → 타이트한 2s/3s WaitUntil이 CPU 경합에 걸림(구조적 부하 flake). 실패 모드=타임아웃(부하)이지 단언 불일치(로직) 아님.
+5. 추가 트레이스 훅은 논블로킹 Channel.TryWrite(Wcs.Api) — fake-serial Online 타임아웃을 유발할 수 없음.
+   ⇒ lessons e2e-parallel-load-surfaces-integration-flakes / s9-flake 재적용. **pre-existing 부하 flake로 귀속 — APPROVED 무영향.**
 
-### C4 — 신규 결정적 테스트(격리 하니스 — 현장 무접촉)
-- WriteOnClearTests 5건 FakeModbusMasterForApi(인메모리 슬레이브·에페메랄, 실 5205/COM1/prod DB 무접촉): C4-1 write-during-busy(Ready==0 중 새 머리 D6 기입)·C4-2 same-floor hold(CurFloor==head도 기입)·C4-3/4 one-pop-per-clear+빈큐 park+다음피스 복구·C4-5a StartupClear 잔류 2→0 스퓨리어스 pop 0·C4-5b OFFLINE 재무장.
+### 2. 4-이벤트 정확 발화 (C1·B2·E1·E2 — 격리 라이브 스택)
+격리 스택(실 Sim TCP 에페메랄 + fake RCS(FakeChuteStateServer) + scratch TraceLog dir + in-memory SQLite — 실경로 D:\/현장 5205/COM1/운영DB 무접촉)으로 소터 Ready 1→0·0→1을 실제로 태워 **전용 파일 raw 인용**(evaluator throwaway 하니스, chuteNo=30 소터):
+```
+[7]  {"eventNo":7,"event":"READY_1TO0","at":"...16.643...","chuteNo":30,"destId":6,"floor":2,"pId":null,"cSeq":null,"cellNo":null,"trigger":"READY_EDGE","detail":"{\"reg\":\"Ready\",\"old\":1,\"new\":0,\"curFloor\":2}"}
+[8]  {"eventNo":8,"event":"CHUTESTATE_PUSH_BUSY","at":"...16.659...","chuteNo":30,"destId":null,"trigger":"IF08_PUSH","detail":"{\"next_state\":2,\"result\":\"OK\",\"attempts\":1,\"host\":\"http://127.0.0.1:55117\"}"}
+[9]  {"eventNo":9,"event":"READY_0TO1","at":"...16.734...","chuteNo":30,"destId":6,"floor":2,"detail":"{\"reg\":\"Ready\",\"old\":0,\"new\":1,\"curFloor\":2}"}
+[10] {"eventNo":10,"event":"CHUTESTATE_PUSH_READY","at":"...16.755...","chuteNo":30,"trigger":"IF08_PUSH","detail":"{\"next_state\":3,\"result\":\"OK\",\"attempts\":1,\"host\":\"http://127.0.0.1:55117\"}"}
+```
+- Ready 1→0 → `[7]{old:1,new:0}` · 0→1 → `[9]{old:0,new:1}`; IF-08 PUT next_state 2 → `[8]{next_state:2}` · 3 → `[10]{next_state:3}` — **정확**.
+- **같은 chuteNo=30**로 7→8(Δt 16ms)·9→10(Δt 21ms) 시각차 산출 가능(비인과 상관 — 계약 조사 C 정합).
+- 7·9 소터 scope: pId/cSeq/cellNo=null, chuteNo/destId 세팅, floor=curFloor. 8·10: chuteNo=payload[0], destId=null(best-effort), detail={next_state,result,attempts,host}.
+- N3 라이브 E2E(실 Sim SetReady + 실 PushAsync PUT→fake RCS)도 동일 4-이벤트를 REST(GET /api/monitor/trace)로 관통 확인 + 파일 raw `[7]/[8]/[9]/[10]` 태그 단언 GREEN.
 
-### C5 — 절대규칙 라이브 증명 (격리 스택 실구동)
-- env override(Provider=Sqlite·scratch DB·TCP Sim 1512·seed·Urls 5215) 격리 기동 → IF-05(induction1→floor1)→IF-09→IF-10 폐루프. 트레이스 REST(GET /api/monitor/trace) 실응답:
-  `{"eventNo":2,"event":"TGTFLOOR_DEQUEUE","trigger":"SORT_START_CLEAR","chuteNo":30,"floor":1,"detail":"{\"curFloor\":1,\"remainingDepth\":0}"}` — 분류 시작 시각(event4/5 셀배정과 동초)에 피스당 정확히 1건.
-- api.log D6 타임라인: `[쓰기 큐] SetTgtFloor → D6=1`(write-on-clear same-floor hold) 1건뿐 · 큐 빔(remainingDepth=0) 후 추가 쓰기 0(OQ2 park) · 유일 D6=0은 `[쓰기 큐] StartupClear`(콜드스타트, 규칙#3 허용 예외). **정상운영 WCS 0 미기입(#3) 라이브 실증**. 전 기입 단일 쓰기 큐 경유(#1)·직접 Modbus 0. Models.cs 변경은 WriteTgtFloor/TgtFloorValue에만 additive·.Ready/.Reason byte-identical(#8). 주기·임계 리터럴 무변경(#7).
-- arm-on-first-TgtFloor==0 재량 결정 VERIFIED: StartupClear 잔류 2→0을 pop 에지로 오인 안 함(C4-5a·라이브 event2 0·복원 머리 보존) & 진짜 클리어는 포착(K3·라이브 loop). 계약의 baseline-on-first-obs보다 안전(over-pop 원천 차단).
+### 3. additive / 회귀 0 (C3)
+- **전용 파일**: 모든 줄이 `[N] {json}` 형식(비-태그 줄 0). 
+- **전역 격리**: 리포 내 `logs/wcs-*.log` 전수 grep `^\[(7|8|9|10)\] {"eventNo"` = **0건** — 트레이스는 전용 파일에만, 전역 Serilog 무유입.
+- **operation_log additive**: N3가 `OperationLogs(API·CHUTESTATE_PUSH)` 존재 단언 GREEN, N1이 HANDSHAKE 존재 단언 GREEN — 트레이스가 대체 아님. REG_CHANGE(Ready) 발화 경로(PlcGateway) zero-diff로 보존.
+- **DORMANT**: baseUrl null → PUT 0 → 이벤트 8/10 미발화(TraceReadyPushTests.Push_Dormant 결정적 + 라이브 백엔드 FloorHosts {} + BaseUrl null에서 이벤트 8/10 자연 무발화).
+- **디렉터리/빈 결과**: GET /trace 빈 결과 → HTTP 200 `[]`(500 없음). eventNo=99 / pId=99999 각각 200·`[]` 확인.
+- 기존 6 이벤트·GET /trace camelCase 형상 불변(B1: 필드 eventNo/event/at/pId/cSeq/chuteNo/destId/cellNo/floor/inductionNo/trigger/detail).
 
-### C6 — 정적 검사
-- `dotnet build`: 오류 0 · 경고 13 전부 선재(NU1903×10 SQLitePCLRaw advisory·CS8604 B2cFacilityService·xUnit2013×2). **변경 파일 신규 경고 0**. 포맷터 backend 미구성(not-configured).
+### 4. 프론트 (Playwright 헤드리스 — :5290 dev, proxy→:5215)
+- **U1**: fresh localStorage(기본 b2c)에서 `/` → **/trace 랜딩**, h1="추적 로그". B2B 토글 클릭 → `/data-generator`(b2b nav 세트, 추적 로그 항목 없음 — 정상). 
+- **U2·C4**: /trace에 1~6 + 신규 7·8·9·10 전부 렌더. 필터 드롭다운 11항목(전체+1~10, 라벨 7="Ready 1→0"·8="슈트상태 push(busy)"·9="Ready 0→1"·10="슈트상태 push(ready)"). 신규 이벤트 pId/cSeq/cellNo="—", chuteNo/floor/detail 채움. 배지 색조 구분(스크린샷 확인). 기존 1~6 무변경. → screenshots/S-TRACE-READY-PUSH-AND-DEFAULT_20260730-140000/01-trace-landing.png
+- **U3**: 드롭다운 event 7 선택 → 정확히 1행(Ready 1→0)만.
+- **U4**: 무매칭 필터(pId=99999) → 0행 + "표시할 추적 로그가 없습니다".
+- **U5**: N/A(다크모드 없음 — 계약 명시).
+- **콘솔(BLOCKING)**: 내 세션(:5290) pageerror **0** · React dev-warning **0**(React DevTools INFO 라인만). 콘솔 파일의 192 [ERROR]/48 hub-negotiate-500은 **전부 foreign :5173 세션**(공유 프로필 잔재 — 내 포트 5290 참조 0건, 5173 참조 384건). lessons foreign-buffer 재적용 — 앱 결함 아님.
 
-### Verification Scenarios
-- Web/UI 기본상태: TraceLogPage(/trace) 렌더·9컬럼·6이벤트 레전드 정합·SignalR "실시간 연결됨". 콘솔(세션격리 all:false) **0 errors / 0 warnings / 0 pageerror**(all:true 버퍼의 5290/5190·2026-07-28 에러는 선행 브라우저 세션 stale — 내 5173→5215 세션 무관).
-- Web/UI event-2 timing: event2 "TgtFloor 디큐" 1행(chuteNo30·floor1)·분류 시작 타이밍 렌더. 스크린샷 evidence 저장(S-TWO-FLOOR-WRITE-ON-CLEAR_tracelog_event2.png).
-- Backend happy/empty-queue/AAB: 상기 라이브 loop + K3 + C4로 전수 실증.
-- 두 선재 flake(E2EGroupN.N1·RtuTransportTests.VT4·둘 다 무접촉 코드) 격리 각 3/3 GREEN·내 full run 미발현 → 선재 환경 flake로 귀속(회귀 아님).
+### 5. 절대규칙 코드 게이트 (C5)
+- **#1/#7**: 신규 코드(ChuteStatePushClient·TraceWiring) grep — EnqueueSet*/WriteRegister/Modbus/write-queue/리터럴 경로(D:\)/리터럴 호스트(http://)·COM/1502/5205 **0건**. host=baseUrl 파라미터, TraceLog dir=옵션값, next_state/result=런타임 데이터.
+- **#8**: ChuteStatePushClient diff = 부수 훅만(const 2·optional 필드+생성자 param·sentAt anchor·EmitPushTrace 2 call·신규 메서드) — 성공/재시도/백오프/URL 판정로직 **zero-diff**. Wcs.Core/PlcGateway/HandshakeOrchestrator/Sim3ds zero-diff. 로깅은 Wcs.Api 계층.
+- **논블로킹·fail-safe**: trace.Log=Channel.TryWrite, Ready 훅·EmitPushTrace 전체 try/catch 예외 격리.
+- **DI 결선 확인**: Program.cs `AddSingleton<ITraceLogger>`(147) 등록 → `ChuteStatePushClient`(216) optional param 주입 → 실 호스트에서 이벤트 8/10 실제 발화(테스트 한정 아님).
 
-### Findings
-- **MINOR 1(비차단·todo.md 등재)**: `SorterFloorReturnService.FireStallWarning` Serilog WARN 문자열이 구 스톨 조건("유휴·TgtFloor=0·머리 불변")을 기술 — 재조정된 abandonment 발화 상태에선 정렬(CurFloor==머리)·WCS write-on-clear로 TgtFloor=머리(비영)라 "TgtFloor=0"이 실제와 모순, "정렬" 절 누락. 구조화 operation_log detail은 실제 snap.TgtFloor 정확 기록·관측 전용(오분류/pop/쓰기 영향 0). fail-loud 정직성 차원 문구 1줄 정정 권고.
-- **정보성 nit**: Generator baseline 산술 라벨 "487+6"은 실제 488+5(무해 — 순증 493/0·삭제 0).
+### 6. N1 완화 정당성(주 관심사) 검토
+N1 변경 = `SequenceEqual({1..6})` → `IsSupersetOf({1..6})` + `Assert.All(1..6, Contains)`. **회귀 은폐 아님**: additive 이벤트 7~10이 같은 분류 흐름에 정당하게 공존(Ready 토글 + 수용상태 push)하므로 exact-set은 필연 실패. 이벤트 1~6의 발화·pId 전파·cSeq 조인·cellNo/chuteNo 상관·operation_log additive 단언은 전부 **불변 유지**. 계약 정합.
 
-### 판정: **APPROVED** — C1–C6 전 조건 + 전 Verification Scenario를 fresh evidence로 통과. 안전 위험(오층·early/double/under pop) 전무 실증. MINOR 1건 todo 등재(비차단). 커밋 전 오케스트레이터 코드리뷰 패스(Step 4.5) 권고.
+### Minor(비차단 — todo 등록 불요, 관측)
+- 없음(계약 스코프 정확 일치·재량 결정 모두 계약 명시 허용 범위).
 
 ## Step 4.5 코드리뷰 결과 (2026-07-30) — Ready to merge: Yes (Critical 0 · Important 0 · Minor 3)
-BLOCKING/Critical 0 → 병합 무차단. 강점 확인(리뷰어, 코드수준): arm-on-first-0 에지 상태머신이 콜드스타트 잔류(2→0 무-pop)·OFFLINE 재동기(팬텀 에지 0)·빈큐 park·같은층·다중에지 전 경로에서 정확(에지당 1 pop·FIFO·K3 홀드 불변). pop→top-of-tick snap 읽기 후 same-tick 새 head re-peek write(torn read 없음). 절대규칙 #1(EnqueueSetTgtFloorAsync만)·#2(TgtFloor==0에서만 write)·#3(0 write 경로 0)·#7·#8 코드수준 보존. push .Ready/.Reason byte-identical(소비자 DestinationStatusPusher:439·Service:277/304 확인). DetectStall abandonment 재도출 정합(정렬 게이트·observe-only·once-per-episode). OFFLINE 갭 중 클리어 미-pop은 안전방향(under-pop→stall fail-loud, over-pop 아님)·C4_5b로 테스트·DetectStall 백스톱.
-### Minor (다음 sprint — 비차단)
-- [CR-MINOR-1] = 위 MINOR 1(FireStallWarning WARN 문구 구조건 기술) — todo 등재됨.
-- [CR-MINOR-2] E2EGroupK_TwoFloorReturnTests.cs:159(및 :154 WriteLine) 주석이 구식(pop=분류사이클 Ready 1→0→1)을 기술 — 테스트 본문은 clear-edge pop 검증으로 정확·GREEN. 주석만 정정.
-- [CR-MINOR-3] write-latency 창 중복 SetTgtFloor(head) 재기입 — bounded·PlcGateway fresh-read D6!=0 dedup으로 idempotent. 결함 아님(무액션).
+BLOCKING/Critical 0 → 병합 무차단. 강점(리뷰어 코드수준): push 사이드훅이 상호배타 2지점(성공 line146 / 재시도소진 line192)에서만 발화 → 논리적 push당 0/1건, operation_log CHUTESTATE_PUSH 카디널리티와 정확 일치. 취소는 EmitPushTrace 이전 throw로 유령이벤트 0. 예외 이중격리(void try/catch + TryWrite). Floor 캡처 타이밍 정확(_latest=snap이 EmitRegisterChanges보다 먼저·PlcGateway:437<452). 판정로직 zero-diff(#8), #1/#7 grep-clean. N1 완화 = 정당한 additive(1~6 subset 보장 유지·회귀탐지력 손실 0).
+### Minor (다음 sprint — 비차단, todo 등재)
+- [CR-MINOR-1] TraceLogService.cs BuildReadyEdgeRecord docstring "순수·부수효과 0" 부정확 — 내부 DateTimeOffset.Now 읽어 시간 의존(에지→null 매핑만 결정적). 주석 완화 또는 clock 주입.
+- [CR-MINOR-2] 프론트 "10개 이벤트" 카피가 Layout.tsx:46·TraceLogPage.tsx:113 문자열 하드코딩(2곳) — 이벤트 추가 시 수동 동기 누락 위험. EVENT_FILTER_OPTIONS.length 파생 권장.
+- [CR-MINOR-3](무액션·설계) 이벤트 8/10이 소터뿐 아니라 CHUTE push까지 포함(ChuteStatePushClient=모든 IF-08 chokepoint·OQ2 확정). DestId=null·chuteNo only — 뷰어에서 소터 외 chuteNo의 8/10 혼재 유의(운영자). 결함 아님.
