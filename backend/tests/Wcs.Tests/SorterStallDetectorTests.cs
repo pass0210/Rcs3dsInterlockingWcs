@@ -16,15 +16,18 @@ using Xunit.Abstractions;
 namespace Wcs.Tests;
 
 // ════════════════════════════════════════════════════════════════════════════
-// S-TWO-FLOOR-CONTROL 서브 스프린트 C3 — 항목 1: 샘플링 스톨 fail-loud 감지기 검증.
+// 샘플링 스톨 fail-loud 감지기 검증 (write-on-clear 재조정 — S-TWO-FLOOR-WRITE-ON-CLEAR).
 //
 // SorterFloorReturnService(관측 루프)를 직접 구성(FakeModbusMasterForApi = Modbus 슬레이브 스탠드인)하고,
-// 스톨 감지기가 **실제 지속 스톨(머리 존재+유휴+TgtFloor==0+머리 불변 N틱)에서만** WARN + operation_log 를
-// 에피소드당 1회 발화하고, 정상/에지(큐 빔·정상 사이클링·오프라인·PAUSED)에서 **오탐 0**임을 실증한다.
+// 스톨 감지기가 **실제 지속 under-pop(정렬됐는데 투하 미도착 → 분류 시작 클리어 없음 → pop 정체 = AGV
+// abandonment: 유휴+정렬(CurFloor==머리)+머리 불변 N틱)에서만** WARN + operation_log 를 에피소드당 1회 발화하고,
+// 정상/에지(큐 빔·정상 사이클링·오프라인·PAUSED)에서 **오탐 0**임을 실증한다.
+//   (write-on-clear 이전 조건은 "유휴 ∧ TgtFloor==0 ∧ 머리 존재"였으나, 이제 큐 머리가 있으면 WCS가 즉시 F를
+//    기입해 TgtFloor≠0 이 되므로 그 조건은 성립 불가 → 정렬-유휴 abandonment 로 재조정.)
 //
 //   CC1.1  오탐 0: 큐 빔 · 정상 사이클(busy 전이 리셋) · 오프라인 · PAUSED 에서 발화 0.
-//   CC1.2  실제 스톨에서만 정확히 1회 발화(에피소드당 1회) + 조건 붕괴 후 재무장 → 2번째 에피소드 재발화.
-//   CC1.3  관측 전용 무부작용: 발화가 D6 쓰기·pop 을 유발하지 않음(TgtFloor 0 유지·큐 머리 불변).
+//   CC1.2  실제 under-pop 에서만 정확히 1회 발화(에피소드당 1회) + 조건 붕괴 후 재무장 → 2번째 에피소드 재발화.
+//   CC1.3  관측 전용 무부작용: 발화가 pop·추가 D6 쓰기를 유발하지 않음(TgtFloor는 S1 정렬값 유지·큐 머리 불변).
 //   CC1.2(cross-layer)  관측 루프 → IOperationLogger → OperationLogService 컨슈머 → operation_log DB 영속.
 //
 // [Collection("RealSimSerial")] — 타이밍-민감 정확-카운트 단언을 무거운 실-Sim 테스트와 직렬화
@@ -133,10 +136,13 @@ public class SorterStallDetectorTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // CC1.2 / CC1.3: 실제 스톨에서만 정확히 1회 발화 + 관측 전용 무부작용 + 재무장.
+    // CC1.2 / CC1.3: 실제 under-pop(abandonment)에서만 정확히 1회 발화 + 관측 전용 무부작용 + 재무장.
+    //   시나리오: head=1 == CurFloor=1(정렬) · Ready=1(유휴) · 투하 없음 → WCS가 F=1 정렬 기입(write-on-clear
+    //   드리프트 방지)하고 정착 → 분류 시작(TgtFloor 클리어)이 없어 pop 정체 = under-pop 스톨.
+    //   재무장은 TgtFloor 토글이 아니라 **Ready 토글**로 한다(TgtFloor 를 건드리면 클리어 에지 pop 이 유발되므로).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task Stall_HeadAlignedIdle_TgtFloor0_FiresOnce_ObserveOnly_ThenReArms()
+    public async Task Stall_HeadAlignedIdle_NoDeposit_FiresOnce_ObserveOnly_ThenReArms()
     {
         const long destId = 700; const int chuteNo = 30; const int stallTicks = 5;
         var opLog  = new RecordingOperationLogger();
@@ -149,17 +155,22 @@ public class SorterStallDetectorTests
             await WaitUntilAsync(() => polling.Latest.Online && polling.Latest.Ready
                                     && polling.Latest.CurFloor == 1 && polling.Latest.TgtFloor == 0, 3000, "스냅샷 정착");
 
-            // head=1 == CurFloor=1 → 정렬 완료(기입 안 함) → TgtFloor 0 유지 → 유휴·머리 불변 지속 = 스톨.
+            // head=1 == CurFloor=1 → WCS가 F=1 정렬 기입(write-on-clear) → 이후 투하 없음 → 분류 시작 클리어
+            //   에지 없음 → pop 없음 → 유휴·정렬·머리 불변 지속 = under-pop 스톨(AGV abandonment).
             queues.Enqueue(destId, 1);
             await svc.StartAsync(CancellationToken.None);
 
+            // S1 정렬 기입(head=1) 관측 — FakeMaster 는 정적이라 tgt==cur 무이동, D6=1 로 정착(클리어 없음).
+            await WaitUntilAsync(() => master.GetTgtFloor() == 1, 4000, "S1 정렬 기입(head=1)");
+
             // 임계 지속 → 정확히 1회 발화.
-            await WaitUntilAsync(() => opLog.CountFor("SORTER_STALL_SUSPECT") >= 1, 4000, "스톨 WARN 발화");
-            await Task.Delay(300);   // 계속 유휴 — 에피소드당 1회(지속 중 반복 발화 0).
+            await WaitUntilAsync(() => opLog.CountFor("SORTER_STALL_SUSPECT") >= 1, 4000, "under-pop WARN 발화");
+            await Task.Delay(300);   // 계속 정렬·유휴 — 에피소드당 1회(지속 중 반복 발화 0).
             Assert.Equal(1, opLog.CountFor("SORTER_STALL_SUSPECT"));
 
-            // CC1.3 관측 전용 무부작용: D6 미기입(TgtFloor 0)·큐 머리 불변(pop 0)·Compute(셀 집계) 미호출.
-            Assert.Equal(0, master.GetTgtFloor());
+            // CC1.3 관측 전용 무부작용: 스톨 감지기가 pop·추가 D6 쓰기를 유발하지 않음. TgtFloor는 S1 정렬값(=1)
+            //   그대로(감지기가 0으로 지우거나 재기입하지 않음)·큐 머리 불변(pop 0)·heavy Compute(셀 집계) 미호출.
+            Assert.Equal(1, master.GetTgtFloor());
             Assert.Equal(1, queues.Count(destId));
             Assert.Equal(0, status.ComputeCalls);
 
@@ -173,21 +184,22 @@ public class SorterStallDetectorTests
             Assert.Contains("\"headFloor\":1", e.Detail);
             Assert.Contains("\"observedOnly\":true", e.Detail);
 
-            // ── 재무장: 조건 붕괴(TgtFloor≠0) → 리셋(재발화 0) → 재확립 → 2번째 에피소드 발화 ──
-            master.SetTgtFloor(9);
-            await WaitUntilAsync(() => polling.Latest.TgtFloor == 9, 2000, "TgtFloor 9(조건 붕괴)");
+            // ── 재무장: 조건 붕괴(Ready=0 = busy) → 리셋(재발화 0) → 재확립(Ready=1) → 2번째 에피소드 발화 ──
+            //   TgtFloor 토글은 클리어 에지(pop)를 유발하므로 Ready 토글로 조건을 붕괴/재확립한다(TgtFloor=1 유지).
+            master.SetReady(false);
+            await WaitUntilAsync(() => !polling.Latest.Ready, 2000, "Ready=0(조건 붕괴 — busy)");
             await Task.Delay(200);
             Assert.Equal(1, opLog.CountFor("SORTER_STALL_SUSPECT"));   // 붕괴 중 재발화 0.
 
-            master.SetTgtFloor(0);
-            await WaitUntilAsync(() => polling.Latest.TgtFloor == 0, 2000, "TgtFloor 0(조건 재확립)");
+            master.SetReady(true);
+            await WaitUntilAsync(() => polling.Latest.Ready, 2000, "Ready=1(조건 재확립)");
             await WaitUntilAsync(() => opLog.CountFor("SORTER_STALL_SUSPECT") >= 2, 4000, "재무장 후 2번째 에피소드 발화");
             await Task.Delay(200);
             Assert.Equal(2, opLog.CountFor("SORTER_STALL_SUSPECT"));   // 새 에피소드도 1회만.
-            Assert.Equal(0, master.GetTgtFloor());                     // 여전히 무부작용.
+            Assert.Equal(1, master.GetTgtFloor());                     // 여전히 S1 정렬값(pop·추가쓰기 0).
             Assert.Equal(1, queues.Count(destId));
 
-            _out.WriteLine($"[Stall] 실제 스톨 1회 발화·관측전용(D6 0·큐 불변·Compute {status.ComputeCalls}회)·재무장 후 2번째 발화");
+            _out.WriteLine($"[Stall] under-pop(abandonment) 1회 발화·관측전용(pop 0·큐 불변·Compute {status.ComputeCalls}회)·재무장 후 2번째 발화");
         }
         finally
         {
@@ -238,11 +250,13 @@ public class SorterStallDetectorTests
             master.SetReady(true); master.SetCurFloor(1); master.SetTgtFloor(0);
             await WaitUntilAsync(() => polling.Latest.Online && polling.Latest.Ready, 3000, "스냅샷 정착");
 
-            // head=1==CurFloor 여러 개 — 사이클마다 하나씩 소비되며 머리는 계속 존재.
+            // head=1==CurFloor(정렬) 머리 존재 — WCS가 F=1 정렬 기입. Ready 토글이 반복돼도 busy 창이 스톨
+            //   카운터를 매번 리셋하므로 임계 미달(오탐 0). (FakeMaster는 TgtFloor를 클리어하지 않아 pop 없음 —
+            //   pop 유무와 무관하게 "busy 전이가 카운터를 리셋한다"는 오탐-0 불변식을 검증하는 것이 목적.)
             for (int i = 0; i < 8; i++) queues.Enqueue(destId, 1);
             await svc.StartAsync(CancellationToken.None);
 
-            // 분류 사이클(Ready 1→0→1)을 임계보다 짧은 간격으로 반복 — busy 창이 매번 카운터 리셋.
+            // 유휴/분류 전이(Ready 1↔0)를 임계보다 짧은 간격으로 반복 — busy(Ready=0) 창이 매번 카운터 리셋.
             for (int i = 0; i < 6; i++)
             {
                 master.SetReady(false);
