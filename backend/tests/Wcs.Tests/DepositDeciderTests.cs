@@ -19,14 +19,17 @@ public class DepositDeciderTests
         new(0, 0, 0, 0, CFlag: false, RFlag: false, Ready: ready,
             CurFloor: cur, TgtFloor: tgt, Online: online, At: DateTimeOffset.UtcNow);
 
-    // 행1 — Ready=1 · CurFloor==운영층 → Ready(받을 수 있음), 쓰기 없음
+    // 행1 — Ready=1 · CurFloor==운영층 · TgtFloor==0 → Ready(받을 수 있음) + write-on-clear로 F 재기입.
+    //   write-on-clear 개정(S-TWO-FLOOR-WRITE-ON-CLEAR): 정렬돼 있어도 TgtFloor==0(디폴트층 이동 명령)이면
+    //   같은 층 F를 재기입해 드리프트를 막는다. .Ready/.Reason은 불변(true/None) — WriteTgtFloor만 false→true.
     [Fact]
     public void Row1_Ready_AtOperationalFloor_IsReady()
     {
         var d = DepositDecider.Decide(Snap(ready: true, cur: OperFloor, tgt: 0), OperFloor, WcsHold.None);
-        Assert.True(d.Ready);
-        Assert.Equal(DenyReason.None, d.Reason);
-        Assert.False(d.WriteTgtFloor);
+        Assert.True(d.Ready);                       // 푸시 계약: Ready 불변(정렬 완료 = 받을 수 있음).
+        Assert.Equal(DenyReason.None, d.Reason);    // 푸시 계약: Reason 불변(None).
+        Assert.True(d.WriteTgtFloor);               // ★ write-on-clear: TgtFloor==0 정렬 상태도 F 재기입.
+        Assert.Equal(OperFloor, d.TgtFloorValue);
     }
 
     // 행2 — Ready=1 · CurFloor≠운영층 · TgtFloor==0 → NOT_ALIGNED + 운영층 정렬 기입
@@ -159,14 +162,16 @@ public class DepositDeciderTests
         Assert.Equal(1, d.TgtFloorValue);   // 상수 2가 아니라 파라미터 F=1을 기입.
     }
 
-    // F=1 · CurFloor==1 · Ready=1 → Ready(그 층에서 수용 가능), 쓰기 없음.
+    // F=1 · CurFloor==1 · Ready=1 · TgtFloor==0 → Ready(그 층 수용 가능) + write-on-clear로 F=1 재기입.
+    //   층 파라미터화에서도 write-on-clear 불변 — .Ready/.Reason 유지, WriteTgtFloor만 false→true(값=F=1).
     [Fact]
     public void FloorParam_F1_AtFloor1_IsReady()
     {
         var d = DepositDecider.Decide(Snap(ready: true, cur: 1, tgt: 0), floor: 1, WcsHold.None);
         Assert.True(d.Ready);
         Assert.Equal(DenyReason.None, d.Reason);
-        Assert.False(d.WriteTgtFloor);
+        Assert.True(d.WriteTgtFloor);            // ★ write-on-clear: 정렬(CurFloor==F=1)·TgtFloor==0도 재기입.
+        Assert.Equal(1, d.TgtFloorValue);
     }
 
     // F=1 · 핑퐁 차단 — 미정렬이지만 TgtFloor≠0(진행 중)이면 덮어쓰지 않음(F 무관 불변).

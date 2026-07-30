@@ -7,16 +7,16 @@ using Wcs.Data;
 namespace Wcs.Api;
 
 // ════════════════════════════════════════════════════════════════════════════
-// 인덕션 기반 2층 제어 (S-TWO-FLOOR-CONTROL 서브 스프린트 A) — 관심사 분리:
+// 인덕션 기반 2층 제어 (S-TWO-FLOOR-CONTROL A / write-on-clear 개정 S-TWO-FLOOR-WRITE-ON-CLEAR):
 //   ① 큐(SorterPendingFloorQueues)     = 상태(소터별 pending-floor FIFO).
-//   ② 판정(Wcs.Core.DepositDecider)     = 순수 게이트(층 F 파라미터화).
-//   ③ 관측 루프(SorterFloorReturnService) = 트리거(TgtFloor==0 관측 → 큐 머리 F 기입, 도착 시 pop).
+//   ② 판정(Wcs.Core.DepositDecider)     = 순수 게이트(층 F 파라미터화·write-on-clear).
+//   ③ 관측 루프(SorterFloorReturnService) = 트리거(TgtFloor==0 관측 → 큐 머리 F 기입, 분류 시작 클리어 시 pop).
 //
 // 절대규칙:
 //   #1 TgtFloor 기입은 소터별 단일 쓰기 큐(bundle.EnqueueSetTgtFloorAsync)로만 — 직접 Modbus 0.
-//   #2 TgtFloor 게이트(TgtFloor==0 && (CurFloor!=F||Ready==0)), 진행중(≠0)엔 미기입(핑퐁 차단).
-//   #3 WCS는 TgtFloor를 클리어하지 않는다(PLC가 분류 시작 시 클리어).
-//   #7 관측 주기는 appsettings(Wcs:SorterFloorReturn:ObserveIntervalMs).
+//   #2 TgtFloor 게이트(TgtFloor==0에서만 기입), 진행중(≠0)엔 미기입(핑퐁 차단).
+//   #3 WCS는 TgtFloor를 클리어하지 않는다(PLC가 분류 시작 시 클리어). WCS는 D6에 0을 절대 안 씀.
+//   #7 관측 주기·스톨 임계는 appsettings(Wcs:SorterFloorReturn:ObserveIntervalMs·StallSuspectTicks).
 //   #8 층 파생·게이트는 순수 함수(Wcs.Core) — 이 서비스는 I/O·상태 트리거만.
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -74,13 +74,16 @@ public sealed class SorterPendingFloorQueues
 /// 각 소터 스냅샷의 <c>TgtFloor==0</c>을 주기적으로 관측해, 소터별 pending-floor 큐 머리 층 F를
 /// DepositDecider 게이트로 판정하고 통과 시 소터별 단일 쓰기 큐(SetTgtFloor)로 기입한다.
 ///
-/// 폐루프 소비(I-1 재설계 2026-07-23 — 도착-pop → 분류사이클-pop):
-///   · pop 단위 = **분류 사이클 완료**(Ready 1→0→1, 그 피스가 실제 분류됨)마다 큐 머리 1건. 도착 즉시가 아님.
-///     큐 [A,A,B]에서 A 2건이 모두 분류 완료되기 전엔 소터가 B로 이동하지 않는다(2번째 A-AGV 고립 방지).
-///   · 분류-제자리(Ready 1→0 시점 CurFloor == 완료 시점 CurFloor)만 pop. 정렬 이동(CurFloor 변화)에 의한
-///     Ready 0→1은 피스 소비가 아니므로 pop하지 않는다.
-///   · 미정렬(머리 F != CurFloor)이면 **유휴(Ready=1)일 때만** 게이트로 F 기입해 그 층으로 정렬(분류 중
-///     선기입 금지 — 분류+이동 융합으로 사이클 감지가 깨지는 것 방지).
+/// write-on-clear 개정(S-TWO-FLOOR-WRITE-ON-CLEAR 2026-07-29):
+///   · pop 단위 = **분류 시작 클리어 에지**(TgtFloor 비영→0)마다 큐 머리 1건. PLC는 분류 시작 시에만 TgtFloor를
+///     0으로 클리어하고(도착 시엔 유지·벤더 확정 OQ3), WCS가 비영값의 유일한 기입자이므로 이 전이는 "그 피스의
+///     분류가 실제 시작됨"의 명확한 신호다 → 에지당 정확히 1 pop(over-pop 불가·early-pop 불가). 큐 [A,A,B]에서
+///     A 2건이 모두 분류 시작되기 전엔 소터가 B로 이동하지 않는다(2번째 A-AGV 고립 방지 — I-1 불변식 보존).
+///   · pop 후 새 머리(다음 피스 층)를 같은 틱에 기입한다(OQ1). 큐가 비면 미기입 — TgtFloor 0 유지(디폴트층 park·OQ2).
+///   · 기입 트리거 = TgtFloor==0 관측 && 큐 비지 않음 && Online && !Paused. **Ready==0(분류/이동 중)에도 기입**
+///     (write-during-busy — PLC가 진행 중 분류를 마친 뒤 F로 이동)하고, **CurFloor==F(이미 그 층)에도 기입**
+///     (같은 층 hold — 방치 시 TgtFloor==0이 디폴트층 이동 명령이라 드리프트). 실제 기입 여부는 DepositDecider
+///     (순수 #8)가 결정: TgtFloor==0이면 F 기입·≠0이면 미기입(핑퐁 #2). WCS는 D6에 0을 절대 안 씀(#3).
 ///   · OFFLINE(스냅샷 불신)이면 pop·기입 모두 생략. PAUSED면 기입 생략(hold — DepositDecider 차단).
 ///     FULL(셀 만재)은 정렬 기입을 막지 않는다(I-2/Q5 — 만재는 IF-05 dispatch만 차단, 물리 정렬은 진행).
 /// </summary>
@@ -102,13 +105,14 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     private int                      _stopped;   // 멱등 StopAsync(Interlocked)
 
     // ── 소터별 관측 상태(관측 루프 단일 스레드 전용 — 락 불요) ─────────────────
-    // 분류 사이클(Ready 1→0→1) 단위 pop을 위해 소터별 직전 Ready·사이클 시작 CurFloor를 추적.
+    // 분류 시작 클리어 에지(TgtFloor 비영→0) 단위 pop을 위해 소터별 무장 여부·직전 TgtFloor를 추적.
     private sealed class ObserveState
     {
-        public bool PrevReady = true;        // 소터 기동 Ready=1 전제(첫 전이 정상 감지).
-        public int  CycleStartFloor;         // Ready 1→0 시점 CurFloor(분류-제자리 vs 이동 구분).
+        // ── 분류-시작 pop 에지 감지 ───────────────────────────────────────────
+        public bool Armed;                   // TgtFloor==0을 최초 1회 관측한 뒤부터 에지 감지 켜짐(무장).
+        public int  PrevTgtFloor;            // 직전 관측 TgtFloor(무장 후 비영→0 전이 = 분류 시작 = pop 에지).
 
-        // ── fail-loud 스톨 의심 감지 상태(C3 — 관측 전용) ──────────────────────
+        // ── fail-loud 스톨 의심 감지 상태(관측 전용) ──────────────────────────
         public int  StallTicks;              // AND 조건 연속 지속 틱수.
         public bool StallWarned;             // 이 에피소드에서 WARN 이미 발화(스팸 억제 — 에피소드당 1회).
         public int  StallHeadFloor;          // 직전 틱 큐 머리 층(머리 불변 판정 — pop 진행 여부).
@@ -214,21 +218,23 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
     }
 
     /// <summary>
-    /// 소터 1대 관측 — 분류 사이클(Ready 1→0→1) 단위로 큐 머리 pop, 미정렬이면 유휴(Ready=1) 시 F 기입.
+    /// 소터 1대 관측 — 분류 시작 클리어 에지(TgtFloor 비영→0)에서 큐 머리 1건 pop, TgtFloor==0이면 큐 머리 F 기입.
     ///
-    /// pop 기준 재설계(I-1 — 2026-07-23): 도착(CurFloor==F) 즉시 pop이 아니라 **분류 사이클 완료**(그 피스가
-    /// 실제 분류됨)마다 큐 머리 1건 pop. 큐 [A,A,B]에서 A 2건이 모두 분류 완료되기 전엔 소터가 B로 이동하지
-    /// 않아 2번째 A-AGV 고립을 막는다. 분류-제자리(CurFloor 불변)와 정렬 이동(CurFloor 변화)을 Ready 1→0
-    /// 시점 CurFloor로 구별해, 이동에 의한 Ready 0→1은 pop하지 않는다(정렬 이동은 피스 소비가 아님).
+    /// pop 기준(write-on-clear — 2026-07-29): 분류 사이클(Ready 에지) 대신 **TgtFloor 비영→0 전이**에서 pop한다.
+    /// PLC는 분류 시작 시에만 TgtFloor를 0으로 클리어하고(도착 시엔 유지 — 벤더 확정 OQ3), WCS가 비영값의 유일한
+    /// 기입자이므로(관측된 0 이후에만 비영 기입) 관측된 비영→0 전이는 "그 피스의 분류가 실제 시작됨"의 명확한
+    /// 신호다 → 에지당 정확히 1 pop. 큐 [A,A,B]에서 A 2건이 모두 분류 시작되기 전엔 B로 이동하지 않는다(I-1 보존).
     ///
-    /// stall 재조정: 구 "머리 F==CurFloor 즉시 소비" 엣지는 제거([A,A,B] 조기 pop 버그의 원인). 대신 머리
-    /// F==CurFloor면 그 피스의 분류를 기다렸다 pop한다 — 각 enqueue 피스에는 대응 분류(IF-10)가 반드시
-    /// 오므로 정상 흐름은 무-stall(미투하 abandonment는 파킹존 D 스코프). 기입은 유휴(Ready=1)·CurFloor!=F
-    /// 에서만 하여 분류 중(Ready=0) 선기입으로 분류+이동이 융합돼 사이클 감지를 깨는 것을 방지.
+    /// 무장(Armed): TgtFloor==0을 최초 1회 관측한 뒤부터만 에지 감지를 켠다. 콜드스타트 StartupClear가 잔류
+    /// TgtFloor(예: 2)를 0으로 지우는 전이(2→0)를 분류 시작으로 오인해 복원 큐 머리를 조기 pop하는 것을 원천
+    /// 차단한다 — StartupClear는 첫 Online 스냅샷 게시 전에 큐 투입되나 처리는 비동기라 첫 관측이 잔류를 볼 수
+    /// 있다. WCS는 0을 관측한 뒤에야 비영을 기입하므로, 무장 후 관측하는 비영은 항상 WCS 자신의 기입 → 그 뒤의
+    /// 0은 진짜 PLC 클리어다. OFFLINE 복구 시에도 재무장(Armed=false)해 fabricated 에지를 방지한다.
     ///
-    /// 사이클 감지는 관측 루프(단일 스레드) 샘플링 기반 — Ready=0 구간(분류·이동 소요)이 관측 주기보다
-    /// 충분히 길어 최소 1회 샘플됨(현장 분류=초 단위 ≫ 주기 150ms). 연속 분류 사이 Ready=1 간격도 AGV
-    /// 도착 cadence(초 단위) ≫ 주기라 각 0→1 에지를 놓치지 않는다.
+    /// 기입은 TgtFloor==0 관측 시 큐 머리 F로(Ready==0/CurFloor==F 무관 — write-during-busy·same-floor hold).
+    /// 실제 기입 여부는 DepositDecider(순수)가 결정: TgtFloor==0이면 F 기입·≠0이면 미기입(핑퐁 #2). 큐가 비면
+    /// 미기입(TgtFloor 0 유지 = 디폴트층 park·OQ2). 에지·기입 모두 관측 루프(단일 스레드) 샘플링 기반이며,
+    /// 분류(Ready=0)·클리어(0) 창이 관측 주기보다 충분히 길어(현장 초 단위 ≫ 주기 150ms) 최소 1회 샘플된다.
     /// </summary>
     private void ObserveSorter(SorterBundleHandle bundle, CancellationToken ct)
     {
@@ -236,68 +242,72 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
         var  snap   = bundle.Latest;
         var  st     = _observeState.GetOrAdd(destId, static _ => new ObserveState());
 
-        // OFFLINE(스냅샷 불신) — pop·기입 생략. PrevReady만 동기(오프라인 스냅샷은 직전 Ready 유지)해
-        // 복구 시 스퓨리어스 에지 방지. 오프라인은 정당한 미기입 상태이므로 스톨 감지 리셋(발화 제외).
+        // OFFLINE(스냅샷 불신) — pop·기입 생략. 에지 감지 무장 해제(복구 시 재무장 → fabricated 에지 방지).
+        // 오프라인은 정당한 미기입 상태이므로 스톨 감지 리셋(발화 제외).
         if (!snap.Online)
         {
-            st.PrevReady = snap.Ready;
+            st.Armed = false;
             ResetStall(st);
             return;
         }
 
-        // ── 분류 사이클 단위 pop (Ready 1→0→1) ────────────────────────────────────
-        bool ready = snap.Ready;
-        if (st.PrevReady && !ready)
+        int tgt = snap.TgtFloor;
+
+        // ── 분류-시작 pop (TgtFloor 비영→0 클리어 에지) ────────────────────────────
+        if (!st.Armed)
         {
-            // Ready 1→0: 사이클 시작 — 시작 시점 CurFloor 기록(분류-제자리 vs 정렬 이동 구분).
-            st.CycleStartFloor = snap.CurFloor;
+            // 무장 전 — TgtFloor==0을 관측해야 무장(콜드스타트 잔류 2→0을 pop 에지로 오인 방지). 0을 볼 때까지 보류.
+            if (tgt == 0) { st.Armed = true; st.PrevTgtFloor = 0; }
         }
-        else if (!st.PrevReady && ready)
+        else
         {
-            // Ready 0→1: 사이클 완료. 시작·완료 CurFloor 동일(제자리 분류 — 이동 아님) && 머리층==그 층이면
-            // 그 피스가 분류 완료된 것 → 큐 머리 1건 pop. 정렬 이동(CurFloor 변화)에 의한 0→1은 pop 안 함.
-            if (st.CycleStartFloor == snap.CurFloor
-                && _queues.TryPeek(destId, out int head) && head == snap.CurFloor)
+            if (st.PrevTgtFloor != 0 && tgt == 0)
             {
+                // 비영→0 에지 = 분류 시작 → 큐 머리 1건 pop(그 피스 소비). 에지당 정확히 1회.
                 if (_queues.TryPop(destId, out int popped))
                 {
-                    // ── [트레이스 이벤트 2] TgtFloor 펜딩큐 디큐(분류 사이클 pop) — 관측/로깅 전용(S-TRACE-LOG-VIEWER) ──
-                    // 층-큐 흐름(소터+층 scope). 큐가 floor(int)만 저장하므로 pId 미포함(수용된 경계) — 소터+층+FIFO 상관.
+                    ResetStall(st);   // pop = 진행 → 스톨 카운터 리셋(에지 직후 재무장).
+                    // ── [트레이스 이벤트 2] TgtFloor 펜딩큐 디큐(분류 시작 클리어) — 관측/로깅 전용(S-TRACE-LOG-VIEWER) ──
+                    // 층-큐 흐름(소터+층 scope). 큐가 floor(int)만 저장하므로 pId 미포함(수용된 경계). timing은
+                    // 분류 시작(구 사이클 완료보다 이름) — event 번호·이름·피스당 1회 의미는 불변.
                     _trace.Log(new TraceRecord(
                         EventNo: 2, Event: "TGTFLOOR_DEQUEUE", At: DateTimeOffset.Now,
                         PId: null, CSeq: null, ChuteNo: bundle.ChuteNo, DestId: destId,
-                        CellNo: null, Floor: popped, InductionNo: null, Trigger: "SORT_CYCLE",
+                        CellNo: null, Floor: popped, InductionNo: null, Trigger: "SORT_START_CLEAR",
                         Detail: $"{{\"curFloor\":{snap.CurFloor},\"remainingDepth\":{_queues.Count(destId)}}}"));
                 }
             }
+            st.PrevTgtFloor = tgt;
         }
-        st.PrevReady = ready;
 
-        // ── fail-loud 스톨 의심 감지(C3 — 관측 전용·WARN + operation_log 1회/에피소드) ──────────
-        // pop이 관측 샘플링에 의존하므로(§2-C 불변식), 큐 머리가 있는데도 pop이 일어나지 않고 정체하는
-        // 상황을 조용히 방치하지 않고 발화한다. 쓰기/pop/재dispatch 같은 교정 동작은 하지 않는다(그건 D).
-        DetectStall(destId, bundle.ChuteNo, snap, st, ready);
+        // ── fail-loud 스톨 의심 감지(관측 전용·WARN + operation_log 1회/에피소드) ──────────
+        // 새 write 모델에선 큐 머리가 있으면 WCS가 즉시 F를 기입하므로 TgtFloor==0에 머물지 않는다. under-pop
+        // (정렬·유휴인데 투하가 안 와 분류 시작(클리어)이 안 일어나 pop이 정체 — AGV abandonment)만 발화한다.
+        // 쓰기/pop/재dispatch 같은 교정 동작은 하지 않는다(그건 Sub-Sprint D).
+        DetectStall(destId, bundle.ChuteNo, snap, st);
 
-        // ── 정렬 기입 — 유휴(Ready=1)·CurFloor!=머리층에서만(분류/이동 중 선기입 금지) ──────────
-        if (!ready || !_queues.TryPeek(destId, out int f) || snap.CurFloor == f)
-            return;   // 분류/이동 중이거나 큐 빔이거나 이미 머리층 → 기입 불요.
+        // ── 정렬/드리프트-방지 기입 — TgtFloor==0 관측 시 큐 머리 F 기입(Ready==0/CurFloor==F 무관) ──────
+        // write-on-clear: 구 "!ready 조기반환·CurFloor==F 스킵"을 제거 — 분류 중(write-during-busy)에도, 이미
+        //   그 층(same-floor hold)에도 기입한다. TgtFloor==0(디폴트층 이동 명령)을 방치하면 캐리지가 드리프트하기
+        //   때문이다. 실제 기입 여부는 DepositDecider(순수)가 판정: TgtFloor==0이면 F 기입·≠0이면 미기입(핑퐁 #2).
+        if (!_queues.TryPeek(destId, out int f))
+            return;   // 큐 빔 → 기입 불요(TgtFloor 0 유지 = 디폴트층 park·OQ2).
 
-        // hold(PAUSED만) 산출 후 게이트. PAUSED/OFFLINE·핑퐁(TgtFloor≠0)이면 미기입(DepositDecider 차단).
-        //
-        // I-2(S-TWO-FLOOR-CONTROL B · Q5 승인): 게이트에 **Paused만** 넘긴다(Online은 위 snap.Online 조기
-        //   반환으로 이미 선판정). **매 유휴 틱마다 무거운 Compute(→ ComputeSorterFull: 셀/배정/명령/piece
-        //   다중 집계 쿼리)를 호출하지 않는다** — 저비용 IsPaused(destination Status/IsActive 단일 조회)로 대체.
-        //   ★ FULL(셀 만재)은 정렬 기입을 **차단하지 않는다**: 큐에 든 피스는 이미 IF-05 dispatch에서 수용
-        //     확정분이므로, 만재로 물리 정렬(이동)까지 막으면 확정 피스가 고립된다. FULL은 IF-05 dispatch에서만
-        //     차단(2단계 게이트 분리). Paused/Offline은 여전히 차단(절대규칙 #2 — 오케스트레이터 정정 문언).
+        // hold(PAUSED만) 산출 후 게이트. Online은 위 snap.Online 조기반환으로 이미 선판정.
+        // I-2(Q5): 게이트에 **Paused만** 넘긴다 — 매 틱 무거운 Compute(→ ComputeSorterFull 셀 집계)를 호출하지
+        //   않고 저비용 IsPaused(destination Status/IsActive 단일 조회)만 쓴다. ★ FULL(셀 만재)은 정렬 기입을
+        //   차단하지 않는다(큐 피스는 IF-05 수용 확정분 — 만재로 물리 정렬까지 막으면 고립). FULL은 IF-05
+        //   dispatch만 차단(2단계 게이트 분리). Paused/Offline은 여전히 차단(절대규칙 #2).
         bool paused = _status.IsPaused(destId);
         var hold = paused ? WcsHold.Paused : WcsHold.None;
 
         var decision = DepositDecider.Decide(snap, f, hold);
         if (!decision.WriteTgtFloor)
-            return;   // 핑퐁 차단(TgtFloor≠0)·hold·정렬완료 — 미기입.
+            return;   // TgtFloor≠0(핑퐁 #2)·hold(Paused) — 미기입. WCS는 D6에 0을 안 씀(#3).
 
         // 소터별 단일 쓰기 큐 경유(절대규칙 #1). fire-and-forget — 예외는 삼키지 않고 로깅.
+        // 컨슈머(PlcGateway)가 쓰기 직전 D6를 fresh FC03로 재읽어 !=0이면 스킵(멱등 dedup — 매 0-틱 같은 F
+        //   재천명이 스팸되지 않게). WCS는 0을 어디서도 안 씀(#3 — 이 경로는 항상 1/2 등 비영값만 투입).
         var stopping = _lifetime.ApplicationStopping;
         _ = bundle.EnqueueSetTgtFloorAsync(decision.TgtFloorValue, stopping)
                   .AsTask()
@@ -309,35 +319,40 @@ public sealed class SorterFloorReturnService : IHostedService, IAsyncDisposable
                   }, TaskScheduler.Default);
     }
 
-    // ── fail-loud 스톨 의심 감지기(C3 — 관측 전용) ─────────────────────────────
+    // ── fail-loud 스톨 의심 감지기(관측 전용) — write-on-clear 재조정 ─────────────
     //
-    // AND 조건(Online은 호출 전 보장): 유휴(Ready==1) ∧ TgtFloor==0 ∧ 큐 머리 존재 ∧ 정지 아님(!IsPaused)
-    //   ∧ 큐 머리 층이 직전 틱과 동일. 이 조건이 연속 StallSuspectTicks 틱 지속되면 에피소드당 1회 WARN +
-    //   operation_log 를 발화한다. 조건이 하나라도 깨지면 리셋(다음 에피소드 재감지).
+    // 재조정 배경: 구 조건(유휴 ∧ TgtFloor==0 ∧ 머리 존재)은 새 write 모델에선 발화 불가다 — 큐 머리가 있으면
+    //   WCS가 즉시 F를 기입해 TgtFloor≠0 이 되므로 "머리 있는데 TgtFloor==0" 상태가 성립하지 않는다. 새 under-pop
+    //   시그니처는 **정렬됐는데 투하가 안 와 분류 시작(클리어)이 안 일어나 pop이 정체**하는 것 = AGV abandonment.
+    //
+    // AND 조건(Online은 호출 전 보장): 유휴(Ready==1) ∧ 정렬(CurFloor==큐 머리 층) ∧ 큐 머리 존재 ∧ 정지 아님
+    //   (!IsPaused) ∧ 큐 머리 층이 직전 틱과 동일(pop 무진행). 연속 StallSuspectTicks 틱 지속되면 에피소드당
+    //   1회 WARN + operation_log 발화. 조건이 하나라도 깨지면 리셋(다음 에피소드 재감지).
     //
     // 왜 오탐 0인가:
-    //   · busy(Ready==0) 구간(분류·이동)은 매 틱 리셋 — 어떤 pop 도 Ready 1→0→1 사이클을 동반하므로,
-    //     정상 사이클링은 그 busy 창에서 카운터가 리셋돼 임계에 못 미친다(정상 대기 cadence < 임계 지속시간 전제).
-    //   · 정렬 진행(머리 F != CurFloor)이면 정렬 기입이 TgtFloor 를 ≠0 으로 만들어 다음 틱 즉시 리셋된다.
-    //   · 오프라인/PAUSED 는 정당한 미기입 — 각각 상위 조기반환·IsPaused 로 제외(발화 안 함).
-    //   · 큐 빔·머리 진행(값 변경)도 리셋. 유휴 idle(큐 빔)은 애초에 머리 없음 → 발화 대상 아님.
-    // 즉 실제 지속 스톨(머리 있는데 유휴+TgtFloor==0 이 임계 이상 — 미투하 abandonment 등)에서만 발화한다.
+    //   · busy(Ready==0) 구간(분류·이동)은 매 틱 리셋 — 정상 투하는 Ready 1→0(분류 시작)을 동반하므로 정상
+    //     사이클링은 그 busy 창에서 카운터가 리셋돼 임계에 못 미친다(정상 투하 cadence < 임계 지속시간 전제).
+    //   · 미정렬(CurFloor≠머리)이면 아직 정렬 이동 중 — 리셋(발화 대상 아님).
+    //   · pop 진행 시 pop 브랜치가 ResetStall + 다음 틱 머리 층 변경으로 리셋.
+    //   · 오프라인/PAUSED 는 정당한 미소비 — 각각 상위 조기반환·IsPaused 로 제외(발화 안 함).
+    //   · 큐 빔은 머리 없음 → 발화 대상 아님.
+    // 즉 실제 지속 under-pop(정렬·유휴·머리 불변이 임계 이상 — 미투하 abandonment)에서만 발화한다.
     //
     // IsPaused 는 저비용 단일 조회(I-2 — Compute/ComputeSorterFull 셀 집계 미호출)이며, 값싼 조건이 모두
     //   통과했을 때만 호출한다(불필요한 DB 조회 최소화). 예외는 관측 루프 try/catch(형제 소터 격리)가 흡수.
-    private void DetectStall(long destId, int chuteNo, PlcSnapshot snap, ObserveState st, bool ready)
+    private void DetectStall(long destId, int chuteNo, PlcSnapshot snap, ObserveState st)
     {
         // 스톨 감지 비활성(설정 ≤0) → 상태 리셋 후 no-op.
         if (_stallSuspectTicks <= 0) { ResetStall(st); return; }
 
-        // 값싼 조건 먼저 — 유휴 ∧ TgtFloor==0 ∧ 큐 머리 존재(Online 은 호출 전 보장).
-        if (!ready || snap.TgtFloor != 0 || !_queues.TryPeek(destId, out int head))
+        // 값싼 조건 먼저 — 유휴 ∧ 큐 머리 존재 ∧ 정렬(CurFloor==머리 층)(Online 은 호출 전 보장).
+        if (!snap.Ready || !_queues.TryPeek(destId, out int head) || snap.CurFloor != head)
         {
             ResetStall(st);
             return;
         }
 
-        // 정지(PAUSED/비활성)는 정당한 미기입 — 발화 제외(저비용 IsPaused 만·Compute 미호출).
+        // 정지(PAUSED/비활성)는 정당한 미소비 — 발화 제외(저비용 IsPaused 만·Compute 미호출).
         if (_status.IsPaused(destId))
         {
             ResetStall(st);
