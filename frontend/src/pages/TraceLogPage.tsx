@@ -8,15 +8,16 @@ import { fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TraceLogPage — 현장 추적용 전용 로그 뷰어(S-TRACE-LOG-VIEWER).
-//   6개 이벤트(1~6)를 이벤트번호 태그로 표시. 접속 시 REST 백로그(최근 N) 시드 → SignalR로 실시간 append.
+// TraceLogPage — 현장 추적용 전용 로그 뷰어(S-TRACE-LOG-VIEWER · S-TRACE-READY-PUSH-AND-DEFAULT).
+//   10개 이벤트(1~10)를 이벤트번호 태그로 표시. 접속 시 REST 백로그(최근 N) 시드 → SignalR로 실시간 append.
 //   필터: 이벤트번호·pId·cSeq(한 피스 흐름으로 좁혀 3→4→5→6 을 이어 봄). 최신 하단·최대 500행.
+//   Ready 전이(7·9)↔슈트상태 push(8·10)는 chuteNo + 시각으로 상관(pId 아님 — 소터 scope·비인과).
 //   마운트 시 trace 그룹 구독 / 언마운트·창닫힘 시 해제(서버 push no-op — 서비스는 계속). 읽기 전용.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_ROWS = 500
 
-// 이벤트 번호 → 라벨/색조(즉시 식별). 1·2=층-큐, 3~6=피스 흐름.
+// 이벤트 번호 → 라벨/색조(즉시 식별). 1·2=층-큐, 3~6=피스 흐름, 7·9=Ready 전이, 8·10=IF-08 push(소터 scope).
 const EVENT_META: Record<number, { label: string; tone: 'neutral' | 'accent' | 'busy' | 'online' | 'warn' }> = {
   1: { label: 'TgtFloor 인큐', tone: 'neutral' },
   2: { label: 'TgtFloor 디큐', tone: 'neutral' },
@@ -24,7 +25,14 @@ const EVENT_META: Record<number, { label: string; tone: 'neutral' | 'accent' | '
   4: { label: 'C 인큐', tone: 'busy' },
   5: { label: 'C 디큐', tone: 'warn' },
   6: { label: 'C 클리어', tone: 'online' },
+  7: { label: 'Ready 1→0', tone: 'warn' },
+  8: { label: '슈트상태 push(busy)', tone: 'busy' },
+  9: { label: 'Ready 0→1', tone: 'online' },
+  10: { label: '슈트상태 push(ready)', tone: 'accent' },
 }
+
+// 이벤트 필터 드롭다운 항목(전체 이벤트 번호 — 신규 7·8·9·10 포함). EVENT_META 키와 동기.
+const EVENT_FILTER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 type Row = TraceRecord | TraceEvent
 
@@ -102,7 +110,7 @@ export function TraceLogPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <span className="text-[12px] text-muted">전용 추적 로그(6개 이벤트) 실시간 스트림</span>
+        <span className="text-[12px] text-muted">전용 추적 로그(10개 이벤트 · Ready 전이·슈트상태 push 포함) 실시간 스트림</span>
         <div className="ml-auto">
           <ConnBadge status={monitor.status} />
         </div>
@@ -120,7 +128,7 @@ export function TraceLogPage() {
             <label className="text-[12px] text-muted">이벤트</label>
             <Select value={eventNo} onChange={(e) => setEventNo(e.target.value)}>
               <option value="">전체</option>
-              {[1, 2, 3, 4, 5, 6].map((n) => (
+              {EVENT_FILTER_OPTIONS.map((n) => (
                 <option key={n} value={n}>
                   {n} · {EVENT_META[n].label}
                 </option>
