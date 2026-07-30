@@ -89,25 +89,28 @@ public sealed record SorterFloorReturnOptions
     /// 큐 관측 주기(ms). 각 소터의 TgtFloor==0을 이 주기로 관측해 큐 머리 층 F 기입/pop을 수행한다.
     /// ≤0이면 최소 1로 클램프. 기본 150ms(폴 주기 동급).
     ///
-    /// ★ 안전 불변식(§2-C · S-TWO-FLOOR-CONTROL C3): <b>ObserveIntervalMs ≪ 최소 분류 소요(Ready=0 창)</b>.
-    ///   pop은 관측 루프의 <c>Ready 1→0→1</c> 에지 <b>샘플링</b>에 의존하므로, 분류 Ready=0 창이 이 주기보다
-    ///   짧으면 에지가 유실돼 큐 머리가 pop되지 않고 정체(under-pop→stall)될 수 있다. 현장 분류=초 단위 ≫
-    ///   주기 150ms라 실무상 안전하며, over-pop/안전속성 회귀는 구조상 불가(liveness 위협일 뿐).
-    ///   정적 설정 검증(IValidateOptions 등)은 리포에 인프라가 없고 분류 소요는 런타임/현장 값이라 기동 시
-    ///   알 수 없으므로, 이 가정이 깨질 때는 <see cref="StallSuspectTicks"/> 런타임 스톨 감지기가 fail-loud로
-    ///   발화(WARN + operation_log)해 운영자가 감지·진단하게 한다(관측 전용 — 자동 조치 없음).
+    /// ★ 안전 불변식(write-on-clear): <b>ObserveIntervalMs ≪ 최소 분류 소요(TgtFloor 클리어 창)</b>.
+    ///   pop은 관측 루프의 <c>TgtFloor 비영→0</c>(분류 시작 클리어) 에지 <b>샘플링</b>에 의존한다. 클리어 후
+    ///   TgtFloor==0 은 WCS가 다음 머리를 기입할 때까지 지속되고(WCS가 비영값 유일 기입자·0 관측 후에만 기입),
+    ///   분류(Ready=0) 창도 이 주기보다 충분히 길어(현장 초 단위 ≫ 150ms) 에지가 최소 1회 샘플된다. over-pop/
+    ///   안전속성 회귀는 구조상 불가(에지당 정확히 1 pop). 이 가정이 깨질 때는 <see cref="StallSuspectTicks"/>
+    ///   런타임 스톨 감지기가 fail-loud로 발화(WARN + operation_log)해 운영자가 감지·진단하게 한다(관측 전용).
     /// </summary>
     public int ObserveIntervalMs { get; init; } = 150;
 
     /// <summary>
-    /// fail-loud 스톨 의심 임계 <b>틱수</b>(관측 루프 계층 — S-TWO-FLOOR-CONTROL C3). 다음 AND 조건이
+    /// fail-loud 스톨 의심 임계 <b>틱수</b>(관측 루프 계층 — write-on-clear 재조정). 다음 AND 조건이
     /// <b>연속 이 틱수만큼</b> 지속되면 소터별로 WARN 로그 + operation_log 1건을 <b>에피소드당 1회</b> 발화한다:
-    ///   소터 Online ∧ 정지 아님(<c>!IsPaused</c>) ∧ 큐 머리 존재 ∧ 유휴(<c>Ready==1</c>) ∧ <c>TgtFloor==0</c>
-    ///   ∧ 큐 머리 층 값이 직전 틱과 동일(pop으로 머리가 바뀌지 않음).
-    /// 조건이 하나라도 깨지면(머리 변경·busy·TgtFloor≠0·큐 빔·오프라인·PAUSED) 카운터·발화 상태를 리셋해
-    /// 다음 에피소드를 재감지한다. <b>관측 전용</b> — PLC 쓰기·pop·재dispatch·파킹 같은 교정 동작은 하지 않는다
-    /// (그건 Sub-Sprint D). 지속 시간 환산 = 이 값 × <see cref="ObserveIntervalMs"/>. 정상 대기(정렬 후 AGV
-    /// 틸트 대기)를 오탐하지 않도록 "현장 최대 분류 소요 + AGV 도착 cadence"를 충분히 상회해야 한다.
+    ///   소터 Online ∧ 정지 아님(<c>!IsPaused</c>) ∧ 큐 머리 존재 ∧ 유휴(<c>Ready==1</c>) ∧ <b>정렬</b>
+    ///   (<c>CurFloor==큐 머리 층</c>) ∧ 큐 머리 층 값이 직전 틱과 동일(pop으로 머리가 바뀌지 않음).
+    /// 이는 <b>정렬됐는데 투하가 안 와 분류 시작(TgtFloor 클리어)이 안 일어나 pop이 정체</b>하는 under-pop
+    /// (AGV abandonment) 시그니처다. 조건이 하나라도 깨지면(머리 변경·busy·미정렬·큐 빔·오프라인·PAUSED)
+    /// 카운터·발화 상태를 리셋해 다음 에피소드를 재감지한다.
+    /// (참고: write-on-clear 이전 조건은 "유휴 ∧ TgtFloor==0 ∧ 머리 존재"였으나, 이제 큐 머리가 있으면 WCS가
+    ///  즉시 F를 기입해 TgtFloor≠0 이 되므로 그 조건은 성립 불가 → 정렬-유휴 abandonment 로 재조정.)
+    /// <b>관측 전용</b> — PLC 쓰기·pop·재dispatch·파킹 같은 교정 동작은 하지 않는다(그건 Sub-Sprint D).
+    /// 지속 시간 환산 = 이 값 × <see cref="ObserveIntervalMs"/>. 정상 대기(정렬 후 AGV 틸트 대기)를 오탐하지
+    /// 않도록 "현장 최대 AGV 투하 대기 + 여유"를 충분히 상회해야 한다.
     /// 기본 50(× 150ms ≈ 7.5초). <b>≤0이면 스톨 감지 비활성</b>(발화 안 함). 하드코딩 금지(절대규칙 #7).
     /// </summary>
     public int StallSuspectTicks { get; init; } = 50;

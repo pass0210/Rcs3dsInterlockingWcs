@@ -72,13 +72,24 @@ public static class DenyReasonWire
 /// <summary>
 /// 3D 소터 정렬·준비 판정 결과(순수 함수 산출).
 ///   - Ready=true: 소터가 지금 받을 수 있음(online && CurFloor==운영층 && Ready==1).
-///   - WriteTgtFloor=true: 운영층으로 정렬하기 위해 TgtFloorValue(=운영층)를 쓰기 큐에 투입.
+///   - WriteTgtFloor=true: 목표 층 F로 정렬(또는 드리프트 방지 hold)하기 위해 TgtFloorValue(=F)를 쓰기 큐에 투입.
 ///   - Reason: 받을 수 없는 사유(내부 기록용 — Ready=true면 None).
 /// IF-09 도착 정렬 판단(쓸지/값)과 Phase 2 푸시 ready 산출의 공용 재료.
+///
+/// ★ 푸시 계약(하드 제약 — S-TWO-FLOOR-WRITE-ON-CLEAR): 푸시 소비자(DestinationStatusService.ComputeSorter·
+///   DestinationStatusPusher, floor=CurFloor)는 <see cref="Ready"/>·<see cref="Reason"/>만 읽는다. 정렬·드리프트
+///   방지를 위한 write-on-clear 변경은 <see cref="WriteTgtFloor"/>·<see cref="TgtFloorValue"/>에만 반영되고
+///   Ready/Reason 은 바이트 동일하게 유지된다(정렬돼 있으면 여전히 Ready=true·Reason=None).
 /// </summary>
 public sealed record DepositDecision(bool Ready, DenyReason Reason, bool WriteTgtFloor, int TgtFloorValue)
 {
-    public static DepositDecision Allow() => new(true, DenyReason.None, false, 0);
+    /// <summary>
+    /// 받을 수 있음(Ready=true·Reason=None). <paramref name="writeTgtFloor"/>가 있으면 정렬 완료 상태에서도
+    /// 그 층을 (재)기입한다 — write-on-clear: TgtFloor==0(디폴트층 이동 명령)을 방치하면 캐리지가 드리프트하므로
+    /// 같은 층 F를 재기입해 위치를 hold한다. 기본 null(기입 없음 — 종전 <c>Allow()</c> 호환).
+    /// </summary>
+    public static DepositDecision Allow(int? writeTgtFloor = null) =>
+        new(true, DenyReason.None, writeTgtFloor.HasValue, writeTgtFloor ?? 0);
     public static DepositDecision Deny(DenyReason reason, int? writeTgtFloor = null) =>
         new(false, reason, writeTgtFloor.HasValue, writeTgtFloor ?? 0);
 }

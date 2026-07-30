@@ -1,121 +1,59 @@
-# Sprint Log — S-TRACE-LOG-VIEWER
+# Sprint Log — S-TWO-FLOOR-WRITE-ON-CLEAR
 
-(Generator가 IMPLEMENTATION COMPLETE 마커와 변경 요약을 여기에 추가)
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-29)
 
-## IMPLEMENTATION COMPLETE (Generator, 2026-07-28)
+### 변경 요약 (스코프: SorterFloorReturnService + 순수 DepositDecider + 테스트. Sim3ds·PlcGateway·RcsController·PendingFloorQueueRestorer·SorterGatewayRegistry 무변경)
 
-전용 추적 로그 sink + 실시간 프론트 뷰어. 6개 이벤트(1~6)를 각 줄 앞머리 이벤트번호 태그로 전용 파일에
-기입 + SignalR trace 그룹으로 실시간 스트리밍 + REST 백로그 + 신규 프론트 페이지. 전부 additive·관측/로깅 전용.
+**S4 — 순수 게이트(Wcs.Core, 규칙 #8)**
+- `DepositDecision.Allow(int? writeTgtFloor = null)` 오버로드 추가(기존 `Allow()`는 null 기본으로 호환). `Models.cs`.
+- `DepositDecider.Decide`: 정렬-유휴(Ready==1 && CurFloor==F) 케이스가 `TgtFloor==0`이면 `Allow(F)`(write-on-clear),
+  `TgtFloor!=0`이면 `Allow(null)`. **`.Ready`/`.Reason`은 불변**(Ready=true·None) — `.WriteTgtFloor`/`.TgtFloorValue`만 변경.
+  busy(Ready==0)·NotAligned 케이스는 종전대로(TgtFloor==0에서 write). 푸시 계약(ComputeSorter/Pusher가 floor=CurFloor로
+  `.Ready`/`.Reason`만 소비) byte-identical 보존 확인.
 
-### 변경 요약 (파일)
-[백엔드 — 신규]
-- `backend/src/Wcs.Api/Services/TraceLogService.cs` (신규) — 핵심. 포함:
-  · `TraceLogOptions`(appsettings "TraceLog" — Enabled·Directory·FileNamePattern·RollingInterval·
-     FileSizeLimitBytes·RetainedFileCountLimit·BacklogTakeDefault/Max·ClampTake). 기본 경로 D:\Rcs3dsInterlockingWcsLogs.
-  · `TraceRecord`(파일 1줄·SignalR payload·백로그 반환의 단일 형상 — EventNo 1~6·Event·At(로컬 ms)·PId·
-     CSeq·ChuteNo·DestId·CellNo·Floor·InductionNo·Trigger·Detail).
-  · `ITraceLogger`(논블로킹 Log + OnEntry) / `ITraceBacklog`(파일 tail Read).
-  · `TraceLogService` — OperationLogService 동형 논블로킹 채널 sink + 백그라운드 컨슈머가 OnEntry 발화 후
-     **전용 Serilog File 로거**(전역 Log.Logger 와 격리)에 `[N] {json}` 1줄 기입. 롤링/크기/보존 = Serilog File 싱크.
-     디렉터리 생성 실패는 fail-safe(파일 비활성·relay 계속). 백로그 = 롤링 파일 tail(FileShare.ReadWrite) + 필터 + clamp.
-  · `TraceCorrelator` — C 흐름(이벤트 4·5·6) pId 실시간 상관(소터별 FIFO 등록 → C인큐 pop → cSeq→ctx 저장 →
-     write 조회 → C클리어는 소터별 "미결 C"에서 해소). 소터 직렬 전제·미등록 fail-safe(pId 미상).
-  · `TraceWiring.Wire` — 번들 기존 훅(HS_C_SENT/CELL_ASSIGN/C_Flag 델타)에 이벤트 4·5·6 추가 구독 결선.
+**S1/S2/S3 — 관측 루프(SorterFloorReturnService.ObserveSorter)**
+- POP 트리거(S2): 구 "분류 사이클(Ready 1→0→1) 제자리" pop → **TgtFloor 비영→0 클리어 에지** pop으로 교체. 에지당 정확히 1 pop.
+  - `ObserveState`: `PrevReady`/`CycleStartFloor` 제거 → `Armed`(첫 TgtFloor==0 관측 후 무장)/`PrevTgtFloor` 추가.
+  - **재량 결정(에지 감지 방식)**: 계약의 "baseline on first obs" 대신 **"첫 TgtFloor==0 관측에서만 무장(arm-on-0)"** 채택.
+    이유(안전): StartupClear는 첫 Online 스냅샷 게시 전에 큐 투입되나 처리는 비동기라 **첫 관측이 잔류 비영(예: 2)을 볼 수 있음** →
+    "baseline=current"면 StartupClear의 2→0을 분류-시작으로 오인해 복원 큐 머리를 조기 pop(over-pop=오분류/안전사고). arm-on-0은
+    잔류를 볼 때까지 무장을 보류해 이 스퓨리어스 pop을 원천 차단. 계약의 goal (a)/(b)(스퓨리어스 pop 0·OFFLINE fabricated 에지 0)을
+    더 강하게 충족. OFFLINE 시 `Armed=false`로 재무장.
+  - pop 후 같은 틱에 새 머리를 기입(OQ1), 큐 비면 미기입·TgtFloor 0 유지(OQ2).
+- WRITE 트리거(S1): 구 `!ready 조기반환 · CurFloor==F 스킵` 제거. 이제 큐 비지 않으면 매 틱 `IsPaused`(저비용·I-2) 후
+  `DepositDecider.Decide`에 위임 — write-during-busy·same-floor hold 실현은 순수 함수가 담당(TgtFloor==0이면 F write). FULL 미차단(Q5),
+  Paused/Offline 차단(#2). 단일 쓰기 큐 경유(#1)·WCS는 0 미기입(#3)·fresh-read dedup은 PlcGateway(무변경) 유지.
+  - **재량 결정(DepositDecider에 전면 위임)**: `IsPaused`를 `TgtFloor!=0`일 때 스킵하지 않고 큐 비지 않으면 매 틱 호출 — 이는 기존
+    `TwoFloorWriteGateI2Tests`(VS-E2a "IsPaused 매 틱·Compute 0")의 불변식을 보존하기 위함(수정 없이 GREEN). 규칙 #8 정합(판정=순수).
+- STALL 재조정(S3·재량 결정): 구 조건(유휴 ∧ TgtFloor==0 ∧ 머리 존재)은 새 모델에서 성립 불가(머리 있으면 즉시 F 기입→TgtFloor≠0).
+  새 under-pop 시그니처 = **유휴(Ready==1) ∧ 정렬(CurFloor==머리) ∧ 머리 불변 N틱**(AGV abandonment). busy/미정렬/오프라인/PAUSED/
+  큐 빔/pop 진행에서 리셋. 관측 전용(쓰기·pop 0). 에피소드당 1회·재무장. `DetectStall` 시그니처에서 `ready` 파라미터 제거(snap에서 파생).
+- 트레이스 event2(S3·재량 결정): EventNo=2·"TGTFLOOR_DEQUEUE"·피스당 1회 불변, `Trigger` "SORT_CYCLE"→**"SORT_START_CLEAR"**,
+  Detail(curFloor·remainingDepth) 유지. 타이밍만 분류-시작으로 시프트(E2EGroupN N1이 Floor/PId만 단언 — 무영향).
+- 문서: `WcsOptions` ObserveIntervalMs/StallSuspectTicks XML doc를 새 에지-pop·abandonment-stall 모델로 갱신(리터럴 변경 0·규칙 #7 유지).
 
-[백엔드 — 계측 훅(관측/로깅 전용·기존 로직 무변경)]
-- `Controllers/RcsController.cs` — 이벤트 1(IF-05 floorQueues.Enqueue 지점)·3(IF-10 DepositReport 진입) 발화 +
-  TriggerSorterHandshake 에서 `correlator.RegisterHandshake` (ExecuteHandshakeAsync 직전, C 흐름 pId 상관).
-- `Services/SorterFloorReturnService.cs` — 이벤트 2(관측 루프 분류-사이클 pop 지점) 발화(ITraceLogger 주입).
-- `Services/PendingFloorQueueRestorer.cs` — 이벤트 1(재시작 복원 re-enqueue, 트리거=RESTORE) 발화 + 사영에 ChuteNo 추가.
-- `Program.cs` — SorterRegistryFactory.StartAsync 관측 결선부에 `TraceWiring.Wire` 추가 구독(operation_log 구독과 나란히) +
-  DI 등록(TraceLogOptions·TraceLogService as ITraceLogger/ITraceBacklog/IHostedService·TraceCorrelator).
-- `Hubs/WcsMonitorHub.cs` — `GroupTrace="trace"` + `SubscribeTrace`/`UnsubscribeTrace` 허브 메서드(옵트인).
-- `Services/MonitorRelayService.cs` — ITraceLogger.OnEntry 구독 → "trace" 그룹 fire-and-forget 브로드캐스트("Trace").
-- `Controllers/MonitoringController.cs` — `GET /api/monitor/trace?take=&eventNo=&pId=&cSeq=` 백로그(clamp·디렉터리 부재 시 빈 목록).
-- `appsettings.json` — "TraceLog" 섹션 신설(전부 설정값·기본 D:\Rcs3dsInterlockingWcsLogs).
+### 테스트 결과 (dotnet test backend/Wcs.sln — SQL Server 아님·기존 SQLite 테스트 provider)
+- 전량 GREEN: **493 통과 / 0 실패** (baseline 487 + 신규 C4 6건 = 493, 산술 일치·회귀 0). full 5회 중 3회 493/493.
+- 신규 결정적 테스트 `WriteOnClearTests`(C4, 6건): C4-1 write-during-busy·C4-2 same-floor hold·C4-3/4 one-pop-per-clear+빈큐 park+
+  다음피스 복구·C4-5a StartupClear 잔류 2→0 스퓨리어스 pop 0·C4-5b OFFLINE 재무장 fabricated pop 0+재무장 실효. FakeModbusMasterForApi 하니스.
+- 업데이트(계약 C3 + 필연적 파생):
+  - `DepositDeciderTests`: Row1·FloorParam_F1_AtFloor1 → WriteTgtFloor false→true(.Ready/.Reason 불변 단언 유지). 비영-TgtFloor 케이스(C1/Row3/Row5/ping-pong) write=false 유지.
+  - `SorterStallDetectorTests`: `Stall_HeadAlignedIdle_*`를 abandonment 시그니처로 재작성(재무장은 Ready 토글 — TgtFloor 토글은 클리어
+    에지 pop 유발하므로 금지). D6는 S1 정렬값 유지(=1)로 단언 변경. 나머지 CC1.1(빈큐·사이클·오프라인·PAUSED·비활성)·크로스레이어는 무변경 GREEN.
+  - `E2EGroupAB_NormalAndGateTests.A3`(계약 미열거이나 write-on-clear가 직접 반증하는 superseded "aligned=no write" 계약 — S1
+    "even CurFloor==head"의 필연): "D6 쓰기 0" → "same-floor hold D6=2 1건·이동 없음(CurFloor 2 유지)"으로 개정. **의도(스퓨리어스 재정렬
+    이동 0) 보존**. A4(미정렬→write 1건)·C7(OFFLINE→write 0)·K1/K2/K3·L/M·TwoFloorHostRouting·push군 전부 무변경 GREEN.
+- flake 귀속(교훈 e2e-parallel-load-surfaces-integration-flakes): full 부하에서 (a) E2EGroupN N1(실-Sim 트레이스, isolation 4/4 GREEN),
+  (b) RtuTransportTests VT4(PlcGateway 단위·1000ms WaitUntil, isolation 3/3 GREEN, 내 변경 코드 무접촉) 각 1회 저빈도 flake — 둘 다 선재
+  환경 flake로 귀속. **C4-5b는 내가 도입한 테스트 flake였고 근본수정 완료**(오프라인 창이 관측 주기보다 짧아 Armed 재설정을 놓침 → 오프라인
+  감지 후 정착 대기 추가; 현장 오프라인 창 ≫ 관측 주기 반영). 수정 후 full 2회 연속 493/493.
 
-[프론트 — 신규 뷰어]
-- `frontend/src/lib/signalr.ts` — `TraceEvent` 타입 + trace 옵트인 구독(subscribeTrace: 첫 구독=SubscribeTrace,
-  마지막 해제=UnsubscribeTrace / connect·reconnected 시 재동기) + `conn.on('Trace')`.
-- `frontend/src/lib/api.ts` — `TraceRecord` + `api.trace()` REST 백로그.
-- `frontend/src/pages/TraceLogPage.tsx` (신규) — 백로그 시드 → SignalR append. 테이블(번호·시각·이벤트·pId·cSeq·
-  chuteNo·cellNo·floor·detail) + 필터(이벤트번호/pId/cSeq) + 자동스크롤 + 연결배지 + empty 상태. 마운트 구독/언마운트 해제.
-- `frontend/src/App.tsx` — `/trace` 라우트. `frontend/src/components/Layout.tsx` — b2c NAV "추적 로그" 항목.
+### 정적 검사 (C6)
+- `dotnet build backend/Wcs.sln`: 오류 0. 경고 13(전부 선재: NU1903 ×10 [SQLitePCLRaw advisory, base develop 선재]·CS8604 [B2cFacilityService]·
+  xUnit2013 ×2 [ChuteStatePushTests·TwoFloorHostRoutingTests, 미접촉 라인]). **신규 경고 0**(변경 파일에서 CS/analyzer 경고 0).
+- 포맷터/린터: 백엔드 전용 포맷터 미구성(not-configured). 프론트엔드 무변경(TraceLogPage 표시-전용 결과만 — 코드 diff 0).
 
-[테스트]
-- `backend/tests/Wcs.Tests/TraceLogTests.cs` (신규 7건) — TraceCorrelator 상관(피스 흐름/FIFO/미등록 fail-safe) +
-  TraceLogService 파일 기입([N] 태그 fresh evidence)·백로그 tail/필터/clamp·디렉터리 부재·비활성 no-op. scratch temp 디렉터리.
-- `backend/tests/Wcs.Tests/E2E/E2EGroupN_TraceLogTests.cs` (신규 1건) — 실 Sim+WCS 1피스 E2E: 6개 이벤트 전량 기입·
-  번호 정확·pId+(chuteNo,cSeq) 상관 재구성 + REST 백로그 조회 + additive 회귀 0(operation_log/sorter_command 유지). per-test scratch 디렉터리.
-- `backend/tests/Wcs.Tests/TraceTestDoubles.cs` (신규) — NopTraceLogger/CapturingTraceLogger.
-- `TestAssemblyInit.cs` — 테스트 프로세스 전역 env `TraceLog__Directory`=temp(실경로 D:\ 무접촉·절대규칙 #7 테스트 지침).
-- `E2E/E2EInfrastructure.cs` — E2E 팩토리에 옵션 `traceLogDir`(per-test scratch) + `simLoopMs`(기본 10) 추가(테스트 인프라).
-- 기존 3개 서비스 생성자 호출부(SorterStallDetectorTests·PendingFloorQueueRestorerTests·TwoFloorHostRoutingTests)에 NopTraceLogger 인자.
-
-### 재량 결정
-- **상관 전파 방식**: 계약 옵션 (ii) — RcsController 가 핸드셰이크 직전 소터별 FIFO 로 (pId,cellNo,chuteNo) 등록,
-  이벤트 4(HS_C_SENT, cSeq 확정)에서 pop 해 cSeq→pId 상관 성립. 이벤트 5는 cSeq→ctx 조회, 이벤트 6은 소터별 "미결 C"
-  에서 해소(소터 직렬 전제 — 모호성 0). HandshakeOrchestrator/PlcGateway 무접촉(절대규칙 #8) — 기존 콜백만 소비.
-- **엔드포인트 경로**: `GET /api/monitor/trace`(기존 operation-log 백로그 패턴 재사용, /api/monitor 하위).
-- **페이지 라우트**: `/trace`, b2c NAV "추적 로그".
-- **sink 구현 방식**: 전용 채널 + 백그라운드 컨슈머 + **전용 Serilog File 서브로거**(롤링/크기/보존을 File 싱크로 획득,
-  전역 로그와 인스턴스 격리). 파일 1줄 = `[N] {json}`(앞머리 [N] 이벤트번호 태그 + 백로그 파싱 대칭 JSON).
-- **이벤트 6 결정성**: C_Flag 1→0 은 폴 관측(계약 명시)이라 Sim 이 C_Flag 를 즉시(10ms) 클리어하면 30ms 폴이 놓친다.
-  E2E 는 현장 PLC 처럼 Sim 루프를 150ms 로(테스트 인프라 옵션 simLoopMs) 늘려 dwell 확보 → 결정적 관측(3회 반복 flake 0).
-
-### 테스트 결과
-- 신규: TraceLog/E2EGroupN 필터 8/8 GREEN × 3회 반복(flake 0).
-- 전체: `dotnet test backend/Wcs.sln` **485/485 GREEN × 2회 연속**(실패 0). baseline 477 + 신규 8 = 485(산술 일치·회귀 0).
-- 빌드: 오류 0. 경고 = 선재 NU1903(SQLitePCLRaw)뿐 — touched 파일 CS 경고 0.
-- 프론트: `npm run typecheck`·`npm run lint`·`npm run build`(tsc+vite, wwwroot 산출) 전부 성공(선재 chunk>500kB·signalr PURE 경고만).
-- 격리: 전용 로그는 테스트 전역 env(temp)·E2E per-test scratch 디렉터리 — 실경로 D:\Rcs3dsInterlockingWcsLogs 무접촉.
-
-### 미확인(Evaluator 브라우저 검증 권장 — W1~W6)
-- 백엔드 계측·상관·번호 태깅·백로그·SignalR 는 자동 테스트로 실증. 프론트 뷰어의 실제 브라우저 렌더(W1 기본·W2 라이브
-  append·W3 필터·W4 empty·W5 콘솔 0·W6 창닫힘 스트림 종료·재시드)는 라이브 스택 + Playwright 로 확인 권장.
-
-## FIX ITERATION 1 (Generator, 2026-07-28) — 코드리뷰 CRITICAL 1건 수정
-
-### CRITICAL — TraceCorrelator `_pending` 누수 + pId 오귀속 (수정 완료)
-증상: `RcsController.TriggerSorterHandshake` 가 `ExecuteHandshakeAsync` 직전 `RegisterHandshake` 를 **무조건** 호출하는데,
-`HandshakeOrchestrator.ExecuteAsync` 는 `HS_C_SENT`(이벤트 4·유일 소비자 ResolveCSent) 前에 조기 종결 경로가 있다 —
-시작 OFFLINE·잔류(arming) 실패·안착지연 OFFLINE(전부 cSeq 증가 前) + **cSeq 증가 後·HS_C_SENT 前** 의 C_Flag 대기
-OFFLINE·CFlagTimeout. 그럼 등록 head 가 소비되지 않아 (a) `_pending` 무한 증가, (b) FIFO 특성상 고아 head 가 매핑을
-한 칸 밀어 다음 성공 핸드셰이크가 이전 피스 pId 로 오귀속(완료조건 #6 무력화·off-by-N 자가지속).
-
-수정(전부 Wcs.Api — 절대규칙 #8 준수·HandshakeOrchestrator/PlcGateway/Wcs.Core 무접촉):
-- `TraceCorrelator` 재설계 — `_pending` 을 소터별 (락 + LinkedList) 로 교체. `RegisterHandshake` 가 **소비 플래그(Consumed)
-  를 지닌 토큰**을 반환. `ResolveCSent`(HS_C_SENT)가 head pop 시 Consumed=true. 신규 `DiscardPending(destId, token)` 은
-  토큰이 미소비면 그 토큰만 identity 로 정확히 제거(동시 등록된 다음 피스 무영향), 이미 소비됐으면 no-op(**idempotent**).
-  → `RcsController` continuation(성공·실패·조기종결·호스트종료 어떤 경로에서도 항상 실행)의 **최상단에서 무조건**
-    `correlator.DiscardPending(destId, traceToken)` 호출. **SentCSeq 판정에 의존하지 않아** cSeq 증가 後 조기종결
-    (CFlagTimeout·OFFLINE-during-C_Flag-wait, SentCSeq≥1)까지 전부 포섭한다.
-    ※ 코드리뷰가 제시한 `result.SentCSeq==0` 판정은 **불완전**(cSeq 증가 後 HS_C_SENT 前 종결 경로를 놓침 + Offline 은
-      SentCSeq≥1 에서 pre/post-HS_C_SENT 구분 불가)이라, 더 견고한 토큰-소비-플래그 방식으로 대체했다.
-- 방어 심화: 소터별 `_pending` 상한 `MaxPending=32` — discard 누락이 무한 증가하지 못하게 최오래 항목 WARN + 축출(Fail Loud).
-- `PendingCount(destId)` 진단 API 추가(테스트·누수 검증용). `TraceCorrelator` 는 선택적 ILogger 주입(테스트는 인자 없이 생성).
-
-### IMPORTANT(문서만) — 한 소터 동시 IF-10 상관 교차
-등록은 IF-10 도착 순서이나 cSeq 는 ExecuteAsync 내부에서 나중에 부여되므로 한 소터 **동시** IF-10 은 pId↔cSeq 교차 가능.
-현 코드베이스는 동시 IF-10 을 직렬화하지 않음(lessons: single-sorter-concurrent-handshake-gap). 계약이 순차 dispatch(SPEC §6)를
-전제하므로 스코프 밖. → `TraceCorrelator` 상단 주석에 알려진-한계 명시 + 프론트 뷰어(`TraceLogPage`)에 한 줄 note
-("상관(pId↔cSeq)은 소터별 순차 dispatch 전제 — 한 소터 동시 투입 시 교차 가능") 경량 노출. 직렬화는 시도 안 함(스코프 밖).
-
-### 변경 파일
-- `backend/src/Wcs.Api/Services/TraceLogService.cs` — TraceCorrelator 재설계(토큰+Consumed·DiscardPending·MaxPending·
-  PendingCount·ILogger·serial-dispatch 한계 주석).
-- `backend/src/Wcs.Api/Controllers/RcsController.cs` — RegisterHandshake 반환 토큰 캡처 + continuation 최상단 무조건 DiscardPending.
-- `frontend/src/pages/TraceLogPage.tsx` — 순차 dispatch 한계 한 줄 note.
-- `backend/tests/Wcs.Tests/TraceLogTests.cs` — 신규 2건(Correlator_AbortedBeforeCSent_DiscardCleansPending_NoMisattribution
-  = 조기종결 후 누수 0 + 성공 피스 자기 pId 상관·오귀속 0 · Correlator_PendingCap_BoundsUnboundedGrowth = 상한 bounded).
-- `backend/tests/Wcs.Tests/E2E/E2EGroupN_TraceLogTests.cs` — 신규 1건(N2: 실 Sim OFFLINE-before-C 종결 → 재기동 → 성공
-  핸드셰이크 → _pending=0(누수 0) + C흐름 4·5·6 이 성공 pId 로만 상관·조기종결 pId 오귀속 없음).
-
-### 스코프 밖(코드리뷰 지시대로 미수정 — 오케스트레이터가 후속 스프린트로 sprint-feedback 등재): reconnect 재시드 · path-literal
-  기본값 · TailLines 휴리스틱 · Detail JSON 보간 · one-shot 컨슈머 루프 · 필터 그룹 churn.
-
-### 테스트 결과(fix iteration)
-- 신규 트레이스 필터(TraceLog/E2EGroupN) 11/11 GREEN × 3회 반복(flake 0). 기존 8 + 신규 3(unit 2 + E2E 1) = 11.
-- 전체 `dotnet test backend/Wcs.sln` **488/488 GREEN × 2회 연속**(실패 0). 직전 iteration 485 + 신규 3 = 488(산술 일치·회귀 0).
-- 빌드 오류 0 · touched 파일(TraceLogService·RcsController) CS 경고 0 · 선재 NU1903 만.
-- 프론트 typecheck/lint/build 전부 성공. 스코프 무변경(Wcs.Core/Migrations/WcsDbContext/Sim3ds 소스 무접촉·미커밋).
+### 절대규칙 증명
+- #1 TgtFloor 기입 전부 `bundle.EnqueueSetTgtFloorAsync`(단일 쓰기 큐) 경유 — 직접 Modbus 0. #2 write는 관측 TgtFloor==0에서만·비영 미덮어씀
+  (DepositDecider가 구조적 보장). #3 WCS는 D6에 0 미기입(K1/K2/K3 `DoesNotContain →0` 유지·write 경로 값 ∈ {1,2}). #7 주기·임계 appsettings.
+  #8 판정은 Wcs.Core 순수 함수(관측 루프는 I/O·상태 트리거만·Compute heavy 미호출).

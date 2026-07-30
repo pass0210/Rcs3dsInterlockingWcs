@@ -140,28 +140,35 @@ public class E2EGroupAB_NormalAndGateTests
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // A3: 이미 운영층 정렬(CurFloor=2) → IF-09 즉시(TgtFloor 쓰기 0).
-    // GT: Sim 타임라인 D6 쓰기 0건(이동 정렬 없음).
+    // A3: 이미 운영층 정렬(CurFloor=2·머리 F=2) → write-on-clear 로 같은 층 재기입(D6=2 1건)·이동 없음.
+    //   write-on-clear 개정(S-TWO-FLOOR-WRITE-ON-CLEAR): TgtFloor==0(디폴트층 이동 명령)을 방치하면 캐리지가
+    //   드리프트하므로, 이미 정렬돼 있어도 같은 층 F=2 를 재기입해 위치를 hold한다(구 "정렬=미기입"에서 개정).
+    // GT: Sim 타임라인 D6=2 정확히 1건(same-floor hold) · tgt==cur 라 이동 시퀀스 없음(CurFloor 2 유지).
     // ════════════════════════════════════════════════════════════════════════
     [Fact]
-    public async Task A3_AlreadyAligned_If09_NoTgtFloorWrite()
+    public async Task A3_AlreadyAligned_WriteOnClear_SameFloorHold_NoMove()
     {
         var (factory, rcs) = await StartAsync(initialCurFloor: 2);  // 이미 운영층(2)
         await using var _f = factory;
         await using var _r = rcs;
         var driver = MultiAgvDriver.ForFactory(factory);
 
-        // IF-05 → IF-09(도착) 까지만(IF-10 끔 — 정렬 쓰기만 관찰).
+        // IF-05(머리 F=2 enqueue) → IF-09(도착) 까지만(IF-10 끔 — 정렬 쓰기만 관찰).
         await driver.RunSingleAsync(new AgvJob(
             23001, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo, DoDeposit: false));
 
-        // 정렬 쓰기가 없음을 확인 — 잠시 폴 후 타임라인에 D6 쓰기 0건.
-        await E2EWait.UntilAsync(() => true, 300, "정렬 관찰 안정화");  // 폴 몇 주기 흐르도록
+        // ★ 이미 정렬(CurFloor==머리 2)이어도 D6=2 재기입(드리프트 방지). 같은 층 hold 이므로 이동 시퀀스는 없다.
+        await E2EWait.UntilAsync(
+            () => factory.Timeline.Any(l => l.Contains("WCS 쓰기 수신: D6") && l.Contains("→2")),
+            4000, "same-floor hold D6=2 재기입");
+        // 정확히 1건(핑퐁 0 — TgtFloor=2 정착 후 재기입 안 함) 안정 확인.
         await E2EWait.UntilExactAsync(
             () => factory.Timeline.Count(l => l.Contains("WCS 쓰기 수신: D6")),
-            expected: 0, stableCount: 6, timeoutMs: 3000, "이미 정렬 → D6 쓰기 0건");
+            expected: 1, stableCount: 6, timeoutMs: 3000, "same-floor hold → D6 쓰기 정확히 1건");
+        // 이동 시퀀스 없음(tgt==cur) — CurFloor 2 유지·이동 로그 0.
+        Assert.DoesNotContain(factory.Timeline, l => l.Contains("이동 시작"));
         Assert.Equal(2, factory.SorterSnapshot(factory.PrimarySorter.DestinationId)!.CurFloor);
-        _out.WriteLine("[A3] 이미 운영층 정렬 → D6 쓰기 0건(Sim 타임라인)");
+        _out.WriteLine("[A3] 이미 정렬 → same-floor hold D6=2 1건·이동 없음(write-on-clear 드리프트 방지)");
     }
 
     // ════════════════════════════════════════════════════════════════════════

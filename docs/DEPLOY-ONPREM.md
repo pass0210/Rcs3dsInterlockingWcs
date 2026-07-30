@@ -216,6 +216,8 @@ dotnet publish backend/src/Wcs.Api/Wcs.Api.csproj -c Release -r win-x64 --self-c
 > - **PLC**: RS-485 면 `Transport:Rtu` + `PortName/BaudRate/Parity/StopBits/UnitId`(★VEICHI 실측값). 네트워크 PLC 면 `"Transport":"Tcp","Host":"192.168.0.50","Port":502`.
 > - **RCS 푸시(IF-08)**: RCS 수신 호스트가 준비되면 `ChuteStatePush.FloorHosts` 에 `{"1":"http://<rcs-1f>:3000","2":"http://<rcs-2f>:3000"}`. 비우면 DORMANT(정상 기동·푸시만 안 나감).
 > - 이 파일은 서버 로컬 전용(저장소 커밋 안 함). 재배포 시 publish 복사로 덮이지 않게 보존(9장).
+> - **추적 로그(S-TRACE-LOG-VIEWER)**: 6개 핸드셰이크 이벤트 전용 로그는 기본 `D:\Rcs3dsInterlockingWcsLogs`(없으면 자동 생성)에 `[N] {json}` 1줄/이벤트로 쌓인다 — 설정 불요(기본값). 경로/롤링/보존 변경만 `TraceLog` 섹션 오버라이드. `/trace` 화면에서 실시간 확인.
+> - **안착 지연(S-IF10-CWRITE-SETTLE-DELAY)**: `Timing:SettleDelayMs` 기본 **0(비활성=현행)**. 3DS PLC 낙하 지연이 없어 제품 안착 전 소터 이동이 문제면, IF-10 수신~안착 물리 소요를 실측해 그 ms 를 양수로 넣어 활성(소터별은 `Sorters[].Timing.SettleDelayMs`). 응답 타이밍엔 영향 없음(지연은 백그라운드 C 기입 전에만).
 
 ### 5-2. (배포 전 1회) 직접 실행으로 설정 검증
 ```powershell
@@ -309,7 +311,41 @@ nssm start WcsApi
 > ⚠️ `appsettings.Production.json` 보존: `-Force` 덮어쓰기는 유지됨. **전체 삭제·`robocopy /MIR` 금지**.
 > ⚠️ 일부 DLL 만 교체 금지(버전 불일치 크래시) — 항상 publish **전체** 교체.
 > DB 마이그레이션은 앱 시작 시 `DbInitializer` 가 로컬 DB 에 자동 적용(테이블/인덱스 추가만, 데이터 보존).
-> 참고: 이번 릴리스대 마이그레이션 예 — `AddHotPathIndexes`·`AddPieceArchivedAt`·`AddSorterCommandProcessingTimes`.
+> 참고: 마이그레이션은 릴리스마다 다르며 앱이 자동 적용한다(과거 예: `AddHotPathIndexes`·`AddPieceArchivedAt`·`AddSorterCommandProcessingTimes`). **안착지연·추적로그 릴리스는 스키마 마이그레이션 0**(코드/설정만).
+
+### 9-B. (현장 표준 — self-contained + sc.exe) 재배포
+> 현재 사내 PC 는 **.NET 런타임 미설치 + WDAC** 라 **self-contained 게시**로 배포하고, 서비스는 **sc.exe 로 등록된 `WcsApi`** 다(nssm 아님 — nssm 명령은 이 서비스에 안 먹는다). 게시 산출물은 개발/빌드 PC 에서 **`D:\프로그램\publish-sc`** 로 만들어 현장으로 옮긴다.
+
+**1) 빌드 PC — self-contained 게시(프론트 먼저):**
+```bash
+git checkout main && git pull
+npm --prefix frontend run build        # → backend/src/Wcs.Api/wwwroot 자동 배치(별도 복사 없음)
+dotnet publish backend/src/Wcs.Api/Wcs.Api.csproj -c Release -r win-x64 --self-contained true -o "D:/프로그램/publish-sc"
+```
+> 산출물 `D:\프로그램\publish-sc` 전체를 현장 PC 로 이관(USB/네트워크). self-contained 라 현장에 .NET 런타임 불요.
+
+**2) 현장 PC — 서비스 교체(관리자 PowerShell):**
+```powershell
+sc.exe stop WcsApi
+sc.exe query WcsApi        # STATE = STOPPED 확인(완전히 멈춘 뒤 복사 — 안 그러면 exe/dll 잠겨 복사 실패)
+
+Copy-Item C:\BOWOO\Wcs.Api\appsettings.Production.json C:\BOWOO\Wcs.Api\appsettings.Production.json.bak -Force   # 안전 백업
+Copy-Item -Recurse -Force <이관한 publish-sc 경로>\* C:\BOWOO\Wcs.Api\    # 덮어쓰기(Production.json 보존)
+
+sc.exe start WcsApi
+sc.exe query WcsApi        # STATE = RUNNING 확인
+```
+> ⚠️ 반드시 **STOPPED 확인 후 복사**. `robocopy /MIR`·폴더 전체 삭제 금지(Production.json 유실). `Copy-Item -Force` 덮어쓰기만.
+> ⚠️ publish-sc 에는 `appsettings.Production.json` 이 없으므로 `-Force` 덮어써도 현장 Production.json 은 보존된다(1의 백업은 안전망).
+> `Stop-Service WcsApi` / `Start-Service WcsApi` / `Get-Service WcsApi` 순정 cmdlet 도 동일.
+
+**3) 로그 확인** — sc.exe 서비스는 작업디렉토리가 `C:\WINDOWS\System32` 라 앱의 상대 `logs/` 가 **거기로** 풀린다:
+```powershell
+Get-ChildItem C:\WINDOWS\System32\logs\wcs-*.log | Sort LastWriteTime -Desc | Select -First 1 FullName, LastWriteTime
+# 전용 추적 로그(S-TRACE-LOG-VIEWER)는 설정 경로(기본 D:\Rcs3dsInterlockingWcsLogs):
+Get-ChildItem D:\Rcs3dsInterlockingWcsLogs\trace-*.log
+```
+> (NSSM 등록 서비스면 §5-3 대로 `AppDirectory`=`C:\BOWOO\Wcs.Api` 라 로그가 `C:\BOWOO\Wcs.Api\logs\` — 등록 방식에 따라 위치가 다르다.)
 
 ---
 
@@ -321,6 +357,7 @@ nssm status WcsApi
 Get-Content C:\BOWOO\Wcs.Api\logs\nssm-err.log -Tail 40
 Get-Content C:\BOWOO\Wcs.Api\logs\wcs-*.log -Tail 40
 ```
+> **sc.exe 등록 서비스**(현장 표준·9-B)면 `nssm status` 대신 `sc.exe query WcsApi`, 앱 로그는 작업디렉토리(system32) 기준 **`C:\WINDOWS\System32\logs\wcs-*.log`** 에 있다. `-Tail` 은 상태 푸시/폴 스팸에 묻히니 `Select-String -Path <log> -Pattern "IF05|IF09|IF10|HANDSHAKE|FULL|ERROR|WARN|OFFLINE"` 로 필터해서 본다.
 
 ### 서비스는 Running 인데 5205 안 열림 / `ConnectionString 초기화되지 않음`
 - 원인: 연결문자열을 NSSM 환경변수에 넣어 깨짐 → 크래시 루프.

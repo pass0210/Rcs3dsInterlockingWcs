@@ -1,245 +1,343 @@
-[Sprint Contract] — S-TRACE-LOG-VIEWER
+[Sprint Contract] — S-TWO-FLOOR-WRITE-ON-CLEAR
 
-═══════════════════════════════════════════════════════════════════════════════
-현장 추적용 전용 로그 파일 + 실시간 프론트 뷰어
-═══════════════════════════════════════════════════════════════════════════════
+──────────────────────────────────────────────────────────────────────────────
+Goal
+──────────────────────────────────────────────────────────────────────────────
+Make WCS write the pending-floor to TgtFloor(D6) the instant it observes the PLC
+clear it (TgtFloor 1→0 at sort-start), so the 3DS carriage never sits at
+TgtFloor==0. Per the vendor-confirmed physical model (2026-07-29), TgtFloor==0 is
+an ACTIVE "go to default (middle) floor" command, not "hold" — leaving it 0 makes
+the carriage drift to the default floor and then round-trip back to the target.
+The current observe loop (a) only writes while Ready==1 and (b) skips when
+CurFloor==head, so at the clear moment (Ready==0) it writes nothing until the
+sorter is idle again — producing the drift+round-trip. This sprint retargets the
+write trigger and the pop trigger to the clear edge, writes even while busy and
+even at the same floor, and preserves every absolute rule (#1/#2/#3/#7/#8).
 
-- Goal:
-  핸드셰이크/2층 제어 흐름의 5개 핵심 이벤트를 **상관키로 한 흐름씩 이어볼 수 있게** 전용
-  로그 파일(D:\Rcs3dsInterlockingWcsLogs)에 기입하고, 프론트에 그 로그를 **실시간 표시**하는
-  전용 화면을 신설한다. 5개 이벤트 계측은 **관측/로깅만** — 기존 판정·핸드셰이크·단일 쓰기
-  큐의 동작·타이밍을 1바이트도 바꾸지 않는다. 기존 operation_log·Serilog·모니터링 SignalR은
-  그대로 유지하고, 전용 로그는 그 위에 **얹는 추가 싱크**다(중복 억제는 아래 결정 참조).
-  ★ 추가 요건(사용자 2026-07-28 확정): **각 트레이스 로그 줄에 "이벤트 번호(1~6)"를 포함**한다.
-    이 번호 = 사용자가 6개 이벤트에 매긴 순번(추적 용이 목적, 이벤트 종류 태그이지 피스 상관키가
-    아님). 매핑: **1=TgtFloor 펜딩큐 인큐 · 2=TgtFloor 펜딩큐 디큐(pop)** · 3=IF-10 도착 · 4=C 인큐 ·
-    5=C 디큐 · 6=C 클리어. 모든 줄이 이 번호를 앞머리에 달아 "몇 번 이벤트"인지 즉시 식별.
+This is safety-critical: a wrong floor write or an early pop causes misclassification
+or machine damage. Zero behavioral regression is a completion condition.
 
-  추적 대상 6개 이벤트(= 로그 이벤트 번호 1~6; 각 이벤트의 파라미터 + 시각, 상관키 포함):
-    1 TgtFloor pending-floor 큐 **인큐** (2층 제어 — 소터별 FIFO enqueue)
-    2 TgtFloor pending-floor 큐 **디큐(pop)** (관측 루프의 분류 사이클 pop)
-    3 IF-10 요청 도착 (RcsController.DepositReport 진입)
-    4 C영역(CellAssign) 기입 인큐 (HandshakeOrchestrator가 C를 큐에 넣는 시점)
-    5 C영역 기입 디큐 = 실제 Modbus write (PlcGateway 컨슈머가 CellAssign 기입)
-    6 C영역 클리어 관측 (PLC가 C를 읽고 C_Flag 1→0으로 클리어한 것을 WCS가 폴 스냅샷에서 관측)
+──────────────────────────────────────────────────────────────────────────────
+Background the Generator MUST internalize before touching code
+──────────────────────────────────────────────────────────────────────────────
+B1. Absolute rules (CLAUDE.md §절대규칙, re-read before Phase 2). Unchanged and
+    binding: #1 (all TgtFloor writes go ONLY through the sorter's single write
+    queue via bundle.EnqueueSetTgtFloorAsync — never direct Modbus), #2 (write
+    TgtFloor ONLY when TgtFloor==0; NEVER overwrite a non-zero TgtFloor — the
+    ping-pong guard; the fresh-read `D6!=0` skip in PlcGateway.ProcessWriteAsync
+    SetTgtFloor case stays the dedup mechanism), #3 (WCS NEVER writes 0 to
+    TgtFloor; the PLC owns the clear), #7 (all periods/thresholds from
+    appsettings — ObserveIntervalMs, StallSuspectTicks), #8 (decision logic is a
+    pure Wcs.Core function; the observe loop only does I/O + state).
 
-───────────────────────────────────────────────────────────────────────────────
-확정 결정 (2026-07-28 Phase-1 게이트 — Open Question 전부 해소)
-───────────────────────────────────────────────────────────────────────────────
-  · OQ6 "부여한 번호" = **이벤트 번호 1~6**(사용자 재확정 2026-07-28: TgtFloor 인큐=1, 디큐=2로 분리
-    → 3=IF-10, 4=C인큐, 5=C디큐, 6=C클리어). 모든 트레이스 줄에 이 번호를 태그로 기입.
-    이벤트 종류 식별용이며 피스 상관키가 아니다(상관키는 pId + (chuteNo,cSeq) 그대로).
-  · OQ1 TgtFloor pop 상관 경계 **수용** — 큐 자료구조 무변경(로깅 전용). 디큐(번호 2)는 소터+층+FIFO로만
-    상관(개별 pId 미포함), 인큐(번호 1)는 트리거 pId·inductionNo를 best-effort 컨텍스트로 남김.
-  · OQ4 중복 정책 = **additive**. 기존 operation_log/Serilog 전부 유지, 전용 파일엔 이 5개만 추가.
-  · OQ2 프론트 = **신규 전용 페이지 + 테이블**(네비 발견 가능). 필터=이벤트번호/pId/cSeq.
-  · OQ3 ⑤ = **C_Flag 1→0 폴 관측**(R 클리어와 구분).
-  · OQ5 롤링/보존 = **일(Day) 롤링 + 100MB 크기롤 + 30일 보존 + 파일명 `trace-.log`**(전부 설정값).
+B2. Vendor physical model (confirmed 2026-07-29):
+    - PLC clears TgtFloor→0 ONLY at sort-start (Ready 1→0). On arrival it writes
+      CurFloor and KEEPS TgtFloor. So a polled TgtFloor 1→0 transition is an
+      unambiguous sort-start signal (WCS is the only writer of non-zero; WCS never
+      writes 0). [Re-affirm with vendor — see Open Question 3.]
+    - Writing TgtFloor while the sorter is busy (Ready==0, mid-sort) is SAFE: the
+      PLC finishes the in-progress sort, then moves to the written floor. The
+      existing Sim3ds already models this (SimSlave.RunSortSequenceAsync re-reads
+      TgtFloor after the sort and moves if it differs) — so the honored-write path
+      is exercisable end-to-end WITHOUT changing the Sim. Sim3ds stays UNCHANGED
+      this sprint. (Note: the Sim models TgtFloor==0 as "stay", NOT as
+      drift-to-default; therefore drift-prevention is verified at the WCS
+      write-timing level, not via Sim drift — see Verification Scenarios.)
 
-───────────────────────────────────────────────────────────────────────────────
-계측 지점(WHERE — 코드 위치는 확정, HOW는 Generator 재량)
-───────────────────────────────────────────────────────────────────────────────
-  [번호 1] TgtFloor 큐 인큐: RcsController.DestinationQuery — `floorQueues.Enqueue(destId, fFloor)` 지점
-        (여기서 pId·inductionNo·destId·chuteNo·floor 전부 가용).
-     + 재시작 복원 경로 PendingFloorQueueRestorer.RestoreAsync의 재-enqueue도 번호 1 이벤트로
-       발화(트리거=RESTORE로 구분).
-  [번호 2] TgtFloor 큐 디큐(pop): SorterFloorReturnService.ObserveSorter — `_queues.TryPop(destId, out _)` 지점.
-     ⚠ 이 두 지점(번호 1·2)에는 **기존 관측 훅이 없다** → 신규 관측 훅(로깅 전용)이 필요.
-       SorterPendingFloorQueues·ObserveSorter의 판정/소비 로직은 무변경, 발화만 추가.
-  (이하 WHERE의 ②=번호3 IF-10 · ③=번호4 C인큐 · ④=번호5 C디큐 · ⑤=번호6 C클리어)
-  ② IF-10: RcsController.DepositReport 진입부 — 이미 `if10ReceivedAtUtc = DateTime.UtcNow`를
-        캡처 중. 여기서 pId·barcode·chuteNo·agvNo 가용. 전용 로그 발화만 추가.
-  ③ C 인큐: HandshakeOrchestrator.ExecuteAsync의 `EmitStage("HS_C_SENT", {cellNo,cSeq})`
-        (기존 OnStage 훅 — bundle.SubscribeHandshakeStage로 구독됨).
-  ④ C 디큐: PlcGateway.ProcessWriteAsync CellAssign case의 `EmitWrite("CELL_ASSIGN", …)`
-        (기존 OnWrite 훅 — bundle.SubscribeWrite로 구독됨).
-  ⑤ C 클리어: PlcGateway.EmitRegisterChanges의 `OnRegisterChange("C_Flag", 1, 0)`
-        (기존 훅 — bundle.SubscribeRegisterChange). reg=="C_Flag" && old==1 && new==0만 필터.
-        ⚠ C_Flag 1→0 순간 C_Seq(D1)도 0으로 클리어되므로 이 델타는 cSeq를 담지 못한다 →
-          상관키는 소터별 "직전 미결 C"(마지막 CELL_ASSIGN의 cSeq/cellNo/pId)에서 해소.
-          핸드셰이크는 소터별 직렬이라 미결 C는 항상 유일(모호성 없음).
-        ⚠ 이 이벤트는 R 클리어(R_Flag 1→0, ClearR)와 **명확히 구분**한다(사용자 확인 항목 3).
+B3. Why the OLD cycle-detection pop existed and why the NEW trigger must not
+    regress it (I-1 early-pop bug — MANDATORY understanding):
+    The original design popped speculatively when "head floor == CurFloor" →
+    immediately drained the queue for a floor before those pieces were ever
+    deposited, so in [A,A,B] the sorter left floor A before the 2nd A-AGV
+    deposited (2nd A-AGV stranded). The I-1 fix moved pop to an ACTUAL sort-cycle
+    completion (Ready 1→0→1 in-place). The NEW pop trigger (TgtFloor 1→0 clear)
+    is likewise gated on a REAL physical event — the PLC only clears when it
+    begins sorting a genuinely-deposited piece (deposit → C_Flag → sort). So each
+    clear == exactly one real piece consumed == one legitimate pop. It is NOT
+    speculative (not a floor-equality guess). The contract REQUIRES the Generator
+    to preserve the [A,A,B] invariant (K3): the sorter holds floor A until BOTH A
+    pieces have actually started sorting (two clears → two pops), and only then is
+    B the head.
 
-───────────────────────────────────────────────────────────────────────────────
-상관키(Correlation) — 설계 결정
-───────────────────────────────────────────────────────────────────────────────
-  두 부류의 흐름이 존재한다. 하나의 상관키로 억지로 묶지 않는다.
+──────────────────────────────────────────────────────────────────────────────
+Implementation Scope (WHAT — the Generator decides HOW)
+──────────────────────────────────────────────────────────────────────────────
+S1. Retarget the WRITE trigger in SorterFloorReturnService.ObserveSorter:
+    - New rule: whenever the observed snapshot has TgtFloor==0 AND the sorter's
+      pending-floor queue is non-empty AND Online AND not Paused → write the
+      current queue HEAD floor to TgtFloor (via the single write queue, rule #1).
+    - This MUST fire even when Ready==0 (write-during-busy) and even when
+      CurFloor==head (write same floor to hold position and prevent drift). Remove
+      the two current guards that block this: the `!ready` early-return and the
+      `snap.CurFloor == f` skip (SorterFloorReturnService.cs ~line 282).
+    - Paused/Offline → no write (Paused via low-cost IsPaused, Online via the
+      existing snap.Online early-return). FULL is NOT a block for the physical
+      alignment write (큐 피스는 IF-05 수용 확정분 — FULL blocks only at IF-05
+      dispatch; unchanged from B/Q5 decision).
+    - The write value is supplied by the QUEUE (head), not by any sort-completion
+      event. Rule #2 is preserved structurally: WCS still only writes when
+      TgtFloor==0; it never overwrites a non-zero TgtFloor; the write-consumer
+      fresh-read `D6!=0` skip remains the dedup so re-asserting the same head on
+      every 0-tick is self-limiting (idempotent) and does not spam.
 
-  (A) 피스 흐름(이벤트 ②→③→④→⑤ = 한 물리 피스):
-      · **1차 상관키 = pId** (RCS 부여, IF-10에 존재). 운영자가 "한 피스"를 따라가는 키.
-      · **기술 조인키 = (chuteNo/destId, cSeq)**. cSeq는 소터별 단조 증가라 C/R 핸드셰이크
-        1건을 유일하게 식별. ③④는 cSeq를 네이티브로 보유, ⑤는 소터별 미결 C에서 해소.
-      · pId 전파: pId는 IF-10·TriggerSorterHandshake에 가용하나 ③④⑤ 발화 시점엔 아직
-        연결돼 있지 않다. Generator는 pId를 C 흐름 이벤트에 **실시간으로 실어야** 한다 —
-        (i) 기존 depositedAtUtc처럼 핸드셰이크에 상관 컨텍스트를 선택적으로 전달하거나,
-        (ii) 소터별 (cSeq→pId) in-메모리 매핑을 C 인큐 시점에 채우는 방식.
-        어느 쪽이든 **단일 쓰기 큐 우회·제2 write 경로 신설 금지, Wcs.Core 무접촉**.
-        WHAT 요구: C 흐름 각 레코드는 pId·cSeq·cellNo·chuteNo(destId)를 모두 담는다.
-      · ★ 사용자-부여 번호(OQ6): 확정되면 이 번호도 피스 흐름 전 레코드(②③④⑤)에 전파해
-        1차 표시 상관키로 쓴다(pId와 별개면 둘 다 기입).
+S2. Retarget the POP trigger:
+    - New rule: pop exactly ONE head on the TgtFloor 1→0 clear edge (sort-start),
+      NOT on the Ready 1→0→1 in-place cycle.
+    - The popped head is the piece whose sort just started (== CurFloor at clear
+      time). After popping, the NEW head becomes the write target for S1 in the
+      same observe tick (this is the write-during-busy of the NEXT piece's floor —
+      see Open Question 1 for the exact "which floor" resolution).
+    - Deterministic edge detection (see Open Question 3): track the previous
+      observed TgtFloor per sorter in ObserveState; pop only on a non-zero→zero
+      transition. Establish the baseline on the first observation and re-sync it
+      on OFFLINE (mirror the existing PrevReady handling) so that (a) the
+      post-StartupClear initial TgtFloor==0 is NOT mistaken for a clear edge (no
+      spurious pop) and (b) OFFLINE recovery does not fabricate an edge. The pop
+      is missed-edge-safe by construction: WCS is the only writer of non-zero and
+      only writes AFTER observing the 0, so the 0 state persists until WCS reacts.
 
-  (B) 층-큐 흐름(이벤트 ① = 소터·층 단위, FIFO):
-      · TgtFloor 큐 인큐/디큐는 **피스 단위가 아니라 소터+층 단위**다(층 1건이 다수 피스를
-        겸할 수 있음 — 큐 [A,A,B]에서 A 정렬 1회가 A 피스 2건을 수용). pId로 묶는 것은
-        의미상 틀리다.
-      · 상관키 = **(chuteNo/destId, floor, 큐 시퀀스/FIFO 위치)**. 인큐 레코드는 트리거 pId·
-        inductionNo·사용자-부여 번호를 **best-effort 컨텍스트**로 함께 남긴다(IF-05 시점 가용).
-        디큐(pop)는 큐가 floor(int)만 저장하므로 pId/번호 없이 소터+층+FIFO로 상관한다.
-      · 로그에 이 경계를 명시(TgtFloor 이벤트는 층-scope임을 운영자가 오해하지 않게).
-      · 큐 자료구조(SorterPendingFloorQueues: ConcurrentQueue<int>)는 **변경하지 않는다**
-        (로깅 전용 원칙 — (pId,floor) 튜플로 바꾸면 공유 상태 변경이라 스코프 밖). → 사용자
-        확인 항목 1 참조.
+S3. Adjust the safety-critical observability to the new triggers (meaning preserved):
+    - Trace event 2 (EventNo=2, "TGTFLOOR_DEQUEUE"): still emitted exactly once per
+      pop (one per real piece consumed). Fire it on the new clear-edge pop; update
+      the Trigger/Detail fields to reflect the clear-edge origin (event NUMBER,
+      NAME, and one-per-piece semantics are preserved — the trace viewer keeps
+      working; only the wall-clock timing shifts earlier to sort-start).
+    - DetectStall (SORTER_STALL_SUSPECT WARN + operation_log, once-per-episode,
+      re-arming, observe-only, no corrective action): re-derive its condition for
+      the new model. Under the new write model a non-empty queue no longer sits at
+      TgtFloor==0 (WCS writes head immediately), so the OLD condition
+      (idle ∧ TgtFloor==0 ∧ head present) can no longer detect a genuine
+      under-pop stall. The re-derived condition MUST still fire once-per-episode
+      for a real under-pop stall (head present but not being consumed — e.g. AGV
+      abandonment: aligned/held at head, no deposit, head unchanged for
+      StallSuspectTicks) and MUST keep ZERO false positives on the legitimate
+      states already covered (empty queue, normal cycling, offline, paused,
+      detector disabled). Keep it observe-only (no writes/pops/re-dispatch — that
+      is Sub-Sprint D scope) and off the pure core.
 
-───────────────────────────────────────────────────────────────────────────────
-Implementation Scope (Generator가 구현할 것)
-───────────────────────────────────────────────────────────────────────────────
-  [백엔드 — 전용 싱크]
-  1. 전용 로그 싱크 신설(Wcs.Api 계층 — 절대규칙 #8: 로깅은 I/O). IOperationLogger/
-     OperationLogService와 **동형의 논블로킹 백그라운드 채널 싱크**로 만든다:
-     발화는 즉시 반환(폴/핸드셰이크/HTTP 핫패스 무블로킹), 컨슈머가 별도 스레드에서 파일 기입.
-     · 파일 위치·롤링·보존·파일명·outputTemplate 전부 **appsettings 설정값**(절대규칙 #7).
-       기본 경로 = `D:\Rcs3dsInterlockingWcsLogs`(폴더 없으면 생성). 코드에 경로 리터럴 0.
-     · 포맷 = **구조화 1줄/이벤트**: 각 줄에 시각(로컬·ms)·event종류(5종 중 1)·상관키
-       (사용자-부여 번호·pId·cSeq·chuteNo/destId·cellNo·floor)·이벤트별 파라미터. 추적 파싱 용이.
-     · 구현 방식(전용 Serilog 서브로거+File 싱크 + 필터 vs 전용 채널+파일 writer)은 Generator
-       재량. 단 **이 5개 이벤트만** 이 파일에 들어가고, 기존 operation_log/Serilog 파일에는
-       영향 0(별도 로거 인스턴스/서브로거로 격리).
-  2. 5개 계측 지점 발화 결선(위 WHERE):
-     · ③④⑤는 기존 훅(SubscribeHandshakeStage/SubscribeWrite/SubscribeRegisterChange)을
-       **추가 구독**(operation_log 구독과 나란히 — Program.cs 관측 결선부와 동형). 기존 구독
-       무변경.
-     · ①②는 신규 로깅 훅(발화만 추가). 판정/소비/응답 로직 무변경.
-     · 소터별 "미결 C"(cSeq→pId·cellNo·사용자번호) in-메모리 추적으로 ⑤ 상관 해소.
-  3. 전용 로그 백로그 시드용 REST 엔드포인트 신설(기존 GET /api/monitor/operation-log 패턴
-     재사용 — take clamp). 최근 N개 트레이스 레코드를 구조화 JSON으로 반환. 로그 디렉터리
-     부재 시 500이 아니라 생성 후 빈 목록 반환.
-  4. 실시간 전달 — 기존 모니터링 SignalR **재사용**:
-     · WcsMonitorHub에 트레이스 옵트인 그룹(예: "trace") + Subscribe/Unsubscribe 허브 메서드
-       추가(GroupOpLogPoll 옵트인 패턴과 동형).
-     · MonitorRelayService가 전용 싱크의 OnEntry(OperationLogService.OnEntry 동형)를 구독해
-       "trace" 그룹으로 fire-and-forget 브로드캐스트(예외 격리·논블로킹 — 기존 Broadcast 패턴).
-     · 신규 push 메서드 + DTO(카멜케이스, MonitorHubContracts 동형).
+S4. Pure decision function (Wcs.Core.DepositDecider) — see Open Question 4:
+    The write-decision must yield "write = head" for TgtFloor==0 in ALL non-hold,
+    online cases, INCLUDING the aligned-idle case (Ready==1 && CurFloor==head &&
+    TgtFloor==0) and the busy case (Ready==0 && TgtFloor==0). Recommended: keep the
+    logic in the pure function (rule #8). HARD CONSTRAINT: the push-facing outputs
+    consumed by DestinationStatusService.ComputeSorter and DestinationStatusPusher
+    — namely DepositDecision.Ready and DepositDecision.Reason — MUST remain
+    byte-identical (those callers pass floor=snap.CurFloor and read ONLY .Ready /
+    .Reason; only .WriteTgtFloor / .TgtFloorValue may change). Enumerate and update
+    the unit tests that encode the superseded "aligned = no write" contract (see
+    Completion Conditions test list).
 
-  [프론트 — 전용 뷰어]
-  5. 신규 페이지 + 라우트(App.tsx) + 좌측 네비 항목(Layout NAV_SETS) 추가. 발견 가능해야 함
-     (고아 페이지 금지 — Evaluator 규칙). OpLogTail.tsx를 템플릿으로:
-     · 접속 시 REST 백로그(최근 N) 시드 → 이후 SignalR로 실시간 append(시계열, 최신 하단,
-       행수 상한 유지).
-     · 필터: event종류 + 상관키(사용자번호/pId/cSeq)로 한 피스 흐름을 좁혀 보기.
-     · 표시 형식 = 테이블(시각·event·사용자번호·pId·cSeq·chuteNo·cellNo·floor·detail 컬럼).
-       상관키로 그룹/필터해 ②→③→④→⑤ + 관련 ① 순서를 이어볼 수 있게.
-  6. "창 닫히면 실시간 스트림 종료" — 뷰어 페이지가 마운트 시 "trace" 그룹 구독, 언마운트/창
-     닫힘 시 구독 해제. 마지막 창이 닫히면 그룹이 비어 서버 push는 no-op(서비스·서버는 계속
-     동작). 재접속 시 백로그 재시드 + 실시간 재스트리밍. (앱 수명 monitorHub 연결은 유지하되
-     trace 구독만 페이지 수명에 종속시키는 방식 권장 — HOW는 Generator 재량.)
+S5. Out of scope / no change (confirm untouched):
+    - PlcGateway.cs: the clear is observed via existing poll snapshots; the
+      SetTgtFloor fresh-read guard stays. No gateway change.
+    - RcsController IF-05 enqueue + trace event 1: unchanged (still enqueues each
+      sorter piece's floor in FIFO order).
+    - PendingFloorQueueRestorer: unchanged. VERIFY the restart interplay: after
+      StartupClear (D6=0) + restore, the observe loop's first observation
+      establishes the TgtFloor baseline at 0 and does NOT spuriously pop; it then
+      writes the restored head normally.
+    - SorterGatewayRegistry / SorterBundleHandle: no new hook — the write path uses
+      the existing EnqueueSetTgtFloorAsync. Sim3ds: unchanged.
+    - Absolutely NO WCS write of 0 to TgtFloor (rule #3). NO overwrite of non-zero
+      TgtFloor (rule #2).
 
-  [설정]
-  7. appsettings에 전용 트레이스 로그 섹션 신설(경로·rollingInterval·fileSizeLimit·
-     retainedFileCount·파일명 패턴·백로그 take 기본/상한·트레이스 그룹 활성 등). 기본값 제시,
-     하드코딩 0.
+──────────────────────────────────────────────────────────────────────────────
+Open Questions — ✅ 사용자 게이트 확정(2026-07-29): OQ1=다음 피스 층(pop 후 새 head) 기입 ·
+OQ2=빈 큐 시 TgtFloor 0 유지(디폴트층 park) · OQ3=PLC는 분류 시작 때만 클리어(도착 시 유지, 1→0 에지=
+분류시작 신호로 안전). 아래 권장 기본값 그대로 확정 — Generator는 이 확정대로 구현.
+(원문 이력)
+──────────────────────────────────────────────────────────────────────────────
+OQ1 ★ WHICH floor to write at the clear moment.
+    Queue semantics (verified from code): IF-05 enqueues each sorter piece's floor
+    in FIFO order; the head is the oldest not-yet-consumed piece; at a clear, the
+    piece being sorted == head (the sorter was aligned to head to receive it, so
+    head == CurFloor at clear).
+    RESOLUTION (recommended default): pop the head, then write the NEW head (the
+    NEXT piece's floor). Rationale traced against [A],[1,2],[1,1,2]:
+      • [1,1,2] @floor1: A1 clear → pop first 1 → new head 1 → write 1 (hold at 1
+        for A2). A2 clear → pop second 1 → new head 2 → write 2 (move to 2 after A2
+        sort — write-during-busy). B clear → pop 2 → empty. Matches K3 intent.
+      • Writing the POPPED head instead (= CurFloor) would only be correct for
+        same-floor-consecutive and DEADLOCKS on a floor change: the held non-zero
+        TgtFloor blocks the next differently-floored write (rule #2) and no further
+        clear arrives to release it. So "write new head" is the only FIFO-correct
+        choice, and it IS the vendor-confirmed write-during-busy (commit the sorter
+        to the next floor while the current piece finishes).
+    CONFIRM with user: that "그 층" means the post-pop new head (next piece), not
+    the popped floor. (Physical analysis is decisive; confirmation is a safety
+    checkpoint given the ambiguous phrasing.)
 
-───────────────────────────────────────────────────────────────────────────────
-중복(기존 operation_log와의 관계) — 설계 결정
-───────────────────────────────────────────────────────────────────────────────
-  · 기본 결정 = **추가(additive)**. 기존 operation_log/Serilog는 지금처럼 HANDSHAKE/PLC_WRITE/
-    POLL_CHANGE/API를 계속 남긴다(무변경·회귀 0). 전용 파일은 그 위에 **큐레이트된 5개 흐름을
-    상관키와 함께** 별도로 남기는 추가 싱크다. 기존 로그에서 이벤트를 "이동/제거"하지 않는다.
-  · "전용 파일에만 남기고 operation_log 중복 제거" 옵션은 사용자 확인 항목 4로 남긴다(권장=추가).
+OQ2 Empty queue at the clear moment (the just-sorted piece was the last).
+    RESOLUTION (recommended default): write NOTHING — leave TgtFloor==0. Rationale:
+    (a) no pending work → no round-trip waste, so drift-to-default is harmless
+    "park at default"; (b) it PRESERVES the "TgtFloor==0 → write head" trigger for
+    the next enqueued piece. The alternative "write CurFloor to hold" would set
+    TgtFloor non-zero and then DEADLOCK a subsequent differently-floored piece
+    (rule #2 forbids overwriting non-zero; rule #3 forbids WCS writing 0). K2
+    already asserts `TgtFloor:0, Ready:true` between sequential pieces — this
+    default keeps K2 green.
+    CONFIRM with user: (i) that the "default (middle) floor" is a SAFE park and
+    drift-on-empty-queue is operationally acceptable; (ii) if NOT acceptable,
+    holding position requires relaxing rule #2 or introducing an operator/WCS
+    re-target path — a larger design change that must escalate to re-planning.
 
-───────────────────────────────────────────────────────────────────────────────
-제약(반드시 준수 — 위반 시 FAIL)
-───────────────────────────────────────────────────────────────────────────────
-  · 절대규칙 #1: 5개 이벤트 계측은 관측/로깅만. 단일 쓰기 큐 우회·제2 write 경로 신설 금지.
-    인큐/디큐 로깅은 **기존 단일 큐 지점에 훅만** 건다.
-  · 절대규칙 #7: 로그 경로·롤링·보존·파일명 = appsettings. `D:\Rcs3dsInterlockingWcsLogs`는
-    기본값. 하드코딩 금지.
-  · 절대규칙 #8: Wcs.Core 순수성 유지. 판정 로직 무변경. HandshakeOrchestrator/PlcGateway
-    (EF 비의존 계층)는 전용 싱크에 의존하지 않는다 — ILogger·콜백 이벤트만 발화하고 Wcs.Api
-    싱크가 파일에 기록(기존 operation_log 패턴과 동일).
-  · 성능: 5개 발화가 핸드셰이크/응답/폴 경로를 블로킹하지 않는다(논블로킹 enqueue + 백그라운드
-    파일 writer + fire-and-forget SignalR). 발화·기록 실패가 본 동작을 막지 않는다(fail-safe).
-  · 회귀 0: 기존 operation_log/Serilog/모니터링 SignalR/기존 테스트 전부 무영향.
+OQ3 Determinism of catching the clear (poll-snapshot based).
+    RESOLUTION (contract requirement, not really optional): track prevTgtFloor per
+    sorter; pop on non-zero→0 edge; baseline on first obs; re-sync on OFFLINE;
+    never pop the post-StartupClear initial 0. Missed-edge-safe by construction (0
+    persists until WCS reacts; poll samples the seconds-long window many times at
+    150ms).
+    CONFIRM with user/vendor: that the PLC clears TgtFloor→0 ONLY at sort-start and
+    at no other time (arrival keeps it) — this is the one assumption the edge
+    detector depends on. Already stated in SPEC §6 / rule #3; re-affirm because it
+    is safety-critical.
 
-- Completion Conditions (Evaluator PASS 최소 조건):
-  1. WCS+Sim3ds 실행 후 IF-05→IF-10→핸드셰이크 1피스를 태우면 D:\Rcs3dsInterlockingWcsLogs에
-     생성된 전용 파일에 **5개 이벤트가 구조화 1줄씩** 기입되고, 사용자-부여 번호·pId·cSeq로
-     한 흐름을 이어 추적 가능함을 실제 파일 내용으로 확인(fresh evidence).
-  2. 전용 파일에는 이 5개 이벤트만 들어가고, 기존 operation_log/Serilog 파일 내용/스키마는
-     무변경(회귀 0). 기존 테스트 스위트 전부 GREEN(Generator·Evaluator 독립 재실행).
-  3. 프론트 신규 뷰어가 네비에서 발견 가능하고, 백로그 시드 + 실시간 append가 브라우저에서
-     동작(스크린샷·콘솔 캡처). 창을 닫으면 스트림이 종료되고 서비스는 계속(재접속 시 재시드).
-  4. 로그 경로/롤링/보존이 appsettings에서 읽히고 기본이 D:\Rcs3dsInterlockingWcsLogs임을
-     설정 변경으로 확인(하드코딩 리터럴 부재).
-  5. 발화 경로가 논블로킹임을 코드 구조로 확인(핫패스에서 동기 파일 I/O·SaveChanges 없음).
-  6. ★ 모든 트레이스 레코드에 **이벤트 번호(1~6)** 가 정확히 태깅됨을 파일·화면에서 확인
-     (1=TgtFloor인큐·2=TgtFloor디큐·3=IF-10·4=C인큐·5=C디큐·6=C클리어). 번호로 이벤트 종류를
-     즉시 식별 가능. 피스 흐름(3~6)은 pId+(chuteNo,cSeq)로 상관되어 한 흐름 재구성 가능.
+OQ4 DepositDecider role. RESOLUTION: yes, the pure function needs the aligned-idle
+    case (Ready==1 && CurFloor==head && TgtFloor==0) to return write=head; the
+    busy case (Ready==0 && TgtFloor==0) already returns write. Push-facing .Ready /
+    .Reason stay identical (constraint S4). Test-update range is enumerated in
+    Completion Conditions. (No user decision needed — documented for transparency
+    since the user asked for the update scope.)
 
-- Parallel Modules: N/A (single module — 백엔드 계약이 프론트 소비의 선행 의존).
-- Evaluation Dimensions: functional only (관측/로깅 전용 additive 기능. 논블로킹은 완료조건 5).
+──────────────────────────────────────────────────────────────────────────────
+Evaluation Criteria (Backend/API weights per workflow-agents.md)
+──────────────────────────────────────────────────────────────────────────────
+1. Functionality / Data integrity (★★★): write-on-clear fires at the 1→0 edge even
+   when Ready==0 and CurFloor==head; exactly one pop per real piece (no early pop,
+   no double pop, no under-pop); FIFO order preserved; drift/round-trip eliminated;
+   all absolute rules (#1/#2/#3/#7/#8) provably intact (no direct Modbus, no
+   overwrite of non-zero TgtFloor, no WCS write of 0).
+2. Architecture / intentional design (★★★): decision stays pure (Wcs.Core); the
+   observe loop stays thin I/O + state; push-facing outputs untouched; change
+   localized to the observe loop + the pure write-decision; no new plumbing.
+3. Craft (★★): deterministic edge detection (baseline/OFFLINE re-sync, no spurious
+   pop); trace event 2 and stall detector correctly retargeted with meaning
+   preserved; no write spam (fresh-read dedup); exception isolation per sorter
+   preserved; config-driven (rule #7).
+4. Regression safety (★★): the FULL existing suite is green, with only the
+   explicitly-listed unit tests updated (and their INTENT — fire-once, FIFO,
+   no-false-positive, push readiness — preserved), plus new deterministic tests
+   for the new scenarios.
 
-───────────────────────────────────────────────────────────────────────────────
-- Detected Project Type: Full-stack
-  (레포 신호: frontend/src/**/*.tsx React SPA 진입점 + backend/src/Wcs.Api Controllers·SignalR
-   허브가 같은 레포에 공존.)
+──────────────────────────────────────────────────────────────────────────────
+Completion Conditions (minimum bar for Evaluator PASS)
+──────────────────────────────────────────────────────────────────────────────
+C1. `dotnet test backend/Wcs.sln` fully green (Evaluator re-runs from scratch,
+    independent of Generator's report).
+C2. Behavioral two-floor suites GREEN with NO weakening of their invariants:
+    E2EGroupK_TwoFloorReturnTests (K1 single-floor return, K2 FIFO 1-2-1
+    one-at-a-time, K3 [A,A,B] hold-until-both-classified), E2EGroupL/M
+    (host push / cold-start), TwoFloorHostRoutingTests, SorterPushOperationalTests,
+    RcsPushTests, ChuteStatePushTests. K3's [A,A,B] hold invariant is the primary
+    non-regression guard for I-1.
+C3. Updated unit tests reflect the NEW contract with intent preserved:
+    - DepositDeciderTests: Row1_Ready_AtOperationalFloor_IsReady and
+      FloorParam_F1_AtFloor1_IsReady flip WriteTgtFloor false→true (TgtFloor==0
+      aligned now writes), with .Ready still true and .Reason still None. Cases
+      with non-zero TgtFloor (C1_Row1_TgtFloorResidual_StillReady,
+      Row3/Row5/FloorParam ping-pong) stay write=false (rule #2). Audit all
+      DepositDecider.Decide call-sites in ScenarioTests for the same shift.
+    - SorterStallDetectorTests: re-target the stall condition to the new model
+      (the CC1.2/1.3 fixtures that set TgtFloor==0 + aligned head and expect a fire
+      encode the OLD condition; update them to the abandonment signature — head
+      present + held/aligned + no pop for N ticks). Preserve: once-per-episode,
+      re-arm, observe-only (D6 unchanged, no pop), zero false positives on empty /
+      cycling / offline / paused / disabled, cross-layer operation_log persistence.
+C4. New deterministic tests (observe-loop level, using FakeModbusMasterForApi so
+    timing is controllable — same harness as SorterStallDetectorTests.BuildService):
+    - write-on-clear: at a TgtFloor 1→0 edge while Ready==0, a SetTgtFloor(new head)
+      is enqueued (write-during-busy) — assert the D6 write happens during the
+      Ready==0 window.
+    - same-floor hold: with new head == CurFloor, WCS still writes that floor
+      (CurFloor==head no longer skipped) — the drift-prevention assertion.
+    - one-pop-per-clear: a single 1→0 edge pops exactly one head and emits exactly
+      one trace event 2; steady TgtFloor==0 (no new edge) does not re-pop.
+    - empty-queue: at a clear that empties the queue, no write is enqueued and
+      TgtFloor stays 0 (OQ2 default); a subsequently enqueued differently-floored
+      piece is then written on the next TgtFloor==0 observation (next-piece
+      recovery).
+    - no missed / no spurious edge: baseline-on-first-obs and OFFLINE re-sync
+      produce no spurious pop (esp. post-StartupClear initial 0).
+C5. Rule proofs in evidence: Sim/Fake timeline shows WCS writes to D6 are only
+    1/2 (never →0); no direct-Modbus write path added; no non-zero TgtFloor
+    overwrite (fresh-read skip logged when applicable).
+C6. Static checks: run the project's build/analyzers/formatter (check mode); record
+    pass/fail/not-configured in sprint-feedback.md.
 
-───────────────────────────────────────────────────────────────────────────────
-- Verification Scenarios (Full-stack — 필수)
+──────────────────────────────────────────────────────────────────────────────
+Parallel Modules: N/A (single module — the change is localized to
+SorterFloorReturnService + the pure DepositDecider write-decision + their tests;
+no boundary-clean partition exists and the pieces are causally coupled).
 
-  === Applicable Web/UI scenarios (신규 트레이스 뷰어 표면) ===
-  W1 Default state: 뷰어 진입 시 REST 백로그(최근 N) 시드 → 테이블 렌더(시각·event·사용자번호·
-     pId·cSeq·chuteNo·cellNo·floor·detail 컬럼). 스크린샷으로 확인.
-  W2 Live-append state: 백엔드에서 1피스를 태워 새 트레이스 이벤트가 SignalR로 도착 → 테이블
-     하단에 실시간 append(자동 스크롤). before/after 스크린샷.
-  W3 Correlation/filter state: 사용자번호(또는 pId/event종류/cSeq) 필터로 한 피스의 ②③④⑤가
-     한 화면에서 이어짐을 확인(click-through: 필터 입력 → 좁혀진 결과 스크린샷).
-  W4 Empty state: 트레이스 이벤트가 아직 없을 때 "표시할 로그 없음" 안내(크래시·빈 흰화면 아님).
-  W5 Error/disconnected state: 허브/백엔드 미가용 시 연결 상태 표시·에러 안내, 콘솔 uncaught
-     예외 0(console.log 캡처 — BLOCKING 규칙). React dev-mode warning 0.
-  W6 Window-close → stream ends: 뷰어 탭을 닫으면 그 클라이언트 구독 종료(서버는 빈 그룹 push
-     no-op·서비스 계속). 재오픈 시 백로그 재시드 + 실시간 재스트리밍.
-  Dark mode: N/A — 앱은 단일 고정 테마(라이트/다크 토글 부재).
+Evaluation Dimensions: functional only (regression-safety is folded into the
+functional re-run per C1–C5; safety-criticality raises the bar, not the dimension
+count).
 
-  === Applicable Backend/API scenarios (백엔드 표면) ===
-  B1 Endpoints/surfaces touched:
-     · 신규 REST: GET 전용 트레이스 백로그(method+path — Generator 확정, /api/monitor 하위
-       권장). take clamp + 커서(기존 operation-log 엔드포인트 패턴).
-     · 신규 SignalR: WcsMonitorHub SubscribeTrace / UnsubscribeTrace + TraceEvent push.
-     · 회귀 대상(무변경 확인): POST /api/v1/destination-query(IF-05), POST /api/v1/deposit-report
-       (IF-10) — 응답 형상·상태코드 불변.
-  B2 Happy path:
-     · GET 백로그 → 최근 N개 구조화 트레이스 레코드(200). take 상한 clamp.
-     · IF-10 → {result:"OK"} 불변; 5개 발화 결과 전용 파일에 5줄 생성(파일 내용 assert),
-       각 줄에 사용자-부여 번호 포함.
-     · IF-05 → {result,chuteNo} 불변; TgtFloor 인큐 이벤트 1줄(트리거·floor·pId·번호·큐 depth).
-  B3 Error cases:
-     · 로그 디렉터리 부재 → 자동 생성 후 빈 목록(500 금지).
-     · take 파라미터 범위 밖 → clamp(또는 400) — 기존 정책 동형.
-     · IF-05/IF-10 검증 실패(pId 범위·barcode 등) → 기존 400 동작 불변(회귀 확인).
+──────────────────────────────────────────────────────────────────────────────
+Detected Project Type: Full-stack
+  (Repo signal: browser-facing entry point `frontend/index.html` + Vite/TS client
+  tree AND server-side controllers `backend/src/Wcs.Api/Controllers` with an
+  ASP.NET Core host. This sprint's SURFACE is backend-only — gateway/decision
+  timing — with a display-only consequence on the frontend TraceLogPage, where
+  trace event 2 now renders at the earlier clear-edge timing. No frontend code
+  changes.)
 
-  === End-to-end data-flow scenario (2+ 계층 교차) ===
-  E1 전(全) 피스 흐름 계측 E2E: 실 Sim3ds + WCS 기동 → IF-05 POST(→ ① TgtFloor 인큐 + 관측
-     루프 pop 시 디큐) → IF-10 POST(→ ② 도착) → 핸드셰이크 진행(→ ③ C 인큐 → ④ C 디큐/Modbus
-     write → Sim이 C 읽고 C_Flag 1→0 클리어 → ⑤ C 클리어 관측) → **전용 파일에 5개 상관 레코드**
-     (사용자번호·pId·cSeq로 한 흐름 재구성 가능)가 남고, **동시에 SignalR trace 그룹으로
-     스트리밍**됨을 검증. 그런 뒤 브라우저 뷰어가 그 5건을 렌더함을 확인(계층: PLC/Gateway →
-     Api 싱크 → 파일 + SignalR → 프론트).
-  E2 Zero-regression E2E: 위 흐름에서 기존 operation_log에도 5개 이벤트가 종전대로 남고
-     (additive), 기존 monitor/oplog SignalR·기존 xUnit 스위트가 전부 GREEN.
+──────────────────────────────────────────────────────────────────────────────
+Verification Scenarios (per-type, mandatory)
+──────────────────────────────────────────────────────────────────────────────
+=== Applicable Web/UI scenarios (frontend surface this sprint touches — display-only) ===
+- Default state — TraceLogPage (`frontend/src/pages/TraceLogPage.tsx`): navigate to
+  the trace log view; the event list renders with no console errors/pageerror; the
+  legend/columns for EventNo/Event are intact (no shape change to event 2).
+- Alternate state introduced by this sprint — event 2 timing: after driving a
+  closed-loop scenario (below), the viewer shows a TGTFLOOR_DEQUEUE (EventNo 2)
+  entry emitted at the sort-start/clear moment rather than at sort-completion;
+  event 2 still appears exactly once per consumed piece, correlated to its sorter
+  + floor. (Browser verification via Playwright MCP: navigate → run loop → screenshot
+  the trace list → READ it; capture console.log; URL from
+  frontend `.claude/ports.local.json`.)
 
-───────────────────────────────────────────────────────────────────────────────
-- Open Questions for User — ✅ 전부 확정됨(2026-07-28 게이트, 위 "확정 결정" 블록이 정본). 아래는 이력.
-  1. 상관키: 권장 = pId 1차 + (chuteNo,cSeq) 기술 조인. TgtFloor 큐 이벤트는 소터+층 scope
-     (pId 아님) — 큐 자료구조 무변경 원칙상 **pop은 피스 단위 상관 불가**. 이 경계 수용 확인.
-  2. 프론트: 신규 전용 페이지(권장) vs 기존 모니터 탭. 표시 = 테이블(권장) vs 타임라인.
-  3. ⑤ "C영역 클리어" = C_Flag 1→0 폴 관측(권장·R 클리어와 구분) 확인.
-  4. 전용 파일에 5개만 — 기존 operation_log에도 계속 남길지(권장=additive·회귀 0) vs 전용에만.
-  5. 보존/크기/롤링: 권장 = 일(Day) 롤링 + 크기롤(100MB) + 보존 N일(30일) + 파일명 trace-.log.
-  6. ★ "내가 부여한 번호" = 정확히 무엇인가? (pId / orderNo / barcode / agvNo / 기타)
-     그 번호를 **모든 트레이스 줄**에 기입(피스 흐름 ②③④⑤ 전파). pId와 다르면 둘 다 기입.
-     TgtFloor 디큐(pop)는 구조상 그 번호를 못 실을 수 있음(경계 명시).
+=== Applicable Backend/API scenarios (the real surface — automated test code, not curl) ===
+- Endpoints touched (no signature change — behavior/timing reached through them):
+    IF-05  POST /api/v1/destination-query  (enqueues sorter piece floor — unchanged)
+    IF-09  POST /api/v1/arrival-report      (arrival record — drives the loop)
+    IF-10  POST /api/v1/deposit-report      (deposit → C_Flag → PLC sort-start →
+                                             TgtFloor clear — the trigger under test)
+    Trace read endpoint backing TraceLogPage (GET — event 2 timing surfaced)
+- Happy path:
+    IF-05 sorter piece (mapped inductionNo) → 200 {result:"OK"} + queue enqueue F.
+    IF-10 on a deposited piece at the aligned floor → 200 {result:"OK"} → handshake
+    → PLC clears TgtFloor → WCS observes 1→0 → pops head → writes new head
+    (write-during-busy) → Sim finishes sort then moves/holds → CurFloor tracks the
+    written floor. Assert: exactly one D6 write per piece, values ∈ {1,2}, never →0.
+- Relevant error / edge cases (Planner-selected — not padded):
+    • Empty-queue clear (OQ2): no D6 write, TgtFloor stays 0, next enqueued
+      differently-floored piece is served on the next TgtFloor==0 observation.
+    • Paused sorter: at a clear, NO write (DepositDecider Paused block) — still no
+      write while busy.
+    • Offline sorter: snapshot distrusted → no pop, no write, PrevReady/prevTgtFloor
+      re-synced (no spurious edge on recovery).
+    • Unmapped inductionNo (unchanged): IF-05 NG + IF05_NO_FLOOR (regression guard —
+      no behavioral change expected).
 
-───────────────────────────────────────────────────────────────────────────────
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3
-  (Applicable Web/UI scenarios [W1–W6], Applicable Backend/API scenarios [B1–B3],
-  end-to-end data-flow [E1–E2]). All slots filled: yes.
+=== End-to-end data-flow scenario(s) crossing layers (HTTP ↔ in-memory queue ↔ Modbus
+    gateway ↔ real Sim3ds ↔ DB/trace) ===
+- Write-on-clear / no round-trip: IF-05→(align)→IF-09→IF-10→PLC sort-start clears
+  TgtFloor→WCS writes the (new head or same head) floor DURING Ready==0→Sim honors
+  the write after the sort→CurFloor lands on the target with NO intermediate write
+  of 0 and NO drift-then-return. (Drift-prevention is asserted at the WCS write
+  timing: a D6 write is emitted at the clear while Ready==0, including when
+  CurFloor==head — since the current Sim models TgtFloor==0 as "stay", the WCS-side
+  write-timing assertion is the definitive drift-prevention proof.)
+- [A,A,B] multi-AGV hold (K3, primary I-1 guard): enqueue [1,1,2] at floor 1; after
+  A1's sort the sorter HOLDS floor 1 and the queue is [1,2] (exactly one pop, no
+  D6→2 yet); only after A2's sort does the sorter move to floor 2; then B empties
+  the queue. Proves the new clear-edge pop does not reintroduce early-pop.
+- Empty-queue park + next-piece recovery: a single piece is deposited/sorted, queue
+  empties, TgtFloor stays 0; a later differently-floored IF-05 is then written and
+  served — proving the empty-queue default (OQ2) does not deadlock the next piece.
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 8
+  (Web/UI: default-state TraceLogPage, event-2-timing alternate state; Backend/API:
+  endpoints-touched, happy-path, error-edge-cases; End-to-end: write-on-clear-no-roundtrip,
+  AAB-hold, empty-queue-recovery). All slots filled: yes.
