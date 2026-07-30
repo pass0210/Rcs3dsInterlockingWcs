@@ -66,21 +66,31 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
     /// <summary>operation_log action 태그(성공/실패 전수 부수 기록).</summary>
     private const string OpLogAction = "CHUTESTATE_PUSH";
 
+    // 계약 next_state 값(UpdateChuteState) — 트레이스 이벤트 8/10 분기 기준. 2=수용 불가 / 3=수용 가능.
+    private const int NextStateBusy  = 2;   // → 이벤트 8(CHUTESTATE_PUSH_BUSY)
+    private const int NextStateReady = 3;   // → 이벤트 10(CHUTESTATE_PUSH_READY)
+
     private readonly IHttpClientFactory            _httpFactory;
     private readonly ChuteStatePushOptions         _opt;
     private readonly ILogger<ChuteStatePushClient> _log;
     private readonly IOperationLogger              _opLog;
 
+    // S-TRACE-READY-PUSH-AND-DEFAULT: 전용 추적 sink(이벤트 8·10) — 관측/로깅 전용 부수 훅.
+    //   optional(null 허용) — 미등록(클라이언트 단독 단위 테스트)이면 no-op. 판정로직(성공/재시도) 무접촉·fail-safe.
+    private readonly ITraceLogger? _trace;
+
     public ChuteStatePushClient(
         IHttpClientFactory            httpFactory,
         IOptions<WcsOptions>          options,
         ILogger<ChuteStatePushClient> log,
-        IOperationLogger              opLog)
+        IOperationLogger              opLog,
+        ITraceLogger?                 trace = null)
     {
         _httpFactory = httpFactory;
         _opt         = options.Value.ChuteStatePush;
         _log         = log;
         _opLog       = opLog;
+        _trace       = trace;
     }
 
     /// <inheritdoc/>
@@ -96,7 +106,11 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
         // DORMANT/미라우팅: 호스트 미지정(층 미설정 or BaseUrl 미설정)이면 no-op. 호출자(Pusher)가 이미
         // 층별 DORMANT로 걸러내지만 방어적으로 한 번 더 — "성공"으로 간주하지 않고 false 반환(미발신 유지).
         if (string.IsNullOrWhiteSpace(baseUrl))
-            return false;
+            return false;   // DORMANT/미라우팅 — PUT 전송 0 → 이벤트 8/10 미발화(자연스러운 no-op).
+
+        // ★ 전송(PUT) 시각 anchor — 요청1(b)/(d) "전이로 나가는 IF-08 push 전송 시각". 첫 시도 직전에 캡처해
+        //   결과 확정 후(성공/소진) 이벤트 8/10 의 At 으로 사용(지연 = 같은 chuteNo 의 이벤트 7/9 → 이 시각차).
+        var sentAt = DateTimeOffset.Now;
 
         // 절대규칙 #7: 엔드포인트는 (층)호스트 + Path 설정 조합(하드코딩 0 — 호스트는 설정값이 주입).
         var url = CombineUrl(baseUrl, _opt.Path);
@@ -128,6 +142,8 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
                     // operation_log: 아웃바운드 푸시 전수(성공) — 부수 기록.
                     _opLog.Log(OperationLogCategory.API, OpLogAction,
                         detail: DetailJson(payload, "OK", attempt));
+                    // 전용 추적(이벤트 8/10) — operation_log 와 나란히 additive(대체 아님). fail-safe.
+                    EmitPushTrace(payload, baseUrl, sentAt, "OK", attempt);
                     return true;
                 }
 
@@ -172,7 +188,51 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
         // operation_log: 아웃바운드 푸시 전수(실패) — 부수 기록(WARN).
         _opLog.Log(OperationLogCategory.API, OpLogAction, level: OperationLogLevel.WARN,
             detail: DetailJson(payload, "FAIL", maxAttempts));
+        // 전용 추적(이벤트 8/10) — 실패 전송도 계측(전송 시각·결과 정직 기록). fail-safe.
+        EmitPushTrace(payload, baseUrl, sentAt, "FAIL", maxAttempts);
         return false;
+    }
+
+    // ── 전용 추적 sink 발화(이벤트 8/10) — 모든 IF-08 PUT 전송을 next_state 로 분기 계측(관측/로깅 전용) ──
+    //
+    // 8  = next_state==2(CHUTESTATE_PUSH_BUSY)  · 10 = next_state==3(CHUTESTATE_PUSH_READY).
+    //   · sink 미등록(단위 테스트)·2/3 외 next_state·빈 payload 는 안전 스킵(발화 0). DestId 미가용 → chuteNo best-effort.
+    //   · trace.Log = Channel.TryWrite(논블로킹). 트레이스 로깅 실패가 push(본 동작)를 막지 않도록 전체 예외 격리(fail-safe).
+    //   · 판정로직(성공/재시도) 무접촉 — 결과가 확정된 호출부에서 result/attempts 를 넘겨받아 기록만 한다(부수 훅).
+    private void EmitPushTrace(
+        ChuteStatePushPayload payload, string baseUrl, DateTimeOffset sentAt, string result, int attempts)
+    {
+        var trace = _trace;
+        if (trace is null) return;
+        try
+        {
+            if (payload.NextStates.Length == 0 || payload.ChuteNumbers.Length == 0) return;
+
+            int nextState = payload.NextStates[0];
+            int    eventNo;
+            string eventName;
+            switch (nextState)
+            {
+                case NextStateBusy:  eventNo = 8;  eventName = "CHUTESTATE_PUSH_BUSY";  break;
+                case NextStateReady: eventNo = 10; eventName = "CHUTESTATE_PUSH_READY"; break;
+                default: return;   // 2/3 외 값 — 매핑 EventNo 없음, 안전 스킵(발화 0).
+            }
+
+            // Detail = {next_state, result, attempts, host}(계약). JsonSerializer 로 안전 직렬화(수기 보간 회피).
+            var detail = JsonSerializer.Serialize(new
+            {
+                next_state = nextState,
+                result,
+                attempts,
+                host       = baseUrl,
+            });
+
+            trace.Log(new TraceRecord(
+                EventNo: eventNo, Event: eventName, At: sentAt,
+                PId: null, CSeq: null, ChuteNo: payload.ChuteNumbers[0], DestId: null, CellNo: null,
+                Floor: null, InductionNo: null, Trigger: "IF08_PUSH", Detail: detail));
+        }
+        catch { /* 트레이스 로깅 실패가 push 를 막지 않음(fail-safe·예외 격리) */ }
     }
 
     // ── 응답 body 성공 판정: {result:"Failed"}=실패, flag==1=성공, 그 외=실패 ──────

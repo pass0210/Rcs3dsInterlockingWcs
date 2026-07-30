@@ -62,10 +62,13 @@ public class E2EGroupN_TraceLogTests
         async Task<IReadOnlyList<TraceDto>> ReadAllAsync()
             => (await client.GetFromJsonAsync<List<TraceDto>>("/api/monitor/trace?take=500"))!;
 
+        // ★ S-TRACE-READY-PUSH-AND-DEFAULT: 이제 같은 흐름에 additive 이벤트 7/8/9/10(Ready 전이·IF-08 push)이
+        //   함께 발화될 수 있다(분류 사이클의 Ready 토글 + 수용상태 push). 기존 6 이벤트(1~6)의 발화·상관은
+        //   불변이므로 "정확히 {1..6}"이 아니라 "1~6 이 모두 포함(superset)"으로 검증한다(회귀 0·additive).
         await E2EWait.UntilAsync(async () =>
         {
             var recs = await ReadAllAsync();
-            return recs.Select(r => r.EventNo).Distinct().OrderBy(n => n).SequenceEqual(new[] { 1, 2, 3, 4, 5, 6 });
+            return recs.Select(r => r.EventNo).ToHashSet().IsSupersetOf(new[] { 1, 2, 3, 4, 5, 6 });
         }, 12000, "전용 파일에 6개 이벤트(1~6) 전부 기입");
 
         var all = await ReadAllAsync();
@@ -73,8 +76,9 @@ public class E2EGroupN_TraceLogTests
         foreach (var r in all)
             _out.WriteLine($"  [{r.EventNo}] {r.Event} pId={r.PId} cSeq={r.CSeq} chute={r.ChuteNo} cell={r.CellNo} floor={r.Floor}");
 
-        // ── 이벤트 번호 정확 태깅(완료조건 6) — 6종 전부 존재 ──────────────────────
-        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6 }, all.Select(r => r.EventNo).Distinct().OrderBy(n => n).ToArray());
+        // ── 이벤트 번호 정확 태깅(완료조건 6) — 6종 전부 존재(additive 7~10 공존 허용·superset) ────
+        var distinctEvents = all.Select(r => r.EventNo).ToHashSet();
+        Assert.All(new[] { 1, 2, 3, 4, 5, 6 }, n => Assert.Contains(n, distinctEvents));
 
         // ── 층-큐 흐름(1·2) ────────────────────────────────────────────────────────
         var e1 = all.First(r => r.EventNo == 1);
@@ -196,5 +200,112 @@ public class E2EGroupN_TraceLogTests
         _out.WriteLine($"[N2] 조기종결(pId={abortedPid}) 후 _pending=0(누수 0) · 성공(pId={successPid}) C흐름 4·5·6 자기 pId 상관(오귀속 0)");
 
         try { Directory.Delete(traceDir, recursive: true); } catch { }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // N3 (S-TRACE-READY-PUSH-AND-DEFAULT · E1/E2): Ready 전이 → IF-08 push 전송 관통.
+    //   실 Sim 으로 소터 Ready 1→0·0→1 을 유도 → (PLC 폴)이벤트 7·9 + (관찰 루프→실 PushAsync PUT →
+    //   fake RCS)이벤트 8·10 이 전용 파일에 raw 로 기입되고 같은 chuteNo 로 상관됨을 실증.
+    //   결정성(DepositDecider·조사 C): 부트스트랩 accept=true(정렬)→10, Ready 1→0→accept false→8+이벤트7,
+    //   Ready 0→1→accept true→10+이벤트9. 회귀 0: operation_log CHUTESTATE_PUSH 종전대로(additive).
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task N3_ReadyEdges_DriveIf08Push_Events7_8_9_10_FileAndCorrelation()
+    {
+        var traceDir = Path.Combine(Path.GetTempPath(), "wcs-trace-e2e", Guid.NewGuid().ToString("N"));
+        await using var rcs = await FakeChuteStateServer.StartAsync();
+        // 레거시 단일 호스트(rcsBaseUrl) → 소터 push 활성. initialCurFloor=2(정렬 — 부트스트랩 accept=true).
+        await using var factory = new E2EWebApplicationFactory(
+            rcsBaseUrl: rcs.BaseUrl, initialCurFloor: 2, traceLogDir: traceDir, sorterObserveIntervalMs: 30);
+        await factory.StartSimsAsync();
+        var client = factory.CreateClient();
+        long destId = factory.PrimarySorter.DestinationId;
+        int  chuteNo = E2EWebApplicationFactory.DefaultSorterChuteNo;
+
+        await E2EWait.UntilAsync(() => factory.IsSorterOnline(destId), 5000, "소터 Online");
+
+        async Task<IReadOnlyList<TraceDto>> ReadAllAsync()
+            => (await client.GetFromJsonAsync<List<TraceDto>>("/api/monitor/trace?take=500"))!;
+
+        // 소터 부트스트랩 push(accept=true → next_state 3 = 이벤트 10) 도달 대기 — Acked=3 확립·파이프 개통 확인.
+        await E2EWait.UntilAsync(async () => (await ReadAllAsync()).Any(r => r.EventNo == 10 && r.ChuteNo == chuteNo), 8000,
+            "소터 부트스트랩 IF-08 push(이벤트 10) 도달");
+
+        // ── Ready 1→0 유도 → 이벤트 7(폴 관측) + 이벤트 8(push 3→2). Ready 를 되돌리기 전에 소터 이벤트 8 을
+        //    반드시 확인해야 한다 — 안 그러면 관찰 루프가 3→2→3 을 합쳐 push 2 가 유실될 수 있다(결정성). ──
+        factory.PrimarySorter.Sim.SetReady(false);
+        await E2EWait.UntilAsync(async () => (await ReadAllAsync()).Any(r => r.EventNo == 7 && r.ChuteNo == chuteNo), 8000,
+            "소터 Ready 1→0(이벤트 7) 관측");
+        await E2EWait.UntilAsync(async () => (await ReadAllAsync()).Any(r => r.EventNo == 8 && r.ChuteNo == chuteNo), 8000,
+            "소터 Ready 1→0 유발 IF-08 push(이벤트 8) 도달");
+
+        // ── Ready 0→1 유도 → 이벤트 9(폴 관측) + 이벤트 10(push 2→3) ────────────────────
+        factory.PrimarySorter.Sim.SetReady(true);
+        await E2EWait.UntilAsync(async () => (await ReadAllAsync()).Any(r => r.EventNo == 9 && r.ChuteNo == chuteNo), 8000,
+            "소터 Ready 0→1(이벤트 9) 관측");
+        await E2EWait.UntilAsync(async () => (await ReadAllAsync()).Any(r => r.EventNo == 10 && r.ChuteNo == chuteNo
+                && r.Detail!.Contains("\"next_state\":3")), 8000,
+            "소터 Ready 0→1 유발 IF-08 push(이벤트 10) 도달");
+
+        var all = await ReadAllAsync();
+        _out.WriteLine("[N3] trace 레코드:");
+        foreach (var r in all.Where(r => r.EventNo is 7 or 8 or 9 or 10))
+            _out.WriteLine($"  [{r.EventNo}] {r.Event} chute={r.ChuteNo} floor={r.Floor} detail={r.Detail}");
+
+        // ★ 시드가 소터(chuteNo=30) 외 CHUTE 도 생성해 부트스트랩 push(이벤트 8/10)가 타 chuteNo 로도 나간다.
+        //   이 소터의 Ready↔push 관통을 검증하는 것이므로 chuteNo==30(소터)로 좁혀 선택한다(상관 키 = chuteNo).
+        //   Ready 전이(7·9)는 소터만 발화하나 방어적으로 동일 chuteNo 로 좁힌다.
+
+        // ── 이벤트 7·9(Ready 전이) — old/new·curFloor 정확·소터 scope(pId 없음) ──────
+        var e7 = all.First(r => r.EventNo == 7 && r.ChuteNo == chuteNo);
+        Assert.Equal(destId, e7.DestId);
+        Assert.Null(e7.PId);
+        Assert.Contains("\"old\":1", e7.Detail);
+        Assert.Contains("\"new\":0", e7.Detail);
+        Assert.Contains("\"curFloor\"", e7.Detail);
+
+        var e9 = all.First(r => r.EventNo == 9 && r.ChuteNo == chuteNo);
+        Assert.Contains("\"old\":0", e9.Detail);
+        Assert.Contains("\"new\":1", e9.Detail);
+
+        // ── 이벤트 8·10(IF-08 push) — next_state 정확·같은 chuteNo 로 Ready 이벤트와 상관 ──
+        var e8 = all.First(r => r.EventNo == 8 && r.ChuteNo == chuteNo);   // 이벤트 7 과 같은 chuteNo → 상관·지연 산출(비인과).
+        Assert.Null(e8.PId);
+        Assert.Contains("\"next_state\":2", e8.Detail);
+        Assert.Contains("\"result\":\"OK\"", e8.Detail);
+
+        var e10 = all.First(r => r.EventNo == 10 && r.ChuteNo == chuteNo);
+        Assert.Contains("\"next_state\":3", e10.Detail);
+
+        // ── 회귀 0(additive): 전용 파일 계측이 기존 operation_log CHUTESTATE_PUSH 를 대체하지 않음 ──
+        using (var db = factory.CreateDbScope())
+        {
+            Assert.True(await db.OperationLogs.AnyAsync(l => l.Category == OperationLogCategory.API && l.Action == "CHUTESTATE_PUSH"),
+                "기존 operation_log CHUTESTATE_PUSH 계측이 종전대로 유지돼야(회귀 0·additive)");
+        }
+
+        // ── 파일 raw 태그([7]/[8]/[9]/[10]) 확인 — REST 뿐 아니라 파일 sink 도 신규 이벤트 수용 ──
+        var files = Directory.GetFiles(traceDir, "trace-*.log");
+        Assert.NotEmpty(files);
+        var lines = files.SelectMany(ReadSharedLines).ToList();
+        Assert.Contains(lines, l => l.StartsWith("[7] "));
+        Assert.Contains(lines, l => l.StartsWith("[8] "));
+        Assert.Contains(lines, l => l.StartsWith("[9] "));
+        Assert.Contains(lines, l => l.StartsWith("[10] "));
+
+        _out.WriteLine($"[N3] Ready 7·9 + push 8·10 파일·REST 관통 · chuteNo={chuteNo} 상관 · operation_log additive");
+
+        try { Directory.Delete(traceDir, recursive: true); } catch { }
+    }
+
+    private static string[] ReadSharedLines(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var sr = new StreamReader(fs);
+        var list = new List<string>();
+        string? line;
+        while ((line = sr.ReadLine()) is not null)
+            if (line.Length > 0) list.Add(line);
+        return list.ToArray();
     }
 }

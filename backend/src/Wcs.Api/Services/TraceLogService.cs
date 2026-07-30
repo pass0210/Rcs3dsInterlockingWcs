@@ -10,13 +10,22 @@ namespace Wcs.Api;
 // ════════════════════════════════════════════════════════════════════════════
 // S-TRACE-LOG-VIEWER — 현장 추적용 전용 로그 sink (additive · 관측/로깅 전용).
 //
-// 6개 핵심 이벤트를 각 줄 앞머리에 "이벤트 번호(1~6)"를 달아 전용 파일에 기입한다:
+// 핵심 이벤트를 각 줄 앞머리에 "이벤트 번호(1~10)"를 달아 전용 파일에 기입한다:
 //   1 TgtFloor 펜딩큐 인큐 (IF-05 enqueue + 재시작 복원 re-enqueue)
 //   2 TgtFloor 펜딩큐 디큐 (관측 루프 pop)
 //   3 IF-10 도착         (DepositReport 진입)
 //   4 C 인큐            (HandshakeOrchestrator HS_C_SENT)
 //   5 C 디큐            (PlcGateway CELL_ASSIGN 실제 write)
 //   6 C 클리어          (PLC가 C_Flag 1→0으로 클리어한 것을 폴 스냅샷에서 관측)
+//   7 Ready 1→0        (소터 Ready 워드 1→0 전이를 폴 스냅샷에서 관측 — S-TRACE-READY-PUSH-AND-DEFAULT)
+//   8 슈트상태 push(busy) (IF-08 UpdateChuteState PUT 전송 중 next_state==2 — 수용 불가 통지)
+//   9 Ready 0→1        (소터 Ready 워드 0→1 전이를 폴 스냅샷에서 관측)
+//   10 슈트상태 push(ready)(IF-08 UpdateChuteState PUT 전송 중 next_state==3 — 수용 가능 통지)
+//
+//   ★ 요청1(S-TRACE-READY-PUSH-AND-DEFAULT): 이벤트 7·9(Ready 전이)와 8·10(IF-08 push 전송) 시각을
+//     관측해 "Ready 전이 ↔ RCS 통지(IF-08 push) 지연"을 측정한다. 7·9 는 소터 scope(층-경계,
+//     pId/cSeq 상관 없음), 8·10 은 전송 chokepoint(ChuteStatePushClient) 계측(chuteNo best-effort).
+//     Ready 에지와 push 는 직접 인과가 아니다(별개 관찰 루프 — 조사 C) — 상관은 chuteNo+시각+next_state 로만.
 //
 // 설계(OperationLogService 와 동형 — 논블로킹 백그라운드 채널 sink):
 //   · Log()는 unbounded Channel 에 TryWrite 만(즉시 반환·논블로킹). 폴/핸드셰이크/HTTP 핫패스 무블로킹.
@@ -68,12 +77,13 @@ public sealed record TraceLogOptions
 // ── 트레이스 레코드(파일 1줄·SignalR payload·백로그 반환의 단일 형상 — 카멜케이스 JSON) ──
 
 /// <summary>
-/// 추적 이벤트 1건. <see cref="EventNo"/>(1~6)로 이벤트 종류를 즉시 식별한다(피스 상관키가 아닌 종류 태그).
+/// 추적 이벤트 1건. <see cref="EventNo"/>(1~10)로 이벤트 종류를 즉시 식별한다(피스 상관키가 아닌 종류 태그).
 /// 피스 흐름(3~6)은 <see cref="PId"/> + (<see cref="ChuteNo"/>/<see cref="DestId"/>, <see cref="CSeq"/>)로 상관.
-/// 층-큐 흐름(1·2)은 소터+층 scope(2는 pId 미포함 — 큐 자료구조상 수용된 경계).
+/// 층-큐 흐름(1·2)·Ready 전이(7·9)·IF-08 push(8·10)는 소터+층 scope(pId/cSeq 미포함 — 소터 경계).
+/// Ready↔push 상관은 pId 아닌 <see cref="ChuteNo"/> + 시각 + next_state(Detail)로 이룬다(조사 C — 비인과).
 /// </summary>
 public sealed record TraceRecord(
-    int            EventNo,       // 1~6(줄 앞머리 태그)
+    int            EventNo,       // 1~10(줄 앞머리 태그)
     string         Event,         // 사람이 읽는 이벤트명(TGTFLOOR_ENQUEUE 등)
     DateTimeOffset At,            // 로컬 시각(ms 포함)
     int?           PId,           // 피스 식별(RCS 부여) — 3~6·1(best-effort). 2는 null.
@@ -568,15 +578,16 @@ public sealed class TraceCorrelator
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// TraceWiring — 소터 번들 관측 훅(기존 이벤트) → 전용 sink 발화 결선(이벤트 4·5·6).
+// TraceWiring — 소터 번들 관측 훅(기존 이벤트) → 전용 sink 발화 결선(이벤트 4·5·6·7·9).
 //   SorterRegistryFactory.StartAsync 의 operation_log 구독과 나란히 "추가 구독"(기존 구독 무변경).
 //   HandshakeOrchestrator/PlcGateway 는 무접촉 — 기존 (action, detailJson)/(reg,old,new) 콜백만 소비.
+//   S-TRACE-READY-PUSH-AND-DEFAULT: reg=="Ready" 델타를 추가 구독해 7(1→0)·9(0→1)를 발화(이벤트 6 무변경).
 // ════════════════════════════════════════════════════════════════════════════
 
-/// <summary>번들 관측 훅에 전용 트레이스 발화(이벤트 4·5·6)를 추가 구독하는 결선 헬퍼.</summary>
+/// <summary>번들 관측 훅에 전용 트레이스 발화(이벤트 4·5·6·7·9)를 추가 구독하는 결선 헬퍼.</summary>
 public static class TraceWiring
 {
-    /// <summary>한 소터 번들에 이벤트 4(C 인큐)·5(C 디큐)·6(C 클리어) 트레이스 발화를 추가 구독한다.</summary>
+    /// <summary>한 소터 번들에 이벤트 4(C 인큐)·5(C 디큐)·6(C 클리어)·7(Ready 1→0)·9(Ready 0→1) 트레이스 발화를 추가 구독한다.</summary>
     public static void Wire(SorterBundleHandle bundle, ITraceLogger trace, TraceCorrelator correlator)
     {
         long destId  = bundle.DestinationId;
@@ -617,6 +628,41 @@ public static class TraceWiring
                 CellNo: ctx?.CellNo, Floor: null, InductionNo: null, Trigger: "C_FLAG_1_TO_0",
                 Detail: "{\"reg\":\"C_Flag\",\"old\":1,\"new\":0}"));
         });
+
+        // 이벤트 7·9 — 소터 Ready 워드 전이(폴 관측). 1→0=7(READY_1TO0)·0→1=9(READY_0TO1). 층-scope(피스 상관 없음):
+        //   PId/CSeq/CellNo=null, ChuteNo/DestId 세팅, Floor=전이 관측 시점 CurFloor(bundle.Latest — EmitRegisterChanges
+        //   는 _latest 갱신 후 발화하므로 cur 스냅샷). 이벤트 6(C_Flag) 구독과 나란히 "추가 구독" — 기존 구독 무변경.
+        //   trace.Log=Channel.TryWrite(논블로킹). 발화 예외는 격리(폴 스레드 비차단·fail-safe).
+        bundle.SubscribeRegisterChange((reg, oldV, newV) =>
+        {
+            if (reg != "Ready") return;
+            try
+            {
+                int curFloor = bundle.Latest.CurFloor;
+                var rec = BuildReadyEdgeRecord(chuteNo, destId, oldV, newV, curFloor);
+                if (rec is not null) trace.Log(rec);
+            }
+            catch { /* 관측 훅 예외 격리 — 폴 루프 보존(fail-safe) */ }
+        });
+    }
+
+    /// <summary>
+    /// Ready 워드 에지(oldV→newV)를 이벤트 7(1→0)·9(0→1) TraceRecord 로 매핑(순수·부수효과 0). 그 외 조합은 null.
+    /// TraceWiring.Wire 의 reg=="Ready" 핸들러가 소비 — 발화 로직을 I/O 무의존 함수로 분리해 결정적으로 테스트한다.
+    /// </summary>
+    public static TraceRecord? BuildReadyEdgeRecord(int chuteNo, long destId, int oldV, int newV, int curFloor)
+    {
+        int eventNo;
+        string eventName;
+        if (oldV == 1 && newV == 0)      { eventNo = 7;  eventName = "READY_1TO0"; }
+        else if (oldV == 0 && newV == 1) { eventNo = 9;  eventName = "READY_0TO1"; }
+        else return null;   // Ready 는 0/1 만 — 그 외 조합은 발화 안 함(방어).
+
+        return new TraceRecord(
+            EventNo: eventNo, Event: eventName, At: DateTimeOffset.Now,
+            PId: null, CSeq: null, ChuteNo: chuteNo, DestId: destId, CellNo: null,
+            Floor: curFloor, InductionNo: null, Trigger: "READY_EDGE",
+            Detail: $"{{\"reg\":\"Ready\",\"old\":{oldV},\"new\":{newV},\"curFloor\":{curFloor}}}");
     }
 
     // "{...cellNo:X,cSeq:Y...}" → (cellNo, cSeq). 파싱 실패는 (0,0)(fail-safe).
