@@ -864,11 +864,15 @@ public sealed class EfSorterCommandJournal : ISorterCommandJournal
                     HandshakeOutcome.CFlagTimeout => SorterCommandStatus.TIMEOUT,  // CFLAG_TIMEOUT → TIMEOUT 저장, alarm code로 구분
                     _                             => SorterCommandStatus.TIMEOUT,
                 };
-                // C1 처리 3시각: tiltedAt(R_Flag==1 관측)·returnedAt(Ready 0→1)은 HandshakeResult에서 유입.
+                // C1 처리 시각: sortStartedAt(Ready 1→0)·tiltedAt(R_Flag==1 관측)·returnedAt(Ready 0→1)은
+                //   HandshakeResult에서 유입(관측만 추가·EF 기입).
+                //   sortStartedAt = 분류 시작 관측(성공·불일치 에지 관측 시 non-NULL / 미관측·타임아웃·OFFLINE NULL).
+                //     → 평균 사이클 시간 = avg(returnedAt − sortStartedAt), 둘 다 non-NULL 행만 n에 포함.
                 //   tiltedAt = 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL(result가 규칙대로 담아 옴).
                 //   returnedAt = 성공(복귀 관측)만 non-NULL / 복귀 타임아웃·그 외 NULL.
-                cmd.TiltedAt   = result.TiltedAt;
-                cmd.ReturnedAt = result.ReturnedAt;
+                cmd.SortStartedAt = result.SortStartedAt;
+                cmd.TiltedAt      = result.TiltedAt;
+                cmd.ReturnedAt    = result.ReturnedAt;
                 if (result.Outcome == HandshakeOutcome.Success)
                 {
                     cmd.RSeq    = result.ReceivedRSeq;

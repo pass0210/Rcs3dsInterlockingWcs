@@ -32,6 +32,7 @@ public interface IMonitoringQueries
     PagedResult<SorterCommandDto>    GetSorterCommands(long? destId, int take, long? cursor);
     PagedResult<OperationLogDto>     GetOperationLog(
         string? category, string? level, int? sorterChuteNo, int take, long? cursor);
+    CycleTimeAvgDto                  GetCycleTimeAvg();
 }
 
 /// <summary>
@@ -378,5 +379,33 @@ public sealed class MonitoringQueries : IMonitoringQueries
 
         long? next = hasMore && page.Count > 0 ? page[^1].Id : null;
         return new PagedResult<OperationLogDto>(page, next);
+    }
+
+    // ── 평균 사이클 시간(분류시작~복귀) — 읽기 전용 집계(S-SORT-CYCLE-TIME-METRIC) ──────────────
+    // sorter_command 전 행(★ ArchivedAt 무필터 — 초기화/아카이브 이전 행 전부 포함) 중 SortStartedAt·
+    //   ReturnedAt 둘 다 non-NULL인 행에 대해 Σ(ReturnedAt − SortStartedAt).TotalSeconds / n.
+    // provider-neutral: (SortStartedAt, ReturnedAt) 2컬럼만 materialize 후 C# TimeSpan 계산(SqlServer/Sqlite
+    //   동일 수치 — provider 고유 date/datediff SQL 0). AsNoTracking·핫패스 무접촉(이 조회 요청 시에만 실행).
+    // n=0 → AvgSeconds=null·N=0(0 나눗셈 없이 200 반환·500 금지). 단조 불변식상 음수 미발생(방어 클램프만).
+    public CycleTimeAvgDto GetCycleTimeAvg()
+    {
+        var pairs = _db.SorterCommands.AsNoTracking()
+            .Where(sc => sc.SortStartedAt != null && sc.ReturnedAt != null)
+            .Select(sc => new { sc.SortStartedAt, sc.ReturnedAt })
+            .ToList();
+
+        int n = pairs.Count;
+        if (n == 0)
+            return new CycleTimeAvgDto(null, 0);   // 측정 데이터 없음 — null·200(비크래시).
+
+        double totalSeconds = 0;
+        foreach (var p in pairs)
+        {
+            double sec = (p.ReturnedAt!.Value - p.SortStartedAt!.Value).TotalSeconds;
+            if (sec < 0) sec = 0;   // 단조상 미발생 — 시계 비단조 방어 클램프(음수 제외 로직 불요).
+            totalSeconds += sec;
+        }
+
+        return new CycleTimeAvgDto(totalSeconds / n, n);   // raw double(초) — 소수 표기는 프론트(#7).
     }
 }

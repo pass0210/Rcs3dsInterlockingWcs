@@ -1000,6 +1000,9 @@ namespace Wcs.Migrations.SqlServer.Migrations
                     b.Property<DateTime?>("ReturnedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime?>("SortStartedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)

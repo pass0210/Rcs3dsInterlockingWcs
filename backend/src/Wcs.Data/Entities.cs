@@ -364,16 +364,21 @@ public sealed class SorterCommand
     public int?               RSeq        { get; set; }  // NULL=미수신
     public int?               RCellNo     { get; set; }
 
-    // ── S-TWO-FLOOR-CONTROL C1: 처리 3시각(투입→틸트→복귀 소요 계측 — SPEC §4·ERD sorter_command) ──
+    // ── S-TWO-FLOOR-CONTROL C1: 처리 시각(투입→분류시작→틸트→복귀 소요 계측 — SPEC §4·ERD sorter_command) ──
     //   컬럼명 = 프로퍼티명(PascalCase, B2C 규약 — HasColumnName 미사용). NULL 규칙:
-    //     · DepositedAt = 3DS 투입(IF-10 보고) 시각. 행 생성 시 유입 → 항상 non-NULL.
-    //     · TiltedAt    = 셀 틸트(R_Flag==1 관측) 시각. 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL.
-    //                     (구 RFlagAt 개명 — 의미 확장: "Success만"→"R_Flag==1 관측 시 항상". RenameColumn 보존.)
-    //     · ReturnedAt  = 복귀 완료(Ready 0→1) 시각. 성공(복귀 관측)만 non-NULL / 그 외 NULL.
-    //   단조: DepositedAt ≤ TiltedAt ≤ ReturnedAt.
-    public DateTime?          DepositedAt { get; set; }
-    public DateTime?          TiltedAt    { get; set; }
-    public DateTime?          ReturnedAt  { get; set; }
+    //     · DepositedAt   = 3DS 투입(IF-10 보고) 시각. 행 생성 시 유입 → 항상 non-NULL.
+    //     · SortStartedAt = 분류 시작(Ready 워드 1→0 전이 관측) 시각 — S-SORT-CYCLE-TIME-METRIC 신설.
+    //                       C 기입 후 소터가 분류를 시작하는 첫 물리 신호(절대규칙 #4 — 0=분류/이동 중).
+    //                       성공·불일치에서 에지 관측 시 non-NULL / 폴 주기보다 빠른 미관측·타임아웃·OFFLINE NULL.
+    //     · TiltedAt      = 셀 틸트(R_Flag==1 관측) 시각. 성공·불일치 non-NULL / 타임아웃·OFFLINE NULL.
+    //                       (구 RFlagAt 개명 — 의미 확장: "Success만"→"R_Flag==1 관측 시 항상". RenameColumn 보존.)
+    //     · ReturnedAt    = 복귀 완료(Ready 0→1) 시각. 성공(복귀 관측)만 non-NULL / 그 외 NULL.
+    //   단조: DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt.
+    //     → 평균 사이클 시간(분류시작~복귀) = avg(ReturnedAt − SortStartedAt), 단조상 음수 미발생.
+    public DateTime?          DepositedAt   { get; set; }
+    public DateTime?          SortStartedAt { get; set; }
+    public DateTime?          TiltedAt      { get; set; }
+    public DateTime?          ReturnedAt    { get; set; }
     public SorterCommandStatus Status     { get; set; }
 
     public DateTime CreatedAt { get; set; }
