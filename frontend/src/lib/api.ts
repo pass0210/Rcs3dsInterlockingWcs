@@ -114,6 +114,13 @@ export interface Paged<T> {
   nextCursor: number | null
 }
 
+// 평균 사이클 시간(분류시작~복귀) — GET /api/monitor/cycle-time-avg(S-SORT-CYCLE-TIME-METRIC).
+//   avgSeconds = Σ(복귀−분류시작)/n(초·raw double). n=0 → avgSeconds=null(측정 데이터 없음).
+export interface CycleTimeAvg {
+  avgSeconds: number | null
+  n: number
+}
+
 // 전용 추적 로그 백로그 레코드(S-TRACE-LOG-VIEWER) — 백엔드 TraceRecord 미러(SignalR TraceEvent와 동형).
 export interface TraceRecord {
   eventNo: number
@@ -204,4 +211,7 @@ export const api = {
         cSeq: opts.cSeq,
       })}`,
     ),
+
+  // 평균 사이클 시간(분류시작~복귀). 파라미터 없음(전 행 집계·ArchivedAt 무필터). n=0 → avgSeconds=null.
+  cycleTimeAvg: () => getJson<CycleTimeAvg>(`/cycle-time-avg`),
 }

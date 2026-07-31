@@ -1,145 +1,138 @@
-[Sprint Contract] — S-IF08-PUSH-LOG-THROTTLE
+[Sprint Contract] — S-SORT-CYCLE-TIME-METRIC (재기획 · S-TRACE-AVG-CYCLE-LABEL iter1 FAIL 대체)
 
-- Goal:
-  IF-08 chute-state push (WCS→RCS) 실패 재시도가 운영로그(operation_log WARN "FAIL")와
-  추적로그(트레이스 이벤트 8/10 result:"FAIL")에 **매 복구-하트비트 주기마다 새 행으로 폭주**하는 것을
-  **소스에서 억제**한다(RCS 호스트가 죽어 있으면 현재는 무한정 누적). 억제 대상은 오직 "반복되는 같은 실패"의
-  로깅이다:
-    · 첫 실패(전이)      → 두 sink 각각 정확히 1건 (신호 유지)
-    · 반복되는 같은 실패 → 두 sink 각각 0건 (주기 재발신에도 추가 로그 0)
-    · 복구(실패→성공)    → 정확히 1건 (현행 성공 로깅으로 자연 충족 — 회귀 0)
-  **Fail-Loud 유지 — 완전 무음 금지.** 실제 push 재시도·복구 하트비트 재발신·Acked/Computed 전이 로직·
-  전이당 1회 발신은 전부 **불변**(로깅만 조절). RCS로의 재시도는 성공할 때까지 계속되되 그 실패를 매번
-  기록하지만 않는다.
+관측/기입 최소확장 · additive · Full-stack. /trace 그리드 위에 "평균 사이클 시간(분류시작~복귀)"을 표시하고 실시간 갱신한다. iter1(`ReturnedAt − CWrittenAt`)이 라이브에서 항상 ≈0(구조적 결함: CWrittenAt=핸드셰이크 후 저널 시각)이라 FAIL → 사용자 게이트 재확정으로 **물리 앵커 쌍(분류 시작 → 복귀)** 으로 재정의한다.
 
-- Implementation Scope: (Generator가 구현할 것들)
-  1. 반복 실패 억제(핵심): `ChuteStatePushClient.PushAsync`가 재시도 소진 시 내는 **세 FAIL 로그**
-     — (a) `_opLog.Log(API, CHUTESTATE_PUSH, WARN, detail=…"FAIL"…)` (약 :189),
-       (b) `EmitPushTrace(… "FAIL" …)` → 트레이스 이벤트 8(next_state=2)/10(next_state=3) (약 :192),
-       (c) `_log.LogError(…재시도 소진…)` Serilog 파일/콘솔 라인 (약 :184-187) ← **OQ-4 확정: 억제 포함**
-     — 를 **같은 실패가 반복될 때 셋 다 emit 하지 않는다**(운영로그·추적로그·Serilog 동일 정책 — OQ-3/OQ-4 확정).
-     (재시도 루프 내 per-attempt `_log.LogWarning`은 스코프 밖 — 한 호출 내 국소.)
-  2. 첫 실패 1건 보존: 같은 억제 단위(= route, next_state — OQ-2)에서 **첫 실패**는 두 sink 각각 정확히
-     1건 남긴다. 이후 같은 단위의 반복 실패는 0건.
-  3. 복구 1건 보존: 실패→성공 전이 시 **현행 성공 로깅 경로(:143-146 OK oplog + OK trace)를 그대로**
-     내보낸다(성공 로깅 무변경). 억제 상태는 **성공 시 리셋**되어, 복구 후 다시 실패하면 그것이 새 "첫 실패"로
-     1건 로깅되어야 한다(신호 재무장).
-  4. 억제 단위 전이 시 재무장: 같은 route가 계속 실패하는 중이라도 산출 next_state가 바뀌면(예 BUSY↔READY)
-     새 전이로 간주해 새 첫 실패 1건을 남긴다(OQ-2 권고 = 예).
-  5. 설정화(절대규칙 #7): 억제 on/off·(있다면) 임계·"아직 실패 중" 요약 주기 등 모든 상수는
-     appsettings `Wcs:ChuteStatePush` 섹션 값으로 외부화한다. 하드코딩 리터럴 0.
-  6. **저빈도 "아직 실패 중" 주기 요약 로그 채택(OQ-1 확정)**: 첫 실패~복구 사이에 설정 주기(appsettings,
-     기본은 하트비트 주기의 수십~수백 배 예: 수 분)마다 요약 1건. 완전 무음 금지(Fail-Loud). 이 요약은
-     운영로그(또는 Serilog) 어느 sink로 낼지는 Generator 재량이되 저빈도·설정 주기·전이 리셋 시 초기화.
-  7. 스레드안전: 억제 상태(직전 로깅한 실패 등)의 갱신은 Pusher의 per-route `RouteState.Gate` 락 안에서
-     원자적으로 수행한다(비원자 check-then-act 금지). in-flight/전이 판정과 동일 임계구역.
-  8. **불변 보존(로깅 외 전부)**: 4-시도 재시도·지수 백오프·DORMANT 가드·성공 판정(2xx+flag==1)·
-     하트비트 재발신 루프·Acked/Computed/PushInFlight 전이 로직·전이당 단일 발신·성공 push 로깅은
-     한 줄도 바꾸지 않는다.
-  9. 절대규칙 #8: Wcs.Core 무접촉(본 변경은 Wcs.Api 계층). 판정 로직 무변경.
-  10. 회귀 대상 테스트 갱신(로그-카운트 단언에 한함): 억제로 로그 행 수를 단언하는 테스트가 있으면 새 억제
-     시맨틱에 맞게 갱신한다. **단 push 재시도/재발신 동작·Acked 갱신·전이당 1회 발신·delivery 카운트를
-     단언하는 부분은 불변**이어야 한다(로깅만 조절). 대상: `ChuteStatePushTests`,
-     `ChuteRecoveryPushHeartbeatTests`, `TraceReadyPushTests`, `RcsPushTests`,
-     `SorterPushOperationalTests`, `TwoFloorHostRoutingTests`, E2E `E2EGroupL_TwoFloorHostPushTests`.
+──────────────────────────────────────────────────────────────────────────────
+- Goal
+──────────────────────────────────────────────────────────────────────────────
+현장 운영자가 /trace 상단에서 "한 사이클(**분류 이동 시작 → 복귀 완료**)에 평균 몇 초 걸리는가"를 한눈에 보고, 신규 사이클이 완료될 때마다(=신규 ReturnedAt 기입) 값이 스스로 갱신되게 한다.
 
-  ── HOW를 고정하지 않음(Generator 재량) ──
-    · "직전 로깅한 실패" 상태를 어디에 둘지(후보: `RouteState`에 last-logged-result 필드 / 클라이언트가
-      Pusher로부터 억제 힌트를 받음 / 기타), 정확한 메서드 시그니처·필드명·주입 방식은 **Generator가 결정**한다.
-      계약은 결과 시맨틱(첫 1 / 반복 0 / 복구 1 / 양 sink 동일 / 동작 불변)만 고정한다.
-    · 판정에 필요한 컨텍스트(route별 Computed/Acked/직전 결과)는 이미 Pusher가 보유하고, 클라이언트는 호출
-      간 상태가 없다는 사실만 계약이 전제한다.
+정의(★재정의 2026-07-30 — 사용자 게이트 재확정):
+  · 대상 = `sorter_command` 테이블.
+  · **분류 시작(SortStartedAt) = Ready 워드 1→0 전이 시각**. 근거: SPEC상 분류 시작 시 Ready=0(절대규칙 #4 — 0=분류/이동 중). C 기입 후 소터가 분류를 시작하는 첫 물리 신호다. 이 시각을 그 사이클의 `sorter_command` 행에 기입한다.
+  · **복귀 완료(ReturnedAt) = Ready 0→1 전이 시각**(기존 컬럼·기존 캡처 재사용 — 무변경).
+  · 사이클 시간 = **ReturnedAt − SortStartedAt**, 초 단위(소수 1자리).
+  · 계산 범위 = 전 행. ★ ArchivedAt 필터 없음(초기화/아카이브·재테스트 이전 행 전부 포함).
+  · n = `ReturnedAt != null && SortStartedAt != null` 인 행 수.
+  · 값 = Σ(ReturnedAt − SortStartedAt) / n, 소수 1자리. n=0 → null("—").
+  · **음수 없음(단조 보장)**: DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt 단조 불변식상 ReturnedAt − SortStartedAt ≥ 0. 따라서 iter1의 "음수 제외" 로직 불요 — 0 나눗셈만 방어. (Generator는 시계 비단조 방어 클램프를 기존 TiltedAt/ReturnedAt 클램프와 동형으로 둔다.)
+  · 실시간 = 신규 사이클 완료(ReturnedAt 신규 기입 = Ready 0→1 = 트레이스 event 9) 시 값이 갱신된다.
+  · ★ **재검증 게이트(iter1 교훈 — 필수)**: 자동 offset 테스트(손세팅 SortStartedAt/ReturnedAt)만으론 **불충분**. **실 Sim E2E로 실제 저널링 경로(Ready 1→0 실관측 → SortStartedAt 기입 → 틸트 → Ready 0→1 → ReturnedAt → 집계)를 태워 의미 있는 양수값(현장 감각상 초 단위)이 나오고, 표시값 = DB Σ/n 임을 실증**해야 PASS. 합성 손세팅으로 마스킹하는 것은 금지(lessons: "GREEN ≠ 사용자 여정").
 
-- Implementation Scope 밖(SCOPE OUT):
-  · Wcs.Core / DepositDecider / 판정 로직(#8 zero-diff).
-  · push 재시도·백오프·재발신·Acked/Computed·전이당 1회 발신·성공 로깅 동작(로깅 억제 외 무변경).
-  · 프론트(TraceLogPage 등) 코드 — 이 스프린트는 소스 억제만(프론트 diff 0).
-  · 재시도 루프 내 per-attempt `_log.LogWarning`(한 호출 내 국소 — OQ-4 결정 전까지 스코프 밖).
+──────────────────────────────────────────────────────────────────────────────
+- ★ 핵심 설계 논점 (Planner 조사 결과 — HOW 최종은 Generator)
+──────────────────────────────────────────────────────────────────────────────
+A. **Ready 1→0(분류 시작) 캡처 지점 — 조사 완료.**
+   현재 Ready 1→0은 두 곳에서 이미 관측되나 **둘 다 층-scope(피스/커맨드 상관 없음)**:
+     ① `PlcGateway.EmitRegisterChanges`(:584) → `OnRegisterChange("Ready",1,0)` 발화.
+     ② `TraceWiring.Wire`(:636)가 이를 구독해 트레이스 event 7(READY_1TO0) 발화 — PId/CSeq/CellNo=null.
+   반면 `HandshakeOrchestrator.WaitRFlagAndProcessAsync`(:355)의 R 폴 루프는 C 기입 이후·R_Flag=1 이전 구간에서 **이미 `_gw.Latest`를 `RFlagPollMs` 주기로 폴링**하며, `PlcSnapshot.Ready`가 그 스냅샷에 포함돼 있다.
+   · **권고안(候補 A1 — 채택 권고)**: 오케스트레이터 R 폴 루프 안에서 Ready 1→0 에지를 **관측만 추가**로 캡처 → `HandshakeResult`에 `SortStartedAt`(nullable) append(기존 TiltedAt/ReturnedAt 추가 패턴과 동형·기본값 null로 ~20개 기존 호출부 보존) → `RcsController` continuation의 `journal.Finalize`에서 그 사이클 행에 기입. **장점**: per-command 상관이 구조적으로 깔끔(각 핸드셰이크 인스턴스가 자기 폴 루프·자기 커맨드 소유), 소터 동시성 상관 문제 회피.
+   · **대안(候補 A2 — 비권고)**: 폴 루프(PlcGateway/TraceWiring)가 관측한 Ready 1→0을 소터별 in-flight latch에 저장하고 Finalize가 읽어 상관. 직렬 dispatch 전제 필요·상태 결선이 더 침습적 → 비권고.
+   · **에지 미관측 리스크(HOW·게이트)**: 한 사이클의 분류가 폴 주기(RFlagPollMs=100ms 기본)보다 빨라 Ready 1→0 에지를 샘플링에서 놓치면 SortStartedAt=null(그 행은 n에서 자연 제외). Generator는 에지 감지 실패 시 "C 기입 후 첫 Ready==0 레벨 관측"을 폴백으로 둘지 결정하되(권고: 폴백 둠), **어떤 HOW든 SortStartedAt ≤ TiltedAt 단조를 깨지 않아야** 한다. E2E 게이트가 실측으로 미관측률·양수성을 검증한다.
 
-- Evaluation Criteria: (Evaluator 판정 기준 + 가중치 — Backend/API 기준, backend-only 변경)
-  1. Functionality / Correctness (★★★) — 억제 시맨틱이 정확한가:
-       · 첫 실패 = 두 sink 각 1건, 반복 실패 = 두 sink 각 0건(주기 N회 재발신에도 추가 0),
-       · 복구 = 성공 로그 1건 + 억제 리셋(복구 후 재실패 시 다시 1건),
-       · next_state 전이 시 새 첫 실패 1건.
-  2. Architecture / Craft — 억제가 판정/전달과 비침습(★★★): 재시도·백오프·Acked/Computed·전이당 1회 발신·
-     성공 로깅이 byte-identical(diff로 실증). 억제는 순수 로깅 게이트이며 delivery에 0 영향.
-  3. Craft — 스레드안전·Fail-Loud(★★): 억제 상태 갱신이 per-route 락 내 원자적(check-then-act 없음),
-     완전 무음 아님(첫 실패+복구 항상 남김; OQ-1 채택 시 저빈도 요약).
-  4. Functionality — 설정화·경계(★★): #7 준수(상수 appsettings), Wcs.Core zero-diff(#8),
-     양 provider(SqlServer 운영/SQLite 테스트) GREEN, 기존 전체 스위트 GREEN(회귀 0).
+B. **스키마/마이그레이션.** `SorterCommand.SortStartedAt`(nullable DateTime) 추가(Entities.cs:374 부근·컬럼명=프로퍼티명 PascalCase·HasColumnName 미사용·B2C 관례). WcsDbContext(:548 부근)에 `.IsRequired(false)` 추가. **provider-split 마이그레이션 2개**(Wcs.Migrations.Sqlite TEXT / Wcs.Migrations.SqlServer datetime2, nullable:true) + 양 ModelSnapshot 갱신 — 기존 `AddSorterCommandProcessingTimes` 관례 그대로. 단조 불변식 주석(Entities.cs:373)을 **`DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt`** 로 갱신. **현장 prod(SqlServer) 마이그레이션은 `MigrateOnStartup=true`(appsettings·DbInitializer.cs:82-87 기본)로 콜드스타트 자동 적용됨을 명시.**
 
-- Completion Conditions: (Evaluator PASS 최소 조건 — 전부 AND)
-  C1. RCS 호스트가 계속 다운인 상태에서 하트비트가 같은 실패 전이를 **N 주기(N≥3)** 재발신해도
-      operation_log의 CHUTESTATE_PUSH WARN "FAIL" 행이 **정확히 1건**, 트레이스 이벤트 8 또는 10의
-      result:"FAIL" 레코드가 **정확히 1건**(합계 N건이 아님)임을 자동화 테스트로 실증.
-  C2. 같은 시나리오에서 WCS→RCS PUT delivery 시도는 **매 주기 계속 발생**(재시도·재발신 불변)함을 실증 —
-      즉 로그만 억제되고 push 동작은 안 죽음(수신측 카운트/시도 카운트로 확인).
-  C3. 복구(호스트 재개) 시 성공 로그가 **정확히 1건** 남고, 그 직후 다시 실패시키면 **새 FAIL 1건**이
-      남음(억제 리셋 실증).
-  C4. next_state를 바꾼(BUSY↔READY) 상태로 계속 실패시키면 **새 FAIL 1건**이 추가로 남음(OQ-2 채택 시).
-  C5. 억제 관련 상수가 appsettings `Wcs:ChuteStatePush`에 존재하고 코드에 하드코딩 0(#7). Wcs.Core
-      git diff 0(#8). 억제는 per-route 락 내에서만 상태 갱신(코드 경로 직독으로 확인).
-  C6. 성공 push 로깅(현행)·재시도·백오프·Acked/Computed 전이·전이당 1회 발신 diff 0(#8 부수 훅).
-  C7. 양 provider 전체 테스트 스위트 GREEN(신규/갱신 포함), 회귀 0. 갱신된 테스트는 로그-카운트 단언만
-      바뀌고 delivery/Acked/attempt 단언은 불변임을 diff로 확인.
-  C8. (OQ-1 채택 시) 저빈도 요약 로그가 설정 주기로만 발화하고 완전 무음이 아님을 실증.
+C. **기존 행 처리(사용자 확인).** 이미 있는 `sorter_command` 행은 SortStartedAt=null → n에서 자연 제외. **평균은 신규 사이클부터 집계**(과거 행은 분류시작 앵커가 없어 빠짐). → Open Question OQ-2.
 
-- Parallel Modules: N/A (single module — Wcs.Api 아웃바운드 push 로깅 억제. 경계 분할 없음.)
+D. **provider-neutral 집계.** iter1과 동형 — (SortStartedAt, ReturnedAt) 2컬럼 materialize 후 C# TimeSpan 계산(SqlServer/Sqlite 동일 수치·provider 고유 date/datediff SQL 0). ArchivedAt 무필터.
 
-- Evaluation Dimensions: functional only
-  (backend-only·단일 표면. 스레드안전은 별도 dimension이 아니라 Craft 기준 C5로 흡수 — 실 병렬 부하
-   재현으로 검증. padding 금지.)
+E. **재검증 게이트(iter1 교훈).** 위 Goal 마지막 항목 — 실 Sim E2E 필수, 합성 마스킹 금지.
 
+──────────────────────────────────────────────────────────────────────────────
+- Implementation Scope (Generator 가 HOW 결정 · 아래 WHAT 전부 충족)
+──────────────────────────────────────────────────────────────────────────────
+BE-1. **스키마 + 마이그레이션** (설계 논점 B):
+      · `SorterCommand.SortStartedAt`(nullable DateTime) 추가 + WcsDbContext 매핑 `.IsRequired(false)`.
+      · 단조 불변식 주석(Entities.cs:373) 갱신: `DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt`.
+      · provider-split 마이그레이션 2개(Sqlite·SqlServer) + 양 ModelSnapshot 갱신. Up=AddColumn(nullable)·Down=DropColumn.
+
+BE-2. **분류 시작(Ready 1→0) 캡처 + 기입** (설계 논점 A — 권고안 A1):
+      · `HandshakeOrchestrator` R 폴 루프에서 Ready 1→0 에지를 **관측만 추가**(기존 폴/타이밍/pop/write-on-clear/ClearR 시점 불변). `HandshakeResult`에 `SortStartedAt`(nullable, 기본 null) append.
+      · `EfSorterCommandJournal.Finalize`(또는 CreateSent — Generator 결정)가 `result.SortStartedAt`를 그 행에 기입.
+      · ★ #8: **Wcs.Core zero-diff**(SortStartedAt은 Wcs.PlcGateway/Wcs.Api/Wcs.Data 계층에만 — Wcs.Core·DepositDecider·판정 로직 무접촉). 핸드셰이크 **제어 흐름·타이밍·pop·write-on-clear·PLC write 시퀀스 불변**(관측·EF 기입만 additive).
+      · ★ #1: 신규 PLC write 0 — SortStartedAt 기입은 EF DB 저장이지 Modbus 아님. 쓰기 큐 무변경.
+
+BE-3. **읽기 전용 집계 조회 1건** (Wcs.Api/Monitoring — 설계 논점 D):
+      · `sorter_command` 전 행(ArchivedAt 무필터) 중 `SortStartedAt != null && ReturnedAt != null` 행에 대해 Σ(ReturnedAt − SortStartedAt)·n 산출 → 평균(초). materialize 후 C# 계산(provider-neutral).
+      · `IMonitoringQueries`에 메서드 추가 + `MonitoringQueries` 구현 + 신규 DTO(예: `{ avgSeconds, n }`). 기존 조회/DTO/리포지토리 무변경(append-only). AsNoTracking.
+      · n=0 방어: 0 나눗셈 없이 `avgSeconds=null`·n=0 신호로 200 반환(500 금지).
+      · 핫패스 무접촉: 집계는 이 조회 요청 시에만 실행(폴/핸드셰이크/IF-10 응답에 삽입 금지).
+
+BE-4. **REST 엔드포인트 1개** (MonitoringController, GET, 읽기 전용):
+      · 파라미터 없음(전 행 집계). 기존 /api/monitor/* 관례(읽기 전용·부수효과 0·200 일관)를 따른다. 경로명 Generator 확정(iter1 관례 `cycle-time-avg` 재사용 가능).
+
+FE-1. **/trace 그리드 위 "평균 사이클 시간" 레이블**:
+      · 마운트 시 BE-4 조회해 표시. 주표기 "평균 사이클 시간(분류시작~복귀): X.X초 · n=N" + 수식 부기 "Σ(복귀−분류시작)/N"(툴팁/부제).
+      · n=0/조회 실패 시 그리드를 깨지 않고 우아하게 degrade("—"/"측정 데이터 없음").
+      · api.ts에 클라이언트 함수 추가. 기존 그리드/필터/연결배지 동작 무변경. 레이블은 앱 테마 토큰(text-ink/bg-panel/border-line/text-faint) 사용.
+
+FE-2. **실시간 트리거 결선**(iter1 동형 재구현):
+      · 기보유 `subscribeTrace` 구독에 얹어 사이클 완료 신호 수신 시 BE-4 재조회(디바운스). **트리거 = event 9(READY_0TO1 = 복귀 완료 = 신규 ReturnedAt)**. 신규 백엔드 push·신규 SignalR 메서드 0.
+      · 재연결(onreconnected) 시에도 1회 재조회(갭 보정).
+
+CFG(#7). **상수/설정 소스화·하드코딩 0**: 소수자리·디바운스 간격·트리거 event 번호·placeholder/카피 문구·포맷터를 프론트 단일 소스 모듈(iter1 `lib/cycleTime.ts` 관례)로. 캡처/타임아웃 관련 백엔드 값은 기존 appsettings 키(RFlagPollMs 등) 재사용 — 신규 타이밍 리터럴 산재 0.
+
+SCOPE OUT(명시):
+  · 소터별/셀별 분해 통계·다른 페이지·다른 이벤트(이번엔 전 행 단일 평균만).
+  · Wcs.Core / DepositDecider / 판정 로직 (절대규칙 #8 zero-diff).
+  · 핸드셰이크 제어 흐름·타이밍·pop·write-on-clear·PLC write 시퀀스 변경(관측·기입만 additive 허용).
+  · 인덱스 추가(현 규모 전행 집계 허용 — 필요 시 별도 스프린트).
+
+──────────────────────────────────────────────────────────────────────────────
+- Open Questions (사용자 확인 완료)
+──────────────────────────────────────────────────────────────────────────────
+OQ-1 (스코프 확장) 캡처를 위해 HandshakeOrchestrator/HandshakeResult/DbRepositories 기입 경로(#8 인접·write-path)를 사용자 승인 하에 의도적으로 확장 — Wcs.Core zero-diff·핸드셰이크 제어흐름/타이밍/pop/write-on-clear/PLC write 불변·회귀 0 최대 보존. → **사용자 ① 선택으로 승인(2026-07-30)**.
+OQ-2 (과거 행) 기존 `sorter_command` 행은 SortStartedAt=null → 평균 제외, **신규 사이클부터 집계**. → **확인: 예**.
+OQ-3 (에지 미관측) 분류가 폴 주기보다 빠른 드문 경우 대비 "C 후 첫 Ready==0 레벨 폴백" 허용(단조 SortStartedAt ≤ TiltedAt 유지). → **확인: 허용**.
+OQ-4 (표시/경로) 표시 카피·수식 부기 게이트 확정값. 엔드포인트 경로명 Generator 확정(iter1 `cycle-time-avg` 재사용 가능).
+
+──────────────────────────────────────────────────────────────────────────────
+- Evaluation Criteria (Full-stack — 가중치)
+──────────────────────────────────────────────────────────────────────────────
+1. Integration Quality (★★★) — BE 집계 계약(avgSeconds·n)과 FE 표시가 형상 일치. 실 사이클을 태워 Ready 1→0 실관측 → SortStartedAt 기입 → ReturnedAt → 집계 → trace event 9 → FE 재조회 → 레이블 갱신이 end-to-end 실제 동작(코드 존재 아님). **표시값이 의미 있는 양수**임을 실증.
+2. Functionality / 정확성 (★★★) — 시드/실데이터로 Σ(ReturnedAt−SortStartedAt)/n 손계산 일치. ArchivedAt!=null 행 포함 양성 실증. SortStartedAt=null 또는 ReturnedAt=null 행은 n 제외. n=0 → 200·비크래시. 양 provider 동일 수치. 단조상 음수 미발생 확인.
+3. Craft (★★) — 읽기 전용 집계·핫패스 무접촉·n=0/조회실패 우아 처리·#7(리터럴/타이밍 설정 소스화)·마이그레이션 관례 정합(2 provider + snapshot). 콘솔 BLOCKING(pageerror/React warning) 0.
+4. 회귀 0 (★★) — **Wcs.Core git diff 0**. 기존 핸드셰이크(성공/불일치/타임아웃/OFFLINE/잔류/복귀)·write-on-clear·트레이스(1~10)·monitor(E1~E7·operation-log)·기존 /trace 그리드/필터/배지·전체 테스트 스위트 수치 불변(baseline+신규=합). 핸드셰이크 타이밍/pop/PLC write 시퀀스 불변 실증.
+
+- Evaluation Dimensions: functional only (단일 표면·읽기 집계 + 최소 write-path 확장. 성능/회귀는 위 Craft·회귀 기준 내 검증).
+- Parallel Modules: N/A (single feature — BE 스키마/캡처/집계 → FE 표시가 계약 의존, boundary-clean 분할 아님).
+
+──────────────────────────────────────────────────────────────────────────────
 - Detected Project Type: Full-stack
-  (repo 신호: `frontend/`(브라우저 진입점·`TraceLogPage.tsx` 등) + `backend/`(ASP.NET Core
-   route/controller·server 호스트) 공존. 단 **이 스프린트 변경은 백엔드 전용** — 프론트 코드 변경 0.)
+  (repo 신호: frontend/ React 클라이언트 렌더 트리(TraceLogPage.tsx 등) + backend/ ASP.NET Core 컨트롤러/허브(MonitoringController·WcsMonitorHub·HandshakeOrchestrator)가 동일 리포에 공존.)
+──────────────────────────────────────────────────────────────────────────────
 
-- Verification Scenarios (Full-stack, mandatory):
+- Verification Scenarios (Full-stack, N=13):
 
-  === Applicable Web/UI scenarios (frontend surface this sprint touches) ===
-  - 프론트 코드 변경 0 — 이 스프린트는 소스(백엔드) 억제만. 아래는 **간접 관측**(백엔드 결과의 시각 확인),
-    프론트 파일 diff는 0이어야 함(회귀 스코프 게이트).
-    · VS-U1 (간접): RCS 다운을 지속시킨 상태에서 `/trace` 뷰어(TraceLogPage)를 열면, 같은 실패 전이에 대해
-      이벤트 8/10 result:"FAIL" 행이 **주기마다 새로 쌓이지 않고 1건에서 멈춰 있음**(폭주 소멸의 시각 확인).
-      뷰어 렌더/네비게이션 로직은 무변경 — 표시되는 데이터(파일 tail)가 줄어든 것뿐.
-    · VS-U2 (간접): 운영로그 모니터링 화면에서 동일 실패의 CHUTESTATE_PUSH WARN "FAIL" 행이 1건만
-      존재(반복 억제). frontend 컴포넌트·API 클라이언트 diff = 0.
-    · 그 외 default/alternate/empty/dark-mode 상태 슬롯: **N/A** — 이 스프린트는 UI 표면을 만들거나 바꾸지
-      않음(프론트 무변경). 다크모드도 N/A(신규 UI 없음).
+  === Applicable Web/UI scenarios (frontend surface: /trace) ===
+  W-1 (기본 상태) /trace 진입 시 그리드 위에 "평균 사이클 시간(분류시작~복귀)" 레이블이 값·n과 함께 렌더된다(주표기 + 수식 부기).
+  W-2 (실시간 갱신 = 핵심 상호작용) 신규 사이클 완료 후(event 9 수신·디바운스 재조회) 레이블의 값·n이 새 수치로 갱신된다(before→after 수치 대조).
+  W-3 (빈/에러 상태) n=0 → "—"/"측정 데이터 없음"; BE-4 조회 실패 주입 시 그리드는 정상 스트림 지속·레이블만 우아 degrade, 복원 후 다음 사이클에 자가 회복.
+  W-4 (다크모드) 앱이 단일 라이트 테마(토글 컨트롤·data-theme·테마 localStorage 키 미관찰)이면 N/A — Evaluator가 실제 토글 유무로 확정. 존재 시 양 테마 대비 확인.
+  W-5 (콘솔) W-1~W-3 클릭스루 중 pageerror 0·React dev-warning 0·의도치 않은 4xx/5xx 0(내 dev 포트로 분리 캡처).
 
-  === Applicable Backend/API scenarios (backend surface this sprint touches) ===
-  - 인바운드 엔드포인트 계약 변경 없음(이 변경은 **아웃바운드** push 클라이언트 WCS→RCS의 로깅 동작).
-    검증 표면 = (i) operation_log 행(CHUTESTATE_PUSH, level=WARN, detail result:"FAIL"),
-    (ii) 트레이스 레코드(EventNo 8/10, Detail result:"FAIL"), (iii) WCS→RCS PUT 시도(수신측 fake host).
-    · VS-B1 첫 실패: fake RCS 호스트를 다운(항상 실패)으로 두고 한 목적지의 수용상태를 한 번 전이시키면 →
-      operation_log FAIL 정확히 1건 + 트레이스 FAIL(8 or 10) 정확히 1건. (억제 없이 첫 신호 유지.)
-    · VS-B2 반복 억제: VS-B1 이후 하트비트가 같은 미동기 route를 N 주기 재발신해도 →
-      operation_log FAIL 추가 0 + 트레이스 FAIL 추가 0. delivery 시도는 매 주기 발생(재발신 불변).
-    · VS-B3 복구 1건: fake 호스트를 성공으로 전환하면 → 성공 로그(OK oplog + OK trace) 정확히 1건,
-      이후 route 동기(Acked==Computed)로 재발신 정지. 성공 로깅 형상·필드 현행과 동일(무변경).
-    · VS-B4 억제 리셋: VS-B3 복구 후 호스트를 다시 다운시키고 새 전이를 내면 → **새 FAIL 1건**(리셋 실증).
-    · VS-B5 next_state 전이(OQ-2): 계속 실패 중 accept 값을 바꿔 next_state를 2↔3으로 전이시키면 →
-      새 FAIL 1건 추가(같은 route라도 새 전이).
-    · VS-B6 동작 불변: 위 전 과정에서 4-시도 재시도·백오프·PushAsync 반환 bool·Acked/Computed 전이·
-      전이당 1회 발신·DORMANT 가드가 diff 0(코드 직독 + delivery/attempt 카운트 단언 불변).
+  === Applicable Backend/API scenarios (backend surface) ===
+  B-1 (엔드포인트) GET /api/monitor/<cycle-avg 경로>(최종 경로명 Generator 확정·파라미터 없음) → 200·{ avgSeconds, n }.
+  B-2 (happy path) SortStartedAt·ReturnedAt 둘 다 있는 시드 행 → { avgSeconds: Σ/n(초·1자리 반올림 전 raw double), n } 손계산 일치. ArchivedAt!=null 행 포함 양성.
+  B-3 (에러/경계) n=0(둘 다 non-null 행 전무) → { avgSeconds:null, n:0 }·200(500 아님). SortStartedAt=null 또는 ReturnedAt=null 행은 n 제외. 양 provider(SqlServer/Sqlite) 동일 수치(또는 provider-neutral 경로임을 코드로 입증).
+  B-4 (마이그레이션 적용) Sqlite·SqlServer 마이그레이션 2개가 `sorter_command`에 SortStartedAt(nullable) 컬럼을 추가하고 콜드스타트 MigrateOnStartup 경로가 exit 0으로 적용됨(기존 데이터 보존·구 행 SortStartedAt=null). ModelSnapshot 정합(pending model changes 경고 0).
+  B-5 (Ready 1→0 캡처 정확성) 핸드셰이크 단위 테스트/통합에서 Ready 1(idle)→0(분류)→…→R_Flag=1→Ready 0→1(복귀) 시퀀스를 태워 SortStartedAt = 1→0 관측 시각으로 기입됨을 실증. 미관측(폴백/에지) 경로 동작 명시.
+  B-6 (단조 불변식) 성공 사이클 행에서 DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt 이 성립(음수 사이클타임 미발생) — 시드·실데이터로 확인.
+  B-7 (회귀) Wcs.Core git diff 0 실증. 기존 핸드셰이크/write-on-clear/trace(1~10)/monitor 테스트 스위트 GREEN(baseline+신규=합). 핸드셰이크 타이밍·pop·PLC write 시퀀스 불변(관련 테스트 수치 불변).
 
-  === End-to-end data-flow scenario (2+ layers) ===
-  - VS-E1 (Pusher→Client→운영로그/트레이스 sink, RCS-down 하트비트 폭주 억제):
-    실 `DestinationStatusPusher` 관찰 루프 + 실 `ChuteStatePushClient` + 다운 상태의 fake RCS 수신 서버 +
-    실 operation_log(EF, SQLite scratch) + capturing 트레이스 sink를 한 스택에 결선. 목적지 1개를 실패
-    전이시키고 관찰 주기를 N회(≥3) 돌린 뒤:
-      (a) operation_log CHUTESTATE_PUSH WARN "FAIL" **CountAsync == 1**,
-      (b) 트레이스 이벤트 8/10 result:"FAIL" 레코드 **count == 1**,
-      (c) fake RCS 수신 PUT 시도 **count ≥ N**(재발신 살아있음 — 로그만 억제),
-    를 **한 테스트에 병치**로 단언(억제 실효 + 폭주 부재 + 동작 불변을 분리 단언 — GREEN 하나로 합치지 말 것).
-    이어서 fake RCS를 성공으로 전환 → 성공 로그 1건 + 재발신 정지(freeze) 확인(복구 실효).
+  === End-to-end data-flow scenario (≥2 계층 횡단) ===
+  E2E-1 (★ 재검증 게이트) 실 Sim IF-05→IF-10 → C 기입 → **Ready 1→0(분류 시작) 실관측 → SortStartedAt 기입** → 틸트 → **Ready 0→1(복귀) → ReturnedAt 기입** → COMPLETED sorter_command 1행 → trace event 9가 프론트 trace 구독 도달 → 디바운스 재조회 → /trace 레이블 n이 +1·평균이 재계산된 **의미 있는 양수**(≈초 단위)로 갱신됨을 브라우저 수치로 실측. 표시값 = DB Σ(ReturnedAt−SortStartedAt)/n 일치(아카이브 행 포함 규칙 반영). ★ 합성 손세팅 아닌 실제 저널링 경로로 실증(iter1 FAIL 근본원인 재발 차단).
 
-- Open Questions (★ 사용자 게이트 확정 2026-07-31):
-  · OQ-1 ✅ **저빈도 "아직 실패 중" 주기 요약 로그 채택**(설정 주기·저빈도). 완전 무음 금지.
-  · OQ-2 ✅ **억제 단위 = (route, next_state)** — 같은 목적지라도 BUSY↔READY 전이는 새 첫 실패로 로깅.
-  · OQ-3 ✅ **운영로그·추적로그 양쪽 동일 정책 억제.**
-  · OQ-4 ✅ **재시도-소진 Serilog `_log.LogError`(약 :184-187)도 억제 포함**(같은 폭주원). 단 재시도 루프 내
-    per-attempt `_log.LogWarning`은 스코프 밖(한 호출 내 국소).
-  → 세 sink(operation_log WARN + 트레이스 8/10 + Serilog LogError) 모두 동일 억제. 요약 로그는 채택.
+──────────────────────────────────────────────────────────────────────────────
+- Completion Conditions (Evaluator PASS 최소 조건)
+──────────────────────────────────────────────────────────────────────────────
+C1. GET(BE-4)가 { avgSeconds, n } 형상으로 200 반환. 파라미터 없이 전 행 집계.
+C2. 자동 테스트(백엔드): (i) 둘 다 non-null 여러 행 → 평균·n 손계산 일치, (ii) ArchivedAt!=null 행도 n·합 포함(양성), (iii) SortStartedAt=null 또는 ReturnedAt=null 행은 n 제외, (iv) n=0 → avgSeconds=null·200, (v) provider-neutral(양 provider 동일 수치 또는 코드 입증). ★ 단, 자동 테스트만으론 PASS 불가 — E2E(C3) 필수.
+C3. **E2E(재검증 게이트)**: 실 Sim 핸드셰이크로 Ready 1→0 실관측→SortStartedAt 기입→ReturnedAt→집계→/trace 레이블 값·n 갱신을 브라우저로 실측. **표시값이 의미 있는 양수**이고 DB Σ/n과 일치. (offset 손세팅 마스킹 금지.)
+C4. 마이그레이션: Sqlite·SqlServer 2개 + 양 ModelSnapshot. `dotnet ef` pending-model-changes 경고 0. MigrateOnStartup 적용 exit 0.
+C5. 정적검사(독립 실행): dotnet build/test exit 0(신규 경고 0 — 선재 NU1903 제외), 프론트 tsc/lint/build exit 0.
+C6. 회귀: 기존 스위트 GREEN(baseline+신규 산술 일치). **Wcs.Core git diff 0.** 핸드셰이크 제어흐름/타이밍/pop/write-on-clear/PLC write 시퀀스 불변 실증(관련 테스트 수치 불변·git diff 리뷰). 기존 /trace 그리드·필터·배지·monitor(E1~E7)·trace(1~10) 무변경.
+C7. 절대규칙: #1(신규 write 경로·PLC write 0 — SortStartedAt 기입은 EF DB 저장), #7(소수자리/디바운스/트리거 event/문구·타이밍 상수·설정 소스화·하드코딩 0), #8(판정 로직 무접촉·Wcs.Core 순수·핸드셰이크 관측/기입만 additive).
 
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios [frontend surface — N/A/indirect, 무변경], Applicable Backend/API scenarios [outbound push 로깅 억제 표면], End-to-end data-flow scenario [Pusher→Client→oplog/trace RCS-down 폭주 억제]). All slots filled: yes.
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 13 (W-1 기본상태, W-2 실시간갱신, W-3 빈/에러상태, W-4 다크모드, W-5 콘솔, B-1 엔드포인트, B-2 happy-path, B-3 에러/경계, B-4 마이그레이션적용, B-5 Ready1→0캡처정확성, B-6 단조불변식, B-7 회귀, E2E-1 횡단데이터흐름-재검증게이트). All slots filled: yes.
