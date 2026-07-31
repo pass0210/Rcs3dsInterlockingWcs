@@ -1,275 +1,145 @@
-[Sprint Contract] — S-TRACE-READY-PUSH-AND-DEFAULT
+[Sprint Contract] — S-IF08-PUSH-LOG-THROTTLE
 
-═══════════════════════════════════════════════════════════════════════════════
-■ Goal (WHAT — Planner 정의)
-═══════════════════════════════════════════════════════════════════════════════
-두 가지를 additive·관측/로깅 전용으로 추가한다(회귀 0).
+- Goal:
+  IF-08 chute-state push (WCS→RCS) 실패 재시도가 운영로그(operation_log WARN "FAIL")와
+  추적로그(트레이스 이벤트 8/10 result:"FAIL")에 **매 복구-하트비트 주기마다 새 행으로 폭주**하는 것을
+  **소스에서 억제**한다(RCS 호스트가 죽어 있으면 현재는 무한정 누적). 억제 대상은 오직 "반복되는 같은 실패"의
+  로깅이다:
+    · 첫 실패(전이)      → 두 sink 각각 정확히 1건 (신호 유지)
+    · 반복되는 같은 실패 → 두 sink 각각 0건 (주기 재발신에도 추가 로그 0)
+    · 복구(실패→성공)    → 정확히 1건 (현행 성공 로깅으로 자연 충족 — 회귀 0)
+  **Fail-Loud 유지 — 완전 무음 금지.** 실제 push 재시도·복구 하트비트 재발신·Acked/Computed 전이 로직·
+  전이당 1회 발신은 전부 **불변**(로깅만 조절). RCS로의 재시도는 성공할 때까지 계속되되 그 실패를 매번
+  기록하지만 않는다.
 
-요청 1 — Ready 전이 + 슈트상태 push 시각 추적:
-  전용 추적 로그(전용 파일 D:\Rcs3dsInterlockingWcsLogs + /trace 실시간 뷰어)에 신규 이벤트를
-  추가해 아래 4개 시각을 관측·기록한다. 목적 = "Ready 전이 ↔ RCS 통지(IF-08 push) 지연" 측정.
-    (a) 소터 Ready 워드 1→0 전이 관측 시각
-    (b) 그 상태 변화로 WCS가 RCS로 나가는 IF-08 슈트상태 update push 전송 시각
-    (c) 소터 Ready 워드 0→1 전이 관측 시각
-    (d) 그 상태 변화로 나가는 IF-08 push 전송 시각
-  기존 TraceLogService 6이벤트 스킴을 확장(신규 EventNo 부여)해 전용 파일 `[N] {json}` +
-  SignalR `/trace` 둘 다 자동 기입되게 한다.
+- Implementation Scope: (Generator가 구현할 것들)
+  1. 반복 실패 억제(핵심): `ChuteStatePushClient.PushAsync`가 재시도 소진 시 내는 **세 FAIL 로그**
+     — (a) `_opLog.Log(API, CHUTESTATE_PUSH, WARN, detail=…"FAIL"…)` (약 :189),
+       (b) `EmitPushTrace(… "FAIL" …)` → 트레이스 이벤트 8(next_state=2)/10(next_state=3) (약 :192),
+       (c) `_log.LogError(…재시도 소진…)` Serilog 파일/콘솔 라인 (약 :184-187) ← **OQ-4 확정: 억제 포함**
+     — 를 **같은 실패가 반복될 때 셋 다 emit 하지 않는다**(운영로그·추적로그·Serilog 동일 정책 — OQ-3/OQ-4 확정).
+     (재시도 루프 내 per-attempt `_log.LogWarning`은 스코프 밖 — 한 호출 내 국소.)
+  2. 첫 실패 1건 보존: 같은 억제 단위(= route, next_state — OQ-2)에서 **첫 실패**는 두 sink 각각 정확히
+     1건 남긴다. 이후 같은 단위의 반복 실패는 0건.
+  3. 복구 1건 보존: 실패→성공 전이 시 **현행 성공 로깅 경로(:143-146 OK oplog + OK trace)를 그대로**
+     내보낸다(성공 로깅 무변경). 억제 상태는 **성공 시 리셋**되어, 복구 후 다시 실패하면 그것이 새 "첫 실패"로
+     1건 로깅되어야 한다(신호 재무장).
+  4. 억제 단위 전이 시 재무장: 같은 route가 계속 실패하는 중이라도 산출 next_state가 바뀌면(예 BUSY↔READY)
+     새 전이로 간주해 새 첫 실패 1건을 남긴다(OQ-2 권고 = 예).
+  5. 설정화(절대규칙 #7): 억제 on/off·(있다면) 임계·"아직 실패 중" 요약 주기 등 모든 상수는
+     appsettings `Wcs:ChuteStatePush` 섹션 값으로 외부화한다. 하드코딩 리터럴 0.
+  6. **저빈도 "아직 실패 중" 주기 요약 로그 채택(OQ-1 확정)**: 첫 실패~복구 사이에 설정 주기(appsettings,
+     기본은 하트비트 주기의 수십~수백 배 예: 수 분)마다 요약 1건. 완전 무음 금지(Fail-Loud). 이 요약은
+     운영로그(또는 Serilog) 어느 sink로 낼지는 Generator 재량이되 저빈도·설정 주기·전이 리셋 시 초기화.
+  7. 스레드안전: 억제 상태(직전 로깅한 실패 등)의 갱신은 Pusher의 per-route `RouteState.Gate` 락 안에서
+     원자적으로 수행한다(비원자 check-then-act 금지). in-flight/전이 판정과 동일 임계구역.
+  8. **불변 보존(로깅 외 전부)**: 4-시도 재시도·지수 백오프·DORMANT 가드·성공 판정(2xx+flag==1)·
+     하트비트 재발신 루프·Acked/Computed/PushInFlight 전이 로직·전이당 단일 발신·성공 push 로깅은
+     한 줄도 바꾸지 않는다.
+  9. 절대규칙 #8: Wcs.Core 무접촉(본 변경은 Wcs.Api 계층). 판정 로직 무변경.
+  10. 회귀 대상 테스트 갱신(로그-카운트 단언에 한함): 억제로 로그 행 수를 단언하는 테스트가 있으면 새 억제
+     시맨틱에 맞게 갱신한다. **단 push 재시도/재발신 동작·Acked 갱신·전이당 1회 발신·delivery 카운트를
+     단언하는 부분은 불변**이어야 한다(로깅만 조절). 대상: `ChuteStatePushTests`,
+     `ChuteRecoveryPushHeartbeatTests`, `TraceReadyPushTests`, `RcsPushTests`,
+     `SorterPushOperationalTests`, `TwoFloorHostRoutingTests`, E2E `E2EGroupL_TwoFloorHostPushTests`.
 
-요청 2 — 프론트 기본화면을 추적 로그(/trace)로 변경:
-  현재 기본 랜딩(B2C home = "데이터 생성" /b2c/test-data)을 추적 로그 /trace 로 바꾼다.
-  기존 라우팅·다른 페이지 접근을 깨뜨리지 않는다.
+  ── HOW를 고정하지 않음(Generator 재량) ──
+    · "직전 로깅한 실패" 상태를 어디에 둘지(후보: `RouteState`에 last-logged-result 필드 / 클라이언트가
+      Pusher로부터 억제 힌트를 받음 / 기타), 정확한 메서드 시그니처·필드명·주입 방식은 **Generator가 결정**한다.
+      계약은 결과 시맨틱(첫 1 / 반복 0 / 복구 1 / 양 sink 동일 / 동작 불변)만 고정한다.
+    · 판정에 필요한 컨텍스트(route별 Computed/Acked/직전 결과)는 이미 Pusher가 보유하고, 클라이언트는 호출
+      간 상태가 없다는 사실만 계약이 전제한다.
 
-═══════════════════════════════════════════════════════════════════════════════
-■ 코드 조사 결과 (설계 근거 — Generator/Evaluator 공유 사실)
-═══════════════════════════════════════════════════════════════════════════════
-기존 6이벤트 스킴 (EventNo = "이벤트 종류(KIND) 태그", per-instance 상관키 아님 —
-  TraceRecord docstring 명시):
-    1 TGTFLOOR_ENQUEUE  (RcsController IF-05 + PendingFloorQueueRestorer 복원)
-    2 TGTFLOOR_DEQUEUE  (SorterFloorReturnService 분류시작 클리어 pop)
-    3 IF10_ARRIVAL      (RcsController DepositReport 진입)
-    4 C_ENQUEUE         (TraceWiring — HS_C_SENT)
-    5 C_DEQUEUE         (TraceWiring — CELL_ASSIGN write)
-    6 C_CLEAR           (TraceWiring — C_Flag 1→0 register change delta)
-  TraceRecord 필드 = {EventNo, Event, At, PId, CSeq, ChuteNo, DestId, CellNo, Floor,
-  InductionNo, Trigger, Detail}. EventNo/Event/At 외 전부 nullable → 신규 이벤트 데이터
-  (chuteNo/destId/floor + 방향/next_state는 Detail)를 그대로 수용(스키마 변경 불요).
+- Implementation Scope 밖(SCOPE OUT):
+  · Wcs.Core / DepositDecider / 판정 로직(#8 zero-diff).
+  · push 재시도·백오프·재발신·Acked/Computed·전이당 1회 발신·성공 로깅 동작(로깅 억제 외 무변경).
+  · 프론트(TraceLogPage 등) 코드 — 이 스프린트는 소스 억제만(프론트 diff 0).
+  · 재시도 루프 내 per-attempt `_log.LogWarning`(한 호출 내 국소 — OQ-4 결정 전까지 스코프 밖).
 
-[조사 A] Ready 전이 관측 지점 — **확정**:
-  PlcGateway.EmitRegisterChanges 가 폴 스냅샷 델타에서 "Ready" 1→0·0→1 을 `OnRegisterChange
-  (reg,old,new)` 로 발화한다(PlcGateway.cs:598). 이는 이벤트 6(C_Flag)이 이미 쓰는
-  `bundle.SubscribeRegisterChange` 훅과 동일 경로 → 신규 Ready 이벤트는 **TraceWiring.Wire 안에
-  이벤트 6과 나란히 "reg=='Ready'" 핸들러를 추가 구독**하면 된다. PlcGateway/HandshakeOrchestrator
-  무접촉(절대규칙 #8 — 기존 콜백 얹기만).
+- Evaluation Criteria: (Evaluator 판정 기준 + 가중치 — Backend/API 기준, backend-only 변경)
+  1. Functionality / Correctness (★★★) — 억제 시맨틱이 정확한가:
+       · 첫 실패 = 두 sink 각 1건, 반복 실패 = 두 sink 각 0건(주기 N회 재발신에도 추가 0),
+       · 복구 = 성공 로그 1건 + 억제 리셋(복구 후 재실패 시 다시 1건),
+       · next_state 전이 시 새 첫 실패 1건.
+  2. Architecture / Craft — 억제가 판정/전달과 비침습(★★★): 재시도·백오프·Acked/Computed·전이당 1회 발신·
+     성공 로깅이 byte-identical(diff로 실증). 억제는 순수 로깅 게이트이며 delivery에 0 영향.
+  3. Craft — 스레드안전·Fail-Loud(★★): 억제 상태 갱신이 per-route 락 내 원자적(check-then-act 없음),
+     완전 무음 아님(첫 실패+복구 항상 남김; OQ-1 채택 시 저빈도 요약).
+  4. Functionality — 설정화·경계(★★): #7 준수(상수 appsettings), Wcs.Core zero-diff(#8),
+     양 provider(SqlServer 운영/SQLite 테스트) GREEN, 기존 전체 스위트 GREEN(회귀 0).
 
-[조사 B] IF-08 push 전송 지점 — **확정**:
-  실제 PUT 전송 = ChuteStatePushClient.PushAsync 의 `http.PutAsJsonAsync(url, payload)`
-  (ChuteStatePushClient.cs:117) → RCS 층 호스트로 `{chute_numbers:[chuteNo], next_states:[3|2]}`.
-  이 클라이언트는 이미 operation_log CHUTESTATE_PUSH(성공/실패)를 남긴다(그대로 유지).
-  push 결정은 DestinationStatusPusher.PumpAsync(전이당 1회 멱등, per-route).
+- Completion Conditions: (Evaluator PASS 최소 조건 — 전부 AND)
+  C1. RCS 호스트가 계속 다운인 상태에서 하트비트가 같은 실패 전이를 **N 주기(N≥3)** 재발신해도
+      operation_log의 CHUTESTATE_PUSH WARN "FAIL" 행이 **정확히 1건**, 트레이스 이벤트 8 또는 10의
+      result:"FAIL" 레코드가 **정확히 1건**(합계 N건이 아님)임을 자동화 테스트로 실증.
+  C2. 같은 시나리오에서 WCS→RCS PUT delivery 시도는 **매 주기 계속 발생**(재시도·재발신 불변)함을 실증 —
+      즉 로그만 억제되고 push 동작은 안 죽음(수신측 카운트/시도 카운트로 확인).
+  C3. 복구(호스트 재개) 시 성공 로그가 **정확히 1건** 남고, 그 직후 다시 실패시키면 **새 FAIL 1건**이
+      남음(억제 리셋 실증).
+  C4. next_state를 바꾼(BUSY↔READY) 상태로 계속 실패시키면 **새 FAIL 1건**이 추가로 남음(OQ-2 채택 시).
+  C5. 억제 관련 상수가 appsettings `Wcs:ChuteStatePush`에 존재하고 코드에 하드코딩 0(#7). Wcs.Core
+      git diff 0(#8). 억제는 per-route 락 내에서만 상태 갱신(코드 경로 직독으로 확인).
+  C6. 성공 push 로깅(현행)·재시도·백오프·Acked/Computed 전이·전이당 1회 발신 diff 0(#8 부수 훅).
+  C7. 양 provider 전체 테스트 스위트 GREEN(신규/갱신 포함), 회귀 0. 갱신된 테스트는 로그-카운트 단언만
+      바뀌고 delivery/Acked/attempt 단언은 불변임을 diff로 확인.
+  C8. (OQ-1 채택 시) 저빈도 요약 로그가 설정 주기로만 발화하고 완전 무음이 아님을 실증.
 
-[조사 C — ★ 핵심] Ready 전이 ↔ push 상관관계 — **직접 인과 아님(코드 확정)**:
-  IF-08 push 는 Ready 레지스터 에지가 **직접 호출로 트리거하지 않는다.** 별개의 주기 관찰
-  루프(DestinationStatusPusher.RunSorterObserveLoopAsync, 주기 = Wcs:ChuteStatePush:
-  SorterObserveIntervalMs=150ms)가 매 틱 소터별 `accept = Ready && !Paused` 를 (dest, 층-호스트)
-  route 마다 재산출하고, route 의 next_state 가 직전 Acked 와 달라질 때만 PushAsync 를 호출한다.
-  결과:
-    · 시간적으로 분리됨(Ready 에지 이후 다음 관찰 틱에 발신).
-    · **route(층-호스트)별**로 발신 — 소터가 층-호스트 N개면 한 Ready 전이가 최대 N건의 push
-      전송을 낳는다(각 route 1건).
-    · Ready 1→0: accept→false → 모든 route next_state=2 → 3이던 route마다 push.
-    · Ready 0→1: accept→true, 그러나 next_state=3 은 **CurFloor==그 route 층**인 route만.
-      나머지 층 route 는 2 유지(변화 없음 → push 0건일 수 있음). 즉 0→1 전이는 push 0/1/N건.
-    · push 는 Ready 외 원인(pause/resume·capacity·CurFloor 변화)에서도 나감.
-  ⇒ "그 전이로 나간 그 push" 를 **인과 토큰으로 특정할 수 없다.** 상관은 chuteNo/destId(소터
-    scope) + 시각 순서 + next_state(2=1→0쪽 / 3=0→1쪽)로만 이뤄진다. 지연 지표는 이에 맞춰 정의
-    (아래 이벤트 구조 참조). 이 사실을 계약이 명문화하며 4개 시각을 이 비인과 모델 위에서 기록한다.
+- Parallel Modules: N/A (single module — Wcs.Api 아웃바운드 push 로깅 억제. 경계 분할 없음.)
 
-[조사 D] 전송 파이프 EventNo-무관성 — **확정**:
-  · SignalR relay(MonitorRelayService.OnTraceEntry → Broadcast(GroupTrace,"Trace",rec)) EventNo 무관.
-  · REST 백로그(TraceLogService.Read / GET /trace) EventNo 필터 무관(TryParse+필터 제너릭).
-  · 프론트 전송 타입 TraceRecord/TraceEvent = `eventNo:number`(제너릭). api.trace(eventNo?) 제너릭.
-  ⇒ 신규 EventNo 는 전송 계층 무변경으로 파일·SignalR·REST 백로그에 자동 흐른다.
+- Evaluation Dimensions: functional only
+  (backend-only·단일 표면. 스레드안전은 별도 dimension이 아니라 Craft 기준 C5로 흡수 — 실 병렬 부하
+   재현으로 검증. padding 금지.)
 
-[조사 E] 프론트 /trace 뷰어 신규 이벤트 렌더 — **부분 자동/부분 하드코딩**:
-  · 테이블 행: TraceLine 이 `EVENT_META[eventNo] ?? {label: row.event, tone:'neutral'}` 폴백을
-    가져 **미등록 EventNo 도 자동 렌더**(서버 event 명·중립색·제너릭 컬럼). "전체" 필터에서 보임.
-  · 그러나 EVENT_META(1~6 하드코딩)·필터 드롭다운(`[1,2,3,4,5,6]` 하드코딩)·"6개 이벤트" 카피는
-    신규 이벤트를 반영 못 함 → 라벨/색·드롭다운 필터 항목·문구 갱신이 필요(아래 Scope).
-
-[조사 F] 기본화면 uiMode 분기 — **단일 소스 확인**:
-  · frontend/src/lib/uiMode.ts `homePathFor(mode)`: b2b→'/data-generator', b2c→'/b2c/test-data'.
-    기본 mode='b2c'. App.tsx ModeHome(`/`·`*`)·Layout.ModeToggle 가 이 함수를 공용.
-  · /trace 는 **b2c NAV 세트에만** 존재(Layout NAV_SETS.b2c). b2b NAV 엔 없음.
-  ⇒ 권장: homePathFor('b2c') → '/trace' 로 변경, b2b 는 '/data-generator' 유지(아래 Open Q4).
-
-═══════════════════════════════════════════════════════════════════════════════
-■ ★ 설계 논점 & Open Questions
-═══════════════════════════════════════════════════════════════════════════════
-✅ 사용자 게이트 확정(2026-07-30) — 아래 OQ 권장과 다른 부분은 **이 블록이 정본**:
-  · OQ1 = **신규 EventNo 4개(7·8·9·10)**, 각 시각 1개(사용자 선택 — 권장안 A가 아닌 대안 B):
-      7  = READY_1TO0           : Ready 워드 **1→0** 전이 관측   (Detail: reg,old=1,new=0,curFloor)
-      8  = CHUTESTATE_PUSH_BUSY : IF-08 push 전송 중 **next_state==2**(busy/not-ready) (Detail: next_state=2,result,attempts,host)
-      9  = READY_0TO1           : Ready 워드 **0→1** 전이 관측   (Detail: reg,old=0,new=1,curFloor)
-      10 = CHUTESTATE_PUSH_READY: IF-08 push 전송 중 **next_state==3**(ready)          (Detail: next_state=3,result,attempts,host)
-    4개 시각 매핑: (a)=7 · (b)=8 · (c)=9 · (d)=10. Ready 방향은 EventNo(7 vs 9)로, push 방향은
-    EventNo(8 vs 10)=next_state(2 vs 3)로 구분. (아래 OQ1 권장안 A[7·8 2개]는 채택 안 함 — 참고 이력.)
-  · OQ2 = **모든 IF-08 PUT 전송 계측**(전송 지점 단일 훅). 각 전송을 next_state로 8(==2)/10(==3)에
-    분기. 소터 chuteNo로 식별. Ready 에지와 인과 링크 없음(조사 C) — chuteNo+시각+next_state 상관.
-  · OQ4 = **B2C만 /trace**. homePathFor('b2c')→'/trace', b2b→'/data-generator' 유지.
-  · OQ3/OQ5 = 확정(소터 scope·pId/cSeq/cellNo=null; 뷰어 EVENT_META/필터/문구 갱신).
-
-(원문 OQ 이력 — 참고용, 정본은 위 확정 블록)
-OQ1 — 이벤트 구조 (권장: 신규 EventNo 2개):
-  [권장안 A] 2개 신규 EventNo, 방향은 필드로:
-    · 7 = READY_TRANSITION : Ready 1→0 AND 0→1 둘 다(동일 KIND). 방향은 Detail의 old/new 로 구분
-        (이벤트 6 C_CLEAR 가 이미 old/new 를 Detail 로 담는 관례와 동형).
-        필드: ChuteNo·DestId·Floor(=관측 시점 CurFloor)·Trigger="READY_EDGE",
-        Detail={reg:"Ready", old, new, curFloor}.
-    · 8 = CHUTESTATE_PUSH_SEND : IF-08 PUT 전송 시각(전송 지점 계측). 방향은 Detail의 next_state
-        (2 vs 3)로 구분. 필드: ChuteNo·DestId·Floor(=route 층/host)·Trigger="IF08_PUSH",
-        Detail={next_state, result, attempts, host}.
-    4개 시각 매핑: (a)=7[old1new0] (b)=8[next_state2] (c)=7[old0new1] (d)=8[next_state3].
-  [근거] EventNo 는 기존 관례상 "이벤트 종류 태그"다 — 1→0 과 0→1 은 같은 KIND(방향만 다름)이므로
-    한 번호+방향필드가 정합. push 도 마찬가지(같은 전송 종류, next_state 로 방향 표현). 또한 조사 C
-    대로 push 는 전이당 0/1/N건이라 시각 4개를 EventNo 4개로 1:1 고정하는 모델이 물리적으로 성립
-    안 함 → 필드 기반이 정직. 레전드/필터도 2개만 늘어 단순.
-  [대안 B] 7/8/9/10 네 EventNo(각 시각 1개). 단점: KIND 관례 위반·레전드/필터 2배·8vs10 은 결국
-    next_state 로만 구분돼 필드 중복·0/N건 현실과 불일치.
-  ▶ 사용자 확정 요청: 권장안 A(7·8) 채택 여부. (미회신 시 A로 진행.)
-
-OQ2 — Ready↔push 상관 방식 (권장: 비인과·소터 scope 상관):
-  조사 C 결론에 따라 이벤트 8은 "특정 Ready 에지가 유발한 push"를 인과로 잇지 않고 **실제 전송
-  지점에서 모든 IF-08 PUT 전송을 계측**한다(소터·슈트 공통 전송 chokepoint). 소터 push 는
-  chute_numbers=[소터 chuteNo]라 chuteNo 로 식별 가능. 지연 지표 = 뷰어/분석에서 같은 chuteNo 의
-  이벤트7(new값) → 그 직후 이벤트8(next_state 부합) 시각차. push 트랜지언트 특성(N route·0건 가능)은
-  Detail(host/next_state)로 노출.
-  ▶ 사용자 확정 요청: 이벤트 8을 (i) 모든 IF-08 전송 계측(권장·전송 지점 단일 훅) vs (ii) 소터
-    Ready-driven 전송만으로 제한. (미회신 시 (i)로 진행 — 정직·additive·최소침습.)
-
-OQ3 — 상관키/스코프 (확정 명시):
-  신규 이벤트 7·8 은 **소터 + chuteNo/destId(+층) scope**다. 피스 pId·cSeq·cellNo 없음
-  (PId/CSeq/CellNo=null). 기존 3~6 의 pId/cSeq 피스-상관과 다른 층/소터 scope 경계임을 명시
-  (이벤트 1·2가 이미 이 scope를 씀 — 이벤트 2는 pId=null). 뷰어 상관은 pId 대신 chuteNo 로.
-
-OQ4 — 기본화면 uiMode 분기 (권장: b2c만 /trace):
-  homePathFor('b2c') → '/trace'. b2b → '/data-generator' 유지.
-  [근거] /trace 는 b2c(관제) NAV 전용 페이지다. b2b(작업 테스트 데이터 생성 도구)가 /trace 로
-    랜딩하면 (1) Layout 헤더 타이틀 매칭이 b2b NAV 에 /trace 부재로 b2b 첫 항목("데이터 생성")으로
-    폴백하는 cosmetic 불일치(todo.md 기존 항목과 동류), (2) b2b 우측 컨트롤(업무일자) 표시 등
-    의미 부정합이 생긴다. 사용자가 말한 "현재 기본화면=데이터 생성"은 기본 mode=b2c 의 랜딩
-    (/b2c/test-data)을 가리키므로, b2c 랜딩만 /trace 로 바꾸면 요구 충족.
-  ▶ 사용자 확정 요청: (i) b2c 만 /trace(권장) vs (ii) 양 모드 다 /trace vs (iii) 다른 조합.
-    (미회신 시 (i)로 진행.)
-
-OQ5 — /trace 뷰어 신규 이벤트 렌더 범위 (확정):
-  테이블 행은 자동 렌더되나(조사 E), 신규 이벤트가 1급으로 보이려면 EVENT_META 라벨/색 추가 +
-  이벤트 필터 드롭다운 항목 추가 + "6개 이벤트" 문구 갱신이 필요 → Scope 에 포함. 백엔드 REST/
-  SignalR 전송은 제너릭이라 무변경.
-
-═══════════════════════════════════════════════════════════════════════════════
-■ Implementation Scope (Generator 가 해야 할 것 — HOW 는 Generator 재량)
-═══════════════════════════════════════════════════════════════════════════════
-[백엔드 — 관측/로깅 전용]
-  S1. Ready 전이 이벤트(7·9) 발화: TraceWiring.Wire 안에서 `bundle.SubscribeRegisterChange`
-      로 reg=="Ready" 델타를 추가 구독 → **1→0이면 EventNo:7(READY_1TO0), 0→1이면 EventNo:9(READY_0TO1)**
-      trace.Log(TraceRecord{EventNo:7|9, ChuteNo/DestId/Floor=CurFloor, Detail={reg,old,new,curFloor}}).
-      기존 이벤트 6(C_Flag) 구독 무변경. 논블로킹(trace.Log=Channel.TryWrite)·예외 격리(폴 스레드 비차단·fail-safe).
-  S2. 슈트상태 push 전송 이벤트(8·10) 발화: **모든 IF-08 PUT 전송**을 전송 지점(ChuteStatePushClient.
-      PushAsync 의 실제 PUT, Wcs.Api 계층 내)에서 계측 → **next_state==2이면 EventNo:8(CHUTESTATE_PUSH_BUSY),
-      next_state==3이면 EventNo:10(CHUTESTATE_PUSH_READY)**. trace.Log(TraceRecord{EventNo:8|10,
-      ChuteNo=payload.chute_numbers[0], DestId(가용 시)·Floor/host, Detail={next_state, result,
-      attempts, host}}). 기존 operation_log CHUTESTATE_PUSH 유지(대체 금지). DORMANT(층호스트 미설정)
-      시 전송 없음 → 이벤트 8/10 미발화(자연스러운 no-op). 논블로킹·fail-safe(로깅 실패가 push 를 막지 않음).
-      · DestId 가 전송 지점에서 미가용하면 chuteNo 기반 best-effort(계약 허용) — HOW 는 Generator.
-      · next_state 가 2/3 외 값이면(이론상) 안전 처리(로깅 스킵 또는 일반 태그) — HOW 는 Generator.
-  S3. TraceLogService 헤더 주석/이벤트 목록(1~6 → 신규 포함)·관련 docstring 갱신(문서 정합).
-  S4. appsettings 무하드코딩 준수: 신규 이벤트는 기존 TraceLog 설정을 재사용(신규 설정 키 불요).
-      방향/next_state 는 런타임 데이터이지 설정값 아님(절대규칙 #7 무위반). 리터럴 경로/호스트 0.
-
-[프론트 — 뷰어 + 기본화면]
-  S5. TraceLogPage: EVENT_META 에 신규 이벤트(**7·8·9·10**) 라벨/색조 추가 + 이벤트 필터 드롭다운
-      배열에 신규 번호 4개 추가 + "6개 이벤트" 문구를 실제 개수(10)/설명으로 갱신. 기존 1~6 렌더 무변경.
-      (신규 이벤트는 chuteNo·floor·detail 컬럼으로 표현; pId/cSeq/cellNo 는 "—".)
-      권장 라벨: 7="Ready 1→0" · 8="슈트상태 push(busy)" · 9="Ready 0→1" · 10="슈트상태 push(ready)".
-  S6. 기본화면: uiMode.ts homePathFor('b2c') = '/trace'(OQ4 확정 반영). ModeHome/`/`·`*`·ModeToggle
-      단일 소스 반영. 다른 라우트·페이지 접근 무변경(회귀 0).
-
-[스코프 밖 — 명시 제외]
-  · PLC 쓰기·핸드셰이크·push 결정 로직·라우팅 변경 0(관측만).
-  · 동시 IF-10 직렬화·pId↔cSeq 갭(기존 알려진 한계) 미해결(스코프 밖).
-  · Ready↔push 인과 링크 신설(불가·조사 C) 0 — 소터 scope 상관만.
-  · TraceLog 전송 계층(SignalR/REST) 코드 변경 0(제너릭).
-
-═══════════════════════════════════════════════════════════════════════════════
-■ 제약 (절대규칙 — 계약 명시)
-═══════════════════════════════════════════════════════════════════════════════
-  · #1 단일 쓰기 큐: 본 스프린트는 로깅 전용 — 제2 write 경로·PLC write 0. 훅은 관측만, sink 는
-    Channel.TryWrite. (해당 없음이나 명시: 신규 코드에 EnqueueSet*/WriteRegister/Modbus 호출 0.)
-  · #7 하드코딩 0: TraceLog 경로/롤링/보존·push 호스트 전부 설정값 재사용. 신규 리터럴 경로/호스트 0.
-  · #8 Wcs.Core 순수: 로깅은 Wcs.Api 계층에서만. PlcGateway/HandshakeOrchestrator/Wcs.Core/
-    ChuteStatePushClient 판정로직 무접촉(이벤트 8 계측은 Wcs.Api 소속 클라이언트 내 부수 훅).
-  · 논블로킹·fail-safe: 발화가 폴 루프·push 핫패스를 블로킹하지 않음(기존 논블로킹 sink 패턴 유지).
-    로깅/훅 예외는 격리 — 본 동작(폴·전송·응답) 무영향.
-  · 회귀 0: 기존 operation_log(REG_CHANGE(Ready) POLL_CHANGE · CHUTESTATE_PUSH API)·전역 Serilog·
-    모니터 SignalR·기존 6 트레이스 이벤트·기존 테스트 전부 무영향(additive). 기본화면 변경이 기존
-    라우팅/타 페이지 접근을 깨지 않음.
-
-═══════════════════════════════════════════════════════════════════════════════
-■ Evaluation Criteria (Evaluator 판정 기준 — Full-stack 4축 + 가중)
-═══════════════════════════════════════════════════════════════════════════════
-  1. Integration Quality (★★★): Ready 에지(PLC/Sim) → 이벤트7(파일 `[7]{json}` + SignalR + 뷰어 행)
-     → push 발신(fake RCS) → 이벤트8(`[8]{json}` + 뷰어) 의 층-scope 데이터 흐름이 끊김 없이 관통.
-     chuteNo 로 7↔8 상관 가능·지연 산출 가능. 전송 계층 무변경으로 자동 흐름.
-  2. Per-layer Quality (★★★): [BE] 훅이 기존 콜백 "추가 구독"만·논블로킹·fail-safe, 절대규칙
-     #1/#7/#8 코드 게이트 통과(write-queue/Modbus/리터럴 0). [FE] 신규 이벤트 라벨/필터/렌더가
-     기존 뷰어 패턴과 정합·기존 6이벤트 무회귀.
-  3. Craft (★★): 방향/결과(old/new·next_state·result)가 Detail 에 정직 기록. DORMANT·전송 실패·
-     디렉터리 부재 등 엣지에서 fail-safe(500 없음·본 동작 비차단). 문서/주석 정합(개수·목록).
-  4. Functionality (★★): 4개 시각 전부 관측·기록됨(요구 (a)~(d)). 기본화면이 /trace 로 랜딩.
-     회귀 0(operation_log 종전 카운트·전역 Serilog 트레이스 0줄·기존 테스트 GREEN).
-
-═══════════════════════════════════════════════════════════════════════════════
-■ Completion Conditions (PASS 최소 조건)
-═══════════════════════════════════════════════════════════════════════════════
-  C1. 격리 라이브 스택(실 Sim + Sqlite scratch + API --Urls 오버라이드 + --TraceLog:Directory=
-      scratch + fake RCS 층호스트 설정)에서 소터 Ready 1→0·0→1 을 실제로 태워 전용 파일에
-      `[7] {json}`(old/new 정확)·`[8] {json}`(next_state 정확)이 raw 로 확인됨. 기존 1~6 무영향.
-  C2. GET /trace 가 eventNo=7·8 필터로 신규 레코드 반환(camelCase TraceRecord 형상 불변). 디렉터리
-      부재 시 [] (200). 백로그·SignalR 무변경 자동 흐름 확인.
-  C3. 회귀 3축 동시: (i) 전용 파일엔 신규 포함 이벤트만·전역 logs/wcs-*.log 에 트레이스 라인 0,
-      (ii) operation_log REG_CHANGE(Ready)·CHUTESTATE_PUSH 종전대로 기록(대체 아님),
-      (iii) 기존 테스트 전량 GREEN(신규분 산술 일치·회귀 0).
-  C4. 프론트: 기본 URL('/') 진입이 /trace 로 랜딩(b2c). 뷰어에서 신규 이벤트가 라벨/색으로 표시되고
-      이벤트 필터 드롭다운으로 선택 가능. 기존 6이벤트·타 페이지·b2b 랜딩(/data-generator) 무회귀.
-      브라우저 콘솔 pageerror 0·React dev-warning 0.
-  C5. 절대규칙 코드 게이트: 신규 코드 경로에 write-queue/PLC-write/리터럴경로/리터럴호스트 0,
-      Wcs.Core/PlcGateway/HandshakeOrchestrator/ChuteStatePushClient 판정로직 zero-diff, 논블로킹
-      (Channel.TryWrite + 예외격리) 확인. lint/tsc/build/format exit 0.
-
-═══════════════════════════════════════════════════════════════════════════════
-■ Parallel Modules (Generator fan-out)
-═══════════════════════════════════════════════════════════════════════════════
-  N/A (단일 응집 additive 변경). 기본 1/1/1 유지.
-
-■ Evaluation Dimensions (Evaluator expert pool)
-  functional only. (보안/성능 민감 신규 표면 없음 — 논블로킹은 functional 게이트로 흡수.)
-
-═══════════════════════════════════════════════════════════════════════════════
 - Detected Project Type: Full-stack
-  (신호: frontend/src 브라우저 진입 SPA(React Router) + backend/src/Wcs.Api 서버측 컨트롤러·
-   호스트가 동일 저장소에 공존 — Full-stack.)
+  (repo 신호: `frontend/`(브라우저 진입점·`TraceLogPage.tsx` 등) + `backend/`(ASP.NET Core
+   route/controller·server 호스트) 공존. 단 **이 스프린트 변경은 백엔드 전용** — 프론트 코드 변경 0.)
 
-═══════════════════════════════════════════════════════════════════════════════
-■ Verification Scenarios (Full-stack — mandatory)
-═══════════════════════════════════════════════════════════════════════════════
-=== Applicable Web/UI scenarios (프론트 surface = TraceLogPage · uiMode/App 라우팅) ===
-  U1 [기본 상태/기본 라우트] '/' 진입(기본 mode=b2c) → /trace 로 redirect·랜딩(헤더 "추적 로그").
-     b2b 토글 후 랜딩 = /data-generator(불변). 스크린샷으로 확인.
-  U2 [기본 상태/뷰어 렌더] /trace 에 기존 1~6 + 신규 7·8 행이 렌더 — 신규 행이 라벨(예: "Ready 전이",
-     "슈트상태 push")·색조로 표시, chuteNo/floor/detail 컬럼 채워지고 pId/cSeq/cellNo="—".
-  U3 [대체 상태/필터 상호작용] 이벤트 드롭다운에 7·8 항목 존재 → 7 선택 시 Ready 전이 행만, 8 선택
-     시 push 전송 행만 필터. chuteNo 로 한 소터 흐름 좁혀 7→8 시각차 확인(navigate→select→assert).
-  U4 [빈/에러 상태] 로그 없을 때 "표시할 추적 로그가 없습니다" + 연결 배지 표시. 백엔드 일시 중단 시
-     graceful(연결 끊김 배지·auto-retry) — pageerror 0(의도적 5xx 는 예외 명시).
-  U5 [다크모드] N/A — 앱에 다크모드 토글/`.dark`/prefers-color-scheme 없음(단일 테마·CSS 토큰).
+- Verification Scenarios (Full-stack, mandatory):
 
-=== Applicable Backend/API scenarios (엔드포인트: GET /trace — 기존, 신규 EventNo 반영) ===
-  B1 [엔드포인트·happy] GET /trace?eventNo=7 / ?eventNo=8 → 신규 레코드 배열(camelCase TraceRecord
-     형상 불변: eventNo/event/at/pId/cSeq/chuteNo/destId/cellNo/floor/detail). 필터 없는 GET /trace
-     는 기존+신규 혼재(시계열 오름차순).
-  B2 [파일 sink] 라이브 태운 뒤 전용 파일에 `[7] {…"old":1,"new":0…}`·`[8] {…"next_state":2…}` raw
-     확인 + 전역 Serilog 파일에 트레이스 라인 0(격리). 기존 1~6 형상 불변.
-  B3 [operation_log additive] REG_CHANGE(Ready) POLL_CHANGE 행 + CHUTESTATE_PUSH API 행이 종전대로
-     기록됨(트레이스가 대체하지 않음 — 카운트 병치 확인).
-  B4 [에러/DORMANT] 층호스트 미설정(DORMANT) → PUT 전송 0 → 이벤트 8 미발화(no-op). TraceLog
-     디렉터리 부재 → GET /trace = [] (200, 500 없음). 로깅 실패가 push/폴 비차단(fail-safe).
+  === Applicable Web/UI scenarios (frontend surface this sprint touches) ===
+  - 프론트 코드 변경 0 — 이 스프린트는 소스(백엔드) 억제만. 아래는 **간접 관측**(백엔드 결과의 시각 확인),
+    프론트 파일 diff는 0이어야 함(회귀 스코프 게이트).
+    · VS-U1 (간접): RCS 다운을 지속시킨 상태에서 `/trace` 뷰어(TraceLogPage)를 열면, 같은 실패 전이에 대해
+      이벤트 8/10 result:"FAIL" 행이 **주기마다 새로 쌓이지 않고 1건에서 멈춰 있음**(폭주 소멸의 시각 확인).
+      뷰어 렌더/네비게이션 로직은 무변경 — 표시되는 데이터(파일 tail)가 줄어든 것뿐.
+    · VS-U2 (간접): 운영로그 모니터링 화면에서 동일 실패의 CHUTESTATE_PUSH WARN "FAIL" 행이 1건만
+      존재(반복 억제). frontend 컴포넌트·API 클라이언트 diff = 0.
+    · 그 외 default/alternate/empty/dark-mode 상태 슬롯: **N/A** — 이 스프린트는 UI 표면을 만들거나 바꾸지
+      않음(프론트 무변경). 다크모드도 N/A(신규 UI 없음).
 
-=== End-to-end data-flow scenario (2+ 계층 관통) ===
-  E1 [Ready 1→0 → push=2 관통] 실 Sim 으로 소터 Ready 1→0 유도 → (PLC 폴)이벤트7[old1new0] 파일
-     +SignalR 도달 → (fake RCS 층호스트 설정)관찰루프가 accept=false 산출 → PushAsync PUT → 이벤트8
-     [next_state2] 파일+뷰어 도달. 같은 chuteNo 로 7→8 페어링·지연(Δt) 산출 가능함을 실증.
-  E2 [Ready 0→1 → push=3 관통] Ready 0→1(+CurFloor 해당 층) → 이벤트7[old0new1] → 그 route push
-     next_state=3 → 이벤트8[next_state3]. (조사 C: 해당 층 route 만 3, 타 층 route 는 미전이 가능 —
-     0/1/N건 특성이 detail(host/next_state)로 관측됨을 확인.)
+  === Applicable Backend/API scenarios (backend surface this sprint touches) ===
+  - 인바운드 엔드포인트 계약 변경 없음(이 변경은 **아웃바운드** push 클라이언트 WCS→RCS의 로깅 동작).
+    검증 표면 = (i) operation_log 행(CHUTESTATE_PUSH, level=WARN, detail result:"FAIL"),
+    (ii) 트레이스 레코드(EventNo 8/10, Detail result:"FAIL"), (iii) WCS→RCS PUT 시도(수신측 fake host).
+    · VS-B1 첫 실패: fake RCS 호스트를 다운(항상 실패)으로 두고 한 목적지의 수용상태를 한 번 전이시키면 →
+      operation_log FAIL 정확히 1건 + 트레이스 FAIL(8 or 10) 정확히 1건. (억제 없이 첫 신호 유지.)
+    · VS-B2 반복 억제: VS-B1 이후 하트비트가 같은 미동기 route를 N 주기 재발신해도 →
+      operation_log FAIL 추가 0 + 트레이스 FAIL 추가 0. delivery 시도는 매 주기 발생(재발신 불변).
+    · VS-B3 복구 1건: fake 호스트를 성공으로 전환하면 → 성공 로그(OK oplog + OK trace) 정확히 1건,
+      이후 route 동기(Acked==Computed)로 재발신 정지. 성공 로깅 형상·필드 현행과 동일(무변경).
+    · VS-B4 억제 리셋: VS-B3 복구 후 호스트를 다시 다운시키고 새 전이를 내면 → **새 FAIL 1건**(리셋 실증).
+    · VS-B5 next_state 전이(OQ-2): 계속 실패 중 accept 값을 바꿔 next_state를 2↔3으로 전이시키면 →
+      새 FAIL 1건 추가(같은 route라도 새 전이).
+    · VS-B6 동작 불변: 위 전 과정에서 4-시도 재시도·백오프·PushAsync 반환 bool·Acked/Computed 전이·
+      전이당 1회 발신·DORMANT 가드가 diff 0(코드 직독 + delivery/attempt 카운트 단언 불변).
 
-> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Web/UI, Backend/API, end-to-end). All slots filled: yes.
+  === End-to-end data-flow scenario (2+ layers) ===
+  - VS-E1 (Pusher→Client→운영로그/트레이스 sink, RCS-down 하트비트 폭주 억제):
+    실 `DestinationStatusPusher` 관찰 루프 + 실 `ChuteStatePushClient` + 다운 상태의 fake RCS 수신 서버 +
+    실 operation_log(EF, SQLite scratch) + capturing 트레이스 sink를 한 스택에 결선. 목적지 1개를 실패
+    전이시키고 관찰 주기를 N회(≥3) 돌린 뒤:
+      (a) operation_log CHUTESTATE_PUSH WARN "FAIL" **CountAsync == 1**,
+      (b) 트레이스 이벤트 8/10 result:"FAIL" 레코드 **count == 1**,
+      (c) fake RCS 수신 PUT 시도 **count ≥ N**(재발신 살아있음 — 로그만 억제),
+    를 **한 테스트에 병치**로 단언(억제 실효 + 폭주 부재 + 동작 불변을 분리 단언 — GREEN 하나로 합치지 말 것).
+    이어서 fake RCS를 성공으로 전환 → 성공 로그 1건 + 재발신 정지(freeze) 확인(복구 실효).
+
+- Open Questions (★ 사용자 게이트 확정 2026-07-31):
+  · OQ-1 ✅ **저빈도 "아직 실패 중" 주기 요약 로그 채택**(설정 주기·저빈도). 완전 무음 금지.
+  · OQ-2 ✅ **억제 단위 = (route, next_state)** — 같은 목적지라도 BUSY↔READY 전이는 새 첫 실패로 로깅.
+  · OQ-3 ✅ **운영로그·추적로그 양쪽 동일 정책 억제.**
+  · OQ-4 ✅ **재시도-소진 Serilog `_log.LogError`(약 :184-187)도 억제 포함**(같은 폭주원). 단 재시도 루프 내
+    per-attempt `_log.LogWarning`은 스코프 밖(한 호출 내 국소).
+  → 세 sink(operation_log WARN + 트레이스 8/10 + Serilog LogError) 모두 동일 억제. 요약 로그는 채택.
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 3 (Applicable Web/UI scenarios [frontend surface — N/A/indirect, 무변경], Applicable Backend/API scenarios [outbound push 로깅 억제 표면], End-to-end data-flow scenario [Pusher→Client→oplog/trace RCS-down 폭주 억제]). All slots filled: yes.
