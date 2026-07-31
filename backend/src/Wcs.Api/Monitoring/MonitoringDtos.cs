@@ -111,6 +111,18 @@ public sealed record PagedResult<T>(
     long?            NextCursor);
 
 /// <summary>
+/// 평균 사이클 시간(분류시작~복귀) — GET /api/monitor/cycle-time-avg(S-SORT-CYCLE-TIME-METRIC).
+///   · 대상 = sorter_command 전 행(ArchivedAt 무필터 — 초기화/아카이브 이전 행 전부 포함).
+///   · n = SortStartedAt != null &amp;&amp; ReturnedAt != null 인 행 수.
+///   · AvgSeconds = Σ(ReturnedAt − SortStartedAt).TotalSeconds / n — 반올림 전 raw double(초).
+///     소수 표기·포맷은 프론트 단일 소스(절대규칙 #7). n=0 → AvgSeconds=null(0 나눗셈 방어).
+///   · 단조 불변식(DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt)상 음수 미발생.
+/// </summary>
+public sealed record CycleTimeAvgDto(
+    double? AvgSeconds,
+    int     N);
+
+/// <summary>
 /// 전 목적지(CHUTE + SORTER_3D) 열거 항목 — GET /api/monitor/destinations(S-B2C-FACILITY A2).
 /// 설비 관리 페이지의 목적지 목록·슈트 제어 destId 소스. readiness 는 DestinationStatusService 재사용.
 /// CHUTE 는 workFullQty/lastClearedAt(chute_detail), SORTER_3D 는 cellTotal/cellEnabled 를 채운다.

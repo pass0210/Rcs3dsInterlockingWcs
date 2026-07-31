@@ -93,6 +93,13 @@ public sealed class MonitoringController : ControllerBase
         => Ok(_queries.GetOperationLog(
             category, level, sorterChuteNo, MonitoringQueries.ClampTake(take), cursor));
 
+    // ── GET /api/monitor/cycle-time-avg (S-SORT-CYCLE-TIME-METRIC) ──────────────
+    // 평균 사이클 시간(분류시작~복귀) = avg(ReturnedAt − SortStartedAt), 초(raw double). 파라미터 없음
+    //   (전 행 집계·ArchivedAt 무필터). n=0 → { avgSeconds:null, n:0 }·200(500 아님). 읽기 전용·부수효과 0.
+    [HttpGet("cycle-time-avg")]
+    public IActionResult GetCycleTimeAvg()
+        => Ok(_queries.GetCycleTimeAvg());
+
     // ── GET /api/monitor/trace?take=&eventNo=&pId=&cSeq= (S-TRACE-LOG-VIEWER) ────
     // 전용 추적 로그 백로그(뷰어 시드 — 파일 tail·읽기 전용). 최근 N개 구조화 트레이스 레코드(시계열 오름차순).
     // take 는 TraceLogOptions 상한으로 clamp. 로그 디렉터리 부재 시 생성 후 빈 목록(500 금지).

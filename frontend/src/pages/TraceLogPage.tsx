@@ -1,11 +1,17 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { api, type TraceRecord } from '@/lib/api'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { api, type CycleTimeAvg, type TraceRecord } from '@/lib/api'
 import { monitorHub, useMonitorState, type ConnStatus, type TraceEvent } from '@/lib/signalr'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Select } from '@/components/ui/select'
 import { fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import {
+  CYCLE_TIME_COPY,
+  CYCLE_TIME_REFETCH_DEBOUNCE_MS,
+  CYCLE_TIME_TRIGGER_EVENT_NO,
+  formatCycleTime,
+} from '@/lib/cycleTime'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TraceLogPage — 현장 추적용 전용 로그 뷰어(S-TRACE-LOG-VIEWER · S-TRACE-READY-PUSH-AND-DEFAULT).
@@ -116,6 +122,9 @@ export function TraceLogPage() {
         </div>
       </div>
 
+      {/* 평균 사이클 시간(분류시작~복귀) — 그리드 위 레이블. 신규 사이클 완료(event 9) 시 자가 갱신. */}
+      <CycleTimeAvgLabel status={monitor.status} />
+
       <Card className="flex min-h-0 flex-1 flex-col">
         <CardHeader className="shrink-0">
           <CardTitle>핸드셰이크·2층 제어 추적 로그</CardTitle>
@@ -195,6 +204,75 @@ export function TraceLogPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 평균 사이클 시간(분류시작~복귀) 레이블 — 그리드 위 표시 + 실시간 자가 갱신.
+//   · 마운트 시 GET /api/monitor/cycle-time-avg 1회 조회.
+//   · 실시간 = event 9(READY_0TO1 = 복귀 완료 = 신규 ReturnedAt) 수신 시 디바운스 재조회.
+//   · 재연결(status→connected) 시 1회 재조회(갭 보정).
+//   · 조회 실패 시 그리드는 무관하게 계속 스트림 — 레이블만 우아 degrade("—"), 다음 갱신에 자가 회복.
+//   소수 자리·디바운스·트리거 event·문구는 lib/cycleTime.ts 단일 소스(절대규칙 #7).
+// ─────────────────────────────────────────────────────────────────────────
+function CycleTimeAvgLabel({ status }: { status: ConnStatus }) {
+  const [data, setData] = useState<CycleTimeAvg | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  const load = useCallback(() => {
+    api
+      .cycleTimeAvg()
+      .then((d) => {
+        setData(d)
+        setFailed(false)
+      })
+      .catch(() => setFailed(true))
+  }, [])
+
+  // 마운트 시 1회 조회.
+  useEffect(() => {
+    load()
+  }, [load])
+
+  // 실시간 트리거 — event 9 수신 시 디바운스 재조회(연쇄 도착 폭주 억제).
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsub = monitorHub.subscribeTrace((e: TraceEvent) => {
+      if (e.eventNo !== CYCLE_TIME_TRIGGER_EVENT_NO) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        load()
+      }, CYCLE_TIME_REFETCH_DEBOUNCE_MS)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsub()
+    }
+  }, [load])
+
+  // 재연결 갭 보정 — 연결이 복구될 때(비-connected → connected) 1회 재조회.
+  const prevStatus = useRef(status)
+  useEffect(() => {
+    if (prevStatus.current !== 'connected' && status === 'connected') load()
+    prevStatus.current = status
+  }, [status, load])
+
+  const isEmpty = data !== null && (data.n === 0 || data.avgSeconds === null)
+  const valueText = failed
+    ? CYCLE_TIME_COPY.placeholder
+    : data === null
+      ? CYCLE_TIME_COPY.loading
+      : formatCycleTime(data.avgSeconds, data.n)
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-lg border border-line bg-panel px-3 py-2">
+      <span className="text-[12px] font-medium text-ink">{CYCLE_TIME_COPY.label}</span>
+      <span className="font-mono text-[14px] font-semibold tabular-nums text-ink">{valueText}</span>
+      <span className="text-[11px] text-faint" title={CYCLE_TIME_COPY.formula}>
+        {isEmpty ? CYCLE_TIME_COPY.empty : CYCLE_TIME_COPY.formula}
+      </span>
     </div>
   )
 }

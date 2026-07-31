@@ -36,8 +36,10 @@ public enum HandshakeOutcome
 
 /// <summary>C/R 핸드셰이크 1건 결과. 성공/실패·사유·대사 정보 포함.</summary>
 /// <remarks>
-/// S-TWO-FLOOR-CONTROL C1 — 처리 3시각 계측을 위해 <see cref="TiltedAt"/>·<see cref="ReturnedAt"/>를
+/// S-TWO-FLOOR-CONTROL C1 — 처리 시각 계측을 위해 <see cref="TiltedAt"/>·<see cref="ReturnedAt"/>를
 /// append-only로 추가(기본값 null → 기존 5-인자 생성자 호출 전부 보존, IsSuccess 불변).
+/// S-SORT-CYCLE-TIME-METRIC — 분류 시작 시각 <see cref="SortStartedAt"/>(Ready 1→0 관측)를 동일 패턴으로
+/// append(기본값 null → 기존 호출부 보존). 평균 사이클 시간 = avg(ReturnedAt − SortStartedAt).
 /// depositedAt(3DS 투입=IF-10 보고 시각)은 핸드셰이크가 관측하지 않으므로 result에 담지 않는다
 /// (RcsController가 저널에 직접 유입 — 계약 (e)).
 /// </remarks>
@@ -48,10 +50,15 @@ public sealed record HandshakeResult(
     int              ReceivedRCellNo,
     string           Detail,
     // 셀 틸트 시각 = R_Flag==1 관측 시점. 성공·불일치에서 non-NULL, R 미수신(타임아웃/OFFLINE)에서 NULL.
-    DateTime?        TiltedAt   = null,
+    DateTime?        TiltedAt      = null,
     // 복귀 완료 시각 = Ready 0→1(R 영역 클리어) 관측 시점. 성공(복귀 관측)에서만 non-NULL.
     //   복귀 대기 타임아웃(성공이나 Ready 미관측)·불일치·타임아웃·OFFLINE에서 NULL.
-    DateTime?        ReturnedAt = null)
+    DateTime?        ReturnedAt    = null,
+    // 분류 시작 시각 = C 기입 후 Ready 워드 1→0 전이(에지) 관측 시점(S-SORT-CYCLE-TIME-METRIC). R 폴 루프에서
+    //   관측만 추가(폴/타이밍/pop/write-on-clear/PLC write 시퀀스 불변). 에지 미관측(폴 주기보다 빠른 분류)·
+    //   R 미수신(타임아웃/OFFLINE before Ready 0 관측)에서 NULL → 그 행은 평균 집계 n에서 자연 제외.
+    //   단조 보장: SortStartedAt ≤ TiltedAt(관측 지점에서 클램프).
+    DateTime?        SortStartedAt = null)
 {
     public bool IsSuccess => Outcome == HandshakeOutcome.Success;
 }
@@ -359,6 +366,14 @@ public sealed class HandshakeOrchestrator
 
         _log.LogInformation("[핸드셰이크] R_Flag 폴링 시작 (타임아웃={Timeout}ms)", _opt.RFlagTimeoutMs);
 
+        // ── S-SORT-CYCLE-TIME-METRIC: 분류 시작(Ready 1→0) 관측 ──────────────────────
+        // C 기입 후 소터가 분류를 시작하면 Ready 워드가 1→0으로 떨어진다(절대규칙 #4 — 0=분류/이동 중).
+        // 이 R 폴 루프는 이미 RFlagPollMs 주기로 _gw.Latest를 샘플링하므로 Ready 레벨을 함께 관측만 추가한다
+        //   (폴/타이밍/pop/write-on-clear/PLC write 시퀀스 불변 — additive). C 기입 직후 첫 Ready==0 관측을
+        //   분류 시작 시각으로 잡는다(정상은 1→0 에지, 폴 주기보다 분류가 짧아 에지를 놓치거나 진입 시 이미
+        //   Ready==0이면 "첫 Ready==0 레벨" 폴백 — OQ-3 허용). 최초 1회만 기록.
+        DateTime? sortStartedAt = null;
+
         while (true)
         {
             // R_Flag 감지는 RFlagRaised 채널 또는 직접 폴링으로 확인
@@ -367,12 +382,17 @@ public sealed class HandshakeOrchestrator
 
             var snap = _gw.Latest;
 
+            // 분류 시작(Ready 1→0/폴백 레벨) 관측 — 최초 Ready==0 1회만 기록(관측 전용·부수효과 0).
+            if (sortStartedAt is null && !snap.Ready)
+                sortStartedAt = DateTime.UtcNow;
+
             // OFFLINE 체크
             if (!snap.Online)
             {
                 _log.LogError("[핸드셰이크] R 폴링 중 OFFLINE");
                 EmitStage("HS_OFFLINE", $"{{\"phase\":\"rPoll\",\"cSeq\":{cSeq}}}");
-                return new(HandshakeOutcome.Offline, cSeq, 0, 0, "OFFLINE during R_Flag poll");
+                return new(HandshakeOutcome.Offline, cSeq, 0, 0, "OFFLINE during R_Flag poll",
+                    SortStartedAt: sortStartedAt);
             }
 
             if (snap.RFlag)
@@ -381,6 +401,10 @@ public sealed class HandshakeOrchestrator
                 int rCellNo   = snap.RCellNo;
                 int rSeq      = snap.RSeq;
                 var tiltedAt  = DateTime.UtcNow;
+
+                // 단조 보장(sortStartedAt ≤ tiltedAt) — 시계 비단조/동일-폴 관측 시 tiltedAt로 클램프
+                //   (기존 returnedAt<tiltedAt 클램프와 동형). 미관측(null)은 그대로 둔다(집계 n 제외).
+                if (sortStartedAt is DateTime ss && ss > tiltedAt) sortStartedAt = tiltedAt;
 
                 _log.LogInformation(
                     "[핸드셰이크] R_Flag=1 수신: R_CellNo={RCellNo} R_Seq={RSeq} (기대 C_Seq={CSeq})",
@@ -403,14 +427,14 @@ public sealed class HandshakeOrchestrator
                     return new(
                         HandshakeOutcome.RSeqMismatch, cSeq, rSeq, rCellNo,
                         $"R_Seq mismatch: expected={cSeq}, actual={rSeq}",
-                        TiltedAt: tiltedAt, ReturnedAt: null);
+                        TiltedAt: tiltedAt, ReturnedAt: null, SortStartedAt: sortStartedAt);
                 }
 
                 // 대사 성공 — R 영역 클리어를 "R_Flag==1 즉시"가 아니라 "Ready==1(복귀 완료) 관측 후"로
                 //   지연한다(SPEC §4·계약 (d-i) 성공 경로 한정). 무-이동 사이클(관측 시점 이미 Ready==1)은
                 //   추가 지연 0으로 즉시 clear. 복귀 이동 사이클은 Ready==1까지 R 유지 후 clear + returnedAt 기록.
                 EmitStage("HS_RSEQ_MATCH", $"{{\"cSeq\":{cSeq},\"rSeq\":{rSeq},\"rCellNo\":{rCellNo}}}");
-                return await WaitReadyThenClearRAsync(cSeq, rCellNo, rSeq, tiltedAt, snap, ct)
+                return await WaitReadyThenClearRAsync(cSeq, rCellNo, rSeq, tiltedAt, sortStartedAt, snap, ct)
                     .ConfigureAwait(false);
             }
 
@@ -426,7 +450,8 @@ public sealed class HandshakeOrchestrator
                     $"{{\"cSeq\":{cSeq},\"timeoutMs\":{_opt.RFlagTimeoutMs},\"online\":{(finalSnap.Online ? "true" : "false")}}}");
 
                 return new(HandshakeOutcome.RFlagTimeout, cSeq, 0, 0,
-                    $"RFLAG_TIMEOUT after {_opt.RFlagTimeoutMs}ms. Online={finalSnap.Online} Ready={finalSnap.Ready}");
+                    $"RFLAG_TIMEOUT after {_opt.RFlagTimeoutMs}ms. Online={finalSnap.Online} Ready={finalSnap.Ready}",
+                    SortStartedAt: sortStartedAt);
             }
         }
     }
@@ -450,11 +475,12 @@ public sealed class HandshakeOrchestrator
     /// ClearR는 전부 단일 쓰기 큐 경유(_gw.EnqueueAsync — 절대규칙 #1, 직접 Modbus 호출 0).
     /// </summary>
     private async Task<HandshakeResult> WaitReadyThenClearRAsync(
-        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, PlcSnapshot rFlagSnap, CancellationToken ct)
+        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, DateTime? sortStartedAt,
+        PlcSnapshot rFlagSnap, CancellationToken ct)
     {
         // 무-이동 사이클: R_Flag==1 관측 스냅샷에서 이미 Ready==1 → 즉시 clear(추가 지연 0).
         if (rFlagSnap.Ready)
-            return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, ct).ConfigureAwait(false);
+            return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, sortStartedAt, ct).ConfigureAwait(false);
 
         // 복귀 이동 중(Ready=0) — Ready==1(복귀 완료)까지 R 영역 유지 후 clear.
         EmitStage("HS_RETURN_WAIT",
@@ -476,12 +502,12 @@ public sealed class HandshakeOrchestrator
                 EmitStage("HS_OFFLINE", $"{{\"phase\":\"returnWait\",\"cSeq\":{cSeq},\"rSeq\":{rSeq}}}");
                 return new(HandshakeOutcome.Offline, cSeq, rSeq, rCellNo,
                     $"OFFLINE during return wait (cSeq={cSeq}, rSeq={rSeq})",
-                    TiltedAt: tiltedAt, ReturnedAt: null);
+                    TiltedAt: tiltedAt, ReturnedAt: null, SortStartedAt: sortStartedAt);
             }
 
             // 복귀 완료(Ready 0→1) — R 클리어 + returnedAt 기록.
             if (s.Ready)
-                return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, ct).ConfigureAwait(false);
+                return await ClearRAndReturnSuccessAsync(cSeq, rCellNo, rSeq, tiltedAt, sortStartedAt, ct).ConfigureAwait(false);
 
             // 복귀 대기 타임아웃 — Ready 미복귀(소터 정체). ClearR로 완료 ack + 알람 + returnedAt=NULL.
             //   분류 자체는 완료·대사 일치이므로 outcome=Success 유지(계약 (d-iii)·(e)).
@@ -497,16 +523,16 @@ public sealed class HandshakeOrchestrator
                 return new(HandshakeOutcome.Success, cSeq, rSeq, rCellNo,
                     $"OK(return timeout): C_Seq={cSeq} R_Seq={rSeq} — Ready==1 not observed within " +
                     $"{_opt.ReturnReadyTimeoutMs}ms (returnedAt=NULL)",
-                    TiltedAt: tiltedAt, ReturnedAt: null);
+                    TiltedAt: tiltedAt, ReturnedAt: null, SortStartedAt: sortStartedAt);
             }
         }
     }
 
     /// <summary>Ready==1 관측 확정 후 ClearR 큐 투입 + returnedAt 기록(단조 보장). 성공 결과 반환.</summary>
     private async Task<HandshakeResult> ClearRAndReturnSuccessAsync(
-        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, CancellationToken ct)
+        int cSeq, int rCellNo, int rSeq, DateTime tiltedAt, DateTime? sortStartedAt, CancellationToken ct)
     {
-        // 단조 보장(depositedAt≤tiltedAt≤returnedAt) — 시계 비단조/즉시-clear 시 tiltedAt로 클램프.
+        // 단조 보장(depositedAt≤sortStartedAt≤tiltedAt≤returnedAt) — 시계 비단조/즉시-clear 시 tiltedAt로 클램프.
         var returnedAt = DateTime.UtcNow;
         if (returnedAt < tiltedAt) returnedAt = tiltedAt;
 
@@ -517,6 +543,6 @@ public sealed class HandshakeOrchestrator
 
         return new(HandshakeOutcome.Success, cSeq, rSeq, rCellNo,
             $"OK: C_Seq={cSeq} R_Seq={rSeq} R_CellNo={rCellNo}",
-            TiltedAt: tiltedAt, ReturnedAt: returnedAt);
+            TiltedAt: tiltedAt, ReturnedAt: returnedAt, SortStartedAt: sortStartedAt);
     }
 }
