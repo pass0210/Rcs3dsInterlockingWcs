@@ -1,48 +1,94 @@
-# Sprint Log — S-TRACE-READY-PUSH-AND-DEFAULT
+# Sprint Log — S-IF08-PUSH-LOG-THROTTLE
 
-## IMPLEMENTATION COMPLETE (Generator, 2026-07-30)
+(Generator가 `## IMPLEMENTATION COMPLETE` + 변경 요약 + 테스트 결과 기록)
 
-관측/로깅 전용·additive 로 신규 트레이스 이벤트 4개(7·8·9·10)와 B2C 기본화면 /trace 랜딩을 구현. 회귀 0.
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-31)
 
-### 변경 요약 (코드 7파일 — 스코프 정확 일치)
-**백엔드 (2)**
-- `backend/src/Wcs.Api/Services/TraceLogService.cs`
-  - S3: 헤더 주석 이벤트 목록 1~6 → 1~10 갱신 + `TraceRecord` docstring/필드 주석 "1~6"→"1~10"(문서 정합).
-  - S1: `TraceWiring.Wire` 에 `bundle.SubscribeRegisterChange` 로 **reg=="Ready" 추가 구독**(기존 이벤트 6 C_Flag 구독 무변경) → 1→0=EventNo7(READY_1TO0)·0→1=EventNo9(READY_0TO1). Floor=전이 관측 시점 `bundle.Latest.CurFloor`(EmitRegisterChanges 는 `_latest` 갱신 후 발화 — cur 스냅샷). PId/CSeq/CellNo=null(소터 scope). 핸들러 예외 격리(try/catch)·trace.Log=Channel.TryWrite(논블로킹).
-  - 발화 로직을 순수 헬퍼 `public static TraceRecord? BuildReadyEdgeRecord(chuteNo, destId, oldV, newV, curFloor)` 로 분리 → I/O 무의존 결정적 단위 테스트 가능(1→0=7·0→1=9·그 외 null).
-- `backend/src/Wcs.Api/Services/ChuteStatePushClient.cs`
-  - S2: 생성자에 **optional `ITraceLogger? trace = null`** 추가(역호환 — 직접 생성 단위 테스트 무영향, 전체 호스트에선 DI 주입). `PushAsync(payload, baseUrl, ct)` **단일 전송 chokepoint**(두 오버로드 funnel)에서 계측.
-  - DORMANT(baseUrl null) 가드 **이후** `sentAt=DateTimeOffset.Now` 캡처(전송 시각 anchor) → 성공/소진 return 지점에서 `EmitPushTrace(result, attempts)` 호출. next_state==2→EventNo8(CHUTESTATE_PUSH_BUSY)·==3→EventNo10(CHUTESTATE_PUSH_READY)·그 외/빈 payload→안전 스킵. Detail={next_state,result,attempts,host} JsonSerializer 직렬화. ChuteNo=payload.ChuteNumbers[0], DestId=null(best-effort — 계약 허용). 전체 예외 격리(fail-safe — 트레이스 실패가 push 비차단). **판정로직(성공/재시도) zero-diff — 부수 훅만.**
-  - 기존 operation_log CHUTESTATE_PUSH(OK/FAIL) **유지**(대체 아님 — 나란히 additive).
+### 설계 요약 (HOW)
+- 억제 상태 위치 = **Pusher의 `RouteState`**(= route 1개). `RouteState`가 `IPushFailureLogThrottle`를 구현하고
+  per-route `PushFailureLogThrottleState`(직전 로깅 실패 next_state + 요약 기준 시각)를 보유. 클라이언트는 호출 간
+  상태가 없으므로 재시도-소진 실패 확정 시 `throttle.OnFailure(nextState)`로 emit 여부(Emit/Suppress/Summary)를
+  위임받는다("클라이언트가 Pusher로부터 억제 힌트를 받음" — 계약 후보 채택).
+- 억제 단위 = **게이트 인스턴스(route) × payload.next_state**(OQ-2). 판정·상태 갱신은 `RouteState.Gate` 락 안에서
+  원자적(비원자 check-then-act 없음). OnFailure는 락 밖(발신 I/O 중)에서 호출되어 스스로 Gate를 잡음(데드락 없음 —
+  PumpAsync 발신은 락 밖).
+- **성공 리셋**은 클라이언트 성공 경로(:143-146)를 건드리지 않기 위해 **Pusher `PumpAsync` ③ `if(ok)` 블록**에서
+  `rs.ResetFailureLogSuppression()`로 수행(이미 Gate 락 보유 — OnFailure의 check-and-set와 동일 임계구역).
+- 요약(OQ-1) sink = operation_log `result:"SUMMARY"`(WARN) + Serilog `LogWarning`("아직 실패 중(요약)"). 트레이스
+  8/10은 발화 안 함(FAIL 카운트와 구분 · 요약은 폭주 아닌 저빈도 생존 신호). "SUMMARY"에 "FAIL" 부분문자열 없음 →
+  FAIL 카운트와 명확 분리.
 
-**프론트 (3)**
-- `frontend/src/pages/TraceLogPage.tsx` (S5): EVENT_META 에 7("Ready 1→0")·8("슈트상태 push(busy)")·9("Ready 0→1")·10("슈트상태 push(ready)") 라벨/색조 추가 + 이벤트 필터 드롭다운 `EVENT_FILTER_OPTIONS=[1..10]` 로 확장 + "6개 이벤트"→"10개 이벤트…" 문구 갱신. 기존 1~6 렌더·TraceLine 폴백 무변경. 신규는 chuteNo/floor/detail 컬럼, pId/cSeq/cellNo="—"(제너릭 렌더).
-- `frontend/src/lib/uiMode.ts` (S6): `homePathFor('b2c')` = **'/trace'**(단일 소스 — ModeHome `/`·`*`·Layout ModeToggle 공용). b2b='/data-generator' 불변.
-- `frontend/src/components/Layout.tsx`: /trace NAV subtitle "6개 이벤트"→"…10개 이벤트" 문구 정합(cosmetic·개수 정합).
+### 변경 파일
+- `backend/src/Wcs.Api/Infrastructure/WcsOptions.cs` (M) — `ChuteStatePushOptions`에 설정 2개 추가(절대규칙 #7):
+  `SuppressRepeatedFailureLog`(bool, 기본 true), `FailureLogSummaryIntervalMs`(int, 기본 300000=5분).
+- `backend/src/Wcs.Api/Services/PushFailureLogThrottle.cs` (신규) — `PushFailureLogAction`(enum: Emit/Suppress/Summary),
+  `IPushFailureLogThrottle`(OnFailure), `PushFailureLogThrottleState`(순수 결정기 `Decide(nextState, suppressEnabled,
+  summaryIntervalMs, now)` + `Reset()` — clock 주입으로 요약 주기 결정적 테스트).
+- `backend/src/Wcs.Api/Services/ChuteStatePushClient.cs` (M) — `PushAsync`에 `IPushFailureLogThrottle? throttle` 오버로드
+  추가(기존 3-arg는 throttle:null 위임 — 하위호환). **FAIL 경로만** 게이트 위임: Emit→세 sink(LogError+oplog WARN
+  FAIL+트레이스 8/10 FAIL, 문자열·인자 byte-identical) / Summary→요약 1건 / Suppress→0건. **성공 경로(:143-146)·재시도·
+  백오프·DORMANT 가드·성공 판정(IsSuccessBody)·per-attempt LogWarning·반환값 전부 무변경**(diff로 실증).
+- `backend/src/Wcs.Api/Services/DestinationStatusPusher.cs` (M) — `RouteState : IPushFailureLogThrottle`(+Options·throttle
+  상태·OnFailure·Reset, 전부 additive). `Observe`의 GetOrAdd가 `Options=_opt` 주입. `PumpAsync` 발신 호출이 `rs`를
+  throttle로 전달(같은 delivery — 4-arg 오버로드). ③ `if(ok)` 블록에 `ResetFailureLogSuppression()` 추가. **Acked/
+  Computed/PushInFlight·전이당 1회·라우팅·부트스트랩·하트비트·콜드스타트 배리어 로직 byte-identical**.
+- `backend/src/Wcs.Api/appsettings.json` (M) — `Wcs:ChuteStatePush`에 `SuppressRepeatedFailureLog:true` +
+  `FailureLogSummaryIntervalMs:300000` + `_comment_LogThrottle`.
+- `backend/tests/Wcs.Tests/PushLogThrottleTests.cs` (신규, 10 테스트) — 3계층:
+  · `PushFailureLogThrottleStateTests`(6) — Decide 순수 시맨틱(첫=Emit/반복=Suppress/next_state 전이=Emit/리셋
+    재무장/요약 주기당 1건/억제 off·요약 off) 결정적 clock으로.
+  · `PushLogThrottleClientGateTests`(2) — 클라이언트가 게이트대로 세 sink 함께 emit/억제/요약 + delivery(HTTP 시도)
+    불변(가짜 RCS 수신 시도 카운트), throttle=null 현행 동작 보존.
+  · `PushLogThrottleEndToEndTests`(2, `[Collection("RealSimSerial")]`) — VS-E1: 실 Pusher+실 Client+다운 가짜 RCS+
+    실 operation_log(EF)+capturing 트레이스 병치(oplog FAIL==1 / trace FAIL==1 / 재발신 시도≥9 / 복구 OK 1건+freeze);
+    VS-B4: 복구 리셋 후 재실패=새 FAIL 1건.
 
-**테스트 (2)**
-- `backend/tests/Wcs.Tests/TraceReadyPushTests.cs` (신규·결정적 단위): push 8/10 계측(FakeChuteStateServer + 캡처 ITraceLogger), DORMANT no-op, next_state 2/3 외 안전 스킵, 실패 전송 result=FAIL 계측, Ready 헬퍼 7/9/비-에지 null, 파일 sink [7][8][9][10] raw 태그 + eventNo 필터. 10 케이스.
-- `backend/tests/Wcs.Tests/E2E/E2EGroupN_TraceLogTests.cs`:
-  - **N3(신규·라이브 E1/E2)**: 실 Sim `SetReady(false/true)` 로 Ready 1→0·0→1 유도 → 이벤트 7·9(폴 관측) + 실 PushAsync PUT→fake RCS 이벤트 8·10(next_state 2/3) 이 전용 파일·REST 로 관통·같은 chuteNo(30) 상관 실증 + operation_log CHUTESTATE_PUSH additive. (시드가 CHUTE 1~6 도 부트스트랩 push 하므로 소터 chuteNo==30 로 좁혀 선택. Ready 되돌리기 전 소터 이벤트 8 확인으로 3→2→3 coalesce 방지.)
-  - **N1 갱신(불가피·회귀 아님)**: 같은 흐름에 이제 additive 이벤트 7~10 이 공존하므로 "정확히 {1..6}" 단언을 "1~6 모두 포함(superset)"으로 완화. 이벤트 1~6 발화·상관·additive 회귀 0 검증은 불변.
+### 억제 상태 위치 / 설정 키
+- 상태: `DestinationStatusPusher.RouteState._failureLog`(PushFailureLogThrottleState), Gate 락으로 보호(per-route 원자).
+- 설정: `Wcs:ChuteStatePush:SuppressRepeatedFailureLog`, `Wcs:ChuteStatePush:FailureLogSummaryIntervalMs`(하드코딩 0).
 
-### 재량 결정 기록
-- **전송 계측 지점**: OQ2 "모든 IF-08 PUT 단일 훅" → `ChuteStatePushClient.PushAsync(payload,baseUrl,ct)`(레거시 오버로드도 여기 위임 = 유일 전송 chokepoint)에서 계측. 전송당 1회(성공/소진 시점) 발화 — operation_log 와 동일 시맨틱. At=첫 전송 시도 시각(sentAt) 으로 지연 지표(같은 chuteNo 이벤트7/9→8/10 시각차) 정합.
-- **ITraceLogger 주입 방식**: optional 파라미터(null 허용) — 직접 생성 단위 테스트(ChuteStatePushClientTests) 무수정 컴파일 보장 + 판정로직 무접촉. 전체 호스트에선 등록된 싱글톤이 DI 주입.
-- **Ready curFloor 취득**: 콜백 (reg,old,new) 만 제공 → `bundle.Latest.CurFloor`(EmitRegisterChanges 가 `_latest=cur` 이후 발화하므로 전이 시점 스냅샷) 사용.
-- **Layout subtitle 갱신**: 계약 S5 는 TraceLogPage 만 명시하나 Layout NAV subtitle 도 "6개 이벤트" stale 문구 보유 → 개수 정합 위해 함께 갱신(cosmetic·trace 표면 내).
+### 계약 매핑
+- C1(FAIL 1건·폭주 0) = VSE1 (a)(b) + 순수 first/repeat. C2(delivery 매 주기) = VSE1 (c) 재발신 시도≥9 + 클라이언트 게이트
+  delivery 3/6/9. C3(복구 1건+리셋) = VSE1 (d) + VSB4. C4(next_state 전이 새 1건) = 순수 `NextStateTransition_ReEmits`
+  (실 pusher는 Computed≠Acked 디덥으로 복구가 next_state를 뒤집어 "연속 다운 중 2↔3 둘 다 실패"가 기계적 도달 불가 —
+  이 사실을 VSB4 주석에 명기, 순수 Decide로 (route,next_state) 재무장을 정밀 실증). C5(설정화·락) = appsettings + Gate 락.
+  C6(동작 diff 0) = 위 diff 실증. C7(양 provider 전체 GREEN·회귀 0). C8(요약) = 순수 `Summary_FiresOncePerInterval` +
+  게이트 Summary sink 1건.
 
-### 테스트 결과 (baseline 대조)
-- **전체 `dotnet test backend/Wcs.sln`: 504 통과 / 0 실패 / 0 건너뜀**. baseline 493 + 신규 11(TraceReadyPushTests 10 + N3 1) = 504(산술 일치·회귀 0).
-- 신규 결정성: TraceReadyPushTests 10 + N3 1 = 11/11 반복 GREEN(N3 는 혼합 실행 전 회차 전부 통과).
-- **N1/N2 flake 는 pre-existing(내 변경 무관) — 귀속 완료**: E2EGroupN 격리 6회 반복에서 내 버전 1~2/6 실패 vs **baseline(stash) 4/6 실패**(더 심함). 실패 모드=이벤트 6(C_Flag 1→0) 관측 타임아웃·pId↔cSeq 상관 — 문서화된 RealSim 핸드셰이크 flake(lessons: s9-flake·e2e-parallel-load·single-sorter-concurrent-handshake-gap). 내 추가 트레이스 write 는 flake 율을 높이지 않음(오히려 baseline 이 더 자주 실패). (검증 절차: `git stash push -u -- <4 code files>` → baseline 6회 → `git stash pop` 복원, 전 파일 무손실 확인.)
-- 빌드 경고: 신규 0. 전부 선재(NU1903×10·xUnit2013×2[ChuteStatePushTests·TwoFloorHostRoutingTests]·CS8604×1[B2cFacilityService]) — 내 4파일에서 warning 0.
-- 프론트: lint exit 0 · typecheck(tsc --noEmit) exit 0 · build(vite) exit 0(chunk>500kB 경고=선재). wwwroot gitignored·무추적(빌드 산출 tracked diff 0).
+### 테스트 결과
+- 전체 스위트: **514 GREEN / 0 FAIL**(baseline 504 + 신규 10, 산술 일치·회귀 0) — 2회 반복 동일(1m31s·1m32s).
+- 신규 10 테스트: 격리 GREEN. E2E(RealSimSerial) 5회 반복 flake 0.
+- 후보 push 테스트(RcsPush·ChuteStatePush·ChuteRecoveryPushHeartbeat·TraceReadyPush·SorterPushOperational·
+  TwoFloorHostRouting·TwoFloorWriteGateI2) 46 GREEN — **기존 테스트 무수정**(전부 delivery/attempt 카운트만 단언,
+  로그-행 수 단언 없음 → 억제(로깅만)에 불변. 클라이언트-직접 테스트는 throttle 미주입=현행 Emit). E2EGroupL 로그-행
+  단언 없음.
+- 빌드: Wcs.Api·Wcs.Tests 0 오류(선재 NU1903·CS8604만). 프론트 무변경 — typecheck/lint/build exit 0(선재 chunk 경고).
+- Wcs.Core zero-diff(#8) 확인(git status empty).
 
-### 절대규칙 게이트 (코드 확인)
-- #1: 신규 코드에 EnqueueSet*/WriteRegister/Modbus/write-queue 호출 0(grep NONE). trace sink=Channel.TryWrite.
-- #7: 리터럴 경로/호스트 0(host=baseUrl 파라미터·TraceLog dir=옵션값·next_state/result 는 런타임 데이터). grep(D:\\·http://) NONE.
-- #8: PlcGateway/Wcs.Core/Sim3ds/HandshakeOrchestrator **zero-diff**(git diff --stat 공란). ChuteStatePushClient 는 판정로직 무접촉·부수 훅만(계약 명시 허용). 로깅은 Wcs.Api 계층.
-- 논블로킹·fail-safe: 모든 신규 발화 예외 격리 + Channel.TryWrite.
+### ⚠ 스코프 밖 foreign 변경(오케스트레이터 주의 — 이 스프린트가 만든 것 아님)
+- 세션 시작 시 clean이던 워크트리에 **다른 스프린트의 미커밋 작업**이 존재: `Wcs.Data/WcsDbContext.cs`(Piece 멱등
+  unique index에 `ArchivedAt IS NULL` 추가) + 마이그레이션 `20260730075818/24_FixPieceIdempotencyIndexExcludeArchived`
+  (SqlServer·Sqlite) + 두 ModelSnapshot. **본 스프린트(log-throttle)는 EF/엔티티/마이그레이션 무접촉** — 이 변경들은
+  로그 억제와 무관한 foreign 잔재다. 커밋 시 log-throttle 파일만 분리 권고(공유 워크트리 교훈 재적용).
+- 그 외 `tasks/RESUME.md`, `tasks/sprint-contract.S-SORT-CYCLE-TIME-METRIC.bak`도 foreign(무관).
 
-BEFORE HANDOFF 전량 GREEN 확인 완료.
+### 본 스프린트가 커밋 대상으로 만든 파일
+- backend/src/Wcs.Api/Infrastructure/WcsOptions.cs
+- backend/src/Wcs.Api/Services/PushFailureLogThrottle.cs (신규)
+- backend/src/Wcs.Api/Services/ChuteStatePushClient.cs
+- backend/src/Wcs.Api/Services/DestinationStatusPusher.cs
+- backend/src/Wcs.Api/appsettings.json
+- backend/tests/Wcs.Tests/PushLogThrottleTests.cs (신규)
+- (+ tasks/ 프로세스 파일)
+
+## FIX ITER (M1/M2/M4) — Generator, 2026-07-31 (코드리뷰 Step 4.5 Minor 견고화)
+
+사용자 결정: Critical/Major 0, Minor 3건만 머지 전 견고화. **이 3건만 fix**(억제 시맨틱·delivery·성공로깅·재시도 전부 불변). M3(단조시계)·M5(센티넬)는 미착수(Minor 등재만).
+
+- **M1 (fail-safe wrap)** `ChuteStatePushClient.cs` — `throttle?.OnFailure(firstNextState)` 호출을 `try/catch`로 격리, 예외 시 기본 `Emit` 폴백(FAIL 신호 유실보다 폭주가 안전·Fail-Loud). 인접 `EmitPushTrace`의 catch 패턴과 동형 — 로그 게이트 예외가 PumpAsync로 전파되지 않음.
+- **M2 (Reset 자체 락)** `DestinationStatusPusher.cs` — `ResetFailureLogSuppression`가 스스로 `lock(Gate)` 하도록(호출자 관례 미의존·by-construction 안전). PumpAsync ③가 이미 Gate 보유 중 호출해도 동일 스레드 Monitor 재진입으로 안전. OnFailure의 check-and-set와 동일 임계구역 유지.
+- **M4 (switch default → Emit)** `ChuteStatePushClient.cs` — 결합돼 있던 `case Suppress: default: break;`를 분리: `case Suppress:`는 그대로 break(무로그), `default:`는 `goto case Emit`(향후 enum 확장 시 무음 억제 방지·Fail-Loud). Emit/Summary 현행 유지.
+
+불변 유지: 억제 시맨틱(첫 1/반복 0/복구 리셋/next_state 전이/요약)·delivery·성공 로깅(:143-146)·재시도/백오프/DORMANT·Acked/Computed/PushInFlight·전이당 1회·#7 설정화·#8 Wcs.Core zero-diff 전부 무변경. 억제 상태는 여전히 Gate 락 내 원자.
+
+테스트: 빌드 0 오류. 전체 스위트 **514 GREEN / 0 FAIL**(baseline 504 + 신규 10, 회귀 0). foreign 미커밋 변경(WcsDbContext + FixPieceIdempotencyIndex 마이그레이션 2건) 무접촉 유지.
