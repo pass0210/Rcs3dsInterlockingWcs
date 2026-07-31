@@ -77,7 +77,11 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
     private const int LegacyRouteKey = int.MinValue;
 
     // ── (목적지, 층 호스트) 단위 전이 추적 상태 ────────────────────────────────
-    private sealed class RouteState
+    //
+    // S-IF08-PUSH-LOG-THROTTLE: 이 route 는 반복-실패 로그 억제 게이트(IPushFailureLogThrottle)이기도 하다
+    //   — 억제 단위 = (route, next_state). 클라이언트가 재시도-소진 실패 확정 시 OnFailure 로 emit 여부를
+    //   위임받고, 그 판정·상태 갱신은 이 route 의 Gate 락 안에서 원자적으로 수행한다(계약 스레드안전).
+    private sealed class RouteState : IPushFailureLogThrottle
     {
         /// <summary>route 키 — 층 번호(1/2) 또는 <see cref="LegacyRouteKey"/>.</summary>
         public required int RouteKey { get; init; }
@@ -85,7 +89,10 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
         /// <summary>이 route의 목적 호스트(설정값 — 절대규칙 #7). route 수명 동안 불변.</summary>
         public required string Host { get; init; }
 
-        /// <summary>per-route 직렬화 락 — 관찰·발신 결정·Acked 갱신을 원자화.</summary>
+        /// <summary>억제 on/off·요약 주기 설정(절대규칙 #7 — 하드코딩 0). route 수명 동안 불변.</summary>
+        public required ChuteStatePushOptions Options { get; init; }
+
+        /// <summary>per-route 직렬화 락 — 관찰·발신 결정·Acked 갱신·로그 억제 상태를 원자화.</summary>
         public readonly object Gate = new();
 
         /// <summary>마지막으로 Compute·라우팅이 산출한 next_state(2/3). null=아직 미산출.</summary>
@@ -96,6 +103,31 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
 
         /// <summary>이 route에 대한 발신 루프가 진행 중인지(in-flight — 중복 발화 차단).</summary>
         public bool PushInFlight;
+
+        /// <summary>반복-실패 로그 억제 상태(직전 로깅한 실패 next_state + 요약 주기 기준 시각). Gate 락으로 보호.</summary>
+        private readonly PushFailureLogThrottleState _failureLog = new();
+
+        /// <summary>
+        /// [IPushFailureLogThrottle] 재시도-소진 실패 확정 시 클라이언트가 호출 — emit/suppress/summary 위임.
+        /// Gate 락 안에서 원자적 check-and-set(비원자 check-then-act 금지). 클라이언트는 락 밖(발신 I/O 중)에서
+        /// 호출하므로 여기서 Gate 를 잡아도 데드락 없음(PumpAsync 의 발신은 락 밖 — 계약 in-flight 임계구역과 동일).
+        /// </summary>
+        public PushFailureLogAction OnFailure(int nextState)
+        {
+            lock (Gate)
+                return _failureLog.Decide(
+                    nextState, Options.SuppressRepeatedFailureLog, Options.FailureLogSummaryIntervalMs,
+                    DateTimeOffset.UtcNow);
+        }
+
+        /// <summary>push 성공 복구 시 억제 리셋 — 다음 실패가 새 첫 실패로 로깅되도록 재무장.
+        /// ★ M2: 스스로 <see cref="Gate"/> 락을 잡아 by-construction 안전(호출자 관례에 미의존). PumpAsync ③가
+        /// 이미 Gate 보유 중 호출해도 동일 스레드 재진입(Monitor 재진입)으로 안전 — OnFailure 의 check-and-set 와 동일 임계구역.</summary>
+        public void ResetFailureLogSuppression()
+        {
+            lock (Gate)
+                _failureLog.Reset();
+        }
     }
 
     // ── destination별 전이 추적 상태(route 집합 포함) ──────────────────────────
@@ -345,7 +377,9 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
 
         foreach (var (routeKey, host, nextState) in routes)
         {
-            var rs = st.Routes.GetOrAdd(routeKey, static (k, h) => new RouteState { RouteKey = k, Host = h }, host);
+            var rs = st.Routes.GetOrAdd(routeKey,
+                static (k, arg) => new RouteState { RouteKey = k, Host = arg.host, Options = arg.opt },
+                (host, opt: _opt));
             lock (rs.Gate)
             {
                 rs.Computed = nextState;
@@ -474,9 +508,11 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             try
             {
                 // ② 발신(락 밖 I/O — 재시도 포함). 이 route의 호스트로만 PUT(층 독립).
+                //   rs 를 억제 게이트(IPushFailureLogThrottle)로 넘겨 재시도-소진 실패 로깅을 (route,next_state)
+                //   단위로 억제(로깅만 — 재시도/재발신/반환값은 무영향).
                 var token = _cts?.Token ?? CancellationToken.None;
                 ok = await _push.PushAsync(
-                    new ChuteStatePushPayload(new[] { st.ChuteNo }, new[] { target }), rs.Host, token)
+                    new ChuteStatePushPayload(new[] { st.ChuteNo }, new[] { target }), rs.Host, rs, token)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -495,7 +531,12 @@ public sealed class DestinationStatusPusher : IDestinationChangeNotifier, IHoste
             lock (rs.Gate)
             {
                 if (ok)
+                {
                     rs.Acked = target;   // 성공만 Acked 갱신(실패면 stale 유지 → 다음 관찰 재푸시).
+                    // S-IF08-PUSH-LOG-THROTTLE: 성공(복구) 시 억제 리셋 — 이후 재실패는 새 첫 실패로 1건 로깅.
+                    //   같은 Gate 락 안이므로 OnFailure 의 check-and-set 와 원자 직렬화(비원자 check-then-act 없음).
+                    rs.ResetFailureLogSuppression();
+                }
 
                 rs.PushInFlight = false;
 

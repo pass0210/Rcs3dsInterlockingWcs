@@ -426,7 +426,7 @@ public class WcsDbContext : DbContext
                 // SQLite는 partial index에서 컬럼명 대소문자 구분 없음
                 e.HasIndex(x => x.PId)
                  .IsUnique()
-                 .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED')")
+                 .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED') AND \"ArchivedAt\" IS NULL")
                  .HasDatabaseName("UQ_piece_pid_active_status");
             }
             else
@@ -434,7 +434,7 @@ public class WcsDbContext : DbContext
                 // SQL Server: filtered unique index — 물리 컬럼명 PascalCase 사용(교정)
                 e.HasIndex(x => x.PId)
                  .IsUnique()
-                 .HasFilter("[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED')")
+                 .HasFilter("[IsActive] = 1 AND [Status] IN ('DEPOSITED','CELL_ASSIGNED','LOADED') AND [ArchivedAt] IS NULL")
                  .HasDatabaseName("UQ_piece_pid_active_status");
             }
 
