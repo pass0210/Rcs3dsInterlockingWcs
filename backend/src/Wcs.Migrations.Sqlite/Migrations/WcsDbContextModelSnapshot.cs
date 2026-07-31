@@ -788,7 +788,7 @@ namespace Wcs.Migrations.Sqlite.Migrations
                     b.HasIndex("PId")
                         .IsUnique()
                         .HasDatabaseName("UQ_piece_pid_active_status")
-                        .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED')");
+                        .HasFilter("\"IsActive\" = 1 AND \"Status\" IN ('DEPOSITED','CELL_ASSIGNED','LOADED') AND \"ArchivedAt\" IS NULL");
 
                     b.HasIndex("Status")
                         .HasDatabaseName("IX_piece_status");
