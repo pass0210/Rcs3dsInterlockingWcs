@@ -271,6 +271,29 @@ public sealed record ChuteStatePushOptions
     /// </summary>
     public int SorterObserveIntervalMs { get; init; } = 150;
 
+    // ── S-IF08-PUSH-LOG-THROTTLE: 반복-실패 push 로그 억제(로깅만 조절 — delivery/재시도/재발신 불변) ──
+
+    /// <summary>
+    /// [S-IF08-PUSH-LOG-THROTTLE] 반복-실패 push 로그 억제 on/off. true(기본)면 같은 억제 단위
+    /// (route = 목적지·층 호스트, next_state)에서 재시도-소진 실패가 반복될 때 **첫 실패 1건만** 로깅하고
+    /// 이후 반복은 세 sink(operation_log WARN "FAIL" + 트레이스 이벤트 8/10 result:"FAIL" + Serilog
+    /// LogError) 모두 억제한다(하트비트 N주기 재발신에도 추가 0). 복구(성공) 시 리셋 → 재실패는 새 첫 실패로
+    /// 1건. next_state 전이(2↔3)는 새 첫 실패로 1건. false면 매 실패마다 로깅(구 동작 보존).
+    /// ★ 억제는 순수 로깅 게이트다 — push 4-시도 재시도·지수 백오프·재발신·Acked/Computed 전이·전이당
+    /// 1회 발신·성공 로깅은 이 값과 무관(delivery 0 영향). 하드코딩 금지(절대규칙 #7).
+    /// </summary>
+    public bool SuppressRepeatedFailureLog { get; init; } = true;
+
+    /// <summary>
+    /// [S-IF08-PUSH-LOG-THROTTLE · OQ-1] 저빈도 "아직 실패 중" 요약 로그 주기(ms). 첫 실패~복구 사이,
+    /// 같은 억제 단위(route,next_state)의 실패가 이 주기 이상 지속되면 요약 1건(operation_log
+    /// result:"SUMMARY" + Serilog WARN)을 발화한다(완전 무음 금지 — Fail-Loud). 전이/복구 시 초기화.
+    /// 하트비트 주기의 수십~수백 배 권장(기본 300000ms=5분 — 폭주 없이 "여전히 다운"을 저빈도로 노출).
+    /// ≤0이면 요약 비활성(그래도 첫 실패·복구는 항상 남으므로 완전 무음 아님).
+    /// <see cref="SuppressRepeatedFailureLog"/>=false면 무의미(매 실패 로깅). 하드코딩 금지(절대규칙 #7).
+    /// </summary>
+    public int FailureLogSummaryIntervalMs { get; init; } = 300000;
+
     /// <summary>
     /// 푸시 서브시스템이 활성인지 — 층 호스트가 하나라도 설정됐거나(신규) 레거시 BaseUrl이 설정됨.
     /// 둘 다 미설정이면 서브시스템 전체 DORMANT(관찰/구독 미기동).

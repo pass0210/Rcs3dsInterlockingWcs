@@ -49,6 +49,15 @@ public interface IChuteStatePushClient
     Task<bool> PushAsync(ChuteStatePushPayload payload, string? baseUrl, CancellationToken ct = default);
 
     /// <summary>
+    /// [S-IF08-PUSH-LOG-THROTTLE] 위 오버로드에 반복-실패 로그 억제 게이트(<paramref name="throttle"/>)를 더한 형태.
+    /// push 동작(재시도·백오프·재발신·성공 판정·반환값)은 완전히 동일하고, **재시도-소진 실패 로깅만** 이 게이트에
+    /// 위임한다(첫 실패=Emit / 반복=Suppress / 요약 주기=Summary). throttle=null이면 억제 없이 매 실패 로깅(현행 동작).
+    /// 억제 단위는 게이트 인스턴스(= route)와 payload의 next_state 조합(OQ-2).
+    /// </summary>
+    Task<bool> PushAsync(
+        ChuteStatePushPayload payload, string? baseUrl, IPushFailureLogThrottle? throttle, CancellationToken ct = default);
+
+    /// <summary>
     /// [레거시 편의] 설정된 BaseUrl로 PUT(재시도 포함). 층별 라우팅을 쓰지 않는 호출부·직접 테스트용.
     /// 내부적으로 <see cref="PushAsync(ChuteStatePushPayload, string?, CancellationToken)"/>에 위임.
     /// </summary>
@@ -98,10 +107,15 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
 
     /// <inheritdoc/>
     public Task<bool> PushAsync(ChuteStatePushPayload payload, CancellationToken ct = default)
-        => PushAsync(payload, _opt.BaseUrl, ct);   // 레거시 편의 — 설정된 BaseUrl로 위임.
+        => PushAsync(payload, _opt.BaseUrl, throttle: null, ct);   // 레거시 편의 — 설정된 BaseUrl로 위임(억제 없음).
 
     /// <inheritdoc/>
-    public async Task<bool> PushAsync(ChuteStatePushPayload payload, string? baseUrl, CancellationToken ct = default)
+    public Task<bool> PushAsync(ChuteStatePushPayload payload, string? baseUrl, CancellationToken ct = default)
+        => PushAsync(payload, baseUrl, throttle: null, ct);   // 억제 게이트 미주입 — 매 실패 로깅(현행 동작).
+
+    /// <inheritdoc/>
+    public async Task<bool> PushAsync(
+        ChuteStatePushPayload payload, string? baseUrl, IPushFailureLogThrottle? throttle, CancellationToken ct = default)
     {
         // DORMANT/미라우팅: 호스트 미지정(층 미설정 or BaseUrl 미설정)이면 no-op. 호출자(Pusher)가 이미
         // 층별 DORMANT로 걸러내지만 방어적으로 한 번 더 — "성공"으로 간주하지 않고 false 반환(미발신 유지).
@@ -180,16 +194,57 @@ public sealed class ChuteStatePushClient : IChuteStatePushClient
             }
         }
 
-        // 재시도 소진 — 최종 실패 명시 로깅(Fail-Loud, 층 호스트별 독립). false 반환 → 조용한 드롭 금지.
-        _log.LogError(
-            "[CHUTESTATE푸시] 재시도 소진({Max}회) — 호스트 {Url} 미도달: chute_numbers=[{Chutes}] next_states=[{States}]. " +
-            "다음 전이/관찰 시 재발신(해당 층 호스트만 — 타 층 발신엔 영향 없음).",
-            maxAttempts, url, Join(payload.ChuteNumbers), Join(payload.NextStates));
-        // operation_log: 아웃바운드 푸시 전수(실패) — 부수 기록(WARN).
-        _opLog.Log(OperationLogCategory.API, OpLogAction, level: OperationLogLevel.WARN,
-            detail: DetailJson(payload, "FAIL", maxAttempts));
-        // 전용 추적(이벤트 8/10) — 실패 전송도 계측(전송 시각·결과 정직 기록). fail-safe.
-        EmitPushTrace(payload, baseUrl, sentAt, "FAIL", maxAttempts);
+        // 재시도 소진 — 최종 실패(Fail-Loud, 층 호스트별 독립). false 반환 → 조용한 드롭 금지.
+        // ★ S-IF08-PUSH-LOG-THROTTLE: 실패 **로깅만** 억제 게이트에 위임(push 동작·반환값 무변경).
+        //   Emit=첫 실패(전이)이니 세 sink emit / Suppress=반복이니 0건 / Summary=요약 주기 도래.
+        //   throttle=null(억제 미주입)이면 Emit(현행 동작 — 매 실패 로깅). next_state 는 억제 단위 키.
+        int firstNextState = payload.NextStates.Length > 0 ? payload.NextStates[0] : int.MinValue;
+        // ★ M1 fail-safe: 억제 게이트 판정 예외가 push(본 동작)로 전파되지 않게 격리(인접 EmitPushTrace catch 동형).
+        //   예외 시 기본 Emit 으로 폴백 — FAIL 신호 유실보다 (드물게) 폭주가 안전(Fail-Loud).
+        PushFailureLogAction logAction;
+        try
+        {
+            logAction = throttle?.OnFailure(firstNextState) ?? PushFailureLogAction.Emit;
+        }
+        catch
+        {
+            logAction = PushFailureLogAction.Emit;
+        }
+
+        switch (logAction)
+        {
+            case PushFailureLogAction.Emit:
+                // (c) Serilog LogError — 재시도 소진 파일/콘솔 라인.
+                _log.LogError(
+                    "[CHUTESTATE푸시] 재시도 소진({Max}회) — 호스트 {Url} 미도달: chute_numbers=[{Chutes}] next_states=[{States}]. " +
+                    "다음 전이/관찰 시 재발신(해당 층 호스트만 — 타 층 발신엔 영향 없음).",
+                    maxAttempts, url, Join(payload.ChuteNumbers), Join(payload.NextStates));
+                // (a) operation_log: 아웃바운드 푸시 전수(실패) — 부수 기록(WARN).
+                _opLog.Log(OperationLogCategory.API, OpLogAction, level: OperationLogLevel.WARN,
+                    detail: DetailJson(payload, "FAIL", maxAttempts));
+                // (b) 전용 추적(이벤트 8/10) — 실패 전송도 계측(전송 시각·결과 정직 기록). fail-safe.
+                EmitPushTrace(payload, baseUrl, sentAt, "FAIL", maxAttempts);
+                break;
+
+            case PushFailureLogAction.Summary:
+                // 저빈도 "아직 실패 중" 요약 1건(OQ-1 · 완전 무음 금지 — Fail-Loud). FAIL 카운트와 구분되도록
+                //   result="SUMMARY"(트레이스 8/10 는 발화 안 함 — 요약은 폭주 아닌 저빈도 생존 신호).
+                _log.LogWarning(
+                    "[CHUTESTATE푸시] 아직 실패 중(요약) — 호스트 {Url} 미도달 지속: chute_numbers=[{Chutes}] next_states=[{States}]. " +
+                    "재발신은 계속 중(로그만 저빈도 요약).",
+                    url, Join(payload.ChuteNumbers), Join(payload.NextStates));
+                _opLog.Log(OperationLogCategory.API, OpLogAction, level: OperationLogLevel.WARN,
+                    detail: DetailJson(payload, "SUMMARY", maxAttempts));
+                break;
+
+            // Suppress → 반복되는 같은 실패: 세 sink 모두 0건(재발신·delivery 는 계속됨 — 로깅만 억제).
+            case PushFailureLogAction.Suppress:
+                break;
+
+            // ★ M4 Fail-Loud: 미지 판정(향후 enum 확장)은 무음 억제하지 않고 Emit 경로로 폴백(신호 유실 금지).
+            default:
+                goto case PushFailureLogAction.Emit;
+        }
         return false;
     }
 
