@@ -1,61 +1,69 @@
-# Sprint Log — S-SORT-CYCLE-TIME-METRIC
+# Sprint Log — S-AUDIT-C-DATA-INTEGRITY
 
 (Generator가 `## IMPLEMENTATION COMPLETE` + 변경 요약 + 테스트 결과 기록)
 
-## IMPLEMENTATION COMPLETE
+## IMPLEMENTATION COMPLETE (Generator, 2026-07-31)
 
-메트릭 = **avg(ReturnedAt − SortStartedAt)**, SortStartedAt = 분류 시작 = **Ready 워드 1→0 전이 시각**(신규 컬럼).
-캡처 = HandshakeOrchestrator R 폴 루프에서 Ready 1→0 에지를 **관측만 추가**(권고안 A1). 브랜치 base = e90f0cc
-(feat/sort-cycle-time-metric). 커밋/푸시 없음.
+신규 마이그레이션 0·스키마/Entities 무변경·Wcs.Core zero-diff(#8)·PlcGateway 무접촉(#1). 커밋/푸시 미수행.
 
-### 변경 요약 (파일별)
+### 변경 파일·항목별 요약
 
-**BE-1 스키마 + 마이그레이션**
-- `backend/src/Wcs.Data/Entities.cs` — `SorterCommand.SortStartedAt`(nullable DateTime) 추가(DepositedAt 다음).
-  단조 불변식 주석을 `DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt`로 갱신.
-- `backend/src/Wcs.Data/WcsDbContext.cs` — ConfigureSorterCommand에 `e.Property(x => x.SortStartedAt).IsRequired(false)` 추가(additive). Piece 인덱스 무접촉.
-- 신규 마이그레이션 2개(`FixPieceIdempotencyIndexExcludeArchived` 위에 얹음):
-  - `Wcs.Migrations.Sqlite/Migrations/20260731021217_AddSorterCommandSortStartedAt.cs` — AddColumn TEXT nullable / Down=DropColumn.
-  - `Wcs.Migrations.SqlServer/Migrations/20260731021228_AddSorterCommandSortStartedAt.cs` — AddColumn datetime2 nullable / Down=DropColumn.
-  - 양 ModelSnapshot 갱신(SortStartedAt property만 추가 — Piece 인덱스 무변경).
-  - 생성 명령: `dotnet ef migrations add … --project <MigProj> --startup-project <MigProj>`(양 provider). MigrateOnStartup=true로 콜드스타트 자동 적용(현장 prod SqlServer).
+**backend/src/Wcs.Api/Repositories/DbRepositories.cs** (판정 로직 코어)
+- **① 원자 예약 차감** — `EfOrderRepository.QueryDestination` tx 블록(:178~294):
+  - 추적 RMW(`item.ReservedQty += qty; SaveChanges`)를 **원자 조건부 UPDATE**로 교체
+    (`_db.OrderItems.Where(i => i.Id==item.Id && i.ReservedQty+qty <= i.PlannedQty).ExecuteUpdate(SetProperty ReservedQty=ReservedQty+qty, UpdatedAt=now)` — :195~199).
+  - `affected==0`(OVER) → tx 롤백 → `overReserved=true` 플래그 → tx 밖에서 `RecordDenied(...,"OVER",...)`
+    호출(:289~293) 후 `("NG",null,"OVER",destApiType,null)` 반환. **DENIED 감사기록 계약 하드 보존**
+    (piece(DENIED)+IF05_REQ/RES(OVER)). tx-밖 pre-OVER(:96)↔tx-안 차감 TOCTOU 창 폐쇄(원자 WHERE=최종 권위).
+  - 원자 UPDATE를 tx 최초 write로 배치 → SQLite shared→write 승격 데드락 회피. 재시도 상수 0(#7).
+- **② 전건 비활성화** — 두 경로 모두 `FirstOrDefault` 1행 → `Where(...).ToList()`+`foreach` 전건:
+  - `QueryDestination` OK 경로 prevActives(:226~231), `RecordDenied` NG 경로 prevActives(:311~316).
+  - 부분 유니크 백스톱(UQ_piece_pid_active_status) 유지·단일-활성 불변식 강제 미포함(계약 OQ-3).
+- **⑤ SelectCell fail-loud** — `EfCellSelector`:
+  - 생성자에 `IAlarmSink`+`ILogger<EfCellSelector>` 주입(:637 — DI 기등록·동일 스코프 WcsDbContext).
+  - `SelectCell` ② 빈 셀 분기에서 매칭 RUNNING 오더 없음(`order is null`, :707~712) → 배정 생성 금지·
+    셀 반환 거부(`null`)·`unmatched=true`. tx 종료 **후** WARN+`_alarm.Append("CELL_ORDER_UNMATCHED",
+    WARN, null, ...)`(:737~743) — EfAlarmSink 자체 tx이므로 중첩 방지 위해 tx 밖 기록. ③ 빈 셀 없음(정상 FULL)은
+    alarm 없이 null(구분).
 
-**BE-2 분류 시작(Ready 1→0) 캡처 + 기입 (캡처 지점 = HandshakeOrchestrator R 폴 루프)**
-- `backend/src/Wcs.PlcGateway/HandshakeOrchestrator.cs`
-  - `HandshakeResult` 레코드에 `SortStartedAt`(nullable, 기본 null) append(TiltedAt/ReturnedAt와 동형 — 기존 ~20 호출부 보존).
-  - `WaitRFlagAndProcessAsync` R 폴 루프에서 **최초 Ready==0 관측 1회**를 sortStartedAt에 기입(정상=1→0 에지, 폴 주기보다 빠른 분류/진입 시 이미 0이면 "첫 Ready==0 레벨" 폴백 — OQ-3 허용). 관측 전용.
-  - 단조 클램프: R_Flag==1 관측 시 `sortStartedAt > tiltedAt`이면 tiltedAt로 클램프(기존 returnedAt<tiltedAt 클램프와 동형).
-  - 모든 종료 경로(성공/불일치/타임아웃/OFFLINE)로 sortStartedAt 전달(`WaitReadyThenClearRAsync`·`ClearRAndReturnSuccessAsync`에 파라미터 추가).
-  - ★ **제어 흐름·타이밍·pop·write-on-clear·PLC write 시퀀스 불변** — EnqueueAsync 호출 수 6→6(신규 PLC write 0), Task.Delay/deadline/poll 무변경. diff는 관측 캡처 + 파라미터 threading + 주석뿐.
-- `backend/src/Wcs.Api/Repositories/DbRepositories.cs` — `EfSorterCommandJournal.Finalize`가 `cmd.SortStartedAt = result.SortStartedAt` 기입(TiltedAt/ReturnedAt 옆에 additive).
+**backend/src/Wcs.Api/Controllers/RcsController.cs**
+- **② 부수 하드닝** — 활성 piece "1건" 읽는 무정렬 조회에 `OrderByDescending(p => p.Id)` 일관 적용:
+  IF-10 capacity piece(:271~275)·TriggerSorterHandshake pieceRow(:329~332).
+- **⑤ null-path 로그 중립화** — `cellNo==null` 경로(:305~312) 로그를 "빈 셀 없음=FULL 또는 미매칭 fail-loud"로
+  중립 표기(진단 오도 방지). 미매칭 구체 사유·alarm은 SelectCell가 기록. IF-11 생략 로직 불변.
 
-**BE-3/4 읽기 전용 집계 + 엔드포인트**
-- `backend/src/Wcs.Api/Monitoring/MonitoringDtos.cs` — `CycleTimeAvgDto(double? AvgSeconds, int N)` 신설.
-- `backend/src/Wcs.Api/Monitoring/MonitoringQueries.cs` — `IMonitoringQueries.GetCycleTimeAvg()` + 구현.
-  전 행(★ **ArchivedAt 무필터**) 중 SortStartedAt·ReturnedAt 둘 다 non-null → (2컬럼 materialize 후 C# TimeSpan 계산·provider-neutral) Σ(ReturnedAt−SortStartedAt)/n. n=0 → AvgSeconds=null·N=0. 음수 방어 클램프. AsNoTracking·핫패스 무접촉.
-- `backend/src/Wcs.Api/Controllers/MonitoringController.cs` — `GET /api/monitor/cycle-time-avg`(파라미터 없음·읽기 전용·200). raw double(초) 반환(소수 표기는 프론트).
+**backend/tests/Wcs.Tests/DataIntegrityAuditTests.cs** (신규 6 테스트)
+- 직접 SQLite 하네스(`SeededDb`: named in-memory shared cache + `DbSeeder.Seed`) + 실 리포지토리.
+- S1(①happy)·S1b(①동시)·S2×2(②)·S5a(⑤a)·S5b(⑤b 회귀).
 
-**FE 표시 + 실시간 트리거**
-- `frontend/src/lib/cycleTime.ts`(신규) — 단일 소스(#7): 소수자리(1)·디바운스(500ms)·트리거 event(9)·카피 문구·`formatCycleTime`.
-- `frontend/src/lib/api.ts` — `CycleTimeAvg` 인터페이스 + `api.cycleTimeAvg()` 클라이언트.
-- `frontend/src/pages/TraceLogPage.tsx` — 그리드 위 `CycleTimeAvgLabel` 컴포넌트: 마운트 조회 + event 9(READY_0TO1) 디바운스 재조회(기보유 subscribeTrace에 얹음·신규 SignalR 0) + 재연결(status→connected) 1회 재조회 + n=0/조회실패 우아 degrade("—"/"측정 데이터 없음"). 앱 테마 토큰(text-ink/bg-panel/border-line/text-faint) 사용. 기존 그리드/필터/배지 무변경.
+### 원자 UPDATE 방식
+EF Core `ExecuteUpdate`(추적 우회 DB-side `UPDATE`) — 기존 `Finalize`의 SortedQty 원자 증가(:988) 선례 재사용.
+명시 tx(`BeginTransaction`) 참여. `WHERE reserved_qty+qty <= planned_qty`가 최종 권위 → 영향행 0=OVER.
+SQL Server rowversion 패자=미처리 500 + SQLite lost-update 동시 해소(양 provider 무관 정확). 추적 `item`은
+불변(ExecuteUpdate가 미갱신)이라 후속 SaveChanges에 미포함 → 이중 write 0.
 
-### 설정 / 캡처 지점 / 상수
-- 백엔드 타이밍: 신규 키 0 — 기존 `RFlagPollMs`(R 폴 주기) 재사용(캡처가 그 폴 루프에 얹힘).
-- 프론트 상수: `lib/cycleTime.ts` 단일 소스(하드코딩 산재 0).
-- 캡처 지점: `HandshakeOrchestrator.WaitRFlagAndProcessAsync` R 폴 루프(관측만 추가).
+### alarm 메커니즘
+기존 `IAlarmSink`/`EfAlarmSink`(alarm 테이블 행 삽입, code·severity·pieceId·message) 재사용.
+`EfCellSelector`에 `IAlarmSink` 생성자 주입(Program.cs DI 무변경 — `AddScoped<IAlarmSink>` 기등록·자동 해석).
+alarm은 SelectCell 트랜잭션 종료 **후** 기록(EfAlarmSink가 자체 tx를 열므로 동일 WcsDbContext 중첩 tx 방지).
+code=`CELL_ORDER_UNMATCHED`·severity=WARN·pieceId=null.
 
-### 테스트 결과
-- 신규 백엔드 테스트 4건(`backend/tests/Wcs.Tests/CycleTimeMetricTests.cs`):
-  1. `Aggregate_BothNonNull_IncludesArchived_ExcludesNulls_MatchesHandCalc` — n=2·avg=15.0초 손계산 일치, ArchivedAt!=null 포함 양성, null 제외.
-  2. `Aggregate_ZeroN_ReturnsNullNotError` — n=0 → avgSeconds=null·200(500 아님).
-  3. `Journal_Finalize_PersistsSortStartedAt_AndMonotone` — Finalize가 result.SortStartedAt 지속·단조(DepositedAt ≤ SortStartedAt ≤ TiltedAt ≤ ReturnedAt).
-  4. `Capture_ReadyOneToZero_SetsSortStartedAt_BeforeTiltAndReturn` — 실 Sim(TCP) 핸드셰이크로 Ready 1→0 실관측 → SortStartedAt 캡처·SortStartedAt < TiltedAt ≤ ReturnedAt·사이클 양수([Collection("RealSimSerial")] 직렬).
-- **전체 스위트: 518 GREEN / 0 실패**(baseline 514 + 신규 4 = 518, 산술 일치·회귀 0). 1m31s.
-- 프론트: `tsc --noEmit` exit 0 · `eslint .` exit 0 · `vite build` exit 0(chunk>500kB 경고는 선재).
-- 마이그레이션: 양 provider `has-pending-model-changes` = **No**.
-- 회귀 게이트: **Wcs.Core git diff 0** · Wcs.Sim3ds diff 0 · HandshakeOrchestrator EnqueueAsync 6→6(신규 PLC write 0) · 핸드셰이크 diff = 관측/파라미터/주석뿐(타이밍·pop·write-on-clear·PLC 시퀀스 불변).
-- 빌드 경고: 선재 NU1903(SQLitePCLRaw)·CS8604(B2cFacilityService)·xUnit2013(기존 테스트)뿐 — 신규 0.
+### 테스트 결과 (RED→GREEN 증거)
+- **Baseline**: full 518 GREEN·0 fail(1m36s).
+- **RED (수정 전 — 스캐폴딩 생성자만 넣어 컴파일)**: 신규 6 중 4 RED / 2 회귀 GREEN.
+  - S2_If05DeactivatesAll: `Assert.Single Failure: collection contained 2 items`(단일 비활성화 후 잔존 2).
+  - S2_RecordDenied: `Assert.Single Failure: contained 2 items`.
+  - S1b_ConcurrentIf05: `Assert.Equal Expected 1 Actual 8`(SQLite lost-update — 동시 IF-05 전원 OK).
+  - S5a_SelectCell_Unmatched: `Assert.Null Failure: Actual 1`(빈 셀 cellNo 조용히 반환).
+  - GREEN: S1_happy(회귀 baseline)·S5b_matched(회귀 guard).
+- **GREEN (수정 후)**: 신규 6/6 GREEN ×3 반복(동시 S1b flake 0).
+- **Full 회귀**: full **524 GREEN**(=518 baseline + 6 신규 산술 일치)·0 fail ×**4 연속**(동시성 변경 게이트)·
+  teardown hang 0(각 ~1m30s 자연 완료)·flake 0.
+- **경고**: 빌드 경고 13 전부 선재 NU1903(SQLitePCLRaw 패키지 취약성)·신규 CS 경고 0.
+- **마이그레이션**: 양 provider `has-pending-model-changes` = **No**(SQLite·SqlServer 모두 "No changes to the model").
 
-### 재검증 게이트(Evaluator 필수 — iter1 교훈)
-자동 테스트만으론 PASS 불가. 실 Sim IF-05→IF-10 → C 기입 → Ready 1→0 실관측 → SortStartedAt 기입 → 틸트 → Ready 0→1 → ReturnedAt → COMPLETED sorter_command → trace event 9 → 디바운스 재조회 → /trace 레이블 n +1·평균이 **의미 있는 양수**로 갱신됨을 브라우저 수치로 실측. 표시값 = DB Σ(ReturnedAt−SortStartedAt)/n 일치(아카이브 행 포함 규칙). 합성 손세팅 마스킹 금지.
+### 실 SQL Server 동시성 실증 위임 (계약 §Evaluation Dimensions 2)
+SQLite는 rowversion 미증가(lessons sqlserver-migration-prod-provider)라 **S-①a(실 SQL Server 동시 IF-05
+rowversion 패자=미처리 500)** 시나리오를 재현 못 한다. 본 스프린트는 provider 무관 원자 갱신 경로(reserved_qty
+이중 가산 부재·초과예약 0·미처리 500 0·DENIED 계약 보존)를 SQLite 실 HTTP 병렬(S1b, 8-way barrier)로 입증했다.
+**실 SQL Server 병렬 동시 요청 실증(≥5회 무flake)은 Evaluator concurrency 차원이 수행**한다.

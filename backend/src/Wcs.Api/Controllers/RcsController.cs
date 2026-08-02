@@ -267,7 +267,12 @@ public sealed class RcsController : ControllerBase
         if (dest is not null && destType == DestinationType.Chute)
         {
             // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
-            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null);
+            // 항목②(S-AUDIT-C) 부수 하드닝: 활성 piece "1건" 읽기에 결정적 정렬(OrderByDescending(Id)) —
+            //   최신 활성 piece를 일관 선택(무정렬 FirstOrDefault의 비결정성 제거).
+            var piece = db.Pieces
+                .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)
+                .OrderByDescending(p => p.Id)
+                .FirstOrDefault();
             var qty   = piece?.Qty ?? req.Qty ?? 1;
             capacity.OnDeposited(dest.Id, qty);
         }
@@ -299,7 +304,10 @@ public sealed class RcsController : ControllerBase
 
         if (!cellNo.HasValue)
         {
-            _log.LogWarning("[IF-10] pId={PId} 3D 보고 → 빈 셀 없음 (3DS FULL 조건). IF-11 트리거 생략", req.PId);
+            // 셀 미선택(null) = ③ 빈 셀 없음(3DS FULL) 또는 ⑤ 미매칭 fail-loud. 둘 다 IF-11/틸트 미트리거.
+            //   ⑤ 미매칭은 SelectCell이 CELL_ORDER_UNMATCHED alarm+WARN을 이미 기록한다(진단 오도 방지 —
+            //   여기 로그는 "빈 셀 없음=FULL"으로 단정하지 않고 중립 표기).
+            _log.LogWarning("[IF-10] pId={PId} 3D 보고 → 셀 미선택(빈 셀 없음=FULL 또는 미매칭 fail-loud) — IF-11 트리거 생략", req.PId);
             return;
         }
 
@@ -320,6 +328,7 @@ public sealed class RcsController : ControllerBase
         //   단일 진실(piece.DepositedAt) 재사용 — 요청 스코프 db로 지금 읽어 클로저로 넘긴다(백그라운드는 스코프 종료).
         var pieceRow = db.Pieces
             .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)   // S-B2C-DATAGEN: 아카이브 제외.
+            .OrderByDescending(p => p.Id)   // 항목②(S-AUDIT-C) 부수 하드닝: 최신 활성 piece 결정적 선택.
             .Select(p => new { p.Id, p.DepositedAt })
             .FirstOrDefault();
         long pieceId = pieceRow?.Id ?? 0;
