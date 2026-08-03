@@ -1,110 +1,62 @@
-[Sprint Contract] — S-AUDIT-D-HANDSHAKE-HARDENING
-(2026-07-01 전체 감사 묶음 D — 핸드셰이크 견고화, 운영 투입 전)
-Base: 최신 develop = 459aaac. feature 브랜치 feat/audit-d-handshake-hardening.
+[Sprint Contract] — S-AUDIT-E-DOCS (2026-07-01 전체 감사 묶음 E — 문서 일괄 정정)
+Base: 최신 develop = 99d8038. feature 브랜치 feat/audit-e-docs.
 
-════════════════════════════════════════════════════════════════════════════
-RE-TRIAGE RESULT (필수 재triage — 현재 코드 직접 판정)
-════════════════════════════════════════════════════════════════════════════
-- D① (R_Flag 레벨읽기 → 허위 RSEQ_MISMATCH·off-by-one 자가지속): ✅ 해소 — SCOPE OUT.
-    S-HANDSHAKE-RESIDUE의 arming(ArmRFlagZeroAsync HandshakeOrchestrator.cs:260-322 — C 기입 전
-    RFlag==0 선관찰=에지 등가). 실증 HandshakeResidueTests S1/S2/S3(실 SimServer·back-to-back 잔류
-    허위 RSEQ_MISMATCH 0·DoesNotContain HS_RSEQ_MISMATCH). 감사 A-1 권고(a) 그대로 구현.
-- D③-part1 (기동 시 잔류 R_Flag ClearR + 로그): ✅ 해소 — SCOPE OUT.
-    양층 C2 StartupClear(PlcGateway.cs:710-729 — R 영역 D2/D3·R_Flag 비트 clear+로그). 실증
-    StartupClearTests VS1 + HandshakeResidueTests S3.
-- D② (CFlagTimeout 단독 결정적 테스트 부재): ⛳ 유효 — IN SCOPE. 현 D5(E2EGroupCD)는
-    `CFLAG_TIMEOUT || RFLAG_TIMEOUT` 택일이라 C_Flag 무한대기 회귀 통과.
-- D④ (IF-10 RecordDeposit false 3원인 '멱등 OK' 합류): ⛳ 유효 — IN SCOPE. RecordDeposit bool 반환
-    (DbRepositories.cs:478) 3원인이 RcsController.cs:249-253 '멱등 OK' 합류.
-- D③-part2 (journal.CreateSent 투입 직후로): ❓ 유효하나 저우선·설계 긴장 → Open Question(기본 SCOPE OUT).
+════════════════════════════════════════════════════════════════════
+## ★ RE-TRIAGE 결과 (현재 코드·문서 직접 판정)
+════════════════════════════════════════════════════════════════════
+SCOPE OUT — 정정 확인(Verification 재확인만):
+- ② README stale → 해소(README.md:19-20 IF-08=푸시·폐지 폴링 명시·:8/:21 RTU/TCP·:55/:92 운영 SQL Server/개발 SQLite·:93 17테이블).
+- ③ master_spec §05 → **master_spec.html은 해소**(:211/216/220 타입 분기·note interface_kr §6 정합).
+- ④ appsettings.Development.json 주석 → 해소(:2 "launchSettings 부재로 기본=Production" 정확).
 
-────────────────────────────────────────────────────────────────────────────
-- Goal:
-  이미 해소된 D①·D③-part1을 회귀 없이 보존한 채 남은 견고화 2건을 닫는다.
-  (1) D② — C_Flag 무한대기 회귀를 결정적으로 잡는 CFlagTimeout '단독' 단언 테스트 추가
-      (현 유일 타임아웃 E2E는 CFLAG||RFLAG 택일이라 RFLAG만으로 통과).
-  (2) D④ — IF-10 RecordDeposit 실패 3원인(진짜중복 / DENIED재보고 / 미존재chuteNo·무피스)이
-      전부 bool false→'멱등 OK' INFO로 합류해 오도하는 것을, 원인별 분리(enum)+원인별 로그
-      (WARN/alarm 후보)로 닫고 미검증 2분기 '현동작 고정' 테스트 추가.
-  전 작업은 200-OK 멱등 응답 시맨틱 + 기존 성공/불일치/타임아웃/OFFLINE/잔류/복귀 전 시나리오
-  바이트 보존하는 '동작 보존 리팩터 + 관측성/커버리지 강화'. 핸드셰이크 제어 흐름 무변경.
+STILL VALID (IN SCOPE):
+- ③-잔여: **docs/wcs_3ds_unified_sequence.html:194-196** 무조건 "FULL·PAUSED는 NG"(타입 분기 미반영·canonical 스펙 소스·코드/master_spec §05/interface_kr §6와 충돌).
+- ⑤: **Dev 시드 chuteNo 미스매치 — 설정/시드 결함**(문서 아님). 자동-오염 벡터는 CLOSED(DbSeeder 명시 게이트). 근본 잔존: DbSeeder.cs:56-68 SORTER_3D chuteNo=30 ↔ appsettings.json:38 Sorters[0].ChuteNo=1 → 명시 SeedOnStartup=true 기동 시 SorterRegistry fail-loud. (feedback-archive:564·todo:18 추적.)
+- ⑥: TASKS.md:41 "16테이블"(→17)·:34-38 M3 폐지 IF-08 폴링 모델 / WcsDbContext.cs:7 "16테이블"(내부 :44/:48/:698은 17).
 
-────────────────────────────────────────────────────────────────────────────
-- Implementation Scope (Generator — WHAT):
-  [D② — CFlagTimeout 결정적 단언] (테스트 중심·프로덕션 변경 최소/0)
-  · 오케스트레이터 단위: C_Flag=1 잔류(미소비) 상태 → ExecuteAsync → Outcome==HandshakeOutcome.
-    CFlagTimeout '단독' 단언(택일 아님). 경과 ≤ CFlagTimeoutMs+ε(무한대기 배제). 타임아웃 설정 주입(#7).
-  · API/영속화: IF-10 유발 핸드셰이크 CFlagTimeout → alarm code "CFLAG_TIMEOUT" 단독 +
-    sorter_command status=TIMEOUT / piece status=TIMEOUT 현동작 고정. (재시도/포기 '정책'은 SPEC §7-B 미확정·무변경.)
-  [D④ — RecordDeposit 원인 분리 + 원인별 로그 + 현동작 고정 테스트]
-  · IDepositRecorder.RecordDeposit 반환 bool→'원인 구분 결과 타입'(최소: 신규기록/진짜중복/
-    DENIED재보고/미존재chuteNo·무피스). enum명·배치·시그니처는 Generator 결정(HOW). 판정은 DB I/O 의존
-    → I/O 계층(Repositories)에 둔다(Wcs.Core 순수 #8 침범 금지).
-  · RcsController IF-10 원인별 로깅: 진짜중복→현행 '멱등 OK'(INFO) 유지, DENIED재보고→WARN(+alarm 후보),
-    미존재chuteNo·무피스→WARN. 전 케이스 여전히 200 OK(응답 보존·정책 변경 아님).
-  · '현동작 고정' 테스트: (a) DENIED piece 재보고→200 OK·DENIED 불변·piece_event 무증가·DENIED WARN.
-    (b) 미존재 chuteNo·무피스→200 OK·piece 0·NoDestination WARN. (c) 정상 신규→신규기록·트리거 정상 /
-    같은 pId 재보고→진짜중복·'멱등 OK' 유지(회귀).
-  [D③-part2 — Open Question 대기(기본 SCOPE OUT)] 채택 시에만 sorter_command SENT 행 내구화.
-  [공통 회귀·불변식 보존] #1(단일 쓰기 큐)·#4(Ready 의미)·#7(타임아웃 설정)·#8(Wcs.Core 순수) 전부 보존.
-    HandshakeOrchestrator 제어 흐름(arming·안착지연·C_Flag 대기·R 폴·복귀 대기·ClearR) D②에서 무변경(관측만).
-    D①/D③-part1 회귀: HandshakeResidueTests(S1~S6·S5b)·StartupClearTests(VS1~VS3b) 전건 GREEN 유지.
+ORCHESTRATOR-ONLY (Generator 편집 불가·안전규칙 "modify CLAUDE.md 금지" → main 직접):
+- ① CLAUDE.md **대부분 정정됨**(L43 MVC·IF-05/09/10·IF-08 푸시·L33 17테이블·L66 Serilog 완료 ✓). 잔여: L35 "§6 투입 가부 표=판정 스펙"(→§05 IF-05 사유 표·§06 IF-08 푸시)·솔루션 구조에 Wcs.Migrations.SqlServer/Sqlite 미표기·(선택)L46 M0 "RED 정상" 잔재.
 
-- SCOPE OUT (해소 확인·착수 금지·회귀 보존만):
-  · D①(arming 해소)·D③-part1(StartupClear 해소) — 위 증거. · F1b 동시 IF-10 직렬화(별개 근본원인·todo:127).
-  · 오더 완료/인덱스/동시 IF-05(묶음 C/기타) — 본 계약 밖.
+════════════════════════════════════════════════════════════════════
+## Goal
+묶음 E 잔여 유효만 정정해 "문서/설정 = 실제 코드 동작" 단일 진실 회복: (1) canonical HTML FULL/PAUSED stale 제거(③-잔여), (2) Dev 시드 chuteNo↔Sorters 정렬로 명시 dev 시드 기동 복원(⑤·회귀 0), (3) TASKS.md·WcsDbContext 주석 정정(⑥). 각 정정은 코드/설정 실제 동작과 **정확 일치**(over-claim·재-stale·새 규칙 도입 금지). ① CLAUDE.md 잔여는 main이 별도 수행(Verification 포함·구현자=main).
 
-────────────────────────────────────────────────────────────────────────────
-- Detected Project Type: Backend/API
-  (변경 표면 100% 서버측 C#: HandshakeOrchestrator·RcsController·DbRepositories(IDepositRecorder)·
-   xUnit+실-Sim. 브라우저 대면 파일 0 변경. 레포에 frontend/ 존재하나 본 스프린트 미변경 → operative 타입
-   Backend/API. 필수 검증=자동화 테스트 실행.)
+## Implementation Scope (Generator — CLAUDE.md 제외·③-잔여·⑤·⑥만)
+- **E-③** docs/wcs_3ds_unified_sequence.html:194-196 — 무조건 "FULL·PAUSED NG"를 타입 분기로 정정(슈트 FULL/PAUSED=IF-05 OK·보내고 대기·readiness는 IF-08 푸시 / 3D 소터만 PAUSED·셀만재 NG). 이미 정합된 master_spec §05·interface_kr §6·실코드(RcsController.QueryDestination)와 표현·의미 일치. 확정4 범위 내·새 규칙/수치 금지. HTML well-formedness 보존(태그 닫힘 대조).
+- **E-⑤** Dev 시드↔Sorters 단일 진실 정렬(설정/시드·코드 로직 무변경) — 명시 dev 시드가 fail-loud 없이 기동되게. 방식은 Q1 확정. 부수: DbSeeder 주석·appsettings 주석 정합. ★ **회귀 0(#7·#8)**: chuteNo=30 전제 자산(DbSeeder 의존 테스트·seed-field-*.sql·0701-CELL 검증) blast radius 열거+전 테스트 GREEN. 넓은 파급이면 최소-침습 대안.
+- **E-⑥** TASKS.md:41 16→17·:34-38 M3 IF-08 폴링→현행 푸시 모델(Q4)·WcsDbContext.cs:7 16→17(내부 정합·임의 수치 금지).
 
-- Verification Scenarios (Backend/API):
-  · Endpoints touched: POST /api/v1/deposit-report (IF-10) — RecordDeposit 원인 분리(D④)+CFlagTimeout(D②) 진입점.
-    신규 엔드포인트 없음(오케스트레이터 단위 테스트는 HTTP 없이 직접).
-  · Happy path: IF-10 정상 신규 → 200 {result:"OK"}·RecordDeposit=신규기록·piece RESERVED→DEPOSITED·
-    (3D)IF-11 트리거/(슈트)만재 집계. 동작 보존.
-  · Error/branch: 진짜중복→200·'멱등 OK'·미트리거 / DENIED재보고→200·DENIED 불변·piece_event 무증가·WARN /
-    미존재chuteNo·무피스→200·piece 0·WARN / CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독·TIMEOUT 매핑. (400은 D-4 기존 커버.)
-  · Sprint-specific (N=9):
-    VS-1 [D②단위] C_Flag 잔류→Outcome==CFlagTimeout 단독 + 경과 ≤ CFlagTimeoutMs+ε(설정 주입).
-    VS-2 [D②API] IF-10 CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독 + sorter_command/piece TIMEOUT 매핑.
-    VS-3 [D④정상/중복] 신규=신규기록·트리거 정상 / 재보고=진짜중복·'멱등 OK' 유지.
-    VS-4 [D④DENIED] DENIED 재보고→200·DENIED 불변·piece_event 무증가·DENIED WARN.
-    VS-5 [D④미존재] 미존재 chuteNo·무피스→200·piece 0·미존재 WARN.
-    VS-6 [D①회귀] HandshakeResidueTests S1/S2/S3 GREEN(arming 훼손 0·허위 MISMATCH 0).
-    VS-7 [회귀] 핸드셰이크 전 시나리오 GREEN(성공/RSeqMismatch/RFlagTimeout/OFFLINE/잔류/복귀·StartupClear).
-    VS-8 [flake 배제] 실-Sim 통합 신규/기존 다회 반복 결정적 GREEN(RSeqMismatch/타이밍 flake 0·신규 테스트 견고화).
-    VS-9 [D③-part2 조건부] 채택 시에만 journal.CreateSent 투입 직후 SENT 행 내구 단언. 미채택 N/A.
+## Orchestrator(main) Scope — ① CLAUDE.md (Generator 금지·Verification 포함)
+- L35 §6 포인터→"§05 IF-05 사유 표(판정)·§06 IF-08 푸시". 솔루션 구조에 Wcs.Migrations.SqlServer/Sqlite 추가. (선택)L46 정리. 기정정 L43/L33/L66 유지 확인.
 
-────────────────────────────────────────────────────────────────────────────
-- Evaluation Criteria (가중): API Design(원인 명료 구분·200 멱등 보존·alarm/상태 일관·로그 정직 fail-loud) ★★★ /
-  Architecture(원인 판정 I/O 계층·Wcs.Core 순수 #8·핸드셰이크 흐름 무변경 additive 테스트) ★★★ /
-  Craft(결정적 타임아웃 ±ε·설정 주입 #7·실-Sim flake 방어·엣지 처리·멱등 무결) ★★ /
-  Functionality(회귀 0·데이터 무결·#1/#4 보존) ★★.
+## Parallel Modules: N/A (single). ## Evaluation Dimensions: functional/accuracy only(단일·⑤ 회귀0은 이 축 내 게이트).
+## Detected Project Type: Full-stack (단 본 스프린트 프론트 무접촉·API 런타임 무변경 — 문서+백엔드 시드/설정).
 
-- Completion Conditions (AND):
-  1. 전체 dotnet test GREEN·회귀 0. 2. D② VS-1·VS-2 신규 GREEN + CFlagTimeout '단독' 단언(Evaluator 독립 재실행).
-  3. D④ VS-3·VS-4·VS-5 신규 GREEN·RecordDeposit 원인 구분 타입·컨트롤러 원인별 로그·200 멱등 불변.
-  4. D①/D③-part1 회귀 보존(HandshakeResidueTests·StartupClearTests GREEN). 5. flake 배제 fresh 출력 인용(허위 MISMATCH/타이밍 0).
-  6. 빌드 경고 증가 0·#1/#4/#7/#8 위반 0. 7. 정책 미확정(DENIED 재보고·CFlag 재시도)은 SPEC §7-B 등재만.
+## Verification Scenarios
+- Web/UI: N/A(frontend/wwwroot 무접촉·사유 명시).
+- Backend/API(시드/설정 부트스트랩 + 주석 대조):
+  · S1[⑤] DbSeeder SORTER_3D chuteNo == appsettings Sorters[].ChuteNo(단일 진실) 코드/설정 대조.
+  · S2[⑤] 명시 SeedOnStartup=true + dev Provider/ConnectionStrings 오버라이드 콜드스타트 시 SORTER_3D가 매칭 Sorters[]로 SorterRegistry fail-loud 없이 provision.
+  · S3[③] unified_sequence.html:194-196 정정문 ↔ 실코드(슈트 full/paused OK·소터 PAUSED·셀만재 NG)·master_spec §05·interface_kr §6 일치. docs/*.html 무조건-NG 잔존 0 재스캔.
+  · S4[⑥] TASKS.md 테이블수==ERD 17·IF-08 폴링 오인 소지 제거.
+  · S5[⑥] WcsDbContext.cs 주석 테이블수 ERD 17·내부 L44/L48/L698 정합.
+  · S6[①·구현자=main] CLAUDE.md L35 포인터 §05/§06 정합·솔루션 구조 Migrations 2종·기정정 L43/L33/L66 유지.
+- E2E(2+ 계층): E1[⑤] appsettings(Provider/ConnectionStrings/Sorters)→DbInitializer 시드(SORTER_3D)→SorterRegistryFactory 매칭→app 기동. 정정 전 fail-loud→정정 후 완주. 회귀 게이트=DbSeeder 의존 테스트+전체 dotnet test GREEN.
 
-────────────────────────────────────────────────────────────────────────────
-- Parallel Modules: N/A (single module·핸드셰이크 코어 인접 회귀 위험→직렬 1/1/1·fan-out 금지).
-- Evaluation Dimensions: functional, concurrency/timing (2개·병렬 Evaluator 풀).
-  · functional: D④ 원인 분리·IF-10 멱등 시맨틱·현동작 고정·데이터 무결·로그 정직성.
-  · concurrency/timing: D② CFlagTimeout 결정성(±ε·무한대기 배제)·실-Sim 잔류/타이밍 회귀·flake 배제(다회)·arming 불변식 보존.
-  APPROVED = 두 차원 모두 PASS(AND).
+## Evaluation Criteria (가중)
+- 정확성 45%(정정문↔지상진실 1:1·over-claim/폐지모델/임의수치 0·③ 확정4 범위) · ⑤ 회귀 0 25%(blast radius 열거+전 테스트 GREEN·코드 로직 무변경) · 재-stale/일관성 15%(FULL/PAUSED·테이블수·IF-08 모델 전 문서 동일 진실·HTML well-formed) · 스코프 준수 15%(SCOPE OUT ②④·master_spec §05 무편집·Generator CLAUDE.md 무편집·①=main).
 
-────────────────────────────────────────────────────────────────────────────
-- Open Questions (★ 사용자 게이트 확정 2026-08-03):
-  1. [D③-part2] ✅ **SCOPE OUT**(이번 미포함). journal.CreateSent 현 위치(핸드셰이크 완료 후) 유지. 크래시 감사 앵커는
-     HS_C_SENT operation_log가 이미 커버. SPEC §7-B에 '수용된 갭(sorter_command SENT 행은 핸드셰이크 후 저널)'로 등재.
-     VS-9 = N/A.
-  2. [D④ 정책] ✅ **현동작 고정 + 원인별 WARN/alarm 로깅**. 원인 분리(enum)+원인별 로그(DENIED재보고·미존재→WARN,
-     진짜중복→INFO '멱등 OK' 유지). 200 멱등 응답·차단 동작 보존. **정책 전환(DENIED 재보고 alarm 승격 등)은 이번 미포함**
-     — SPEC §7-B 등재만. (alarm은 '후보' 수준 — Generator가 기존 IAlarmSink 재사용 여부 판단, 정책 변경 아님.)
-  3. [프로젝트 타입] ✅ Backend/API 확정(프론트 미변경).
+## Completion Conditions
+- ③-잔여: unified_sequence.html 타입 분기 정정·docs/*.html 무조건-NG 잔존 0·코드 대조 통과.
+- ⑤: DbSeeder chuteNo↔Sorters 단일 진실·S2/E1 성립·전체 테스트 GREEN(회귀 0)·코드 로직 무변경.
+- ⑥: TASKS.md·WcsDbContext 테이블수 17·IF-08 구모델 정정.
+- ①(main): L35 포인터·Migrations 표기·기정정 유지(Verification 통과).
+- dotnet build 성공·dotnet test 전건 GREEN(신규 경고 0).
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Endpoints touched, Happy path per endpoint, Error/branch cases per endpoint) + 9 sprint-specific(VS-1…VS-9). All slots filled: yes.
+## Open Questions (★ 사용자 게이트 확정 2026-08-03)
+Q1/Q2 [⑤] ✅ **appsettings.Development.json에 dev 전용 Sorters[] 항목(ChuteNo=30) 오버라이드 추가**(본 스프린트 포함·최소 침습·시드/테스트 자산 무변경·회귀 0). DbSeeder chuteNo 변경 안 함(30 유지). base appsettings Sorters(ChuteNo=1)도 무변경.
+Q3 [③] ✅ **unified_sequence.html:194-196 한정**(+docs/*.html 무조건-NG 잔존 0 재스캔으로 다른 곳 없음 확인).
+Q4 [⑥ M3] ✅ **"구 모델(당시 기록)" 주석 보존**(마일스톤 이력 정직성 — 재작성 대신 폐지 모델임을 명시해 IF-08 폴링 오인 방지).
+Q5 [① 처리] ✅ **CLAUDE.md 정정 = 오케스트레이터(main) 직접**(Generator 금지·안전규칙). Generator 완료 후 main이 편집→Evaluator S6 검증.
+
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 8 (Web/UI[N/A], Backend/API S1~S6, E2E E1). All slots filled: yes.
