@@ -1,50 +1,107 @@
-# Sprint Log — S-AUDIT-D-HANDSHAKE-HARDENING
+# Sprint Log — S-AUDIT-B-DEPLOY-HARDENING
 
-(Generator가 `## IMPLEMENTATION COMPLETE` + 변경 요약 + 테스트 결과 기록)
+(Generator가 `## IMPLEMENTATION COMPLETE` + 변경 요약 + 검증 결과 기록)
 
-## IMPLEMENTATION COMPLETE (Generator, 2026-08-03)
+## IMPLEMENTATION COMPLETE
 
-실작업 = **D② (CFlagTimeout 결정적 단독 단언)** + **D④ (RecordDeposit 원인 분리 + 원인별 로그 + 현동작 고정)**.
-동작 보존 리팩터 + 관측성/커버리지 강화. 핸드셰이크 제어 흐름 무변경. D①/D③-part1 회귀 보존. 스코프 밖(D①/D③ 코드·Wcs.Core·D③-part2) 무접촉.
+### 모듈 1 — 로그 위치 결정성 (Serilog 파일 sink 작업 디렉터리 고정)
 
-### 파일별 변경 요약
+**변경 파일**
+- `backend/src/Wcs.Api/Program.cs`
+  - using 추가: `Microsoft.Extensions.Hosting.WindowsServices`(WindowsServiceHelpers).
+  - `builder.Host.UseWindowsService()` 직후·`UseSerilog(...)` **이전**에 작업 디렉터리 고정 블록 삽입.
+    서비스 컨텍스트일 때만 `Directory.SetCurrentDirectory(AppContext.BaseDirectory)` 호출.
+  - 하단에 순수 헬퍼 `public static class ServiceHostingEnvironment` 추가
+    (`ResolveWorkingDirectoryOverride(bool isWindowsService, string baseDirectory)` → 서비스면 baseDirectory, 아니면 null).
+    OperationLogClassifier(기존 Program.cs 공개 정적 클래스·테스트 소비) 패턴과 동형.
+- `backend/tests/Wcs.Tests/ServiceHostingEnvironmentTests.cs` (신규)
+  - 게이트 실효 단위 검증(서비스=경로 반환 / 비서비스=null / baseDirectory echo). Fact 2 + Theory 3 = 5 케이스.
 
-**D④ — 프로덕션(WCS)**
-- `backend/src/Wcs.Api/Repositories/Repositories.cs` — `enum DepositRecordResult { NewRecord, Duplicate, DeniedReport, NoDestination }` 신설(I/O 계층 — Wcs.Core 순수 #8 침범 0). `IDepositRecorder.RecordDeposit` 반환 `bool → DepositRecordResult`.
-- `backend/src/Wcs.Api/Repositories/DbRepositories.cs` — `EfDepositRecorder.RecordDeposit` 6개 return을 원인별 매핑: 미존재chuteNo·무피스→`NoDestination`, 신규 직삽입/RESERVED→DEPOSITED 전이→`NewRecord`, 이미 DEPOSITED/CELL_ASSIGNED/LOADED→`Duplicate`, DENIED→`DeniedReport`, 유니크 위반 백스톱→`Duplicate`. 판정 로직·트랜잭션 경계 불변(반환 타입만 변경).
-- `backend/src/Wcs.Api/Controllers/RcsController.cs` — IF-10 `DepositReport`에서 `if (!isNewRecord)` 단일 '멱등 OK' 합류를 `switch(recordResult)` 원인별 분기로: `Duplicate`→현행 INFO '멱등 OK' 유지 / `DeniedReport`→`_log` WARN + operation_log `IF10_DENIED_REREPORT`(WARN) / `NoDestination`→`_log` WARN + operation_log `IF10_NO_DESTINATION`(WARN). **전 케이스 200 OK·차단 동작 바이트 보존**('멱등 OK' 위장만 제거). `NewRecord`만 후속(FULL 집계·IF-11 트리거) 진행 — 기존 경로 불변.
+**작업 디렉터리 고정 방식**
+- 게이트: `WindowsServiceHelpers.IsWindowsService()`(Q2). 서비스 컨텍스트일 때만 CWD를 exe 인접
+  `AppContext.BaseDirectory`(=배포 폴더)로 고정(Q1). dev `dotnet run`·콘솔·WebApplicationFactory 테스트
+  호스트는 IsWindowsService=false → CWD 미변경(회귀 0).
+- 결과: Serilog 파일 sink의 상대 `path`("logs/wcs-.log", appsettings 값 **유지**)가 sink 생성 시점(builder.Build())의
+  CWD 기준으로 해석되므로, 서비스에서 `<배포폴더>\logs\wcs-*.log`로 결정적 생성. sc.exe 기본 CWD(System32\logs) 유입 종료.
+- #7 준수: 리터럴 경로 하드코딩 0 — 실행 코드는 `AppContext.BaseDirectory` 파생값만 사용(주석의 `C:\...`·`System32`는
+  배경 설명일 뿐 로직 아님). appsettings `Serilog:WriteTo:File:path`는 상대값 그대로.
+- 무회귀 근거: 정적 서빙(WebRootPath=ContentRoot/wwwroot — UseWindowsService가 ContentRoot=BaseDirectory로 이미 고정,
+  CWD와 무관)·전용 추적 로그(TraceLog `D:\Rcs3dsInterlockingWcsLogs` 절대경로)·operation_log/plc_event(DB) 전부 무영향.
 
-**D② — 테스트 상대역(Sim3ds test-only helper, WCS 핸드셰이크 무변경)**
-- `backend/src/Wcs.Sim3ds/SimSlave.cs` — `SetCResidue(int cCellNo, int cSeq)` test-only 헬퍼 추가(기존 `SetRResidue`와 동형: C 영역 + C_Flag=1 직접 세팅). 정상 런타임 동작 불변.
-- `backend/src/Wcs.Sim3ds/SimServer.cs` — 파사드 `SetCResidue` 위임 노출.
+**문서 갱신 (DEPLOY-ONPREM.md)**
+- §9-B step3: 로그 확인 경로를 `C:\WINDOWS\System32\logs\wcs-*.log` → `C:\BOWOO\Wcs.Api\logs\wcs-*.log`(=`<DEPLOY_DIR>\logs`)로
+  갱신 + 서비스 컨텍스트 CWD 고정 동작 설명 + "과거 System32" 히스토리 각주.
+- §10 트러블슈팅: sc.exe 등록 서비스 앱 로그 위치를 System32\logs → `<DEPLOY_DIR>\logs`로 정정.
 
-**테스트**
-- `backend/tests/Wcs.Tests/CFlagTimeoutTests.cs` (신규) — **VS-1**: 실 Sim + PlcPollingService + HandshakeOrchestrator 하니스. StartupClearCompleted 배리어 후 `InjectNoResponse`(상태기계 정지=C 미소비) + `SetCResidue`(C_Flag=1) 심고 `ExecuteAsync` → `Outcome==CFlagTimeout` **단독** + 경과 [CFlagTimeoutMs−100, CFlagTimeoutMs+2500]ms(무한대기 배제) + `HS_C_SENT`·`CELL_ASSIGN` 부재(C 미기입) + `HS_CFLAG_TIMEOUT` 발화·`HS_R_RECV`/`HS_TIMEOUT` 부재. CFlagTimeoutMs=500 설정 주입(#7). 포트 경쟁 재시도 견고화.
-- `backend/tests/Wcs.Tests/E2E/E2EGroupCD_AlignHandshakeTests.cs` — **VS-2** `D5b_CFlagTimeout_Deterministic_CflagAlarmAlone_TimeoutMapping` 추가: IF-10 유발 핸드셰이크 CFlagTimeout → alarm `CFLAG_TIMEOUT` **단독**(RFLAG_TIMEOUT 부재) + sorter_command status=TIMEOUT + piece status=TIMEOUT 현동작 고정. `StartAsync` 헬퍼에 `cFlagTimeoutMs` 파라미터 추가(D5b는 500 주입). WCS 스냅샷 CFlag=1 **4연속 안정**(UntilExactAsync) 대기로 StartupClear 잔여 창 배제.
-- `backend/tests/Wcs.Tests/E2E/E2EInfrastructure.cs` — `E2EWebApplicationFactory`에 `cFlagTimeoutMs=2000`(기본=기존 하드코딩값·회귀 0) 생성자 파라미터 추가 → `Timing:CFlagTimeoutMs` 결선.
-- `backend/tests/Wcs.Tests/DepositRecorderCauseTests.cs` (신규) — **VS-3(원인 판정)**: EfDepositRecorder를 in-memory SQLite로 격리, 5원인 단위 단언(NewRecord 전이/직삽입·Duplicate·DeniedReport(불변+piece_event 무증가)·NoDestination(piece 0)).
-- `backend/tests/Wcs.Tests/ApiIntegrationTests.cs` — `FakeModbusWebApplicationFactory`에 `CapturingLogger<RcsController> RcsLog` 등록(원인별 로그 캡처). **VS-4**(DENIED 재보고→200·DENIED 불변·piece_event 0·WARN·멱등OK 위장 제거) / **VS-5**(미존재 chuteNo·무피스→200·piece 0·WARN) / **VS-3**(신규→200·DEPOSITED·트리거 분기 도달·WARN/멱등OK 부재 / 재보고→200·'멱등 OK' INFO 유지) 추가.
-- `backend/tests/Wcs.Tests/DataIntegrityAuditTests.cs` — RecordDeposit 호출부 `bool isNew → DepositRecordResult` 갱신(`Assert.Equal(NewRecord, ...)`).
+### 모듈 2 — install-service.ps1 견고화
 
-**문서**
-- `docs/SPEC.md §7-B` — (1) C_Flag 대기 타임아웃: 무한대기 배제 결정적 회귀 가드 등재(재시도/포기 정책은 여전히 미정) (2) IF-10 DENIED 재보고·미존재 chuteNo 처리: 현동작 확정·고정(정책 전환 미포함) (3) sorter_command SENT 행 내구화 시점 = 수용된 갭(D③-part2 SCOPE OUT — HS_C_SENT operation_log가 감사 앵커 커버).
+**변경 파일**
+- `scripts/install-service.ps1` (전면 개정, AST 파싱 통과 확인)
 
-### enum 설계 (HOW 결정)
-- 명칭·배치: `Wcs.Api.DepositRecordResult`(Repositories.cs — I/O 계층). Wcs.Core 순수 #8 보존(판정이 DB 상태 의존이라 Core에 두지 않음).
-- 값: 최소 4원인 = `NewRecord`(유일 성공·후속 트리거 진행) / `Duplicate`(진짜 중복·'멱등 OK' INFO) / `DeniedReport`(DENIED 재보고·WARN) / `NoDestination`(미존재 chuteNo·무피스·WARN). 시그니처: `DepositRecordResult RecordDeposit(int, string, int, int, int?, string?)`.
+**스크립트 변경**
+- 비밀번호(SecureString): `-Password` 파라미터 추가. 계정이 내장/가상 서비스 계정
+  (LocalSystem·LocalService·NetworkService·`NT SERVICE\*`)이 **아니면** 필수 — 미제공 시 서비스 생성 전 사전 요구·중단
+  (sc start 1069 로그온 실패 예방). `sc.exe create ... obj= <계정> password= <값>` 전달(평문은 sc.exe 인자로만 순간 사용).
+- SQL 선기동 의존: `-SqlServiceName`(기본값 **MSSQLSERVER**·Q4) → `sc.exe create ... depend= <서비스명>`. 빈 문자열이면 생략.
+- 설치 전 사전 SQL 도달성 점검: `Test-SqlReachable`(Invoke-Sqlcmd 우선·sqlcmd fallback)로 대상 DB에 `SELECT 1`.
+  실패 시 **서비스 미생성·중단**(5초 무한 크래시 루프 서비스 미등록). 점검 도구 부재 시 `-SkipSqlCheck`로만 강행.
+  대상 파라미터화: `-SqlServer`(기본 localhost)·`-SqlDatabase`(기본 Rcs3dsInterlockingWcs)·SQL 인증용 `-SqlUser`/`-SqlPassword`.
+- 헤더/주석 정정: (구 :14-15) 자동 Migrate 단언을 "계정 DB 권한(db_owner)·SQL 기동 시에만 성공, 아니면 크래시 루프"로 교정 +
+  사전 점검/depend= 근거 명시. (구 :18) "운영 README(P4)" → `docs/DEPLOY-ONPREM.md`(§5·§9-B·§10) 참조로 교체.
+  .DESCRIPTION에 현장 표준=수동 sc.exe(§9-B)/NSSM(§5-3)·이 스크립트=대안임을 명시. 기본 계정 LocalSystem 유지(Q5).
+- 완료 메시지에 depend= 안내 + "앱 로그: exe 인접 `<배포폴더>\logs\wcs-*.log`" 안내 추가(모듈 1과 정합).
 
-### alarm 판단 (사용자 게이트 D④)
-- DENIED 재보고·미존재를 alarm으로 **승격하지 않음**(정책 전환 미포함 — SPEC §7-B 등재만). 기존 `IAlarmSink` 재사용 안 함. 관측은 `_log` WARN + operation_log(WARN) 두 sink로만(현동작 고정·차단 동작 불변). CFlagTimeout의 `CFLAG_TIMEOUT` alarm은 기존 결선 그대로(변경 0).
+**문서 갱신 (DEPLOY-ONPREM.md §5-3 대안 블록)**
+- 대안(프로젝트 내장 스크립트) 블록에 depend=/사전 SQL 점검/비내장 계정 비밀번호/SQL 인증 점검 예시(PowerShell) 반영.
+- 이 스크립트=대안, 현장 표준=§9-B 수동 sc.exe 명시. 이 스크립트 등록 서비스도 앱 로그가 `<DEPLOY_DIR>\logs`(모듈 1)임을 명시.
 
-### 테스트 결과
-- **RED→GREEN**: 신규 테스트는 원인 분리(enum) 전 코드에선 컴파일/단언 불가(bool 합류) → 구현 후 GREEN. VS-1은 arming-only 시절엔 CFlag 무한대기로 hang(무한대기 배제 실증).
-- **신규 GREEN**: VS-1(CFlagTimeoutTests) 1 + VS-2(D5b) 1 + VS-3 원인판정 5(DepositRecorderCauseTests) + VS-3/4/5 컨트롤러 3 = **10건 신규 전건 GREEN**.
-- **baseline 회귀 보존**: HandshakeResidueTests(S1~S6·S5b) + StartupClearTests(VS1~VS3b) = **11건 GREEN**(arming·StartupClear 훼손 0·허위 MISMATCH 0). E2EGroupCD D3~D11 기존 GREEN.
-- **전체 `dotnet test backend/Wcs.sln`**: **534 통과 / 0 실패 / 0 건너뜀** — **3회 반복 전건 동일**(1m40s·1m40s·1m33s), teardown hang 0. 신규 실-Sim/타이밍 테스트(VS-1·VS-2·D④) **5회 반복 10/10 GREEN**(flake 0).
-- **빌드**: 솔루션 빌드 오류 0·신규 CS 경고 0(기존 NU1903 패키지 취약성 경고만 잔존).
-- **절대규칙**: #1(단일 쓰기 큐 — 핸드셰이크 EnqueueAsync 경로 무변경)·#4(Ready 의미 무변경)·#7(CFlagTimeoutMs·cFlagTimeoutMs 설정 주입)·#8(원인 판정 I/O 계층·Wcs.Core 무접촉) 위반 0.
+### SCOPE 준수
+- SCOPE OUT 무접촉 확인: 운영 README 신규 0·루트 README/CLAUDE.md/master_spec 0·base appsettings Trusted_Connection 변경 0·
+  기본 계정 하향 0·묶음 A 0. install-service.ps1 실패 복구 `restart/5000` 루프는 구현 스코프(항목 4~8) 밖이라 미변경.
+- `uninstall-service.ps1` 무접촉(변경 불요).
 
-## FIX ITER (Minor 1/2) — Generator, 2026-08-03
-- **Minor 1 (fail-loud default)**: `RcsController.cs` IF-10 `switch(recordResult)`에 `default:` 추가 — 향후 enum 비-신규 값이 로그 없이 200으로 조용히 빠지는 '위장유실' 재현 차단. 미매핑 원인을 `_log` WARN + operation_log `IF10_UNMAPPED_CAUSE`(WARN)로 fail-loud, 응답은 200 멱등 유지(IF-10 계약 보존). 현 4값 exhaustive라 런타임 무영향.
-- **Minor 2 (주석만)**: `DbRepositories.cs` 상태 전이 else 주석을 catch-all임을 정확히 반영하도록 정정(비정상 종단 상태 MISMATCH/TIMEOUT/CANCELLED도 이 else로 들어와 DEPOSITED로 '부활'→NewRecord = 선재 동작·이번 바이트 보존, 실 가드는 후속). **코드 로직 무변경**.
-- enum 매핑·핸드셰이크·동작·200 멱등 전부 불변. #7/#8 유지. 신규 CS 경고 0(B2cFacilityService CS8604만 선재).
+### 검증
+- `dotnet build backend/Wcs.sln -c Debug`: **오류 0**. 경고 13개 전부 **기존**(NU1903 SQLite CVE·B2cFacilityService.cs CS8604·
+  기존 테스트 xUnit2013) — 내 변경(Program.cs·신규 테스트 파일)에서 **신규 경고 0**.
+- `dotnet test backend/Wcs.sln --no-build`: **539 통과 / 0 실패 / 0 건너뜀**, 1m37s, teardown hang 0(프로세스 정상 종료).
+  신규 ServiceHostingEnvironmentTests 5 케이스 포함(단독 실행도 GREEN).
+- install-service.ps1: `[System.Management.Automation.Language.Parser]::ParseFile` **AST 파싱 오류 0**. 정적 로직 워크스루 완료
+  (내장 계정 화이트리스트·비밀번호 게이트·depend= 조건·SELECT 1 3분기(true/false/null) 정확).
+- #7: Program.cs 실행 코드 리터럴 경로 하드코딩 0(AppContext.BaseDirectory 파생만) — git diff 확인.
+- #8: `git diff --stat -- backend/src/Wcs.Core` **빈 diff**(Wcs.Core 무변경).
+- **로그 경로 실증 방법(Evaluator용)**: 순수 게이트를 단위 테스트로 실증(서비스=배포폴더 / 비서비스=null). dev `dotnet run`은
+  CWD=프로젝트라 갭 재현 불가하므로, 실 서비스 컨텍스트 재현이 필요하면 (a) `ServiceHostingEnvironment.ResolveWorkingDirectoryOverride(true, <baseDir>)`
+  결과로 SetCurrentDirectory 실효 확인, 또는 (b) 실제 sc.exe/Windows Service 기동 후 `<DEPLOY_DIR>\logs\wcs-*.log` 생성·System32\logs 유입 0 관측.
+
+### 변경 파일 요약
+- `backend/src/Wcs.Api/Program.cs` (모듈 1)
+- `backend/tests/Wcs.Tests/ServiceHostingEnvironmentTests.cs` (모듈 1·신규)
+- `scripts/install-service.ps1` (모듈 2)
+- `docs/DEPLOY-ONPREM.md` (모듈 1 §9-B/§10 · 모듈 2 §5-3)
+
+## FIX ITER (M1/m1/m5)
+
+코드리뷰(Step 4.5) 후 사용자 결정 = M1 + 값싼 m1·m5만 머지 전 견고화. 이 3건만 수정, 그 외 전부 불변
+(모듈 1 로그 게이트·depend=·사전점검 로직·문서 정합 무변경). C# 무변경(PS/MD만) — 539 테스트 무영향.
+
+**M1 (MAJOR·보안 — 자격증명 커맨드라인 leak 제거)** — `scripts/install-service.ps1`
+- 문제: 비내장 계정 password가 `sc.exe create ... password= <평문>` 으로 프로세스 커맨드라인(감사 4688·Sysmon·SIEM)에 평문 지속 기록.
+- 수정: 서비스 생성을 계정 종류로 분기. **비내장 계정 → `New-Service -Credential (PSCredential) -BinaryPathName -DisplayName -StartupType Automatic -DependsOn <SqlServiceName>`** — 자격증명을 SCM API로 전달(커맨드라인 미노출). 내장/가상 계정(무password) → 기존 `sc.exe create` 유지(원래 자격증명 없음). depend=(≡ -DependsOn)·start= auto(≡ -StartupType Automatic)·환경변수·설명·실패복구(공통 후처리 sc.exe description/failure) 동작·의미 전부 보존.
+- 잔여: sqlcmd fallback `-P <평문>`(도달 좁음·Invoke-Sqlcmd 우선이라 통상 미도달)에 커맨드라인 노출 경고 주석 추가(코드 동작 불변).
+- 검증: 생성 경로에 `password=` 토큰 잔존 0(정규식 확인)·New-Service 경로 존재 확인.
+
+**m1 (값쌈 — 내장 계정 별칭 화이트리스트 보강)** — `install-service.ps1`
+- `$builtinAccounts` 에 `NT AUTHORITY\SYSTEM`(LocalSystem 별칭)·`NT AUTHORITY\LOCAL SERVICE`·`NT AUTHORITY\NETWORK SERVICE`(표시명 공백형) 추가. 이 별칭들이 password 요구로 오거부되지 않음. (-contains 대소문자 무시.)
+
+**m5 (값쌈 — 빈 SecureString 거부)** — `install-service.ps1`
+- 비내장 계정 password 가드를 `($null -eq $Password) -or ($Password.Length -eq 0)` 로 확장 — 빈 SecureString 도 null과 동일하게 사전 거부(빈 password→sc start 1069 예방). `-or` 단락평가로 null-safe.
+
+**손대지 않음(sprint-feedback 등재 — 이번 스코프 밖)**: m2(SecureString zero-out)·m3(사전점검 앱DB 대상 정합)·m4(TLS). 모듈 1·depend=·사전점검·문서 정합 무변경.
+
+**문서**: `docs/DEPLOY-ONPREM.md` §5-3 대안 블록 계정 bullet에 New-Service(SCM API·커맨드라인 미노출)·`NT AUTHORITY\SYSTEM` 별칭·비어있지 않은 password 반영.
+
+### FIX ITER 검증
+- `install-service.ps1`: `[Parser]::ParseFile` **AST 파싱 오류 0**. 생성 경로 `password=` 토큰 0·New-Service 경로 확인.
+- `dotnet test backend/Wcs.sln --no-build`: **539 통과 / 0 실패**(clean 환경 2회 GREEN). C# 무변경이라 무영향 재확인.
+- ⚠ 중간 1회 `E2EGroupN_TraceLogTests.N1`(전용 파일 6이벤트 12s 대기) 타임아웃 1건 관측 → **기지(旣知) 타이밍 플레이크**로 귀속:
+  ① `--no-build` 동일 바이너리가 GREEN(539)→RED(538/1)→GREEN(539) — 코드 무관 외부 타이밍/워밍업. ② N1 단독 실행·full-suite 내에서는 통과, cold class-filter 재실행에서만 실패(콜드스타트/E2E 부하 민감). ③ 내 변경은 C# 경로 0(PS/MD, Program.cs 게이트는 테스트 호스트에서 IsWindowsService()==false로 no-op). 고아 Sim/포트 점검 결과 잔류 0. (교훈: s9-flake-under-e2e-load·e2e-parallel-load-surfaces-integration-flakes.)

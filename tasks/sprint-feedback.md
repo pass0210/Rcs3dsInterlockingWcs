@@ -1,31 +1,36 @@
-# Sprint Feedback — S-AUDIT-D-HANDSHAKE-HARDENING
+# Sprint Feedback — S-AUDIT-B-DEPLOY-HARDENING
 
 ## APPROVED (2026-08-03, iteration 1 · 2차원 Evaluator pool aggregate)
 
-전 차원 PASS (AND). 상세: tasks/sprint-feedback/functional.md · tasks/sprint-feedback/concurrency.md.
+전 차원 PASS (AND). 상세: tasks/sprint-feedback/functional.md · tasks/sprint-feedback/deploy-safety.md.
 
 ### 재triage 반영
-D①(R_Flag arming)·D③-part1(StartupClear)은 S-HANDSHAKE-RESIDUE/양층 C2에서 이미 해소 → SCOPE OUT(회귀 보존 R-확인). D③-part2(SENT 저널 시점)는 사용자 게이트 SCOPE OUT(SPEC §7-B '수용된 갭' 등재). 남은 유효 **D②·D④** 구현.
+③ 운영 README는 이번 세션 DEPLOY-ONPREM.md(12절) 정비로 이미 해소 → SCOPE OUT. 남은 유효 **①(로그 위치)·②(install-service.ps1)** 구현.
 
 ### 차원 1 — Functional: **PASS**
-- **D④ 원인 분리**: `DepositRecordResult{NewRecord,Duplicate,DeniedReport,NoDestination}` enum이 I/O 계층(Repositories.cs)·Wcs.Core git diff 0(#8). EfDepositRecorder 6 return 원인별 정확 매핑·트랜잭션 경계/branching 불변.
-- **IF-10 원인별 로그**: switch — Duplicate→INFO '멱등 OK'(현행) / DeniedReport→WARN+IF10_DENIED_REREPORT / NoDestination→WARN+IF10_NO_DESTINATION. 전 케이스 200 OK·NewRecord만 후속 트리거(조기 return 바이트 보존).
-- 현동작 고정 테스트 비공허(CapturingLogger 실메시지·고유 pId·DoesNotContain "멱등 OK"). 데이터 무결·정책 미변경(alarm 미승격). 회귀 0(534=524+10 산술 일치·PlcGateway/HandshakeOrchestrator diff 0·Sim3ds test-only). D④ 필터 9/9 GREEN.
-- **Minor(비차단·등재)**: RcsController IF-10 switch에 default 없음 — 현 4값 exhaustive라 결함 아니나 향후 enum 확장 시 무로그 200 fail-loud 사각. default throw/switch expression 권고.
+- 로그 경로 게이트: `ServiceHostingEnvironment.ResolveWorkingDirectoryOverride`(서비스→baseDir/비서비스→null) 정확·ServiceHostingEnvironmentTests 5 GREEN(비공허)·게이트 블록 Program.cs:41-46 = UseWindowsService 직후·UseSerilog 이전(위치/순서 정확).
+- install-service.ps1: 비내장계정 password 게이트(create 전 exit)·depend= MSSQLSERVER·Test-SqlReachable SELECT 1 3분기(null/false→미생성 중단·true→진행·-SkipSqlCheck 우회) 정확·AST 파싱 OK.
+- /health 무변경·회귀 0(539=534+5)·#7(리터럴 경로 0)·#8(Wcs.Core diff 0).
+- Minor(정보성): PS 화이트리스트가 `NT AUTHORITY\SYSTEM` 별칭 미인식→password 요구 가능(보수적 안전·sc.exe obj=는 LocalSystem이라 결함 아님).
 
-### 차원 2 — Concurrency/Timing: **PASS**
-- **D② VS-1**(오케스트레이터 단위 재실행): Outcome=CFlagTimeout **단독**·elapsed 508ms(CFlagTimeoutMs=500 주입·ε=8ms·무한대기 배제)·Online=True(진짜 C_Flag 타임아웃)·HS_C_SENT/CELL_ASSIGN 부재. 하니스 RFlagTimeoutMs=3000이라 fallthrough면 ~3500>상한 → 이중 배제.
-- **D② VS-2**(D5b·IF-10 유발): alarm=CFLAG_TIMEOUT 단독(RFLAG_TIMEOUT 부재)·sorter_command/piece=TIMEOUT. 기존 D5 CFLAG||RFLAG 택일 모호성 실제 제거.
-- **flake 배제**: 타이밍+arming 회귀 13테스트(CFlagTimeout·HandshakeResidue S1~S6/S5b·StartupClear·D5b) **6회 반복 13/13×6 GREEN**·타이밍 flake 0·teardown hang 0.
-- **arming 불변식 보존**: HandshakeOrchestrator.cs·PlcGateway.cs diff **0바이트**(제어흐름·arming 무변경). #1/#4 diff 0·#7 CFlagTimeoutMs appsettings 실키 주입.
+### 차원 2 — Deployment-safety & Regression: **PASS**
+- 로그 위치 결정성: (a) 코드흐름 확정 — SetCurrentDirectory(Program.cs:41-46)가 UseWindowsService 뒤·builder.Build()(File sink 생성) 앞 → 상대 "logs/"가 배포폴더 해석·조기 부트스트랩 로거 없음. (b) 순수 게이트 5 GREEN. (c) **동등 실-서비스 재현**(동일 Serilog.Sinks.File 6.0.0+동일 path+byte-identical 게이트 폐기 프로젝트): 서비스=배포폴더/logs 1건·System32 0·비서비스=CWD 불변. System32\logs 유입 종료 실증+논리 확정.
+- 문서-코드 정합: DEPLOY-ONPREM.md §9-B step3·§10·§5-3 전부 정합(라인 대조·격차 0).
+- 회귀 0: 539 GREEN·빌드 신규 경고 0·TraceLog D:\절대·정적서빙 ContentRoot=BaseDirectory(CWD 무관)·#8 Wcs.Core diff 0.
+- 크래시루프 예방: 사전 SQL 점검(:149-169)이 sc.exe create(:171-190) 앞→실패 시 미생성. password 게이트 create 이전.
+- SCOPE: README/CLAUDE.md/master_spec/appsettings 무접촉·기본 계정 LocalSystem 유지·in-scope 4파일뿐.
 
-**APPROVED** — Step 4.5 코드리뷰 진행 가능. 커밋 스코프: Repositories.cs·DbRepositories.cs·RcsController.cs·SimSlave.cs·SimServer.cs·docs/SPEC.md + 신규/수정 테스트(CFlagTimeoutTests·DepositRecorderCauseTests·E2EGroupCD·E2EInfrastructure·ApiIntegrationTests·DataIntegrityAuditTests) + 프로세스 파일.
+**APPROVED** — Step 4.5 코드리뷰 진행 가능. 커밋 스코프: Program.cs·ServiceHostingEnvironmentTests.cs(신규)·scripts/install-service.ps1·docs/DEPLOY-ONPREM.md + 프로세스 파일.
 
-## Step 4.5 코드리뷰 (2026-08-03) — Critical 0 · Major 0 · Minor 2 → 하드닝 후 APPROVED 유지
-enum 매핑 6→4 정확·동작 바이트 보존·SetCResidue test-only 격리·SPEC 정확·#7/#8 clean.
-### FIX ITER (Minor 1/2 하드닝 — 사용자 결정·Functional 재검증 PASS 유지)
-- **Minor 1 (fail-loud default)**: RcsController IF-10 switch에 `default:` 추가 — 미매핑 원인 WARN(_log + operation_log `IF10_UNMAPPED_CAUSE`)+200 유지. 현 4값 exhaustive라 런타임 무영향(default 도달 불가)·무음 사각 제거(향후 enum 확장 대비). S-IF08 M4 동형.
-- **Minor 2 (주석만)**: DbRepositories 상태전이 else 주석을 catch-all로 정정(executable byte-identical·로직 diff 0).
-- 재검증: dotnet test **534 GREEN**(fresh 재실행·teardown hang 0)·Wcs.Core/PlcGateway/HandshakeOrchestrator diff 0·신규 경고 0. concurrency/timing 차원 무영향(핸드셰이크 무접촉).
+## Step 4.5 코드리뷰 (2026-08-03) — Critical 0 · MAJOR 1 · Minor 5 → 하드닝 후 APPROVED 유지
+모듈1(CWD 게이트) 견고·부작용 0·인젝션 안전·문서 정확. 지적은 PowerShell 자격증명 처리 집중.
+### FIX ITER (M1 보안 + m1·m5 하드닝 — 사용자 결정·Deploy-safety 재검증 PASS 유지)
+- **M1 (MAJOR·보안)**: `sc.exe create ... password= <평문>` 커맨드라인 leak(감사4688/SIEM 평문 영속) 제거 → 비내장 계정 **New-Service -Credential(PSCredential·SCM API)**·내장/가상은 sc.exe 유지. 생성 경로 `password=` 토큰 0(유일 매치=금지 설명 주석). depend=≡-DependsOn·start=auto≡StartupType·후처리(description/failure/env) 동등.
+- **m1**: 내장 화이트리스트에 NT AUTHORITY\SYSTEM·LOCAL SERVICE·NETWORK SERVICE 추가(별칭 오거부 제거).
+- **m5**: password 가드 `($null -eq $Password) -or ($Password.Length -eq 0)`(빈 SecureString 거부).
+- 재검증: AST 파싱 0·dotnet test **539 GREEN**(독립 재실행·N1 타임아웃 미재현=기지 flake 귀속)·Wcs.Core diff 0·모듈1/depend=/사전점검 무변경·§5-3 문서 정합.
 ### 잔여 Minor (등재 — 다음 스프린트/후속)
-- **CR-M2(선재)**: RecordDeposit 상태전이 catch-all이 비정상 종단(MISMATCH/TIMEOUT/CANCELLED) piece도 DEPOSITED로 부활시켜 NewRecord 성공 처리 — 선재 동작(이번 바이트 보존). 명시 가드는 후속(감사 별개 항목). 관련: audit-20260701 §RecordDeposit destId 미교차검증.
+- **m2**: install-service.ps1 SecureString 평문이 GC heap에 잔류(zero-out 불가·Marshal BSTR 결정적 wipe 검토·admin 설치라 수용).
+- **m3**: 사전 SQL 점검이 앱DB(-SqlDatabase) 대상 → 신선 호스트(DB 미존재·dbcreator 계정)에서 EF MigrateAsync가 만들 DB를 false abort. master 프로브 또는 "대상 DB 선존재 필요" 문서화 검토.
+- **m4**: 사전점검 TrustServerCertificate=$true(-C) — localhost 기본은 무해, 원격 -SqlServer+SQL인증 시 미검증 채널 자격증명 프로브(MITM). 원격 시 한 줄 caveat.
+- (정보성) PS 화이트리스트 별칭은 m1로 해소. FRONTEND.md:60 System32 언급은 CWD 문제 배경 설명(정확·묶음 E 문서 정리 대상).

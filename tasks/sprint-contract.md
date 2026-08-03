@@ -1,110 +1,93 @@
-[Sprint Contract] — S-AUDIT-D-HANDSHAKE-HARDENING
-(2026-07-01 전체 감사 묶음 D — 핸드셰이크 견고화, 운영 투입 전)
-Base: 최신 develop = 459aaac. feature 브랜치 feat/audit-d-handshake-hardening.
+[Sprint Contract]
+Sprint ID: S-AUDIT-B-DEPLOY-HARDENING
+Title: 2026-07-01 전체 감사 묶음 B — 운영(Windows Service) 배포 전 차단 (재triage 후)
+Base: 최신 develop = 99d8038. feature 브랜치 feat/audit-b-deploy-hardening.
 
 ════════════════════════════════════════════════════════════════════════════
-RE-TRIAGE RESULT (필수 재triage — 현재 코드 직접 판정)
+## ★ RE-TRIAGE 결과 (현재 코드·문서 직접 판정)
 ════════════════════════════════════════════════════════════════════════════
-- D① (R_Flag 레벨읽기 → 허위 RSEQ_MISMATCH·off-by-one 자가지속): ✅ 해소 — SCOPE OUT.
-    S-HANDSHAKE-RESIDUE의 arming(ArmRFlagZeroAsync HandshakeOrchestrator.cs:260-322 — C 기입 전
-    RFlag==0 선관찰=에지 등가). 실증 HandshakeResidueTests S1/S2/S3(실 SimServer·back-to-back 잔류
-    허위 RSEQ_MISMATCH 0·DoesNotContain HS_RSEQ_MISMATCH). 감사 A-1 권고(a) 그대로 구현.
-- D③-part1 (기동 시 잔류 R_Flag ClearR + 로그): ✅ 해소 — SCOPE OUT.
-    양층 C2 StartupClear(PlcGateway.cs:710-729 — R 영역 D2/D3·R_Flag 비트 clear+로그). 실증
-    StartupClearTests VS1 + HandshakeResidueTests S3.
-- D② (CFlagTimeout 단독 결정적 테스트 부재): ⛳ 유효 — IN SCOPE. 현 D5(E2EGroupCD)는
-    `CFLAG_TIMEOUT || RFLAG_TIMEOUT` 택일이라 C_Flag 무한대기 회귀 통과.
-- D④ (IF-10 RecordDeposit false 3원인 '멱등 OK' 합류): ⛳ 유효 — IN SCOPE. RecordDeposit bool 반환
-    (DbRepositories.cs:478) 3원인이 RcsController.cs:249-253 '멱등 OK' 합류.
-- D③-part2 (journal.CreateSent 투입 직후로): ❓ 유효하나 저우선·설계 긴장 → Open Question(기본 SCOPE OUT).
+- ① Serilog 상대경로: **유효(미해소)** — IN SCOPE(주 작업). appsettings.json:24 `logs/wcs-.log`·
+  appsettings.Development.json:28 `logs/wcs-dev-.log`(둘 다 상대)·Program.cs SetCurrentDirectory 0건.
+  sc.exe 서비스 로그가 System32\logs로 실측(DEPLOY-ONPREM.md §9-B/§10) — 조용한 유실은 아니나
+  위치 예측 불가·CWD 의존·제한계정 취약. (rollOnFileSizeLimit 1GB 유실은 묶음 A에서 이미 해소.)
+- ② install-service.ps1: **4 하위이슈 유효**(부 작업) — :32 LocalSystem 기본, :55 password=/depend= 부재,
+  :61 restart/5000 루프, 사전 SQL 점검 부재. 단 현장 표준=수동 sc.exe(§9-B)·NSSM 권장(§5-3)이라 '대안' 경로.
+- ③ 운영 README: **해소 — SCOPE OUT**. DEPLOY-ONPREM.md 12절 정비(§2-3 SQL 계정/권한·§5 설정/서비스·
+  §9/§9-B 재배포·§10 트러블슈팅·§11 WDAC)로 커버. 루트 README.md IF-08=푸시 de-stale 완료. 잔여=①의 로그
+  위치 변경을 DEPLOY-ONPREM.md에 반영하는 것뿐.
 
-────────────────────────────────────────────────────────────────────────────
-- Goal:
-  이미 해소된 D①·D③-part1을 회귀 없이 보존한 채 남은 견고화 2건을 닫는다.
-  (1) D② — C_Flag 무한대기 회귀를 결정적으로 잡는 CFlagTimeout '단독' 단언 테스트 추가
-      (현 유일 타임아웃 E2E는 CFLAG||RFLAG 택일이라 RFLAG만으로 통과).
-  (2) D④ — IF-10 RecordDeposit 실패 3원인(진짜중복 / DENIED재보고 / 미존재chuteNo·무피스)이
-      전부 bool false→'멱등 OK' INFO로 합류해 오도하는 것을, 원인별 분리(enum)+원인별 로그
-      (WARN/alarm 후보)로 닫고 미검증 2분기 '현동작 고정' 테스트 추가.
-  전 작업은 200-OK 멱등 응답 시맨틱 + 기존 성공/불일치/타임아웃/OFFLINE/잔류/복귀 전 시나리오
-  바이트 보존하는 '동작 보존 리팩터 + 관측성/커버리지 강화'. 핸드셰이크 제어 흐름 무변경.
+════════════════════════════════════════════════════════════════════════════
+## Goal
+운영 Windows Service 배포 시 (a) 앱 로그가 예측가능·기록가능 위치에 결정적 생성되도록 Serilog 파일 sink
+작업 디렉터리 기준 고정(현재 sc.exe 서비스는 System32\logs로 흘러 예측 불가·제한계정 취약), (b) 프로젝트
+내장 서비스 등록 스크립트를 SQL 권한 실패·password·SQL 기동 순서·사전 점검 측면 견고화. 두 변경 모두
+DEPLOY-ONPREM.md와 정합하도록 문서 갱신. ③ 운영 README는 SCOPE OUT(이미 커버). 절대규칙 #7(경로/설정
+하드코딩 금지 — AppContext 파생/appsettings 오버라이드만)·#8(Wcs.Core 무변경).
 
-────────────────────────────────────────────────────────────────────────────
-- Implementation Scope (Generator — WHAT):
-  [D② — CFlagTimeout 결정적 단언] (테스트 중심·프로덕션 변경 최소/0)
-  · 오케스트레이터 단위: C_Flag=1 잔류(미소비) 상태 → ExecuteAsync → Outcome==HandshakeOutcome.
-    CFlagTimeout '단독' 단언(택일 아님). 경과 ≤ CFlagTimeoutMs+ε(무한대기 배제). 타임아웃 설정 주입(#7).
-  · API/영속화: IF-10 유발 핸드셰이크 CFlagTimeout → alarm code "CFLAG_TIMEOUT" 단독 +
-    sorter_command status=TIMEOUT / piece status=TIMEOUT 현동작 고정. (재시도/포기 '정책'은 SPEC §7-B 미확정·무변경.)
-  [D④ — RecordDeposit 원인 분리 + 원인별 로그 + 현동작 고정 테스트]
-  · IDepositRecorder.RecordDeposit 반환 bool→'원인 구분 결과 타입'(최소: 신규기록/진짜중복/
-    DENIED재보고/미존재chuteNo·무피스). enum명·배치·시그니처는 Generator 결정(HOW). 판정은 DB I/O 의존
-    → I/O 계층(Repositories)에 둔다(Wcs.Core 순수 #8 침범 금지).
-  · RcsController IF-10 원인별 로깅: 진짜중복→현행 '멱등 OK'(INFO) 유지, DENIED재보고→WARN(+alarm 후보),
-    미존재chuteNo·무피스→WARN. 전 케이스 여전히 200 OK(응답 보존·정책 변경 아님).
-  · '현동작 고정' 테스트: (a) DENIED piece 재보고→200 OK·DENIED 불변·piece_event 무증가·DENIED WARN.
-    (b) 미존재 chuteNo·무피스→200 OK·piece 0·NoDestination WARN. (c) 정상 신규→신규기록·트리거 정상 /
-    같은 pId 재보고→진짜중복·'멱등 OK' 유지(회귀).
-  [D③-part2 — Open Question 대기(기본 SCOPE OUT)] 채택 시에만 sorter_command SENT 행 내구화.
-  [공통 회귀·불변식 보존] #1(단일 쓰기 큐)·#4(Ready 의미)·#7(타임아웃 설정)·#8(Wcs.Core 순수) 전부 보존.
-    HandshakeOrchestrator 제어 흐름(arming·안착지연·C_Flag 대기·R 폴·복귀 대기·ClearR) D②에서 무변경(관측만).
-    D①/D③-part1 회귀: HandshakeResidueTests(S1~S6·S5b)·StartupClearTests(VS1~VS3b) 전건 GREEN 유지.
+## Implementation Scope
+[모듈 1 — 로그 위치 결정성 (①)]
+1. Windows Service(비대화형) 컨텍스트에서 Serilog 파일 sink 상대경로 `logs/`가 CWD(System32)가 아니라
+   배포 폴더(exe 인접=AppContext.BaseDirectory 기준)로 해석되도록 앱 시작 지점에서 작업 디렉터리 기준 고정.
+   위치 Program.cs(Serilog 초기화 이전). #7: AppContext.BaseDirectory 파생만(리터럴 경로 하드코딩 금지).
+   appsettings의 `Serilog:WriteTo:File:path`는 상대(`logs/wcs-.log`) 유지 기본안(최종 위치=Q1·적용범위=Q2).
+2. 회귀 비발생: 정적 서빙(WebRootPath=ContentRoot/wwwroot·CWD 무관)·전용 추적 로그(TraceLog=절대경로
+   D:\Rcs3dsInterlockingWcsLogs)·operation_log/plc_event(DB·CWD 무관) 무영향 확인.
+3. DEPLOY-ONPREM.md §9-B step3·§10 로그 위치 서술을 새 동작과 정합화(System32\logs→확정 위치).
+[모듈 2 — install-service.ps1 견고화 (②)]
+4. 계정≠LocalSystem 시 SecureString password 파라미터 + `obj= <계정> password= <값>` 전달.
+5. 로컬 SQL 선기동 보장: `depend= <SQL 서비스명>`(파라미터화·기본값=Q4).
+6. 설치 전 사전 SQL 도달성 점검(SELECT 1) 실패 시 서비스 미생성·중단·안내(5초 무한 크래시루프 예방).
+7. 스크립트 헤더/주석 정정(:14-15 자동 Migrate 단언 오도 교정·:18 운영 README→DEPLOY-ONPREM.md 참조).
+8. DEPLOY-ONPREM.md §5-3 대안 블록에 password/depend=/사전점검 반영.
+[SCOPE OUT] ③ 운영 README(해소)·루트 README/CLAUDE.md/master_spec 일괄 정정(묶음 E)·base appsettings
+Trusted_Connection 자체 변경(운영은 Production.json SQL 인증 오버라이드)·묶음 A 항목(해소)·기본 계정 하향(Q5·기본 미포함).
 
-- SCOPE OUT (해소 확인·착수 금지·회귀 보존만):
-  · D①(arming 해소)·D③-part1(StartupClear 해소) — 위 증거. · F1b 동시 IF-10 직렬화(별개 근본원인·todo:127).
-  · 오더 완료/인덱스/동시 IF-05(묶음 C/기타) — 본 계약 밖.
+## Parallel Modules: N/A (두 모듈 다 DEPLOY-ONPREM.md 공유 편집 → 단일 모듈).
+## Evaluation Dimensions:
+1) Functional — 로그가 의도 위치에 실제 생성·/health 정상·스크립트 문법/로직 올바름·사전점검 동작.
+2) Deployment-safety & regression — 로그 위치 변경이 DEPLOY-ONPREM.md와 정합·dev dotnet run/정적서빙/
+   TraceLog/DB 기록 회귀 0·#7(경로 하드코딩 0)·#8(Wcs.Core 무변경) 준수.
+(APPROVED=두 차원 AND. 동시성 차원 무관·미선언.)
 
-────────────────────────────────────────────────────────────────────────────
-- Detected Project Type: Backend/API
-  (변경 표면 100% 서버측 C#: HandshakeOrchestrator·RcsController·DbRepositories(IDepositRecorder)·
-   xUnit+실-Sim. 브라우저 대면 파일 0 변경. 레포에 frontend/ 존재하나 본 스프린트 미변경 → operative 타입
-   Backend/API. 필수 검증=자동화 테스트 실행.)
+## Detected Project Type: Backend/API
+(backend/src/Wcs.Api ASP.NET Core + Windows Service 호스트·Program.cs 부트스트랩. 프론트 변경 0. 변경 표면=
+ startup/logging 인프라 + 배포 스크립트 + 배포 문서.)
 
-- Verification Scenarios (Backend/API):
-  · Endpoints touched: POST /api/v1/deposit-report (IF-10) — RecordDeposit 원인 분리(D④)+CFlagTimeout(D②) 진입점.
-    신규 엔드포인트 없음(오케스트레이터 단위 테스트는 HTTP 없이 직접).
-  · Happy path: IF-10 정상 신규 → 200 {result:"OK"}·RecordDeposit=신규기록·piece RESERVED→DEPOSITED·
-    (3D)IF-11 트리거/(슈트)만재 집계. 동작 보존.
-  · Error/branch: 진짜중복→200·'멱등 OK'·미트리거 / DENIED재보고→200·DENIED 불변·piece_event 무증가·WARN /
-    미존재chuteNo·무피스→200·piece 0·WARN / CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독·TIMEOUT 매핑. (400은 D-4 기존 커버.)
-  · Sprint-specific (N=9):
-    VS-1 [D②단위] C_Flag 잔류→Outcome==CFlagTimeout 단독 + 경과 ≤ CFlagTimeoutMs+ε(설정 주입).
-    VS-2 [D②API] IF-10 CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독 + sorter_command/piece TIMEOUT 매핑.
-    VS-3 [D④정상/중복] 신규=신규기록·트리거 정상 / 재보고=진짜중복·'멱등 OK' 유지.
-    VS-4 [D④DENIED] DENIED 재보고→200·DENIED 불변·piece_event 무증가·DENIED WARN.
-    VS-5 [D④미존재] 미존재 chuteNo·무피스→200·piece 0·미존재 WARN.
-    VS-6 [D①회귀] HandshakeResidueTests S1/S2/S3 GREEN(arming 훼손 0·허위 MISMATCH 0).
-    VS-7 [회귀] 핸드셰이크 전 시나리오 GREEN(성공/RSeqMismatch/RFlagTimeout/OFFLINE/잔류/복귀·StartupClear).
-    VS-8 [flake 배제] 실-Sim 통합 신규/기존 다회 반복 결정적 GREEN(RSeqMismatch/타이밍 flake 0·신규 테스트 견고화).
-    VS-9 [D③-part2 조건부] 채택 시에만 journal.CreateSent 투입 직후 SENT 행 내구 단언. 미채택 N/A.
+## Verification Scenarios (Backend/API)
+- Endpoints touched: 없음(HTTP 계약 무변경). liveness는 기존 GET /health(무변경) 사용.
+- Happy path: (기동/로그=실제 해피패스) Windows Service 컨텍스트 기동 시 wcs-*.log가 의도 위치(배포 폴더 하위
+  logs·Q1)에 생성·System32\logs 신규 유입 0. GET /health→200 {status,db,sorters} 불변. install-service.ps1
+  유효 인자 실행→서비스 생성+depend=/failure/env 의도대로(생성 후 정리 가능 검증).
+- Error cases: 제한 계정 기동 시 파일 로그 의도 위치 기록 또는 쓰기실패 진단가능(무음 삼킴 아님) / DB 도달불가
+  MigrateAsync throw fatal 진단이 의도 위치에서 확인 / 사전 SQL 점검 실패→서비스 미생성·중단 / 계정≠LocalSystem인데
+  password 미제공→사전 요구·검증(sc start 1069 예방).
+- Operational verification(필수·인프라 스프린트 실제 표면): 로그 경로 변경은 **실 서비스 컨텍스트 기동으로 실증**
+  (dotnet run은 CWD=프로젝트라 갭 재현 못 함 — 실 sc.exe/Windows Service 또는 IsWindowsService 경로 강제 동등 재현).
+  install-service.ps1은 정적 검토+PowerShell AST 파싱 통과+로직 워크스루(가능 시 폐기용 서비스명 dry-run→즉시 정리·
+  불가 시 정적 대체 명시). DEPLOY-ONPREM.md §9-B step3/§10 로그 경로가 코드 새 동작과 일치(문서-코드 격차 0).
+  무회귀: dotnet build 신규 경고 0·dotnet test 기존 GREEN·TraceLog/정적서빙/DB 기록 무영향.
 
-────────────────────────────────────────────────────────────────────────────
-- Evaluation Criteria (가중): API Design(원인 명료 구분·200 멱등 보존·alarm/상태 일관·로그 정직 fail-loud) ★★★ /
-  Architecture(원인 판정 I/O 계층·Wcs.Core 순수 #8·핸드셰이크 흐름 무변경 additive 테스트) ★★★ /
-  Craft(결정적 타임아웃 ±ε·설정 주입 #7·실-Sim flake 방어·엣지 처리·멱등 무결) ★★ /
-  Functionality(회귀 0·데이터 무결·#1/#4 보존) ★★.
+## Evaluation Criteria (weights)
+- (35%) 로그 위치 결정성: 서비스 컨텍스트 wcs-*.log 확정 위치 실 생성 실증·System32\logs 유입 0·#7 준수(리터럴 0).
+- (25%) 스크립트 견고화: password(SecureString)·depend=(파라미터)·사전 SQL 점검 동작·크래시루프 서비스 미생성·파싱 통과.
+- (20%) 문서 정합: DEPLOY-ONPREM.md 로그 위치(§9-B/§10)·§5-3 스크립트 절 코드와 정합·격차 0·③ SCOPE OUT 증거.
+- (15%) 무회귀: 빌드 경고 0(신규)·기존 테스트 GREEN·dev dotnet run 로그·정적서빙·TraceLog·DB 무영향·#8 Wcs.Core diff 0.
+- (5%) 범위 준수: 묶음 E/C·기본 계정 하향 등 스코프 밖 변경 0.
 
-- Completion Conditions (AND):
-  1. 전체 dotnet test GREEN·회귀 0. 2. D② VS-1·VS-2 신규 GREEN + CFlagTimeout '단독' 단언(Evaluator 독립 재실행).
-  3. D④ VS-3·VS-4·VS-5 신규 GREEN·RecordDeposit 원인 구분 타입·컨트롤러 원인별 로그·200 멱등 불변.
-  4. D①/D③-part1 회귀 보존(HandshakeResidueTests·StartupClearTests GREEN). 5. flake 배제 fresh 출력 인용(허위 MISMATCH/타이밍 0).
-  6. 빌드 경고 증가 0·#1/#4/#7/#8 위반 0. 7. 정책 미확정(DENIED 재보고·CFlag 재시도)은 SPEC §7-B 등재만.
+## Completion Conditions (AND)
+1. 서비스 컨텍스트 실 기동(또는 IsWindowsService 동등 재현)에서 wcs-*.log 의도 위치 생성 실증·System32\logs 신규 유입 0.
+2. #7 위반 0(경로 리터럴 하드코딩 없음)·#8 위반 0(Wcs.Core diff 0).
+3. install-service.ps1 password/depend=/사전점검 포함·PowerShell 파싱 통과+정적 로직 검토 통과(dry-run 환경 허용 시).
+4. DEPLOY-ONPREM.md 로그 위치·스크립트 서술이 새 코드와 정합(대조).
+5. dotnet build 신규 경고 0·dotnet test 기존 GREEN.
+6. dev dotnet run 로그·정적서빙·TraceLog·DB 기록 무회귀.
 
-────────────────────────────────────────────────────────────────────────────
-- Parallel Modules: N/A (single module·핸드셰이크 코어 인접 회귀 위험→직렬 1/1/1·fan-out 금지).
-- Evaluation Dimensions: functional, concurrency/timing (2개·병렬 Evaluator 풀).
-  · functional: D④ 원인 분리·IF-10 멱등 시맨틱·현동작 고정·데이터 무결·로그 정직성.
-  · concurrency/timing: D② CFlagTimeout 결정성(±ε·무한대기 배제)·실-Sim 잔류/타이밍 회귀·flake 배제(다회)·arming 불변식 보존.
-  APPROVED = 두 차원 모두 PASS(AND).
+## Open Questions (★ 사용자 게이트 확정 2026-08-03)
+Q1. ✅ **로그 위치 = exe 인접 `<배포폴더>\logs`**(AppContext.BaseDirectory 기준·#7·NSSM AppDirectory 동작 동일).
+    기존 System32\logs → 이 위치로 변경 → DEPLOY-ONPREM.md §9-B step3·§10 로그 확인 경로를 `C:\BOWOO\Wcs.Api\logs`류로 갱신 필수.
+Q2. ✅ **IsWindowsService 게이트**(서비스 컨텍스트에만 작업디렉터리 고정). dev `dotnet run` 로그는 프로젝트/logs 유지(회귀 0).
+Q3. ✅ **install-service.ps1 견고화 포함**(저비용). 단 DEPLOY-ONPREM.md에 현장 표준=수동 sc.exe/NSSM, 이 스크립트=대안임을 명시.
+Q4. ✅ **depend= MSSQLSERVER**(로컬 기본 인스턴스). 파라미터화하되 기본값=MSSQLSERVER.
+Q5. ✅ **기본 계정 LocalSystem 유지**(인프라만 추가·기본값 하향 미포함 — 감사 C-17은 후속).
 
-────────────────────────────────────────────────────────────────────────────
-- Open Questions (★ 사용자 게이트 확정 2026-08-03):
-  1. [D③-part2] ✅ **SCOPE OUT**(이번 미포함). journal.CreateSent 현 위치(핸드셰이크 완료 후) 유지. 크래시 감사 앵커는
-     HS_C_SENT operation_log가 이미 커버. SPEC §7-B에 '수용된 갭(sorter_command SENT 행은 핸드셰이크 후 저널)'로 등재.
-     VS-9 = N/A.
-  2. [D④ 정책] ✅ **현동작 고정 + 원인별 WARN/alarm 로깅**. 원인 분리(enum)+원인별 로그(DENIED재보고·미존재→WARN,
-     진짜중복→INFO '멱등 OK' 유지). 200 멱등 응답·차단 동작 보존. **정책 전환(DENIED 재보고 alarm 승격 등)은 이번 미포함**
-     — SPEC §7-B 등재만. (alarm은 '후보' 수준 — Generator가 기존 IAlarmSink 재사용 여부 판단, 정책 변경 아님.)
-  3. [프로젝트 타입] ✅ Backend/API 확정(프론트 미변경).
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Endpoints touched, Happy path per endpoint, Error/branch cases per endpoint) + 9 sprint-specific(VS-1…VS-9). All slots filled: yes.
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints-touched·happy-path-per-endpoint·error-cases-per-endpoint) + 1 보강(operational-verification). All slots filled: yes.
