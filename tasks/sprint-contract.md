@@ -1,103 +1,110 @@
-[Sprint Contract]
-Sprint: S-AUDIT-C-DATA-INTEGRITY (감사 2026-07-01 묶음 C — 데이터 정합, 운영 투입 전)
-Base: 최신 develop = 11e76b8 (2601·사이클타임 포함). feature 브랜치에서 작업(develop 직접 커밋 0).
+[Sprint Contract] — S-AUDIT-D-HANDSHAKE-HARDENING
+(2026-07-01 전체 감사 묶음 D — 핸드셰이크 견고화, 운영 투입 전)
+Base: 최신 develop = 459aaac. feature 브랜치 feat/audit-d-handshake-hardening.
 
-────────────────────────────────────────────────────────
-## ★ 재triage 결과 (현재 코드 직접 확인 — 필수 의무 이행)
-────────────────────────────────────────────────────────
-원 5항목 중 2건(③④)은 한 달간 후속 스프린트(S-HARDENING-1)에서 이미 해소. 남은 3건(①②⑤)만 Implementation Scope.
+════════════════════════════════════════════════════════════════════════════
+RE-TRIAGE RESULT (필수 재triage — 현재 코드 직접 판정)
+════════════════════════════════════════════════════════════════════════════
+- D① (R_Flag 레벨읽기 → 허위 RSEQ_MISMATCH·off-by-one 자가지속): ✅ 해소 — SCOPE OUT.
+    S-HANDSHAKE-RESIDUE의 arming(ArmRFlagZeroAsync HandshakeOrchestrator.cs:260-322 — C 기입 전
+    RFlag==0 선관찰=에지 등가). 실증 HandshakeResidueTests S1/S2/S3(실 SimServer·back-to-back 잔류
+    허위 RSEQ_MISMATCH 0·DoesNotContain HS_RSEQ_MISMATCH). 감사 A-1 권고(a) 그대로 구현.
+- D③-part1 (기동 시 잔류 R_Flag ClearR + 로그): ✅ 해소 — SCOPE OUT.
+    양층 C2 StartupClear(PlcGateway.cs:710-729 — R 영역 D2/D3·R_Flag 비트 clear+로그). 실증
+    StartupClearTests VS1 + HandshakeResidueTests S3.
+- D② (CFlagTimeout 단독 결정적 테스트 부재): ⛳ 유효 — IN SCOPE. 현 D5(E2EGroupCD)는
+    `CFLAG_TIMEOUT || RFLAG_TIMEOUT` 택일이라 C_Flag 무한대기 회귀 통과.
+- D④ (IF-10 RecordDeposit false 3원인 '멱등 OK' 합류): ⛳ 유효 — IN SCOPE. RecordDeposit bool 반환
+    (DbRepositories.cs:478) 3원인이 RcsController.cs:249-253 '멱등 OK' 합류.
+- D③-part2 (journal.CreateSent 투입 직후로): ❓ 유효하나 저우선·설계 긴장 → Open Question(기본 SCOPE OUT).
 
-| 원항목 | 판정 | 증거(file:line) |
-|--------|------|------------------|
-| ① 동시 IF-05 rowversion 충돌 500 | **유효** | DbRepositories.cs:199 `ReservedQty += qty`(추적 RMW)→:232 SaveChanges→:255-259 catch{Rollback;throw} 미가공 전파. OVER 검사(:96) tx 밖 stale-read. RcsController 호출부 try/catch·전역 핸들러 0 → SQL Server rowversion 패자=미처리 500 + DENIED 감사기록까지 롤백. SQLite=lost update. |
-| ② piece 다중 활성 비활성화 FirstOrDefault 1행 | **유효** | DbRepositories.cs:203(OK)+:276(NG) 둘 다 정렬없는 `FirstOrDefault(PId==pId && IsActive && ArchivedAt==null)` 1행만. 잔존 활성 시 IF-10 부분유니크 위반→RecordDeposit false→RcsController:249-253 '멱등 OK' return→핸드셰이크 미도달=투입 유실+IF-11 미트리거. |
-| ③ piece(PId,IsActive) 인덱스 | **해소** | WcsDbContext.cs:447-448 `IX_piece_pid_active` 비필터 복합. 마이그레이션 20260713012244_AddHotPathIndexes. → SCOPE OUT. |
-| ③ order_item(Barcode) 인덱스 | **해소** | WcsDbContext.cs:385-386 `IX_order_item_barcode`. 동 마이그레이션. → SCOPE OUT. |
-| ④ ReleaseCell destination 스코프 | **해소** | 전역 `ReleaseCell(cellNo)` 삭제. ICellSelector=`SelectCell`+`ReleaseEmptyAssignment(chuteNo,barcode,cellNo)`(destination 스코프)+Finalize 오더 스코프 release(:939-944). → SCOPE OUT. |
-| ⑤ SelectCell 미매칭 시 배정없이 셀 반환 | **유효** | DbRepositories.cs:648-670: order==null이어도 배정행 없이 `freeCell.CellNo` 무조건 반환·WARN/alarm 0. REPORTED_DIRECT·바코드 오타 시 물리 틸트되는데 cell_assignment 부재→빈 셀→재배정→혼적. |
+────────────────────────────────────────────────────────────────────────────
+- Goal:
+  이미 해소된 D①·D③-part1을 회귀 없이 보존한 채 남은 견고화 2건을 닫는다.
+  (1) D② — C_Flag 무한대기 회귀를 결정적으로 잡는 CFlagTimeout '단독' 단언 테스트 추가
+      (현 유일 타임아웃 E2E는 CFLAG||RFLAG 택일이라 RFLAG만으로 통과).
+  (2) D④ — IF-10 RecordDeposit 실패 3원인(진짜중복 / DENIED재보고 / 미존재chuteNo·무피스)이
+      전부 bool false→'멱등 OK' INFO로 합류해 오도하는 것을, 원인별 분리(enum)+원인별 로그
+      (WARN/alarm 후보)로 닫고 미검증 2분기 '현동작 고정' 테스트 추가.
+  전 작업은 200-OK 멱등 응답 시맨틱 + 기존 성공/불일치/타임아웃/OFFLINE/잔류/복귀 전 시나리오
+  바이트 보존하는 '동작 보존 리팩터 + 관측성/커버리지 강화'. 핸드셰이크 제어 흐름 무변경.
 
-**결론: 남은 유효 = ①②⑤ (전부 코드 전용·스키마 변경 0·신규 마이그레이션 불필요). no-op 아님.**
+────────────────────────────────────────────────────────────────────────────
+- Implementation Scope (Generator — WHAT):
+  [D② — CFlagTimeout 결정적 단언] (테스트 중심·프로덕션 변경 최소/0)
+  · 오케스트레이터 단위: C_Flag=1 잔류(미소비) 상태 → ExecuteAsync → Outcome==HandshakeOutcome.
+    CFlagTimeout '단독' 단언(택일 아님). 경과 ≤ CFlagTimeoutMs+ε(무한대기 배제). 타임아웃 설정 주입(#7).
+  · API/영속화: IF-10 유발 핸드셰이크 CFlagTimeout → alarm code "CFLAG_TIMEOUT" 단독 +
+    sorter_command status=TIMEOUT / piece status=TIMEOUT 현동작 고정. (재시도/포기 '정책'은 SPEC §7-B 미확정·무변경.)
+  [D④ — RecordDeposit 원인 분리 + 원인별 로그 + 현동작 고정 테스트]
+  · IDepositRecorder.RecordDeposit 반환 bool→'원인 구분 결과 타입'(최소: 신규기록/진짜중복/
+    DENIED재보고/미존재chuteNo·무피스). enum명·배치·시그니처는 Generator 결정(HOW). 판정은 DB I/O 의존
+    → I/O 계층(Repositories)에 둔다(Wcs.Core 순수 #8 침범 금지).
+  · RcsController IF-10 원인별 로깅: 진짜중복→현행 '멱등 OK'(INFO) 유지, DENIED재보고→WARN(+alarm 후보),
+    미존재chuteNo·무피스→WARN. 전 케이스 여전히 200 OK(응답 보존·정책 변경 아님).
+  · '현동작 고정' 테스트: (a) DENIED piece 재보고→200 OK·DENIED 불변·piece_event 무증가·DENIED WARN.
+    (b) 미존재 chuteNo·무피스→200 OK·piece 0·NoDestination WARN. (c) 정상 신규→신규기록·트리거 정상 /
+    같은 pId 재보고→진짜중복·'멱등 OK' 유지(회귀).
+  [D③-part2 — Open Question 대기(기본 SCOPE OUT)] 채택 시에만 sorter_command SENT 행 내구화.
+  [공통 회귀·불변식 보존] #1(단일 쓰기 큐)·#4(Ready 의미)·#7(타임아웃 설정)·#8(Wcs.Core 순수) 전부 보존.
+    HandshakeOrchestrator 제어 흐름(arming·안착지연·C_Flag 대기·R 폴·복귀 대기·ClearR) D②에서 무변경(관측만).
+    D①/D③-part1 회귀: HandshakeResidueTests(S1~S6·S5b)·StartupClearTests(VS1~VS3b) 전건 GREEN 유지.
 
-────────────────────────────────────────────────────────
-## Goal
-────────────────────────────────────────────────────────
-운영 투입 전 데이터 정합 결함 3건 제거:
-(①) 다중 AGV 같은 barcode 동시 IF-05의 미처리 500·SQLite lost-update를 **DENIED 기록 계약 보존**하며 원자 갱신(또는 재시도)으로 해소.
-(②) 같은 pId 잔존 다중 활성 piece가 정상 IF-10을 '멱등 OK'로 위장 유실+IF-11 미트리거하는 것을, IF-05 두 경로 이전 활성 piece **전건 비활성화**로 차단.
-(⑤) SelectCell이 매칭 오더 없이 셀을 조용히 반환해 물리 적재가 DB상 빈 셀로 남는 혼적 벡터를 **fail-loud**로 전환.
-절대규칙: #7(재시도 횟수 등 튜너블 appsettings·하드코딩 금지)·#8(Wcs.Core 순수 무변경). ③④ 해소로 #1·멀티소터 시그니처 파급 없음.
+- SCOPE OUT (해소 확인·착수 금지·회귀 보존만):
+  · D①(arming 해소)·D③-part1(StartupClear 해소) — 위 증거. · F1b 동시 IF-10 직렬화(별개 근본원인·todo:127).
+  · 오더 완료/인덱스/동시 IF-05(묶음 C/기타) — 본 계약 밖.
 
-────────────────────────────────────────────────────────
-## Implementation Scope (Generator가 할 일)
-────────────────────────────────────────────────────────
-### 항목 ① — 동시 IF-05 예약 차감 원자화 (DbRepositories.cs EfOrderRepository.QueryDestination)
-- 예약 차감을 RowVersion RMW→**원자 조건부 갱신**(의미: `reserved_qty += qty WHERE reserved_qty+qty <= planned_qty`, 영향행 0=OVER). SQL Server 미처리 500·SQLite lost-update 동시 해소. 선례: Finalize의 `ExecuteUpdate` 원자 증가(:916-920) 패턴 재사용(명시 tx 내).
-- **DENIED 기록 계약 보존(하드 요구)**: 원자 갱신 OVER 실패(또는 재시도 소진) 시 반드시 `RecordDenied(...,"OVER",...)`로 piece(DENIED)+piece_event 남김. 어느 동시 요청도 감사기록 없이 500 소실 금지.
-- tx 밖 pre-OVER(:96)↔tx 안 차감 TOCTOU 창 닫음(원자 갱신 최종 권위). 정상 단건·비경합 응답 형상·부수효과 전부 불변(회귀 0).
+────────────────────────────────────────────────────────────────────────────
+- Detected Project Type: Backend/API
+  (변경 표면 100% 서버측 C#: HandshakeOrchestrator·RcsController·DbRepositories(IDepositRecorder)·
+   xUnit+실-Sim. 브라우저 대면 파일 0 변경. 레포에 frontend/ 존재하나 본 스프린트 미변경 → operative 타입
+   Backend/API. 필수 검증=자동화 테스트 실행.)
 
-### 항목 ② — 이전 활성 piece 전건 비활성화 (동 DbRepositories.cs)
-- QueryDestination OK(:203)·RecordDenied NG(:276) 경로의 이전 활성 piece 비활성화를 `FirstOrDefault` 1행→**전건**(활성·미아카이브 전체). 부분 유니크 백스톱(UQ_piece_pid_active_status·MAJOR-1 멱등)은 **유지**.
-- (부수 하드닝) 활성 piece "1건" 읽는 잔여 무정렬 조회(RcsController:321 pieceRow, :270 IF-10 capacity)에 결정적 정렬(`OrderByDescending(Id)`) 일관 적용.
+- Verification Scenarios (Backend/API):
+  · Endpoints touched: POST /api/v1/deposit-report (IF-10) — RecordDeposit 원인 분리(D④)+CFlagTimeout(D②) 진입점.
+    신규 엔드포인트 없음(오케스트레이터 단위 테스트는 HTTP 없이 직접).
+  · Happy path: IF-10 정상 신규 → 200 {result:"OK"}·RecordDeposit=신규기록·piece RESERVED→DEPOSITED·
+    (3D)IF-11 트리거/(슈트)만재 집계. 동작 보존.
+  · Error/branch: 진짜중복→200·'멱등 OK'·미트리거 / DENIED재보고→200·DENIED 불변·piece_event 무증가·WARN /
+    미존재chuteNo·무피스→200·piece 0·WARN / CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독·TIMEOUT 매핑. (400은 D-4 기존 커버.)
+  · Sprint-specific (N=9):
+    VS-1 [D②단위] C_Flag 잔류→Outcome==CFlagTimeout 단독 + 경과 ≤ CFlagTimeoutMs+ε(설정 주입).
+    VS-2 [D②API] IF-10 CFlagTimeout→alarm "CFLAG_TIMEOUT" 단독 + sorter_command/piece TIMEOUT 매핑.
+    VS-3 [D④정상/중복] 신규=신규기록·트리거 정상 / 재보고=진짜중복·'멱등 OK' 유지.
+    VS-4 [D④DENIED] DENIED 재보고→200·DENIED 불변·piece_event 무증가·DENIED WARN.
+    VS-5 [D④미존재] 미존재 chuteNo·무피스→200·piece 0·미존재 WARN.
+    VS-6 [D①회귀] HandshakeResidueTests S1/S2/S3 GREEN(arming 훼손 0·허위 MISMATCH 0).
+    VS-7 [회귀] 핸드셰이크 전 시나리오 GREEN(성공/RSeqMismatch/RFlagTimeout/OFFLINE/잔류/복귀·StartupClear).
+    VS-8 [flake 배제] 실-Sim 통합 신규/기존 다회 반복 결정적 GREEN(RSeqMismatch/타이밍 flake 0·신규 테스트 견고화).
+    VS-9 [D③-part2 조건부] 채택 시에만 journal.CreateSent 투입 직후 SENT 행 내구 단언. 미채택 N/A.
 
-### 항목 ⑤ — SelectCell 미매칭 fail-loud (DbRepositories.cs EfCellSelector.SelectCell + RcsController.cs TriggerSorterHandshake)
-- SelectCell ② 빈 셀 분기에서 매칭 오더 없으면 조용히 셀 반환 금지 → fail-loud(OQ-2 최종 확정): 권고=`null` 반환(핸드셰이크/틸트 미트리거)+WARN+alarm 1건(`CELL_ORDER_UNMATCHED`). 대안=orphan 표식 행 남겨 점유 추적(틸트 허용).
-- 호출부 RcsController:298-304는 이미 `cellNo==null`이면 IF-11 생략 — 미매칭 null도 합류하되 로그/alarm이 "미매칭 fail-loud"임을 구분(진단 오도 금지).
+────────────────────────────────────────────────────────────────────────────
+- Evaluation Criteria (가중): API Design(원인 명료 구분·200 멱등 보존·alarm/상태 일관·로그 정직 fail-loud) ★★★ /
+  Architecture(원인 판정 I/O 계층·Wcs.Core 순수 #8·핸드셰이크 흐름 무변경 additive 테스트) ★★★ /
+  Craft(결정적 타임아웃 ±ε·설정 주입 #7·실-Sim flake 방어·엣지 처리·멱등 무결) ★★ /
+  Functionality(회귀 0·데이터 무결·#1/#4 보존) ★★.
 
-### 스키마
-- **신규 마이그레이션 없음**(①②⑤ 코드 전용). WcsDbContext·Entities 무변경. 스키마 변경 필요 판단 시 즉시 Evaluator에 스코프 확장 요청(임의 마이그레이션 금지).
+- Completion Conditions (AND):
+  1. 전체 dotnet test GREEN·회귀 0. 2. D② VS-1·VS-2 신규 GREEN + CFlagTimeout '단독' 단언(Evaluator 독립 재실행).
+  3. D④ VS-3·VS-4·VS-5 신규 GREEN·RecordDeposit 원인 구분 타입·컨트롤러 원인별 로그·200 멱등 불변.
+  4. D①/D③-part1 회귀 보존(HandshakeResidueTests·StartupClearTests GREEN). 5. flake 배제 fresh 출력 인용(허위 MISMATCH/타이밍 0).
+  6. 빌드 경고 증가 0·#1/#4/#7/#8 위반 0. 7. 정책 미확정(DENIED 재보고·CFlag 재시도)은 SPEC §7-B 등재만.
 
-────────────────────────────────────────────────────────
-## SCOPE OUT (해소 확인 — 착수 금지)
-────────────────────────────────────────────────────────
-- ③ piece(PId,IsActive)/order_item(Barcode) 인덱스: 해소(WcsDbContext:447-448·385-386, 마이그레이션 20260713012244).
-- ④ ReleaseCell destination 스코프: 해소(전역 ReleaseCell 삭제·ReleaseEmptyAssignment+Finalize 오더 스코프). 멀티소터 2대째 안전.
-- (참고) A-2/A-9 오더 완료 수명주기·sorted_qty 가산 이미 구현(Finalize :916-945). 묶음 C 원항목 아님.
+────────────────────────────────────────────────────────────────────────────
+- Parallel Modules: N/A (single module·핸드셰이크 코어 인접 회귀 위험→직렬 1/1/1·fan-out 금지).
+- Evaluation Dimensions: functional, concurrency/timing (2개·병렬 Evaluator 풀).
+  · functional: D④ 원인 분리·IF-10 멱등 시맨틱·현동작 고정·데이터 무결·로그 정직성.
+  · concurrency/timing: D② CFlagTimeout 결정성(±ε·무한대기 배제)·실-Sim 잔류/타이밍 회귀·flake 배제(다회)·arming 불변식 보존.
+  APPROVED = 두 차원 모두 PASS(AND).
 
-────────────────────────────────────────────────────────
-## Parallel Modules: N/A (①②⑤ 전부 DbRepositories.cs 공유 파일 편집 — 단일 Generator)
-────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────
+- Open Questions (★ 사용자 게이트 확정 2026-08-03):
+  1. [D③-part2] ✅ **SCOPE OUT**(이번 미포함). journal.CreateSent 현 위치(핸드셰이크 완료 후) 유지. 크래시 감사 앵커는
+     HS_C_SENT operation_log가 이미 커버. SPEC §7-B에 '수용된 갭(sorter_command SENT 행은 핸드셰이크 후 저널)'로 등재.
+     VS-9 = N/A.
+  2. [D④ 정책] ✅ **현동작 고정 + 원인별 WARN/alarm 로깅**. 원인 분리(enum)+원인별 로그(DENIED재보고·미존재→WARN,
+     진짜중복→INFO '멱등 OK' 유지). 200 멱등 응답·차단 동작 보존. **정책 전환(DENIED 재보고 alarm 승격 등)은 이번 미포함**
+     — SPEC §7-B 등재만. (alarm은 '후보' 수준 — Generator가 기존 IAlarmSink 재사용 여부 판단, 정책 변경 아님.)
+  3. [프로젝트 타입] ✅ Backend/API 확정(프론트 미변경).
 
-## Evaluation Dimensions (Evaluator expert pool — APPROVED는 전 차원 PASS)
-1. **Functional / Data-integrity** — ②전건 비활성화·⑤fail-loud 기능 정확성 + 정상 경로 회귀 0(TDD SQLite in-memory).
-2. **Concurrency & Provider-fidelity** — ①동시 IF-05는 **실 SQL Server provider**에서만 재현(SQLite rowversion 미증가 — lessons 실 prod provider 검증). 실 SQL Server 병렬 동시 요청 실증 + 단독 다회 실행(flake 배제). fake+구조단언 불충분.
-
-────────────────────────────────────────────────────────
-## Detected Project Type: Backend/API
-(ASP.NET Core MVC Controllers·EF Core 리포지토리·xUnit. 프론트 표면 무변경 — 순수 백엔드.)
-────────────────────────────────────────────────────────
-
-## Verification Scenarios (Backend/API)
-### [Slot 1] 건드리는 엔드포인트
-- POST /api/v1/destination-query (IF-05) — ①예약차감 원자화·②전건 비활성화.
-- POST /api/v1/deposit-report (IF-10) — ②멱등 오판 방지 하류·⑤SelectCell fail-loud.
-(IF-09 arrival-report 무변경.)
-### [Slot 2] Happy path
-- IF-05 단건 매칭: 200 {result:"OK",chuteNo}+piece RESERVED 1+IF05_REQ/RES+(소터)floor enqueue. 원자화 후 reserved_qty 정확히 +qty.
-- IF-10 정상 투입: 활성 RESERVED→200+piece DEPOSITED+(소터)SelectCell 매칭→IF-11 트리거.
-### [Slot 3] 에러/경계 (적용 케이스만)
-- **[S-①a] 동시 IF-05(실 SQL Server)**: planned_qty 2건 동시수용 불가 SKU 2요청 병렬 → 미처리 500 **0건**(양 200), 한쪽 OK·다른쪽 NG(OVER) 또는 reserved_qty ≤ planned_qty(초과예약 0). **NG도 piece(DENIED)+IF05_REQ/RES(OVER) 존재**(DENIED 계약 보존). 실 SQL Server+단독 ≥5회 무flake.
-- **[S-①b] SQLite lost-update 부재**: 원자 갱신으로 reserved_qty 이중 가산 없음(provider 무관 최종 권위).
-- **[S-②] 다중 활성 전건 비활성화**: 같은 pId 활성 2행 구성→신규 IF-05가 전건 비활성화(잔존 0)→정상 IF-10이 위장유실 없이 DEPOSITED+(소터)IF-11 트리거. (수정 전=1행만→부분유니크 위반→false→유실 RED 정상.)
-- **[S-⑤a] SelectCell 미매칭 fail-loud**: IF-05 선행 없이(또는 오타) IF-10 빈셀 분기 RUNNING 오더 매칭 실패→셀 조용히 반환 안함(null)+WARN+alarm 1건, IF-11 미트리거, 유령 점유 0. (수정 전=CellNo 반환+무로그 RED 정상.)
-- **[S-⑤b] SelectCell 정상 매칭 회귀 0**: 매칭 오더 존재 시 기존대로 cell_assignment 생성+셀 반환(불변).
-### [Regression-guard — SCOPE OUT 재해소 확인(존재 단언만)]
-- **[R-③]** IX_piece_pid_active·IX_order_item_barcode 모델/마이그레이션 계속 존재.
-- **[R-④]** ICellSelector에 전역 ReleaseCell(cellNo) 미재도입(멀티소터 교차 해제 0).
-
-## Completion Conditions
-- ①②⑤ 각 RED-우선 테스트 수정 전 RED→수정 후 GREEN.
-- [S-①a]는 **실 SQL Server provider** 실증(SQLite 대체 불가)+단독 ≥5회 무flake.
-- 전체 `dotnet test backend/Wcs.sln` GREEN(동시성 변경이므로 ≥4회 연속)+teardown hang 0+신규 경고 0.
-- 정상 경로 회귀 0. 신규 마이그레이션 없음(양 provider has-pending-model-changes "No").
-
-## Evaluation Criteria (가중치)
-- 정확성(①②⑤ 결함 제거+DENIED/멱등/혼적 계약 보존) 45% · 동시성·provider 충실도(①실 SQL Server·flake 배제) 25% · 회귀 0(정상 경로·SCOPE OUT 유지) 20% · 절대규칙(#7·#8·마이그레이션 무단생성 금지)+진단 정직성 10%.
-
-────────────────────────────────────────────────────────
-## Open Questions (★ 사용자 게이트 확정 2026-07-31)
-────────────────────────────────────────────────────────
-- **OQ-1 (①) ✅ 조건부 원자 UPDATE**: `reserved_qty += qty WHERE reserved_qty+qty <= planned_qty`, 영향행 0=OVER. 양 provider 동시 해소·RMW 충돌 원천 제거·Finalize ExecuteUpdate 패턴 재사용. (catch-retry 미채택.)
-- **OQ-2 (⑤) ✅ 틸트 차단(null+alarm)**: 미매칭 시 셀 반환 거부(null)+WARN+alarm(`CELL_ORDER_UNMATCHED`) → IF-11/물리 틸트 미트리거. 혼적 원천 차단. (orphan 추적 미채택 — 이미 IF-10 보고된 물리 상품은 틸트 명령 없이 대기.)
-- **OQ-3 (②) ✅ 전건 비활성화만**: 이전 활성 piece 전건 비활성화 + 기존 status-필터 유니크 백스톱(MAJOR-1 멱등) 유지. 단일-활성 DB 불변식 강제는 미포함(최소 변경).
-
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 9 (endpoints-touched, happy-path-per-endpoint, error-cases[S-①a·S-①b·S-②·S-⑤a·S-⑤b], regression-guard[R-③·R-④]). All slots filled: yes.
+> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (Endpoints touched, Happy path per endpoint, Error/branch cases per endpoint) + 9 sprint-specific(VS-1…VS-9). All slots filled: yes.
