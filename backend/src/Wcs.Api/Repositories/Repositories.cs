@@ -42,17 +42,40 @@ public interface IOrderRepository
 }
 
 /// <summary>
+/// IF-10 투입 보고 기록 결과 — 실패(비-신규) 3원인을 분리해 오도('멱등 OK' 합류)를 없앤다
+/// (S-AUDIT-D-HANDSHAKE-HARDENING D④). 판정은 DB I/O(piece 상태 조회) 의존이라 I/O 계층(Repositories)에 둔다
+/// — Wcs.Core 순수(절대규칙 #8) 침범 금지. 컨트롤러는 이 원인으로 로그 레벨(WARN/INFO)을 가르되
+/// **모든 원인에서 200 OK 멱등 응답·차단 동작을 보존**한다(현동작 고정 — 정책 전환 아님).
+/// </summary>
+public enum DepositRecordResult
+{
+    /// <summary>신규 기록 성공 — piece RESERVED/QUERIED/PERMITTED→DEPOSITED 전이(또는 신규 pId 직삽입). 후속 트리거 진행.</summary>
+    NewRecord,
+
+    /// <summary>진짜 중복 — 이미 DEPOSITED/CELL_ASSIGNED/LOADED(또는 동시 삽입 유니크 위반). 멱등 OK(현행 INFO 유지).</summary>
+    Duplicate,
+
+    /// <summary>DENIED piece 재보고 — IF-05에서 NG(DENIED)로 거절된 piece에 IF-10 도달. 차단 유지(WARN).</summary>
+    DeniedReport,
+
+    /// <summary>미존재 chuteNo·무피스 — 활성 piece 없고 chuteNo에 해당하는 활성 destination도 없음. 기록 불가(WARN).</summary>
+    NoDestination,
+}
+
+/// <summary>
 /// 투입 기록 (IF-16 통합 — IF-05 OK/NG·IF-10 보고 모두 기록).
 /// M4에서 EfDepositRecorder가 구현.
 /// </summary>
 public interface IDepositRecorder
 {
     /// <summary>
-    /// IF-10 투입 보고 기록 — 멱등(pId 중복 무해).
-    /// piece 부분 유니크 위반 시 멱등 false 반환(static lock 불필요).
+    /// IF-10 투입 보고 기록 — 멱등(pId 중복 무해). piece 부분 유니크 위반 시 <see cref="DepositRecordResult.Duplicate"/> 반환.
     /// </summary>
-    /// <returns>이미 기록된(중복) 경우 false, 신규 기록 true.</returns>
-    bool RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs);
+    /// <returns>
+    /// 원인 구분 결과(<see cref="DepositRecordResult"/>): 신규 기록만 <see cref="DepositRecordResult.NewRecord"/>이고,
+    /// 진짜 중복/DENIED 재보고/미존재 chuteNo·무피스는 각각 구분해 반환한다(구 bool false 3원인 합류 해소 — D④).
+    /// </returns>
+    DepositRecordResult RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs);
 
     /// <summary>pId 기록 존재 여부 (IF-10 멱등 확인).</summary>
     bool HasDepositRecord(int pId);

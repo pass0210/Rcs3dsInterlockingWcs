@@ -191,8 +191,8 @@ public sealed class DataIntegrityAuditTests
         // ── IF-10: 투입 보고 → 신규 C 를 DEPOSITED 전이(잔존 활성 DEPOSITED 없음 → 부분유니크 위반 0). ──
         db.ChangeTracker.Clear();
         var recorder = new EfDepositRecorder(db);
-        bool isNew = recorder.RecordDeposit(pid, "TEST-BARCODE-3", 30, 1, qty: 1, clientTs: null);
-        Assert.True(isNew, "IF-10 이 위장유실(false) 없이 신규 투입 기록 — 전건 비활성화로 잔존 활성 DEPOSITED 제거");
+        var recResult = recorder.RecordDeposit(pid, "TEST-BARCODE-3", 30, 1, qty: 1, clientTs: null);
+        Assert.Equal(DepositRecordResult.NewRecord, recResult); // 위장유실(비-신규) 없이 신규 투입 기록 — 전건 비활성화로 잔존 활성 DEPOSITED 제거(D④ 원인 구분)
 
         db.ChangeTracker.Clear();
         Assert.Equal(PieceStatus.DEPOSITED, db.Pieces.Single(p => p.Id == pieceCId).Status);

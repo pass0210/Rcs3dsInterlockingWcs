@@ -475,7 +475,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
         _db = db;
     }
 
-    public bool RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs)
+    public DepositRecordResult RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs)
     {
         // timeStamp 백필 (Scope-3): 파싱 성공 → effective, 실패·누락 → UtcNow
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
@@ -499,7 +499,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
                 if (dest is null)
                 {
                     tx.Rollback();
-                    return false; // 목적지 없으면 기록 불가
+                    return DepositRecordResult.NoDestination; // 활성 piece 없음 + chuteNo 목적지 없음 → 기록 불가(WARN)
                 }
 
                 var now2 = DateTime.UtcNow;
@@ -529,25 +529,29 @@ public sealed class EfDepositRecorder : IDepositRecorder
                 });
                 _db.SaveChanges();
                 tx.Commit();
-                return true;
+                return DepositRecordResult.NewRecord; // 신규 pId 직삽입(IF-05 없이 IF-10 먼저) — 후속 트리거 진행
             }
 
-            // 이미 DEPOSITED 이상 → 멱등(중복)
+            // 이미 DEPOSITED 이상 → 진짜 중복(멱등 OK·현행 INFO 유지)
             if (piece.Status is PieceStatus.DEPOSITED or PieceStatus.CELL_ASSIGNED
                               or PieceStatus.LOADED)
             {
                 tx.Rollback();
-                return false;
+                return DepositRecordResult.Duplicate;
             }
 
-            // DENIED piece는 IF-10 도달 시도 → 멱등 false
+            // DENIED piece는 IF-10 도달 시도 → DENIED 재보고(차단 유지·WARN)
             if (piece.Status == PieceStatus.DENIED)
             {
                 tx.Rollback();
-                return false;
+                return DepositRecordResult.DeniedReport;
             }
 
-            // 상태 전이: RESERVED/QUERIED/PERMITTED → DEPOSITED
+            // 상태 전이 → DEPOSITED (catch-all else — 위 DEPOSITED/CELL_ASSIGNED/LOADED·DENIED 게이트를
+            //   통과한 그 외 '모든' 상태가 여기로 온다). 정상 경로는 RESERVED/QUERIED/PERMITTED이나, 이 else는
+            //   ⚠ 비정상 종단 상태(MISMATCH/TIMEOUT/CANCELLED 등)도 포함하며 그런 piece를 DEPOSITED로 '부활'시켜
+            //   NewRecord로 반환한다. 이는 이 스프린트 이전부터의 선재(先在) 동작으로 이번엔 바이트 보존만 한다
+            //   (반환 타입 bool→enum만 변경). 종단 상태 재보고를 별도 차단/원인 분리하는 실 가드는 후속 과제.
             var now3 = DateTime.UtcNow;
             piece.Status      = PieceStatus.DEPOSITED;
             piece.DepositedAt = effective;
@@ -563,13 +567,13 @@ public sealed class EfDepositRecorder : IDepositRecorder
             });
             _db.SaveChanges();
             tx.Commit();
-            return true;
+            return DepositRecordResult.NewRecord; // 위 게이트 밖 그 외 상태 → DEPOSITED 전이 성공(catch-all)
         }
         catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
         {
-            // piece 부분 유니크 위반 → 신규 piece insert 경합만 백스톱(동시 동일 pId 1건만 전이)
+            // piece 부분 유니크 위반 → 신규 piece insert 경합(동시 동일 pId 1건만 전이) = 진짜 중복 백스톱
             tx.Rollback();
-            return false;
+            return DepositRecordResult.Duplicate;
         }
         catch
         {

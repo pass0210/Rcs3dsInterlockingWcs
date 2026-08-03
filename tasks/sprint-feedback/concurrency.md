@@ -1,83 +1,98 @@
-# Sprint Feedback — S-AUDIT-C-DATA-INTEGRITY
-## Dimension ②: Concurrency & Provider-fidelity (항목 ① 동시 IF-05 원자 예약 차감)
+# Sprint Feedback — S-AUDIT-D-HANDSHAKE-HARDENING
+## Dimension: Concurrency / Timing (D② CFlagTimeout 결정성 + 실-Sim 타이밍 회귀 + flake 배제 + arming 불변식 보존)
 
 **VERDICT: PASS**
 
-Evaluator: concurrency dimension (expert pool). 평가 대상: 계약 §Evaluation Dimensions 2 — 실 SQL Server provider
-동시 IF-05 원자 예약 차감 실증. SQLite 대체 불가(rowversion 미증가 — lessons sqlserver-migration-prod-provider).
-모든 증거는 이번 세션에서 직접 실행한 fresh tool output. 코드 미수정.
+Evaluator: concurrency/timing dimension (expert pool). 평가 범위 = 계약 §Evaluation Dimensions 2 —
+D② CFlagTimeout '단독' 결정성(±ε·무한대기 배제), 실-Sim 잔류/타이밍 회귀 0, flake 배제(다회 반복),
+arming 불변식·핸드셰이크 제어흐름 보존. 모든 증거는 이번 세션에서 직접 실행한 fresh tool output. 코드 미수정.
+(D④ 원인분리·멱등 시맨틱·로그 정직성은 functional 차원 소관 — 본 리포트 범위 밖.)
 
 ---
 
-### 0. Handoff 확인
-- `tasks/sprint-log.md` → `## IMPLEMENTATION COMPLETE (Generator, 2026-07-31)` 마커 존재 확인.
-- 대상 코드 직접 판독: `DbRepositories.cs` `EfOrderRepository.QueryDestination` 원자 UPDATE 경로.
+### 0. Handoff · Ground-truth 확인
+- `tasks/sprint-log.md` → `## IMPLEMENTATION COMPLETE (Generator, 2026-08-03)` 마커 존재 확인.
+- 변경 표면 git 직접 판독(`git diff HEAD --stat`): 프로덕션 변경은 D④(RcsController/DbRepositories/Repositories)뿐.
+  D② 관련 프로덕션 코드(`HandshakeOrchestrator.cs`·`PlcGateway.cs`) **diff 완전 비어있음(0 바이트)** — 핸드셰이크
+  제어흐름·arming 무변경 물리 확인. Sim3ds `SetCResidue`는 `SetRResidue`와 동형 test-only 추가 헬퍼(런타임 경로 무접촉).
+- 빌드: `dotnet build backend/Wcs.sln -c Debug` → 오류 0 / 경고 10(전부 선재 NU1903 SQLite 취약성). **신규 CS 경고 0**.
 
 ---
 
-### 1. 실 로컬 SQL Server 스크래치 DB + from-scratch 마이그레이션
+### 1. D② VS-1 — CFlagTimeout '단독' 결정성 (오케스트레이터 단위, 직접 재실행)
 
-- 인스턴스: **Microsoft SQL Server 2025 (RTM-GDR) 17.0.1125.2, Enterprise Developer Edition** (localhost, 기본 인스턴스 MSSQLSERVER 실행 중). login=DESKTOP-236GOAR\USER, Trusted_Connection.
-- 스크래치 DB `WcsAuditCConcur` 생성 후 from-scratch 마이그레이션:
-  `dotnet ef database update --project backend/src/Wcs.Migrations.SqlServer --startup-project backend/src/Wcs.Migrations.SqlServer --connection "Server=localhost;Database=WcsAuditCConcur;Trusted_Connection=True;TrustServerCertificate=True"`
-  → 9개 마이그레이션(Initial … 20260731021228_AddSorterCommandSortStartedAt) 순차 적용, **Done. EXITCODE=0**. 신규 마이그레이션 0(계약 준수).
-- **rowversion 실증 (핵심 — SQLite 재현 불가)**: `order_item.RowVersion` 컬럼 DATA_TYPE = **`timestamp`** (SQL Server rowversion 동시성 토큰, null=YES). 실 prod provider에만 존재하는 물리 컬럼 확인.
-- 현장/운영 DB(`Rcs3dsInterlockingWcs`)·포트(5205) **무접촉** — 별도 스크래치 DB·에페메랄 포트만 사용.
+테스트: `CFlagTimeoutTests.VS1_CFlagResidue_Unconsumed_CFlagTimeoutAlone_Bounded_NoCWritten`
+(실 SimServer + PlcPollingService + HandshakeOrchestrator 하니스, `[Collection("RealSimSerial")]`).
 
-### 2. 실 SQL Server 백엔드로 앱 기동
-- 빌드: `Wcs.Api` Release BUILD_EXITCODE=0 (선재 NU1903 SQLite 취약성 경고 + 선재 CS8604 1건만, 신규 경고 0).
-- 기동: `Database:Provider=SqlServer`, `ConnectionStrings:WcsDb=<스크래치>`, `SeedOnStartup=true`, 에페메랄 포트 **127.0.0.1:5399**. (소터 chuteNo=30 = TCP dead-port 15999 → OFFLINE, IF-05 CHUTE 경로와 무관.)
-- `/health` → `status=ok db=True sorters=1` (스크래치 DB 연결 확인). 시드 적용: dest=7·order=5·item=5·piece=0.
-- 시나리오 준비: `order_item(TEST-BARCODE-1, CHUTE chuteNo=1, RUNNING)` planned_qty를 매 iter SQL로 축소·reserved_qty=0 리셋 → 동시 수용 상한 강제.
+**fresh 실측 출력 (verbosity=detailed):**
+```
+[VS-1] Outcome=CFlagTimeout elapsed=508ms Detail=C_Flag still set after 500ms. Online=True Ready=True
+```
 
-### 3. 동시 IF-05 병렬 실증 (같은 barcode, N=8 동시 발사, 각 요청 distinct pId)
+- **단독성**: `Assert.Equal(HandshakeOutcome.CFlagTimeout, result.Outcome)` — 택일(CFLAG||RFLAG) 아닌 **정확히 CFlagTimeout 단독**. 실측 Outcome=CFlagTimeout.
+- **무한대기 배제(±ε)**: elapsed=**508ms**, 주입 상한 CFlagTimeoutMs=500. 하한 400ms(실제 대기 실증) ≤ 508 ≤ 상한 3000ms.
+  ε≈8ms — 상한 근처에서 **결정적으로 유계**. 즉시반환도 무한대기도 아님.
+- **fallthrough 배제 검증(스켑틱)**: 하니스 RFlagTimeoutMs=3000. 만약 C_Flag 대기가 R 폴로 흘러갔다면 경과 ≈ 500(cflag)+3000(rflag)=~3500ms > 상한 3000 → 상한 단언 FAIL. 실측 508ms + Outcome==CFlagTimeout(RFlag 아님)이 fallthrough를 이중 배제.
+- **진짜 C_Flag 타임아웃(OFFLINE 위장 아님)**: Detail `Online=True Ready=True` — 폴 응답은 계속(Online 유지)인데 C_Flag=1 미소비로 상한 초과. OFFLINE fallthrough였다면 Outcome=Offline로 단언 FAIL.
+- **C 미기입**: `DoesNotContain HS_C_SENT` + `DoesNotContain CELL_ASSIGN`(WaitCFlagZeroAsync가 CellAssign 전 종결). 단언 통과.
+- **단계 단독**: `Contains HS_CFLAG_TIMEOUT` + `DoesNotContain HS_R_RECV/HS_TIMEOUT(RFLAG)/HS_RSEQ_MISMATCH`. 통과.
+- **설정 주입(#7)**: CFlagTimeoutMs=500을 `PlcGatewayOptions` 생성자로 주입. appsettings.json 실키 `Timing:CFlagTimeoutMs`(기본 5000) 확인 — 하드코딩 아님.
+- 소스 경로 검증: `HandshakeOrchestrator.WaitCFlagZeroAsync`(:326-358)는 `deadline = Now + _opt.CFlagTimeoutMs`, C_Flag=1 지속 시 `HandshakeOutcome.CFlagTimeout` 반환 — R 폴(WaitRFlagAndProcessAsync :362) **이전** 단계라 CFLAG가 RFLAG로 새지 않음.
 
-`HttpClient.PostAsync` N개 즉시 발사 후 `Task.WaitAll` (HTTP 레벨 barrier). 매 iter 응답코드 분포 + DB 사후 상태(reserved_qty·piece status·piece_event OVER 감사) 검증.
+### 2. D② VS-2 — IF-10 유발 CFlagTimeout → alarm 'CFLAG_TIMEOUT' 단독 (API/영속화, 직접 재실행)
 
-| iter (pidBase) | planned | http codes | body OK/NG | reserved_qty after | RESERVED piece | DENIED piece | DENIED+OVER audit | verdict |
-|---|---|---|---|---|---|---|---|---|
-| 1000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS* |
-| 2000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 3000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 4000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 5000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 6000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 7000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
-| 8000 | 3 | **200:8** | 3 / 5 | **3** | 3 | 5 | 5 | PASS |
-| 9000 | 5 | **200:8** | 5 / 3 | **5** | 5 | 3 | 3 | PASS |
-| 10000 | 1 | **200:8** | 1 / 7 | **1** | 1 | 7 | 7 | PASS |
+테스트: `E2EGroupCD_AlignHandshakeTests.D5b_CFlagTimeout_Deterministic_CflagAlarmAlone_TimeoutMapping`.
 
-\* iter1(pidBase 1000)의 "FAIL"은 하네스 다중-sqlcmd 파싱 글리치(RESERVED count 빈 문자열)일 뿐 — DB 직접 조회로 `pId 1001=RESERVED, 1002~1008=DENIED (RESERVED=1/DENIED=7)` 확인. 실질 결과는 PASS. 이후 iter는 단일 쿼리로 파싱 견고화.
+**fresh 실측 출력:**
+```
+[IF-11] 핸드셰이크 완료: pId=24050 cellNo=1 outcome=CFlagTimeout destId=6
+[D5b VS-2] CFlagTimeout '단독' — alarm codes=CFLAG_TIMEOUT / sorter_command=TIMEOUT / piece=TIMEOUT
+```
 
-계약 단언 전부 충족:
-- **미처리 500 = 0건**: 10회 전부 응답코드 분포 `200:8` (500·비-200 전무). rowversion 패자가 500으로 소실되지 않음.
-- **초과예약 0**: 최종 reserved_qty가 planned_qty와 **정확히 일치**(1/3/5). `reserved_qty ≤ planned_qty` 위반 0. 원자 WHERE(`reserved_qty+qty <= planned_qty`)가 K와 무관하게 상한을 정확히 강제.
-- **DENIED 계약 보존**: 수용 못 한 요청(N−planned)마다 **piece(status=DENIED)** + **piece_event(IF05_REQ reason=OVER) + piece_event(IF05_RES reason=OVER)** 존재. 감사기록 소실 0.
-- **한쪽 OK·다른쪽 NG(OVER) 정합**: OK=planned·NG(OVER)=N−planned, piece 총수=8(유령/누수 0).
-- 서버 로그 스캔: `Unhandled`/HTTP 500/request `fail:` 전무. 유일한 Exception 라인은 dead-sorter(15999) `Could not connect within the specified time.` = 예상된 OFFLINE(핸들 처리·IF-05 무관). IF-05 결과 로그도 1 OK / 7 OVER로 일치.
+- **alarm 단독**: `Assert.Contains("CFLAG_TIMEOUT")` + `Assert.DoesNotContain("RFLAG_TIMEOUT")`. 실측 alarm codes = `CFLAG_TIMEOUT` 만(RFLAG_TIMEOUT 부재). 기존 D5의 `CFLAG||RFLAG` 택일 모호성 **실제로 제거**됨 — C_Flag 무한대기 회귀를 이제 잡는다.
+- **현동작 고정 매핑**: sorter_command status=**TIMEOUT**, piece status=**TIMEOUT**. IF-11 로그가 `outcome=CFlagTimeout`로 핸드셰이크가 진짜 CFlagTimeout로 종결했음을 교차 확인.
+- **결정성 장치**: `SetCResidue(C_Flag=1)` + `InjectNoResponse`(상태기계 정지)로 C_Flag 미소비 강제 + `UntilExactAsync(stableCount=4)`로 WCS가 C_Flag=1 **4연속 안정** 관찰 후 진행 → StartupClear 잔여 창 배제. CFlagTimeoutMs=500 주입.
 
-### 4. flake 배제 (단독 ≥5회)
-- planned=1·N=8 동시 시나리오를 **7회**(pidBase 1000·2000·3000·4000·5000·6000·7000·10000 중 planned=1은 8회) 단독 반복 — 전부 동일 결과(500=0·reserved_qty=1·DENIED 7건 모두 OVER 감사 보존). 추가로 다-당첨(planned=3/5) 변형 2회로 상한 캡핑 정확성 교차 확인. 총 10회 병렬 시나리오 전부 일관. 1회 성공 PASS 아님 — ≥5회 무flake 요건 초과 충족.
+### 3. flake 배제 — 타이밍/실-Sim 신규+회귀 **6회 반복** (1회 GREEN PASS 아님)
 
-### 5. 코드 경로 검증 (diff vs develop)
-- `git diff develop -- DbRepositories.cs`:
-  - 제거: `-  item.ReservedQty += qty;` + `- _db.SaveChanges();` (추적 RMW 삭제).
-  - 추가: `+ int affected = _db.OrderItems.Where(i => i.Id==item.Id && i.ReservedQty + qty <= i.PlannedQty).ExecuteUpdate(... ReservedQty => ReservedQty + qty, UpdatedAt=now)` → `+ if (affected == 0) { tx.Rollback(); overReserved = true; }` → tx 종료 후 `+ if (overReserved) { RecordDenied(...,"OVER",...); return ("NG",null,"OVER",...); }`.
-- **원자 조건부 UPDATE 확인**: `WHERE reserved_qty+qty <= planned_qty`, 영향행 0 = OVER. tx 최초 write(:195).
-- **추적 RMW 잔재 0**: repo 전역 `ReservedQty +=` 정규식 히트는 주석(:180) 1건뿐 — 실 코드 0.
-- **pre-OVER↔차감 TOCTOU 폐쇄**: :97 pre-OVER는 tx 밖 fast-path stale-read일 뿐, 최종 권위는 원자 UPDATE의 WHERE. 10회 병렬 실증(초과예약 0·패자 전원 DENIED·500 0)이 TOCTOU 창 폐쇄를 경험적으로 입증.
-- **절대규칙 #7**: 재시도 상수/하드코딩 0(원자 1회 — catch-retry 미채택, OQ-1 준수).
+필터 = `CFlagTimeoutTests | HandshakeResidueTests | StartupClearTests | D5b_CFlagTimeout` (13 테스트), `--no-build` 독립 재실행:
 
-### 6. 정리 (흔적 0)
-- 앱 프로세스 종료(PROC_ALIVE_AFTER=False).
-- `DROP DATABASE WcsAuditCConcur` → `SCRATCH_DB_GONE`.
-- 운영 DB `Rcs3dsInterlockingWcs` 최종 스냅샷 = 기준선과 동일: `piece=1 order_item=572 destination=1` (무접촉 확인).
+| iter | 결과 | 시간 |
+|---|---|---|
+| 1 | 실패:0 통과:13 건너뜀:0 | 7s |
+| 2 | 실패:0 통과:13 건너뜀:0 | 6s |
+| 3 | 실패:0 통과:13 건너뜀:0 | 6s |
+| 4 | 실패:0 통과:13 건너뜀:0 | 6s |
+| 5 | 실패:0 통과:13 건너뜀:0 | 6s |
+| 6 | 실패:0 통과:13 건너뜀:0 | 6s |
+
+**6/6 결정적 GREEN. 타이밍 flake 0.** 신규 실-Sim/타이밍 테스트(VS-1·VS-2)가 매회 동일 통과. 각 iter 클린 종료
+(teardown hang 0 — Harness.DisposeAsync의 `Queue.Writer.TryComplete()` = testhost-teardown-channel-race 교훈 반영).
+포트 경쟁 견고화(`StartRobustAsync` 6회 재시도) + `StartupClearCompleted` 배리어가 s9-flake/e2e-parallel-load 교훈 실효.
+
+### 4. arming 불변식 · D①/D③-part1 회귀 보존
+
+- `HandshakeResidueTests` S1~S6·S5b + `StartupClearTests` VS1~VS3b(위 13건 중 12건) **6회 전건 GREEN**.
+  arming(ArmRFlagZeroAsync) 훼손 0 · 허위 RSEQ_MISMATCH 0(VS-1이 `DoesNotContain HS_RSEQ_MISMATCH`도 단언) · StartupClear 회귀 0.
+- HandshakeOrchestrator/PlcGateway diff 0(§0) — arming·안착지연·C_Flag 대기·R 폴·복귀 대기·ClearR 흐름 물리적 무변경.
+
+### 5. 전체 스위트 GREEN + teardown hang 0 (독립 확인)
+
+```
+dotnet test backend/Wcs.sln -c Debug --no-build
+통과!  - 실패:0, 통과:534, 건너뜀:0, 전체:534, 기간: 1 m 36 s
+```
+534 전건 통과 · 0 실패 · 0 건너뜀. 실행 후 제어 정상 반환(teardown hang 0). 계약 Completion Condition #1 충족.
+
+### 6. 절대규칙 준수 (concurrency/timing 소관)
+- **#1(단일 쓰기 큐)**: 핸드셰이크 EnqueueAsync/PlcWriteQueue 경로 diff 0 — 무변경.
+- **#4(Ready 의미)**: 오케스트레이터 diff 0 — Ready 해석 무변경.
+- **#7(CFlagTimeoutMs 설정 주입)**: appsettings `Timing:CFlagTimeoutMs`(기본 5000) 실키 + 테스트 500 주입. 하드코딩 0.
 
 ---
 
 ## 결론
-**Concurrency & Provider-fidelity 차원 = PASS.** 실 SQL Server 2025(rowversion=timestamp 물리 컬럼 확인) 위에서
-같은 barcode 동시 IF-05 8-way 병렬을 planned=1/3/5로 총 10회 실증 — 미처리 500 = 0, 초과예약 0(reserved_qty가
-planned_qty 정확 일치), DENIED 감사기록(piece DENIED + IF05_REQ/RES OVER) 전건 보존, OK/NG 정합, flake 0.
-원자 조건부 ExecuteUpdate가 SQL Server rowversion 패자=미처리 500과 SQLite lost-update를 동시 해소하고
-pre-OVER↔차감 TOCTOU를 닫음. 절대규칙 #7(재시도상수 0)·마이그레이션 무단생성 0 준수. 현장/운영 무접촉.
+**Concurrency / Timing 차원 = PASS.** D② CFlagTimeout이 실 Sim 위에서 **단독·유계(508ms@상한500)·무한대기 배제**로
+결정적 재현됨(VS-1 단위 + VS-2 API가 alarm CFLAG_TIMEOUT 단독·RFLAG_TIMEOUT 부재로 기존 CFLAG||RFLAG 택일 모호성 제거).
+신규 타이밍/실-Sim + arming 회귀 13건 **6회 반복 전건 GREEN(flake 0)**, 전체 534 GREEN·teardown hang 0.
+HandshakeOrchestrator/PlcGateway diff 0으로 arming 불변식·제어흐름 물리 보존. 절대규칙 #1/#4/#7 위반 0.
