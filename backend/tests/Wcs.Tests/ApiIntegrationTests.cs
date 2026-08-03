@@ -7,7 +7,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Wcs.Api;
+using Wcs.Api.Controllers;
 using Wcs.Core;
 using Wcs.Data;
 using Wcs.PlcGateway;
@@ -35,6 +37,10 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
 {
     /// <summary>테스트에서 직접 레지스터를 조작하기 위해 공개.</summary>
     public FakeModbusMasterForApi FakeMaster { get; } = new();
+
+    // S-AUDIT-D-HANDSHAKE-HARDENING D④ — RcsController 의 원인별 로그(INFO/WARN)를 캡처해 단언(VS-3/4/5).
+    //   공유 픽스처라 항목이 누적되므로 테스트는 고유 pId 로 필터링한다("pId={고유값}").
+    public CapturingLogger<RcsController> RcsLog { get; } = new();
 
     // ── P2b: 단일 소터 fake 레지스트리 (chuteNo=30, destinationId=DB 조회) ──
     private readonly PlcWriteQueue          _fakeWriteQueue  = new();
@@ -77,6 +83,9 @@ public sealed class FakeModbusWebApplicationFactory : WebApplicationFactory<Prog
 
         builder.ConfigureServices(services =>
         {
+            // D④ — RcsController 원인별 로그 캡처(ILogger<RcsController> 대체). 컨트롤러 유일 소비자라 영향 국소.
+            services.AddSingleton<ILogger<RcsController>>(RcsLog);
+
             // ── WcsDbContext를 named in-memory SQLite로 교체 ─────────────────────
             var dbDescriptors = services
                 .Where(d => d.ServiceType == typeof(DbContextOptions<WcsDbContext>)
@@ -1074,6 +1083,127 @@ public class ApiIntegrationTests : IClassFixture<FakeModbusWebApplicationFactory
         Assert.Equal("NG", body.Result);
         Assert.Null(body.ChuteNo);
         _out.WriteLine($"[P2a-8] unknown barcode → NG·chuteNo=null·500없음 result={body.Result}");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // D④ [S-AUDIT-D-HANDSHAKE-HARDENING] — IF-10 RecordDeposit 원인 분리 + 원인별 로깅 + 200 멱등 보존.
+    //   구 bool false 3원인('멱등 OK' 합류)을 원인 구분 + 원인별 로그(진짜중복→INFO / DENIED재보고·미존재→WARN)로
+    //   닫되, 전 케이스 200 OK 멱등 응답·차단 동작을 바이트 보존한다(현동작 고정). 로그는 공유 픽스처 RcsLog로 캡처.
+    //   pId 고유값으로 필터링(누적 픽스처 격리).
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ── VS-4: DENIED piece 재보고 → 200·DENIED 불변·piece_event 무증가·DENIED WARN ──
+    [Fact]
+    public async Task VS4_If10_DeniedPiece_RerReport_200_Unchanged_DeniedWarn()
+    {
+        const int pid = 26010;
+
+        // DENIED piece 직삽입(IF-05 NG로 거절된 piece 재현). piece_event 없음(무증가 기준선).
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db  = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+            var now = DateTime.UtcNow;
+            db.Pieces.Add(new Wcs.Data.Piece
+            {
+                PId = pid, IsActive = true, Barcode = "TEST-BARCODE-1", Qty = 1,
+                Status = Wcs.Data.PieceStatus.DENIED, DestinationId = null,
+                CreatedAt = now, UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var if10Req = new { pId = pid, barcode = "TEST-BARCODE-1", chuteNo = 1, agvNo = 1, qty = (int?)null, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-report", if10Req);
+
+        // 200 멱등 응답 보존.
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositReportResponse>();
+        Assert.Equal("OK", body!.Result);
+
+        // DENIED 불변 + piece_event 무증가.
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+            var piece = db.Pieces.Single(p => p.PId == pid);
+            Assert.Equal(Wcs.Data.PieceStatus.DENIED, piece.Status);
+            Assert.Empty(db.PieceEvents.Where(e => e.PieceId == piece.Id));
+        }
+
+        // DENIED WARN 로깅 + '멱등 OK' 위장 제거(그 pId에 INFO '멱등 OK' 부재).
+        var mine = _factory.RcsLog.Entries.Where(e => e.message.Contains($"pId={pid}")).ToList();
+        Assert.Contains(mine, e => e.level == LogLevel.Warning && e.message.Contains("DENIED piece 재보고"));
+        Assert.DoesNotContain(mine, e => e.message.Contains("멱등 OK"));
+        _out.WriteLine($"[VS-4] DENIED 재보고 → 200·DENIED 불변·piece_event 0·WARN(멱등 OK 위장 제거)");
+    }
+
+    // ── VS-5: 미존재 chuteNo·무피스 → 200·piece 0·NoDestination WARN ──────────────
+    [Fact]
+    public async Task VS5_If10_UnknownChuteNo_NoPiece_200_ZeroPiece_NoDestinationWarn()
+    {
+        const int pid = 26020;
+
+        var if10Req = new { pId = pid, barcode = "NO-SUCH-BARCODE", chuteNo = 9999, agvNo = 1, qty = (int?)null, timeStamp = (string?)null };
+        var resp = await _client.PostAsJsonAsync("/api/v1/deposit-report", if10Req);
+
+        // 200 멱등 응답 보존.
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<DepositReportResponse>();
+        Assert.Equal("OK", body!.Result);
+
+        // piece 0(기록 불가 — 활성 piece 없음 + 미존재 chuteNo).
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+            Assert.Empty(db.Pieces.Where(p => p.PId == pid));
+        }
+
+        // NoDestination WARN 로깅.
+        var mine = _factory.RcsLog.Entries.Where(e => e.message.Contains($"pId={pid}")).ToList();
+        Assert.Contains(mine, e => e.level == LogLevel.Warning && e.message.Contains("미존재 chuteNo"));
+        Assert.DoesNotContain(mine, e => e.message.Contains("멱등 OK"));
+        _out.WriteLine($"[VS-5] 미존재 chuteNo·무피스 → 200·piece 0·NoDestination WARN");
+    }
+
+    // ── VS-3: 정상 신규→신규기록·트리거 경로 진입 / 같은 pId 재보고→진짜중복·'멱등 OK' 유지(회귀) ──
+    [Fact]
+    public async Task VS3_If10_NewThenDuplicate_NewProceeds_DuplicateIdempotentOk()
+    {
+        const int pid = 26030;
+
+        // IF-05로 RESERVED piece 생성(CHUTE — 결정적·백그라운드 핸드셰이크 없음).
+        var if05Req = new { pId = pid, agvNo = 1, barcode = "TEST-BARCODE-1", inductionNo = 1, qty = 1, timeStamp = (string?)null };
+        var if05Resp = await _client.PostAsJsonAsync("/api/v1/destination-query", if05Req);
+        Assert.Equal(HttpStatusCode.OK, if05Resp.StatusCode);
+        var if05Body = await if05Resp.Content.ReadFromJsonAsync<DestinationQueryResponse>();
+        Assert.Equal("OK", if05Body!.Result);
+
+        var if10Req = new { pId = pid, barcode = "TEST-BARCODE-1", chuteNo = if05Body.ChuteNo!.Value, agvNo = 1, qty = (int?)null, timeStamp = (string?)null };
+
+        // ── 1차: 신규기록 → 200 + RESERVED→DEPOSITED + 트리거 경로 진입(조기 '멱등 OK' 반환 아님) ──
+        var resp1 = await _client.PostAsJsonAsync("/api/v1/deposit-report", if10Req);
+        Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
+        Assert.Equal("OK", (await resp1.Content.ReadFromJsonAsync<DepositReportResponse>())!.Result);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Wcs.Data.WcsDbContext>();
+            Assert.Equal(Wcs.Data.PieceStatus.DEPOSITED, db.Pieces.Single(p => p.PId == pid).Status);
+        }
+        var afterNew = _factory.RcsLog.Entries.Where(e => e.message.Contains($"pId={pid}")).ToList();
+        // 신규기록은 조기 '멱등 OK' 반환 아님(트리거 경로로 진행 — 슈트면 "IF-11 트리거 없음" INFO 도달) + WARN 부재.
+        Assert.DoesNotContain(afterNew, e => e.message.Contains("멱등 OK"));
+        Assert.DoesNotContain(afterNew, e => e.level == LogLevel.Warning);
+        Assert.Contains(afterNew, e => e.message.Contains("IF-11 트리거 없음")); // 슈트 신규기록 트리거-분기 도달(트리거 정상)
+
+        // ── 2차: 같은 pId 재보고 → 진짜중복 → 200 + '멱등 OK' INFO 유지(회귀) ──
+        var resp2 = await _client.PostAsJsonAsync("/api/v1/deposit-report", if10Req);
+        Assert.Equal(HttpStatusCode.OK, resp2.StatusCode);
+        Assert.Equal("OK", (await resp2.Content.ReadFromJsonAsync<DepositReportResponse>())!.Result);
+
+        var afterDup = _factory.RcsLog.Entries.Where(e => e.message.Contains($"pId={pid}")).ToList();
+        Assert.Contains(afterDup, e => e.level == LogLevel.Information && e.message.Contains("중복 보고 — 멱등 OK"));
+        Assert.DoesNotContain(afterDup, e => e.level == LogLevel.Warning);
+        _out.WriteLine($"[VS-3] 신규=신규기록·트리거 경로 진입 / 재보고=진짜중복·'멱등 OK' INFO 유지(회귀)");
     }
 
     // ════════════════════════════════════════════════════════════════════════

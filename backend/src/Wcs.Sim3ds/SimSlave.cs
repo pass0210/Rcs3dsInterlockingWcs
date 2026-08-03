@@ -146,6 +146,24 @@ public sealed class SimSlave
     }
 
     /// <summary>
+    /// 테스트 전용(S-AUDIT-D-HANDSHAKE-HARDENING D②): C 영역에 잔류(C_Flag=1 + 지정값)를 직접 세팅.
+    /// PLC(3DS)가 C_Flag를 소비·클리어하지 못한 "C_Flag 미소비 잔류" 상황을 재현한다 —
+    /// <see cref="InjectNoResponse"/>=true(상태기계 정지)와 함께 쓰면 WCS 핸드셰이크의 C_Flag 대기 상한
+    /// (CFlagTimeoutMs) 초과 → CFlagTimeout 경로를 결정적으로 유발한다(무한대기 배제 회귀 가드).
+    /// </summary>
+    public void SetCResidue(int cCellNo, int cSeq)
+    {
+        lock (_hrLock)
+        {
+            _hr[RegisterMap.C_CellNo] = (ushort)cCellNo;
+            _hr[RegisterMap.C_Seq]    = (ushort)cSeq;
+            _hr[RegisterMap.Flags]    = (ushort)(_hr[RegisterMap.Flags] | RegisterMap.D4.C_Flag);
+            FlushToServerLocked();
+        }
+        LogTimeline($"[테스트] C 잔류 세팅: C_CellNo={cCellNo} C_Seq={cSeq} C_Flag=1");
+    }
+
+    /// <summary>
     /// 테스트 전용(C2 §4-B): TgtFloor(D6)에 잔류값을 직접 세팅(콜드스타트 클리어 대상). 이동 유발을 피하려면
     /// 호출자가 CurFloor와 같은 값을 준다(tgt==cur → Sim 상태기계 미이동). WCS 기동 클리어가 이 값을 0으로 지운다.
     /// </summary>

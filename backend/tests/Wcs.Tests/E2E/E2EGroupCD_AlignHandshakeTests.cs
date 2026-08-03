@@ -26,11 +26,12 @@ public class E2EGroupCD_AlignHandshakeTests
     public E2EGroupCD_AlignHandshakeTests(ITestOutputHelper output) => _out = output;
 
     private async Task<(E2EWebApplicationFactory factory, FakeChuteStateServer rcs)> StartAsync(
-        int initialCurFloor = 2, int rFlagTimeoutMs = 3000)
+        int initialCurFloor = 2, int rFlagTimeoutMs = 3000, int cFlagTimeoutMs = 2000)
     {
         var rcs = await FakeChuteStateServer.StartAsync();
         var factory = new E2EWebApplicationFactory(
-            rcsBaseUrl: rcs.BaseUrl, initialCurFloor: initialCurFloor, rFlagTimeoutMs: rFlagTimeoutMs);
+            rcsBaseUrl: rcs.BaseUrl, initialCurFloor: initialCurFloor,
+            rFlagTimeoutMs: rFlagTimeoutMs, cFlagTimeoutMs: cFlagTimeoutMs);
         await factory.StartSimsAsync();
         _ = factory.CreateClient();
         await E2EWait.UntilAsync(() => factory.IsSorterOnline(factory.PrimarySorter.DestinationId), 5000, "소터 Online");
@@ -230,6 +231,67 @@ public class E2EGroupCD_AlignHandshakeTests
             // 현 동작 단언: 미응답 시 핸드셰이크가 TIMEOUT 계열로 수렴(상한 정책은 SPEC §7-B 미정 — finding).
             Assert.Contains(codes, c => c is "CFLAG_TIMEOUT" or "RFLAG_TIMEOUT");
             _out.WriteLine($"[D5 ⚠현동작] C_Flag/R_Flag 미응답 → alarm codes={string.Join(",", codes)} (상한 정책 SPEC §7-B 미정 — finding)");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // D5b [VS-2, S-AUDIT-D-HANDSHAKE-HARDENING D②]: IF-10 유발 핸드셰이크 CFlagTimeout →
+    //   alarm code "CFLAG_TIMEOUT" '단독'(RFLAG_TIMEOUT 부재) + sorter_command status=TIMEOUT /
+    //   piece status=TIMEOUT 현동작 고정. D5의 `CFLAG||RFLAG` 택일을 결정적 '단독'으로 좁힌다.
+    //
+    //   결정성: C_Flag=1 잔류(미소비)를 SetCResidue 로 명시 심음 + InjectNoResponse(상태기계 정지)로
+    //     소비를 막아 핸드셰이크가 R 폴 이전 C_Flag 대기 상한(CFlagTimeoutMs=500)에서 종결하게 강제한다.
+    //   ★ 핸드셰이크 제어 흐름 무변경(관측/단언만) — 재시도/포기 정책 무변경(SPEC §7-B).
+    // ════════════════════════════════════════════════════════════════════════
+    [Fact]
+    public async Task D5b_CFlagTimeout_Deterministic_CflagAlarmAlone_TimeoutMapping()
+    {
+        // CFlagTimeoutMs=500(짧게 주입 — 설정 주입·절대규칙 #7). 결정적 CFlagTimeout.
+        var (factory, rcs) = await StartAsync(cFlagTimeoutMs: 500);
+        await using var _f = factory;
+        await using var _r = rcs;
+        var driver = MultiAgvDriver.ForFactory(factory);
+        long destId = factory.PrimarySorter.DestinationId;
+
+        // ── C_Flag=1 잔류(미소비) 주입 ─────────────────────────────────────────────
+        // InjectNoResponse: Sim 상태기계 정지 → 심은 C_Flag를 소비·클리어하지 않음(폴 응답은 계속 → Online 유지).
+        //   콜드스타트 StartupClear는 소터 Online 확정(StartAsync) 시점에 이미 처리됨 — C 잔류를 지우지 않는다.
+        factory.PrimarySorter.Sim.InjectNoResponse = true;
+        factory.PrimarySorter.Sim.SetCResidue(cCellNo: 12, cSeq: 99);
+
+        // WCS 스냅샷이 C_Flag=1을 '안정적으로' 관찰할 때까지 대기(StartupClear 잔여 창 배제 — 4연속 안정).
+        await E2EWait.UntilExactAsync(
+            () => factory.SorterSnapshot(destId)?.CFlag == true ? 1 : 0,
+            expected: 1, stableCount: 4, timeoutMs: 4000, "WCS가 잔류 C_Flag=1 안정 관찰");
+
+        // ── IF-05 → IF-10 → 핸드셰이크(C_Flag 대기 상한 초과 → CFlagTimeout) ────────
+        const int pid = 24050;
+        await driver.RunSingleAsync(new AgvJob(pid, 1, "TEST-BARCODE-3", E2EWebApplicationFactory.DefaultSorterChuteNo, DoArrival: false));
+
+        // 현동작 고정: sorter_command TIMEOUT + alarm CFLAG_TIMEOUT 도달까지 대기.
+        await E2EWait.UntilAsync(async () =>
+        {
+            using var db = factory.CreateDbScope();
+            return await db.SorterCommands.AnyAsync(c => c.Status == SorterCommandStatus.TIMEOUT)
+                && await db.Alarms.AnyAsync(a => a.Code == "CFLAG_TIMEOUT");
+        }, 8000, "CFlagTimeout → sorter_command TIMEOUT + alarm CFLAG_TIMEOUT");
+
+        using (var db = factory.CreateDbScope())
+        {
+            var codes = await db.Alarms.Select(a => a.Code).Distinct().ToListAsync();
+            // (1) alarm 'CFLAG_TIMEOUT' 단독 — RFLAG_TIMEOUT 부재(D5의 택일 모호성 제거).
+            Assert.Contains("CFLAG_TIMEOUT", codes);
+            Assert.DoesNotContain("RFLAG_TIMEOUT", codes);
+
+            // (2) sorter_command status=TIMEOUT 현동작 고정(CFlagTimeout→TIMEOUT 저장, alarm code로 구분).
+            var cmd = await db.SorterCommands.OrderByDescending(c => c.Id).FirstAsync();
+            Assert.Equal(SorterCommandStatus.TIMEOUT, cmd.Status);
+
+            // (3) piece status=TIMEOUT 현동작 고정(CFlagTimeout→PieceStatus.TIMEOUT).
+            var piece = await db.Pieces.FirstAsync(p => p.PId == pid && p.IsActive);
+            Assert.Equal(PieceStatus.TIMEOUT, piece.Status);
+
+            _out.WriteLine($"[D5b VS-2] CFlagTimeout '단독' — alarm codes={string.Join(",", codes)} / sorter_command={cmd.Status} / piece={piece.Status}");
         }
     }
 
