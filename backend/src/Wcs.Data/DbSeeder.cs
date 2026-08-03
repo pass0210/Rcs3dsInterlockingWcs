@@ -29,7 +29,7 @@ public static class DbSeeder
         db.SaveChanges();
     }
 
-    // ── 목적지 (슈트 1~5 + 3D Sorter 슈트 3) ───────────────────────────────
+    // ── 목적지 (슈트 1~5 + 3D Sorter chuteNo=30) ───────────────────────────
     private static void SeedDestinations(WcsDbContext db)
     {
         var now = DateTime.UtcNow;
@@ -51,8 +51,9 @@ public static class DbSeeder
             });
         }
 
-        // 3D Sorter — chute_no=3 (M3 시드: TEST-BARCODE-3 → ChuteNo=3 Sorter3D)
-        // 슈트 3번은 CHUTE로도, SORTER_3D로도 등록. 3D는 별도 chute_no=30 사용
+        // 3D Sorter — SORTER_3D 목적지는 전용 chute_no=30으로 등록(CHUTE 1~5와 겹치지 않는 별도 번호).
+        // M3 시드 오더 TEST-BARCODE-3 → ORD-003 → ChuteNo=30 SORTER_3D (라인 185와 일치).
+        // dev 콜드스타트 SorterRegistry 매칭을 위해 appsettings.Development.json Sorters[]는 ChuteNo=30(E-⑤).
         if (!existing.Contains(30))
         {
             db.Destinations.Add(new Destination
