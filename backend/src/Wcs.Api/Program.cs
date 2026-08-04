@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Options;
 using Serilog;
 using Wcs.Api;
@@ -26,6 +27,23 @@ var builder = WebApplication.CreateBuilder(args);
 // WebApplicationFactory 테스트 호스트) 아무것도 하지 않으므로 콘솔·테스트 무파손.
 // 서비스 등록 스크립트: scripts/install-service.ps1 / uninstall-service.ps1.
 builder.Host.UseWindowsService();
+
+// ── 로그 위치 결정성: 서비스 컨텍스트 작업 디렉터리 고정 (S-AUDIT-B-DEPLOY-HARDENING 모듈 1) ──
+// 배경: sc.exe로 등록된 Windows Service는 프로세스 작업 디렉터리(CWD)가 C:\WINDOWS\System32 라,
+//   Serilog 파일 sink의 상대경로("logs/wcs-.log")가 System32\logs 로 풀려 위치 예측 불가·제한계정 취약.
+// 정책(Q1·Q2 확정): 서비스 컨텍스트일 때만 CWD를 exe 인접(AppContext.BaseDirectory=배포 폴더)으로 고정한다.
+//   → 상대 "logs/" 가 <배포폴더>\logs 로 결정적 해석(NSSM AppDirectory 동작과 동일).
+//   dev `dotnet run`(비서비스)·콘솔·테스트 호스트는 게이트로 CWD 미변경 → 프로젝트/logs 유지(회귀 0).
+// #7 준수: 리터럴 경로 하드코딩 없음 — AppContext.BaseDirectory 파생만. Serilog `path`는 appsettings 상대값 유지.
+// 위치: Serilog UseSerilog 이전(파일 sink 경로는 builder.Build() 시점에 CWD 기준 해석되므로 그 전에 확정).
+// 무영향: 전용 추적 로그(TraceLog=D:\ 절대경로)·operation_log/plc_event(DB)·정적 서빙(WebRootPath=ContentRoot/
+//   wwwroot — UseWindowsService가 ContentRoot=BaseDirectory로 이미 고정, CWD와 무관)에는 영향 없음.
+{
+    var workingDirOverride = ServiceHostingEnvironment.ResolveWorkingDirectoryOverride(
+        WindowsServiceHelpers.IsWindowsService(), AppContext.BaseDirectory);
+    if (workingDirOverride is not null)
+        Directory.SetCurrentDirectory(workingDirOverride);
+}
 
 // ── Serilog 구조화 로깅 (M5-P2 / S-OBSERVABILITY) ────────────────────────────
 // 레벨·싱크(Console/File)·파일 경로·롤링 주기·보존·outputTemplate 전부 appsettings의
@@ -385,6 +403,28 @@ app.Map("/api/{**rest}", () => Results.NotFound());
 app.MapFallbackToFile("index.html");
 
 app.Run();
+
+// ════════════════════════════════════════════════════════════════════════════
+// ServiceHostingEnvironment — 서비스 호스팅 컨텍스트 작업 디렉터리 결정 (S-AUDIT-B-DEPLOY-HARDENING 모듈 1)
+// 로그 위치 결정성의 순수 판정: "서비스 컨텍스트면 작업 디렉터리를 배포 폴더로 고정할지"를 부작용 없이
+// 산출한다. Program 부트스트랩부는 이 결과만 소비해 Directory.SetCurrentDirectory를 호출한다 —
+// 판정 로직을 I/O에서 분리해 단위 테스트로 검증 가능하게 한다(실 서비스 컨텍스트 재현 없이 게이트 실효 입증).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// <summary>서비스 호스팅 컨텍스트에서 작업 디렉터리 고정 대상을 결정하는 순수 헬퍼(모듈 1).</summary>
+public static class ServiceHostingEnvironment
+{
+    /// <summary>
+    /// Windows Service 컨텍스트일 때 작업 디렉터리로 고정할 경로(=exe 인접 배포 폴더)를 반환한다.
+    /// 비서비스(콘솔·dev dotnet run·테스트 호스트)면 null — 작업 디렉터리를 바꾸지 않는다(회귀 0).
+    /// #7: 리터럴 경로 하드코딩 없음 — 호출부가 넘긴 AppContext.BaseDirectory 파생값만 반환한다.
+    /// </summary>
+    /// <param name="isWindowsService">WindowsServiceHelpers.IsWindowsService() 판정 결과.</param>
+    /// <param name="baseDirectory">AppContext.BaseDirectory(exe 인접 배포 폴더).</param>
+    /// <returns>서비스 컨텍스트면 baseDirectory, 아니면 null(작업 디렉터리 미변경 신호).</returns>
+    public static string? ResolveWorkingDirectoryOverride(bool isWindowsService, string baseDirectory)
+        => isWindowsService ? baseDirectory : null;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // OperationLogClassifier — 핸드셰이크 단계 action → operation_log 레벨 분류 (A-1)
