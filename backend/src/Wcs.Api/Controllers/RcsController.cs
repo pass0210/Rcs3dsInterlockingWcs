@@ -242,13 +242,54 @@ public sealed class RcsController : ControllerBase
             CellNo: null, Floor: null, InductionNo: null, Trigger: "IF10",
             Detail: $"{{\"barcode\":\"{req.Barcode}\",\"agvNo\":{req.AgvNo}}}"));
 
-        // ── 투입 기록 + 멱등 ──────────────────────────────────────────────────────
-        var isNewRecord = recorder.RecordDeposit(
+        // ── 투입 기록 + 원인 구분(D④) ────────────────────────────────────────────
+        // RecordDeposit 은 실패(비-신규) 3원인을 분리 반환한다(구 bool false 3원인 '멱등 OK' 합류 해소).
+        //   원인별로 로그 레벨만 가르되(진짜중복→INFO '멱등 OK' / DENIED재보고·미존재→WARN),
+        //   전 케이스 200 OK 멱등 응답·차단 동작을 바이트 보존한다(현동작 고정 — 정책 전환 아님, 사용자 게이트 D④).
+        var recordResult = recorder.RecordDeposit(
             req.PId, req.Barcode, req.ChuteNo, req.AgvNo, req.Qty, req.TimeStamp);
 
-        if (!isNewRecord)
+        if (recordResult != DepositRecordResult.NewRecord)
         {
-            _log.LogInformation("[IF-10] pId={PId} 중복 보고 — 멱등 OK", req.PId);
+            switch (recordResult)
+            {
+                case DepositRecordResult.Duplicate:
+                    // 진짜 중복(이미 DEPOSITED/CELL_ASSIGNED/LOADED 또는 동시 삽입 유니크 위반) — 현행 '멱등 OK'(INFO) 유지.
+                    _log.LogInformation("[IF-10] pId={PId} 중복 보고 — 멱등 OK", req.PId);
+                    break;
+
+                case DepositRecordResult.DeniedReport:
+                    // DENIED piece 재보고 — IF-05에서 NG(DENIED)로 거절된 piece에 IF-10 도달. 차단 유지·WARN(오도 금지).
+                    //   정책 전환(alarm 승격 등)은 이번 미포함(SPEC §7-B 등재) — 200 멱등 응답·차단 동작 보존.
+                    _log.LogWarning(
+                        "[IF-10] pId={PId} chuteNo={ChuteNo} DENIED piece 재보고 — 투입 차단 유지(200 멱등)", req.PId, req.ChuteNo);
+                    _opLog.Log(OperationLogCategory.API, "IF10_DENIED_REREPORT", level: OperationLogLevel.WARN,
+                        sorterChuteNo: req.ChuteNo, barcode: req.Barcode, pId: req.PId,
+                        detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo},\"cause\":\"DeniedReport\"}}");
+                    break;
+
+                case DepositRecordResult.NoDestination:
+                    // 미존재 chuteNo·무피스 — 활성 piece 없고 chuteNo에 해당하는 활성 destination도 없음. 기록 불가·WARN.
+                    _log.LogWarning(
+                        "[IF-10] pId={PId} chuteNo={ChuteNo} 활성 piece 없음 + 미존재 chuteNo — 투입 기록 불가(200 멱등)", req.PId, req.ChuteNo);
+                    _opLog.Log(OperationLogCategory.API, "IF10_NO_DESTINATION", level: OperationLogLevel.WARN,
+                        sorterChuteNo: req.ChuteNo, barcode: req.Barcode, pId: req.PId,
+                        detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo},\"cause\":\"NoDestination\"}}");
+                    break;
+
+                default:
+                    // Fail-loud: 현 4값(NewRecord/Duplicate/DeniedReport/NoDestination)은 exhaustive이나, 향후 enum에
+                    //   비-신규 값이 추가되면 로그 없이 조용히 200으로 빠지는 '위장유실'(이 스프린트가 없애려는 결함)을
+                    //   재현할 수 있다. 미매핑 원인을 무음 처리하지 않고 WARN(구조화 로그 포함)으로 드러낸다.
+                    //   응답은 200 멱등을 유지(IF-10 응답 계약 보존 — RCS에 500 던지지 않음).
+                    _log.LogWarning(
+                        "[IF-10] pId={PId} chuteNo={ChuteNo} 미매핑 RecordDeposit 원인({Cause}) — 로그만·200 멱등(추가 원인 처리 누락 의심)",
+                        req.PId, req.ChuteNo, recordResult);
+                    _opLog.Log(OperationLogCategory.API, "IF10_UNMAPPED_CAUSE", level: OperationLogLevel.WARN,
+                        sorterChuteNo: req.ChuteNo, barcode: req.Barcode, pId: req.PId,
+                        detail: $"{{\"chuteNo\":{req.ChuteNo},\"agvNo\":{req.AgvNo},\"cause\":\"{recordResult}\"}}");
+                    break;
+            }
             return Ok(new DepositReportResponse("OK"));
         }
 
@@ -267,7 +308,12 @@ public sealed class RcsController : ControllerBase
         if (dest is not null && destType == DestinationType.Chute)
         {
             // S-B2C-DATAGEN: 아카이브(재테스트 초기화) 행 제외.
-            var piece = db.Pieces.FirstOrDefault(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null);
+            // 항목②(S-AUDIT-C) 부수 하드닝: 활성 piece "1건" 읽기에 결정적 정렬(OrderByDescending(Id)) —
+            //   최신 활성 piece를 일관 선택(무정렬 FirstOrDefault의 비결정성 제거).
+            var piece = db.Pieces
+                .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)
+                .OrderByDescending(p => p.Id)
+                .FirstOrDefault();
             var qty   = piece?.Qty ?? req.Qty ?? 1;
             capacity.OnDeposited(dest.Id, qty);
         }
@@ -299,7 +345,10 @@ public sealed class RcsController : ControllerBase
 
         if (!cellNo.HasValue)
         {
-            _log.LogWarning("[IF-10] pId={PId} 3D 보고 → 빈 셀 없음 (3DS FULL 조건). IF-11 트리거 생략", req.PId);
+            // 셀 미선택(null) = ③ 빈 셀 없음(3DS FULL) 또는 ⑤ 미매칭 fail-loud. 둘 다 IF-11/틸트 미트리거.
+            //   ⑤ 미매칭은 SelectCell이 CELL_ORDER_UNMATCHED alarm+WARN을 이미 기록한다(진단 오도 방지 —
+            //   여기 로그는 "빈 셀 없음=FULL"으로 단정하지 않고 중립 표기).
+            _log.LogWarning("[IF-10] pId={PId} 3D 보고 → 셀 미선택(빈 셀 없음=FULL 또는 미매칭 fail-loud) — IF-11 트리거 생략", req.PId);
             return;
         }
 
@@ -320,6 +369,7 @@ public sealed class RcsController : ControllerBase
         //   단일 진실(piece.DepositedAt) 재사용 — 요청 스코프 db로 지금 읽어 클로저로 넘긴다(백그라운드는 스코프 종료).
         var pieceRow = db.Pieces
             .Where(p => p.PId == req.PId && p.IsActive && p.ArchivedAt == null)   // S-B2C-DATAGEN: 아카이브 제외.
+            .OrderByDescending(p => p.Id)   // 항목②(S-AUDIT-C) 부수 하드닝: 최신 활성 piece 결정적 선택.
             .Select(p => new { p.Id, p.DepositedAt })
             .FirstOrDefault();
         long pieceId = pieceRow?.Id ?? 0;

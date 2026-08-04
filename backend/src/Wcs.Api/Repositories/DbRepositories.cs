@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Wcs.Data;
 using Wcs.PlcGateway;
 using DataOrderItem   = Wcs.Data.OrderItem;
@@ -175,87 +176,120 @@ public sealed class EfOrderRepository : IOrderRepository
             }
         }
 
-        // ── 트랜잭션: 예약차감 + piece 삽입 + IF05_REQ/RES piece_event + AUTO 배정 반영 ─
-        using var tx = _db.Database.BeginTransaction();
-        try
+        // ── 트랜잭션: 원자 예약차감 + piece 삽입 + IF05_REQ/RES piece_event + AUTO 배정 반영 ─
+        // 항목①(S-AUDIT-C): 예약 차감을 추적 RMW(item.ReservedQty += qty; SaveChanges)에서
+        //   **원자 조건부 UPDATE**로 교체 — `reserved_qty += qty WHERE reserved_qty + qty <= planned_qty`,
+        //   영향행 0 = OVER(초과예약 차단). Finalize의 ExecuteUpdate(원자 증가) 선례(§SortedQty)를 재사용한다.
+        //   효과: SQL Server rowversion 패자=미처리 500 + SQLite lost-update를 동시 해소하고,
+        //         tx-밖 pre-OVER(위 :96) ↔ tx-안 차감 사이의 TOCTOU 창을 닫는다(원자 UPDATE의 WHERE가 최종 권위).
+        //         재시도 불요(원자 1회 — 절대규칙 #7 하드코딩/재시도상수 0).
+        // 항목②(S-AUDIT-C): 기존 활성 piece 비활성화를 FirstOrDefault 1행 → **전건**(활성·미아카이브 전체)으로.
+        bool overReserved = false;
+        using (var tx = _db.Database.BeginTransaction())
         {
-            var now = DateTime.UtcNow;
-
-            // AUTO 배정이면 wcs_order.destination_id 갱신
-            if (autoAssign)
+            try
             {
-                order.DestinationId  = destId;
-                order.DestAssignType = DestAssignType.AUTO;
-                order.DestAssignedAt = now;
-                if (order.Status == OrderStatus.WAITING)
+                var now = DateTime.UtcNow;
+
+                // 원자 조건부 예약 차감 — tx의 최초 write(SQLite: 쓰기락 즉시 취득 → shared→write 승격 데드락 회피).
+                int affected = _db.OrderItems
+                    .Where(i => i.Id == item.Id && i.ReservedQty + qty <= i.PlannedQty)
+                    .ExecuteUpdate(s => s
+                        .SetProperty(x => x.ReservedQty, x => x.ReservedQty + qty)
+                        .SetProperty(x => x.UpdatedAt,   now));
+
+                if (affected == 0)
                 {
-                    order.Status    = OrderStatus.RUNNING;
-                    order.StartedAt = now;
+                    // OVER — 원자 UPDATE가 초과예약을 거부(동시 경합 패자 또는 실제 초과). tx 롤백 후
+                    //   DENIED 감사기록(하드 계약)을 tx 밖에서 남긴다(RecordDenied가 자체 tx 사용 — 중첩 방지).
+                    tx.Rollback();
+                    overReserved = true;
                 }
-                order.UpdatedAt = now;
+                else
+                {
+                    // AUTO 배정이면 wcs_order.destination_id 갱신
+                    if (autoAssign)
+                    {
+                        order.DestinationId  = destId;
+                        order.DestAssignType = DestAssignType.AUTO;
+                        order.DestAssignedAt = now;
+                        if (order.Status == OrderStatus.WAITING)
+                        {
+                            order.Status    = OrderStatus.RUNNING;
+                            order.StartedAt = now;
+                        }
+                        order.UpdatedAt = now;
+                    }
+
+                    // p_id 순환: 기존 활성 piece **전건** 비활성화(항목② — 잔존 활성 piece가 IF-10을 부분유니크
+                    //   위반→'멱등 OK' 위장유실로 몰던 결함 차단). S-B2C-DATAGEN: 아카이브 행 제외.
+                    var prevActives = _db.Pieces
+                        .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
+                        .ToList();
+                    foreach (var pa in prevActives)
+                    {
+                        pa.IsActive  = false;
+                        pa.UpdatedAt = now;
+                    }
+
+                    // agv / induction 조회
+                    var agv       = _db.Agvs.FirstOrDefault(a => a.AgvNo == agvNo);
+                    var induction = _db.Inductions.FirstOrDefault(i => i.InductionNo == inductionNo);
+
+                    // piece 삽입 (RESERVED)
+                    var piece = new Piece
+                    {
+                        PId           = pId,
+                        IsActive      = true,
+                        Barcode       = barcode,
+                        Qty           = qty,
+                        DepositedAt   = null,
+                        DestinationId = destId!.Value,
+                        OrderItemId   = item.Id,
+                        AgvId         = agv?.Id,
+                        InductionId   = induction?.Id,
+                        Status        = PieceStatus.RESERVED,
+                        ClientTs      = clientTs,          // RCS 원문 보존
+                        CreatedAt     = now,
+                        UpdatedAt     = now,
+                    };
+                    _db.Pieces.Add(piece);
+                    _db.SaveChanges();
+
+                    // piece_event: IF05_REQ + IF05_RES — 같은 트랜잭션 (MINOR-6)
+                    _db.PieceEvents.Add(new PieceEvent
+                    {
+                        PieceId   = piece.Id,
+                        EventType = PieceEventType.IF05_REQ,
+                        Reason    = "NORMAL",
+                        ClientTs  = clientTs,
+                        At        = effective,
+                    });
+                    _db.PieceEvents.Add(new PieceEvent
+                    {
+                        PieceId   = piece.Id,
+                        EventType = PieceEventType.IF05_RES,
+                        Reason    = "NORMAL",
+                        ClientTs  = clientTs,
+                        At        = now,
+                    });
+                    _db.SaveChanges();
+
+                    tx.Commit();
+                }
             }
-
-            // 예약 차감
-            item.ReservedQty += qty;
-            item.UpdatedAt    = now;
-
-            // p_id 순환: 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외 — 재테스트 시 옛 piece 오소비 차단)
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
-            if (prevActive is not null)
+            catch
             {
-                prevActive.IsActive  = false;
-                prevActive.UpdatedAt = now;
+                tx.Rollback();
+                throw;
             }
-
-            // agv / induction 조회
-            var agv       = _db.Agvs.FirstOrDefault(a => a.AgvNo == agvNo);
-            var induction = _db.Inductions.FirstOrDefault(i => i.InductionNo == inductionNo);
-
-            // piece 삽입 (RESERVED)
-            var piece = new Piece
-            {
-                PId           = pId,
-                IsActive      = true,
-                Barcode       = barcode,
-                Qty           = qty,
-                DepositedAt   = null,
-                DestinationId = destId!.Value,
-                OrderItemId   = item.Id,
-                AgvId         = agv?.Id,
-                InductionId   = induction?.Id,
-                Status        = PieceStatus.RESERVED,
-                ClientTs      = clientTs,          // RCS 원문 보존
-                CreatedAt     = now,
-                UpdatedAt     = now,
-            };
-            _db.Pieces.Add(piece);
-            _db.SaveChanges();
-
-            // piece_event: IF05_REQ + IF05_RES — 같은 트랜잭션 (MINOR-6)
-            _db.PieceEvents.Add(new PieceEvent
-            {
-                PieceId   = piece.Id,
-                EventType = PieceEventType.IF05_REQ,
-                Reason    = "NORMAL",
-                ClientTs  = clientTs,
-                At        = effective,
-            });
-            _db.PieceEvents.Add(new PieceEvent
-            {
-                PieceId   = piece.Id,
-                EventType = PieceEventType.IF05_RES,
-                Reason    = "NORMAL",
-                ClientTs  = clientTs,
-                At        = now,
-            });
-            _db.SaveChanges();
-
-            tx.Commit();
         }
-        catch
+
+        // OVER(원자 갱신 거부) — tx 종료 후 DENIED 감사기록(중첩 tx 방지). 어느 동시 요청도 감사 없이 500 소실 금지.
+        if (overReserved)
         {
-            tx.Rollback();
-            throw;
+            RecordDenied(pId, agvNo, barcode, inductionNo, qty, "OVER", clientTs, effective, item, dest);
+            return ("NG", null, "OVER", destApiType, null);
         }
 
         return ("OK", chuteNo, "NORMAL", destApiType, destId);
@@ -272,12 +306,15 @@ public sealed class EfOrderRepository : IOrderRepository
         {
             var now = DateTime.UtcNow;
 
-            // 기존 활성 piece 비활성화 (S-B2C-DATAGEN: 아카이브 행 제외)
-            var prevActive = _db.Pieces.FirstOrDefault(p => p.PId == pId && p.IsActive && p.ArchivedAt == null);
-            if (prevActive is not null)
+            // 기존 활성 piece **전건** 비활성화 (항목②: FirstOrDefault 1행→전건 — 잔존 활성 잔류 차단).
+            //   S-B2C-DATAGEN: 아카이브 행 제외.
+            var prevActives = _db.Pieces
+                .Where(p => p.PId == pId && p.IsActive && p.ArchivedAt == null)
+                .ToList();
+            foreach (var pa in prevActives)
             {
-                prevActive.IsActive  = false;
-                prevActive.UpdatedAt = now;
+                pa.IsActive  = false;
+                pa.UpdatedAt = now;
             }
 
             var agv       = _db.Agvs.FirstOrDefault(a => a.AgvNo == agvNo);
@@ -438,7 +475,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
         _db = db;
     }
 
-    public bool RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs)
+    public DepositRecordResult RecordDeposit(int pId, string barcode, int chuteNo, int agvNo, int? qty, string? clientTs)
     {
         // timeStamp 백필 (Scope-3): 파싱 성공 → effective, 실패·누락 → UtcNow
         var effective = ParseTimestamp(clientTs) ?? DateTime.UtcNow;
@@ -462,7 +499,7 @@ public sealed class EfDepositRecorder : IDepositRecorder
                 if (dest is null)
                 {
                     tx.Rollback();
-                    return false; // 목적지 없으면 기록 불가
+                    return DepositRecordResult.NoDestination; // 활성 piece 없음 + chuteNo 목적지 없음 → 기록 불가(WARN)
                 }
 
                 var now2 = DateTime.UtcNow;
@@ -492,25 +529,29 @@ public sealed class EfDepositRecorder : IDepositRecorder
                 });
                 _db.SaveChanges();
                 tx.Commit();
-                return true;
+                return DepositRecordResult.NewRecord; // 신규 pId 직삽입(IF-05 없이 IF-10 먼저) — 후속 트리거 진행
             }
 
-            // 이미 DEPOSITED 이상 → 멱등(중복)
+            // 이미 DEPOSITED 이상 → 진짜 중복(멱등 OK·현행 INFO 유지)
             if (piece.Status is PieceStatus.DEPOSITED or PieceStatus.CELL_ASSIGNED
                               or PieceStatus.LOADED)
             {
                 tx.Rollback();
-                return false;
+                return DepositRecordResult.Duplicate;
             }
 
-            // DENIED piece는 IF-10 도달 시도 → 멱등 false
+            // DENIED piece는 IF-10 도달 시도 → DENIED 재보고(차단 유지·WARN)
             if (piece.Status == PieceStatus.DENIED)
             {
                 tx.Rollback();
-                return false;
+                return DepositRecordResult.DeniedReport;
             }
 
-            // 상태 전이: RESERVED/QUERIED/PERMITTED → DEPOSITED
+            // 상태 전이 → DEPOSITED (catch-all else — 위 DEPOSITED/CELL_ASSIGNED/LOADED·DENIED 게이트를
+            //   통과한 그 외 '모든' 상태가 여기로 온다). 정상 경로는 RESERVED/QUERIED/PERMITTED이나, 이 else는
+            //   ⚠ 비정상 종단 상태(MISMATCH/TIMEOUT/CANCELLED 등)도 포함하며 그런 piece를 DEPOSITED로 '부활'시켜
+            //   NewRecord로 반환한다. 이는 이 스프린트 이전부터의 선재(先在) 동작으로 이번엔 바이트 보존만 한다
+            //   (반환 타입 bool→enum만 변경). 종단 상태 재보고를 별도 차단/원인 분리하는 실 가드는 후속 과제.
             var now3 = DateTime.UtcNow;
             piece.Status      = PieceStatus.DEPOSITED;
             piece.DepositedAt = effective;
@@ -526,13 +567,13 @@ public sealed class EfDepositRecorder : IDepositRecorder
             });
             _db.SaveChanges();
             tx.Commit();
-            return true;
+            return DepositRecordResult.NewRecord; // 위 게이트 밖 그 외 상태 → DEPOSITED 전이 성공(catch-all)
         }
         catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
         {
-            // piece 부분 유니크 위반 → 신규 piece insert 경합만 백스톱(동시 동일 pId 1건만 전이)
+            // piece 부분 유니크 위반 → 신규 piece insert 경합(동시 동일 pId 1건만 전이) = 진짜 중복 백스톱
             tx.Rollback();
-            return false;
+            return DepositRecordResult.Duplicate;
         }
         catch
         {
@@ -592,10 +633,16 @@ public sealed class EfDepositRecorder : IDepositRecorder
 public sealed class EfCellSelector : ICellSelector
 {
     private readonly WcsDbContext _db;
+    // 항목⑤(S-AUDIT-C): 빈 셀 분기 미매칭 시 fail-loud alarm(CELL_ORDER_UNMATCHED)를 남기기 위한 의존.
+    //   IAlarmSink=EfAlarmSink(동일 스코프 WcsDbContext) — alarm 은 SelectCell 트랜잭션 종료 후 기록(중첩 tx 방지).
+    private readonly IAlarmSink _alarm;
+    private readonly ILogger<EfCellSelector> _log;
 
-    public EfCellSelector(WcsDbContext db)
+    public EfCellSelector(WcsDbContext db, IAlarmSink alarm, ILogger<EfCellSelector> log)
     {
-        _db = db;
+        _db    = db;
+        _alarm = alarm;
+        _log   = log;
     }
 
     public int? SelectCell(int chuteNo, string barcode)
@@ -608,72 +655,99 @@ public sealed class EfCellSelector : ICellSelector
 
         if (dest is null) return null;
 
-        using var tx = _db.Database.BeginTransaction();
-        try
+        // 항목⑤(S-AUDIT-C): ② 빈 셀 분기에서 매칭 RUNNING 오더가 없으면 셀을 조용히 반환하던 혼적 벡터를
+        //   fail-loud로 전환한다 — 셀 반환 거부(null)+WARN+alarm(CELL_ORDER_UNMATCHED). 물리 상품은 틸트 명령
+        //   없이 대기(IF-11 미트리거). alarm/로그는 tx 종료 **후** 기록한다(EfAlarmSink가 자체 tx를 열므로
+        //   SelectCell 트랜잭션과 중첩 방지 — 동일 스코프 WcsDbContext).
+        bool unmatched = false;
+        int? selected  = null;
+        using (var tx = _db.Database.BeginTransaction())
         {
-            var now = DateTime.UtcNow;
-
-            // ① 오더가 이 소터에 활성 배정 보유 → 그 배정 셀 중 여유 있는 셀 재사용(no-overflow).
-            //   SorterCellQty 공유(byte-consistent) — CellNo 오름차순 중 여유 있는 첫 셀.
-            //   보유 셀 전부 작업수량 도달이면 null(NG) — ②로 폴백하지 않는다(오더는 자기 셀 하나에 국한).
-            //   → IF-05 SorterCanAcceptBarcode(배정 보유 → 그 셀 여유만)와 정확히 동형.
-            var assignedCells = SorterCellQty.AssignedCellsForBarcode(_db, dest.Id, barcode);
-            if (assignedCells.Count > 0)
+            try
             {
-                var roomCell = SorterCellQty.FirstAssignedCellWithRoom(_db, dest.Id, assignedCells);
-                tx.Commit();
-                return roomCell?.CellNo;   // 여유 셀 재사용 / 전부 full이면 null(오버플로 금지).
-            }
+                var now = DateTime.UtcNow;
 
-            // ② 배정 없음(진짜 신규) → 빈 enabled 셀 신규 할당.
-            var occupiedCellIds = _db.CellAssignments
-                .Where(a => a.Cell.DestinationId == dest.Id && a.ReleasedAt == null)
-                .Select(a => a.CellId)
-                .ToHashSet();
-
-            var freeCell = _db.Cells
-                .Where(c => c.DestinationId == dest.Id
-                         && c.Enabled
-                         && !occupiedCellIds.Contains(c.Id))
-                .OrderBy(c => c.CellNo)
-                .FirstOrDefault();
-
-            if (freeCell is null)
-            {
-                tx.Commit();
-                return null; // ③ 빈 셀 없음
-            }
-
-            // 배정할 오더 조회
-            var order = _db.OrderItems
-                .Include(i => i.Order)
-                .Where(i => i.Barcode == barcode
-                         && i.Order.DestinationId == dest.Id
-                         && i.Order.Status == OrderStatus.RUNNING)
-                .Select(i => i.Order)
-                .FirstOrDefault();
-
-            if (order is not null)
-            {
-                _db.CellAssignments.Add(new CellAssignment
+                // ① 오더가 이 소터에 활성 배정 보유 → 그 배정 셀 중 여유 있는 셀 재사용(no-overflow).
+                //   SorterCellQty 공유(byte-consistent) — CellNo 오름차순 중 여유 있는 첫 셀.
+                //   보유 셀 전부 작업수량 도달이면 null(NG) — ②로 폴백하지 않는다(오더는 자기 셀 하나에 국한).
+                //   → IF-05 SorterCanAcceptBarcode(배정 보유 → 그 셀 여유만)와 정확히 동형.
+                var assignedCells = SorterCellQty.AssignedCellsForBarcode(_db, dest.Id, barcode);
+                if (assignedCells.Count > 0)
                 {
-                    CellId     = freeCell.Id,
-                    OrderId    = order.Id,
-                    AssignedAt = now,
-                    ReleasedAt = null,
-                    CreatedAt  = now,
-                });
-                _db.SaveChanges();
-            }
+                    var roomCell = SorterCellQty.FirstAssignedCellWithRoom(_db, dest.Id, assignedCells);
+                    tx.Commit();
+                    return roomCell?.CellNo;   // 여유 셀 재사용 / 전부 full이면 null(오버플로 금지).
+                }
 
-            tx.Commit();
-            return freeCell.CellNo;
+                // ② 배정 없음(진짜 신규) → 빈 enabled 셀 신규 할당.
+                var occupiedCellIds = _db.CellAssignments
+                    .Where(a => a.Cell.DestinationId == dest.Id && a.ReleasedAt == null)
+                    .Select(a => a.CellId)
+                    .ToHashSet();
+
+                var freeCell = _db.Cells
+                    .Where(c => c.DestinationId == dest.Id
+                             && c.Enabled
+                             && !occupiedCellIds.Contains(c.Id))
+                    .OrderBy(c => c.CellNo)
+                    .FirstOrDefault();
+
+                if (freeCell is null)
+                {
+                    tx.Commit();
+                    return null; // ③ 빈 셀 없음(3DS FULL) — 정상 게이트(alarm 없음).
+                }
+
+                // 배정할 오더 조회
+                var order = _db.OrderItems
+                    .Include(i => i.Order)
+                    .Where(i => i.Barcode == barcode
+                             && i.Order.DestinationId == dest.Id
+                             && i.Order.Status == OrderStatus.RUNNING)
+                    .Select(i => i.Order)
+                    .FirstOrDefault();
+
+                if (order is null)
+                {
+                    // ⑤ 미매칭 fail-loud — 배정 생성 금지(빈 tx 커밋)·셀 반환 거부. alarm/로그는 tx 종료 후.
+                    tx.Commit();
+                    unmatched = true;
+                    selected  = null;
+                }
+                else
+                {
+                    _db.CellAssignments.Add(new CellAssignment
+                    {
+                        CellId     = freeCell.Id,
+                        OrderId    = order.Id,
+                        AssignedAt = now,
+                        ReleasedAt = null,
+                        CreatedAt  = now,
+                    });
+                    _db.SaveChanges();
+                    tx.Commit();
+                    selected = freeCell.CellNo;
+                }
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
         }
-        catch
+
+        // ⑤ 미매칭 fail-loud 기록(tx 종료 후 — 중첩 tx 방지). ③ 빈 셀 없음(정상 FULL)과 명확히 구분:
+        //   이 경로는 "빈 셀은 있으나 매칭 RUNNING 오더가 없음"(오타·REPORTED_DIRECT) → 혼적 차단.
+        if (unmatched)
         {
-            tx.Rollback();
-            throw;
+            _log.LogWarning(
+                "[IF-11] 셀 선택 미매칭 fail-loud: chuteNo={ChuteNo} barcode={Barcode} — 매칭 RUNNING 오더 없음 → 셀 반환 거부(IF-11/틸트 미트리거)",
+                chuteNo, barcode);
+            _alarm.Append("CELL_ORDER_UNMATCHED", AlarmSeverity.WARN, null,
+                $"chuteNo={chuteNo} barcode={barcode} — 물리 투입 보고되었으나 매칭 RUNNING 오더 없음(혼적 차단·셀 미배정)");
         }
+
+        return selected;
     }
 
     // ── OFFLINE 등 물리 적재 불가 시 방금 만든 신규(빈) 배정만 롤백 (S-CELL-ACCUM Scope 5) ─────

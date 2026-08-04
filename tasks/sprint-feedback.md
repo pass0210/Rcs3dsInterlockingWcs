@@ -1,51 +1,48 @@
-# Sprint Feedback — S-SORT-CYCLE-TIME-METRIC
+# Sprint Feedback — S-AUDIT-E-DOCS
 
-(Evaluator가 PASS/FAIL·APPROVED 기록)
+(Evaluator가 문서/설정 정확성 단일 차원 검증 → APPROVED/FAIL. ① CLAUDE.md는 구현자=main·S6로 검증.)
 
-## APPROVED (2026-07-31, iteration 1)
+---
 
-메트릭 = avg(ReturnedAt − SortStartedAt), SortStartedAt = 분류 시작(Ready 워드 1→0 관측, HandshakeOrchestrator R 폴
-루프 관측 전용 + 첫 Ready==0 폴백[OQ-3]). 전 완료조건 C1~C7·전 시나리오(W-1~W-5·B-1~B-7·E2E-1) 신선증거로 검증.
+## APPROVED — 2026-08-03 (Evaluator, 독립 검증·fresh evidence)
 
-### ★ 재검증 게이트(iter1 FAIL 근본원인 재발 차단) — 실 Sim E2E로 실증
-- 격리 라이브 스택: 실 Sim3ds TCP :1518(--sort 1500) + Wcs.Api :5217(Sqlite scratch·SeedOnStartup·Sorters[0]
-  ChuteNo=30/Tcp/1518 override·ChuteStatePush DORMANT) + Vite :5294(→:5217). 현장/운영 DB·포트 무접촉.
-- 실 저널링 경로 2사이클 구동(합성 손세팅 아님): IF-05(TEST-BARCODE-3·ind1)→IF-10(chuteNo30)→핸드셰이크→
-  COMPLETED sorter_command. 브라우저 /trace 레이블:
-  - 마운트: "평균 사이클 시간(분류시작~복귀) · 1.5초 · n=1 · Σ(복귀−분류시작)/N".
-  - 2번째 사이클 완료 후 **페이지 리로드 없이**(navEntries=1) "1.5초 · n=2"로 자가 갱신 — event 9(READY_0TO1)
-    → subscribeTrace → 500ms 디바운스 재조회 체인 실동작 실증(W-2/E2E-1 핵심 상호작용).
-- **표시값 = DB Σ/n 비순환 실증**(raw 컬럼 직독, dbread 도구): row1 cycle=1.5090001s·row2 cycle=1.4046335s →
-  n=2 sum=2.9136336 avg=**1.4568168** = 엔드포인트 {avgSeconds:1.4568168,n:2} = 레이블 "1.5초"(toFixed(1)) 완전 일치.
-  n=1 단계도 1.5090001 정확 일치. **의미 있는 양수(≈초)** 실증 — iter1의 항상-≈0 결함 재발 없음.
-- 단조 불변식 실데이터 확인: 두 행 모두 Deposited ≤ SortStarted ≤ Tilted ≤ Returned = OK(음수 사이클 미발생).
+전 항목 지상진실 1:1 정합, 회귀 0, 코드 로직 diff 0(주석/문서/dev-config만), 스코프 준수. 6개 정정 파일(③⑤⑥=Generator, ①=main) 모두 통과. 근거는 아래 — 전부 이번 세션 fresh tool output(git diff·grep 재스캔·dotnet build/test·콜드스타트 실증·node JS parse).
 
-### 집계 정확성 / 마이그레이션 / 회귀
-- 자동 테스트 4건 GREEN(명시 실측): Aggregate n=2 avg=15.0 손계산 일치·ArchivedAt!=null 행 포함·null 행 제외 /
-  n=0→avgSeconds=null·200 / Journal.Finalize 지속+단조 / **실 Sim 캡처**(Outcome=Success·sortStarted<tilted≤returned·
-  cycle=124ms 양수). 전체 스위트 **518 GREEN / 0 fail / 0 skip**(514 baseline + 4 신규 = 산술 일치·회귀 0).
-- 마이그레이션: SqlServer(datetime2)·Sqlite(TEXT) 2개 + 양 ModelSnapshot. **has-pending-model-changes=No**(양 provider).
-  base e90f0cc(FixPieceIdempotency…) 위 20260731 신규가 순서대로 얹힘. **SQL Server 콜드스타트**: 빈 eval DB에
-  9개 마이그레이션 from-scratch 적용 exit 0·SortStartedAt=datetime2 nullable 확인. Sqlite 콜드스타트: 라이브 스택
-  MigrateOnStartup+Seed 정상(컬럼 존재). AddColumn(nullable)이라 기존 행 보존·구 행 SortStartedAt=null 구조적 보장.
-- 회귀 0: **Wcs.Core git diff 0**·Sim3ds diff 0. HandshakeOrchestrator diff = SortStartedAt 관측(`if(sortStartedAt is
-  null && !snap.Ready)`) + tiltedAt 클램프 + 전 종료경로 파라미터 threading + 주석뿐. **EnqueueAsync 6→6**(신규 PLC
-  write 0)·Task.Delay/deadline/poll/pop/write-on-clear/ClearR 시퀀스 불변(diff 리뷰 + 라이브 핸드셰이크 정상 완료
-  cSeq/rSeq match로 실증). 프론트 tsc/lint/build exit 0(선재 chunk 경고만). 콘솔: 내 :5294 페이지 pageerror 0·warning 0
-  (all:true 버퍼 69k는 전부 foreign 세션 — 내 포트 참조 0건, foreign-buffer 분리).
+### E-③ FULL/PAUSED 무조건-NG → 타입 분기 (PASS)
+- **지상진실 대조**: 실코드 `RcsController.QueryDestination`(RcsController.cs:91-119) — `if (dt != DestinationType.Sorter3D) return DestinationBlock.None;`(슈트 full/paused 통과·OK) / 소터는 `Paused→차단`, else `SorterCanAcceptBarcode ? None : Full`. 정정문(슈트=IF-05 OK·보내고 대기, 소터만 PAUSED·셀만재 NG)과 의미 정확 일치.
+- **정정문↔canonical 정합**: master_spec §05(:211/216/220)·interface_kr §6(:264)·영문 interface(:281)가 이미 동일 타입 분기 — 정정된 unified_sequence.html:194-196 + master_spec:263(§08)이 이들과 문구·의미 일치.
+- **★ 독립 전수 재스캔**(`grep -rniE "FULL.{0,60}PAUSED|PAUSED.{0,60}FULL" docs/*.html`, 6개 html): 무조건-NG 잔존 = **0건**. 이번 스프린트가 손댄 2건(unified:194-196, master_spec:263/§08)이 유일한 무조건-NG였고 둘 다 정정됨(Generator 재스캔 주장을 독립 재스캔으로 확인). 나머지 FULL/PAUSED 동시출현은 전부 비-NG 맥락 — TgtFloor 쓰기 정책(3ds_interface:220/339·master:286 "쓰지 않고 대기"), WCS 판단 서술(:138/338·master:285), IF-08 푸시(:327·master:225/230), §09 예외표 중립 "IF-05/IF-08에서 처리"(master:276), 파킹존 우회(unified:207) — 무조건 NG 단정 없음.
+- **§05 무접촉**: git diff상 master_spec 변경 hunk는 line 263(§08 `<section id="s8">`) 단 1곳. §05(:208-224)는 -/+ 없음 → 무편집 확인. Generator의 §08 추가 정정은 완료조건("docs/*.html 무조건-NG 잔존 0"·"전 문서 동일 진실")에 부합·§05 무접촉이라 정당.
+- **HTML well-formedness**: master_spec:263 태그 균형(`<b>`3/3·`<code>`4/4·`<li>`1/1). unified:194-196 JS 문자열 single-quote parity 전부 짝수(32/20/12). `node`로 `const S=[...]` 배열 전체 파싱 성공 → 편집이 시퀀스 JS를 깨지 않음.
 
-### 절대규칙
-- #1: SortStartedAt 기입은 EF DB 저장(Journal.Finalize)·Modbus 아님 — 쓰기 큐 무변경·EnqueueAsync 6→6.
-- #7: 프론트 상수(소수1·디바운스500·트리거event9·카피·포맷) lib/cycleTime.ts 단일 소스·백엔드 RFlagPollMs 재사용·신규 타이밍 리터럴 0.
-- #8: 판정 로직 무접촉·Wcs.Core 순수(diff 0)·핸드셰이크 관측/EF 기입만 additive.
+### E-⑤ dev 시드 chuteNo↔Sorters 단일 진실 정렬 (PASS — 콜드스타트 실증)
+- **단일 진실 대조(S1)**: DbSeeder.cs SORTER_3D chuteNo=**30**(코드값 :61 무변경, 주석만 정정 — :32/:54-56이 실코드·:186와 정합). appsettings.Development.json에 dev 전용 `Sorters:[{ChuteNo:30, Transport:Tcp}]` 오버라이드 추가 → .NET 인덱스0 병합으로 base(ChuteNo:1→30·Transport:Rtu→Tcp)만 덮고 Host/Port(127.0.0.1:1502) 상속. base appsettings.json Sorters[0].ChuteNo=**1** 무변경(확인).
+- **fail-loud 로직 확인**: Program.cs:509-518 — 각 SORTER_3D dest를 `configByChuteNo.TryGetValue(dest.ChuteNo)` 조회, 미스매치 시 `LogCritical + throw InvalidOperationException("appsettings Sorters[] 항목 없음 — 기동 불가")`. base만이면 configByChuteNo={1}, 시드 chuteNo=30 → 미스매치 → fail-loud. dev 오버라이드로 {30} → 매칭.
+- **★ 콜드스타트 직접 재현(S2/E1 · fresh)**: `ASPNETCORE_ENVIRONMENT=Development` + `--Database:Provider=Sqlite --Database:SeedOnStartup=true --Database:MigrateOnStartup=true --ConnectionStrings:WcsDb=<temp>` 로 빌드 dll 실행(port 5399). 로그:
+  - `[DbInitializer] 콜드스타트 자동 Migrate 시작(provider=Sqlite)` → `Migrate 완료`
+  - `[DbInitializer] dev 시드 실행됨(트리거: Database:SeedOnStartup=true)`
+  - `[SorterRegistry] SORTER_3D destination 1대 조회` → `공유 버스 구성 busKey=127.0.0.1:1502 멤버 1대 transport=Tcp` → **`[SorterRegistry] 초기화 완료 — 소터 1대 / 공유 버스 1개`(fail-loud 0·throw 없음)**
+  - `Now listening on: http://127.0.0.1:5399` + `Application started` + `Hosting environment: Development` → **기동 완주**
+  - 이후 `Could not connect...`(Sim 미기동) → `[SorterRegistry] OFFLINE alarm: destId=6 chuteNo=30` = 문서화된 fail-safe(지연 Open·소터만 OFFLINE). transport=Tcp·busKey=127.0.0.1:1502 = 오버라이드/상속 정확 반영.
+- **회귀 blast radius = 0**: DbSeeder chuteNo=30 코드값 무변경이라 chuteNo=30 전제 자산(DbSeeder 의존 테스트·seed-field SQL·Field20Cells) 무영향. 테스트는 Production 환경+자체 주입 config → Development.json Sorters 오버라이드 미로드(blast=0). 전체 534 GREEN으로 입증.
 
-W-3(빈/에러 우아 degrade)·W-4(단일 라이트 테마 N/A — data-theme·토글 부재 확인)는 엔드포인트 n=0→null 응답·
-formatCycleTime placeholder·failed catch branch 코드로 커버(라이브 결함주입 미실시 — 핵심 양수 게이트 실증으로 비례).
+### E-⑥ 테이블수·M3 구모델 주석 (PASS)
+- TASKS.md:41 16→**17**(ERD.md 헤딩 `## 테이블 (17)` 정합·확인). :33 M3 헤딩 아래 "⚠ 구 모델(당시 기록)…현행 IF-08=WCS→RCS 상태 푸시(2026-07-21·SPEC §06)" 블록쿼트 보존형 주석(Q4 — 재작성 아님·폴링 오인 방지).
+- WcsDbContext.cs:7 16→**17** · :24 "16 코어 + operation_log = 17 테이블 · ERD.md" — 내부 :44("17번째 테이블")·:48/:698("기존 17테이블")과 정합. 임의 수치 도입 0. (B2B 6테이블은 docs/B2B-SCHEMA.md 별도 스키마·":48 완전 분리" 명시라 ERD 17 카운트와 무충돌.)
 
-## Minor (코드리뷰 4-Tier — 다음 스프린트 Generator 참고 · 전부 비차단·사용자 결정=등재 후 커밋)
-- **CR-1**: `MonitoringQueries.GetCycleTimeAvg`가 전행 `.ToList()` materialize(ArchivedAt 무필터·무인덱스) — 매 event9 재조회마다 전체 스캔. **계약 SCOPE OUT**(현 규모 허용). 실 볼륨 전 running-sum/윈도우 팔로업 권고.
-- **CR-2**: `TraceLogPage.tsx CycleTimeAvgLabel.load()`가 매 resolve에 setData — 마운트/event9/재연결 fetch 동시 시 늦은 응답이 최신 덮음(seq 가드 없음). 자가치유(다음 event9). abort/seq 토큰 권고.
-- **CR-3**: trailing 디바운스라 연속 분류(event9 < 500ms 간격) 중엔 ≥500ms 조용한 구간까지 미갱신. 디바운스 자체는 계약 허용. leading+trailing max-wait 권고.
-- **CR-4**: event9(READY_0TO1·폴 관측)와 핸드셰이크 Finalize(ReturnedAt 기입)가 독립 — 커밋 지연 시 재조회가 방금 완료행을 놓쳐 n이 1사이클 지연(자가보정). E2E n+1 게이트 flakiness 관련.
-- **CR-5**: `HandshakeOrchestrator` 첫 Ready==0=분류시작 전제 — 필드 PLC가 비분류 사유(인테이크·직전 실패사이클 잔류 모션)로 Ready 드롭 시 sortStartedAt 조기 캡처(단조 ≤ TiltedAt 클램프됨·사이클 팽창). OQ-3 허용·E2E 양수 검증. 필드 반복 로그 관찰 권고.
-- **CR-6**: 조회 실패 degrade가 직전 good 값 버리고 "—" + tooltip이 stale `data`로 isEmpty 판정 → "—"+수식 병기 가능(cosmetic). 계약은 "—" 명시.
+### E-① CLAUDE.md (구현자=main·S6) (PASS)
+- L35 포인터 → "§05 IF-05 사유 표 = 판정 스펙 · §06 IF-08 상태 푸시 정의"(§05/§06 실문서 정합).
+- 솔루션 구조에 `Wcs.Migrations.SqlServer`(:45)·`Wcs.Migrations.Sqlite`(:46) 표기 — 두 프로젝트 물리 실재 확인(`ls backend/src/Wcs.Migrations.*`).
+- 기정정 유지: L43 MVC Controllers IF-05/09/10 + IF-08 상태 푸시 ✓ / L33 17테이블 ✓ / L66·68 Serilog 도입 완료 ✓. 재-drift 0.
+- L48 "처음엔 RED가 정상" stale 제거 → "Decide 판정·ToWire 전부 GREEN — 구현 완료"(grep "RED" CLAUDE.md = 0건).
+
+### 회귀/규칙 (PASS)
+- **build**: `dotnet build backend/Wcs.sln` = **0 오류**, 경고 10개 전부 NU1903(SQLitePCLRaw 2.1.10 advisory·전 프로젝트 공통·Migrations 2종 포함) = 선재·신규 0.
+- **test**: `dotnet test backend/Wcs.sln`(독립 재실행) = **534/534 GREEN**(실패 0·건너뜀 0·1m30s·exit 0). Generator가 경고한 N1 TraceLog E2E flake 미재현(내 단일 full-run에서 GREEN). 귀속 근거: .cs diff 전부 `//` 주석(IL byte-identical)·테스트 Production 환경 Development.json 미소비·선재 flake 교훈 다수(s9-flake·sim-timeline-race·e2e-parallel-load). 단일 RED 부재로 회귀 0 확정.
+- **코드 로직 diff 0**: DbSeeder.cs·WcsDbContext.cs 변경 전부 주석 라인(git diff 확인) → IL 무변경. appsettings.Development.json은 dev-config(Q1 승인 범위). #7(하드코딩 금지)·#8(순수 함수) 위반 없음.
+
+### 스코프 준수 (PASS)
+- git diff 변경 파일 = CLAUDE.md(①=main)·TASKS.md·appsettings.Development.json·DbSeeder.cs·WcsDbContext.cs·wcs_3ds_unified_sequence.html·wcs_rcs_3ds_master_spec.html(§08만) + tasks/*(프로세스).
+- 무접촉 확인: README.md(변경목록 부재)·appsettings.Development.json ④ SeedOnStartup 주석(diff상 context)·master_spec §05·base appsettings.json Sorters(ChuteNo=1). Generator는 CLAUDE.md 무접촉(①=main).
+
+**결론: APPROVED.** 정확성·회귀0·재-stale0·스코프 전 축 충족.

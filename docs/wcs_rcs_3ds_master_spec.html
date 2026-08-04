@@ -260,7 +260,7 @@
       <span class="st">④ 투입(슈트/3D 공통)</span>
     </div>
     <ol>
-      <li><b>① 인덕션·목적지 조회</b> — 스캔(qty) → (판독 실패 시 NO_READ·재스캔/리젝트) → <code>IF-05</code>(라인 투입 기록 + 목적지·수량 판정). 이 시점에 WCS가 <code>inductionNo</code>→층 F를 파생하고 소터면 그 피스를 <b>소터별 FIFO 큐</b>에 넣는다 — <code>TgtFloor</code>에는 <b>큐 머리 층</b>을 게이트 허용(<code>==0</code>) 시 기입(순서대로, §07). → OK·chuteNo(NORMAL·BUSY) / NG·대기(FULL·PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE).</li>
+      <li><b>① 인덕션·목적지 조회</b> — 스캔(qty) → (판독 실패 시 NO_READ·재스캔/리젝트) → <code>IF-05</code>(라인 투입 기록 + 목적지·수량 판정). 이 시점에 WCS가 <code>inductionNo</code>→층 F를 파생하고 소터면 그 피스를 <b>소터별 FIFO 큐</b>에 넣는다 — <code>TgtFloor</code>에는 <b>큐 머리 층</b>을 게이트 허용(<code>==0</code>) 시 기입(순서대로, §07). → OK·chuteNo(NORMAL·BUSY + 슈트 FULL/PAUSED — 보내고 대기, readiness는 IF-08 푸시) / NG·대기(소터 FULL/PAUSED·OVER·COMPLETED·NO_DEST·OFFLINE) — FULL/PAUSED는 목적지 타입별 분기(§05).</li>
       <li><b>② 목적지 상태 알림</b> — <code>IF-08</code>: WCS가 목적지(슈트/소터) 상태 변경 시마다 RCS로 푸시(<code>next_state</code> 3/2 · <b>층별 호스트</b>). 소터가 F층 정렬·수용 가능이면 F층 호스트에 <code>3</code>. RCS는 그 목적지가 <code>3</code>(열림)일 때 투입, 아니면 대기 — <b>미수용 AGV는 목적지 앞이 아니라 파킹존에서 대기</b>하다 열림(<code>3</code>) 수신 시 목적지로 이동.</li>
       <li><b>③ 도착 보고</b> — <code>IF-09</code>: (파킹존→)목적지 도착 시 → WCS는 도착만 기록(<b>층 필드 없음</b> · 정렬은 ①에서 이미 수행). <b>미개방 목적지에선 ②의 열림 푸시가 이 도착보다 먼저</b>다(이미 열림이면 직행).</li>
       <li><b>④ 투입</b> — <code>IF-10</code> 투입 보고 → <code>IF-11</code> 셀 지정(C_Flag=0 확인 후 1) → PLC가 C 읽고 초기화 → 적재(R_Flag=0 확인 후 1) → WCS R_Flag 폴링 → R 읽고 초기화. 이후 <b>분류 후 복귀</b>: 분류 시작 시 PLC가 TgtFloor=0 클리어 → WCS가 <code>TgtFloor==0</code> 관측 시 큐 다음 층 기입 → 소터 그 층으로 이동·도착 시 CurFloor 기입.</li>

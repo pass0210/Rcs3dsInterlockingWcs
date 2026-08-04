@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Wcs.Data;
 
 // ════════════════════════════════════════════════════════════════════════════
-// WcsDbContext — ERD.md 16테이블 + provider 분기(SQL Server / SQLite)
+// WcsDbContext — ERD.md 17테이블 + provider 분기(SQL Server / SQLite)
 //
 // provider 분기 원칙 (ERD.md §인덱스):
 //   SQL Server : filtered index (p_id) WHERE is_active=1 + rowversion 동시성 토큰
@@ -21,7 +21,7 @@ public class WcsDbContext : DbContext
 
     public WcsDbContext(DbContextOptions<WcsDbContext> options) : base(options) { }
 
-    // ── DbSet (16 테이블) ──────────────────────────────────────────────────
+    // ── DbSet (16 코어 + operation_log = 17 테이블 · ERD.md) ─────────────────
     // 기준정보
     public DbSet<Destination>     Destinations     { get; set; } = null!;
     public DbSet<Cell>            Cells            { get; set; } = null!;

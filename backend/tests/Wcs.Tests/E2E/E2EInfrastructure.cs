@@ -64,6 +64,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
     private readonly IReadOnlyDictionary<int, string>? _floorHosts;  // S-TWO-FLOOR-CONTROL B — 층→호스트 맵(제공 시 층별 라우팅).
     private readonly int      _initialCurFloor;       // Sim 초기 CurFloor(2=즉시 정렬 / 1=미정렬)
     private readonly int      _rFlagTimeoutMs;
+    private readonly int      _cFlagTimeoutMs;        // C_Flag 대기 상한(ms). 기본 2000(기존 E2E 불변). D② CFlagTimeout 결정성용 단축 주입.
     private readonly int      _sorterObserveIntervalMs;
     private readonly int      _settleDelayMs;         // S-IF10-CWRITE-SETTLE-DELAY — 안착 지연(0=미주입·현행).
     private readonly string?  _traceLogDir;           // S-TRACE-LOG-VIEWER — 전용 추적 로그 per-test scratch 디렉터리(null=env 기본).
@@ -116,6 +117,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         int[]?    extraSorterChuteNos     = null,
         int       initialCurFloor         = 2,
         int       rFlagTimeoutMs          = 3000,
+        int       cFlagTimeoutMs          = 2000,
         int       sorterObserveIntervalMs = 30,
         (int ChuteNo, byte UnitId)[]? sharedBusUnits = null,
         bool      induceSerialMismatch     = false,
@@ -138,6 +140,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
         _extraSorterChuteNos        = extraSorterChuteNos ?? [];
         _initialCurFloor            = initialCurFloor;
         _rFlagTimeoutMs             = rFlagTimeoutMs;
+        _cFlagTimeoutMs             = cFlagTimeoutMs;
         _sorterObserveIntervalMs    = sorterObserveIntervalMs;
         _settleDelayMs              = settleDelayMs;
         _inductionFloorMap          = inductionFloorMap ?? new Dictionary<int, int> { [1] = 2, [2] = 2 };
@@ -251,7 +254,7 @@ public sealed class E2EWebApplicationFactory : WebApplicationFactory<Program>, I
             {
                 ["Timing:RFlagPollMs"]    = "20",
                 ["Timing:RFlagTimeoutMs"] = _rFlagTimeoutMs.ToString(),
-                ["Timing:CFlagTimeoutMs"] = "2000",
+                ["Timing:CFlagTimeoutMs"] = _cFlagTimeoutMs.ToString(),
                 // 운영층 — 레거시 참조값(정렬은 인덕션 파생 큐 구동 — 절대규칙 #7)
                 ["Wcs:OperationalFloor"]  = "2",
                 // 소터 pending-floor 큐 관측 주기(폐루프 트리거) — 폴 주기 동급으로 빠르게.

@@ -31,6 +31,7 @@ SDK 버전이 net10.0과 다르면 csproj TargetFramework 일괄 수정.
 - **Done**: 통합 테스트 — 시뮬레이터 상대로 셀 지정→적재 완료 왕복 1건 성공, R_Seq==C_Seq 검증, 로그에 레지스터 타임라인
 
 ## M3. API 3종 (Wcs.Api)
+> ⚠ **구 모델(당시 기록).** 아래 M3 항목의 IF-08은 당시의 "WCS가 스냅샷 캐시를 읽어 투입 가부를 판정·응답하는 폴링 조회(RCS→WCS)" 모델을 그대로 남긴 기록이다. **현행은 이 폴링 조회를 폐지**하고 IF-08 = **WCS→RCS 상태 푸시**(`PUT /api/UpdateChuteState`, 상태 전이 시 발신·층별 호스트)로 대체했다(2026-07-21 — docs/SPEC.md §06 · docs/wcs_rcs_interface_kr.html §IF-08 · docs/wcs_rcs_3ds_master_spec.html §06). 마일스톤 이력 정직성을 위해 원문을 보존하되, 아래 IF-08 서술(폴링·allowed 판정·WRONG_FLOOR)은 폐지된 당시 모델임을 유의(IF-08 폴링 오인 방지).
 - **DTO 정정(하네스 검증 도출 — Dtos.cs 스켈레톤 오류)**: IF-05 req에 `AgvNo` 추가 / IF-08·IF-10에서 timeStamp·qty는 nullable 선택필드로(원본 HTML엔 없음, SPEC §7-A) / IF-05 OK 응답 reason(NORMAL·BUSY·FULL·PAUSED) 주석 정정
 - IF-05/08/10 구현(스텁 교체). IF-08 = 스냅샷 캐시 읽기 → Decide → (쓰기 결정 시) 쓰기 큐 투입 → 즉시 응답(쓰기 완료 대기 안 함)
   - **allowed=true → reason="READY" 주입**(API 계층, Core ToWire(None)=null 유지). SPEC §7-A
@@ -38,7 +39,7 @@ SDK 버전이 net10.0과 다르면 csproj TargetFramework 일괄 수정.
 - **Done**: Sim3ds + API 띄우고 curl 시나리오: IF-05 OK → IF-08(WRONG_FLOOR→이동→allowed) → IF-10 OK
 
 ## M4. 시나리오 검증 + 영속화
-- Wcs.Data: **docs/ERD.md의 16테이블** 그대로 EF Core 구현(SQL Server Express, 개발은 SQLite 분기) + Initial 마이그레이션 + 기준정보 시드
+- Wcs.Data: **docs/ERD.md의 17테이블** 그대로 EF Core 구현(SQL Server Express, 개발은 SQLite 분기) + Initial 마이그레이션 + 기준정보 시드
   - **agvFloor 단일 진실 전환**: M4부터 `agv.floor`가 단일 진실, appsettings.Floors는 초기 시드 전용으로 강등(M3의 매핑 조회는 IAgvFloorResolver로 추상화해 교체 1지점화)
 - 시나리오 S1~S9 자동화(xUnit 통합 테스트, Sim3ds 고장 주입 사용):
   S1 정상 / S2 층 다름(차트②) / S3 분류 중 선기입·복귀·분류시작 클리어(차트③) / S4 핑퐁 차단(쓰기 이력 검증)
