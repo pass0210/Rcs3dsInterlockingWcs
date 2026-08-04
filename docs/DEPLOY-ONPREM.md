@@ -250,7 +250,22 @@ Start-Sleep 8
 Get-NetTCPConnection -LocalPort 5205 -ErrorAction SilentlyContinue   # 5205 LISTEN 확인
 ```
 > 이미 등록돼 있으면 설정만 교체 후 `Restart-Service WcsApi`.
-> **대안(프로젝트 내장)**: NSSM 대신 `scripts\install-service.ps1 -BinPath C:\BOWOO\Wcs.Api\Wcs.Api.exe -Environment Production` (sc.exe + UseWindowsService). NSSM 이 로그/재시작 제어가 더 편해 권장.
+>
+> **대안(프로젝트 내장 스크립트)** — 현장 표준은 §9-B 의 수동 `sc.exe`(런타임 미설치·WDAC 환경) 또는 위 NSSM 이다. 아래는 그 대안으로, `sc.exe create` 를 자동화하면서 depend=/사전 SQL 점검/비내장 계정 비밀번호를 함께 처리한다:
+> ```powershell
+> # LocalSystem(기본)로 등록 — 설치 전 localhost\Rcs3dsInterlockingWcs 에 SELECT 1 도달성 점검 후 생성.
+> scripts\install-service.ps1 -BinPath C:\BOWOO\Wcs.Api\Wcs.Api.exe -Environment Production `
+>   -SqlServiceName MSSQLSERVER   # Express 면 'MSSQL$SQLEXPRESS'. depend= 로 SQL 선기동 보장.
+>
+> # (선택) SQL 인증 운영 구성 — 앱이 쓰는 실제 자격증명으로 사전 점검:
+> #   -SqlServer localhost -SqlDatabase Rcs3dsInterlockingWcs -SqlUser <SQL_USER> -SqlPassword (Read-Host -AsSecureString)
+> # (선택) 도메인/로컬 사용자 계정으로 실행 — 비밀번호(SecureString) 필수(미제공 시 sc start 1069):
+> #   -Account "DOMAIN\svc-wcs" -Password (Read-Host -AsSecureString)
+> ```
+> - `depend= <SqlServiceName>`(기본 `MSSQLSERVER`) 로 로컬 SQL 이 먼저 뜬 뒤 WCS 가 기동한다(부팅 순서 크래시 예방).
+> - 설치 전 `SELECT 1` 사전 점검이 **실패하면 서비스를 생성하지 않고 중단**한다(5초 간격 무한 크래시 루프 서비스 미등록). 점검 도구(`Invoke-Sqlcmd`/`sqlcmd`)가 없으면 `-SkipSqlCheck` 로만 강행.
+> - 계정이 LocalSystem(·`NT AUTHORITY\SYSTEM` 별칭)·LocalService·NetworkService·`NT SERVICE\*` 가 아니면 비어있지 않은 `-Password`(SecureString)가 필수다. 이 자격증명은 `New-Service -Credential`(SCM API)로 전달돼 **프로세스 커맨드라인에 노출되지 않는다**(감사 4688/Sysmon/SIEM 평문 leak 없음). 내장 계정은 비밀번호 없이 `sc.exe create`.
+> - 이 스크립트로 등록한 서비스도 `sc.exe`(UseWindowsService) 라, 앱 로그는 **exe 인접 배포 폴더 `<DEPLOY_DIR>\logs\wcs-*.log`** 에 생성된다(§9-B step3). NSSM 이 로그/재시작 제어 UI 가 더 편해 §5-3 본문(NSSM)을 권장.
 
 ---
 
@@ -339,13 +354,14 @@ sc.exe query WcsApi        # STATE = RUNNING 확인
 > ⚠️ publish-sc 에는 `appsettings.Production.json` 이 없으므로 `-Force` 덮어써도 현장 Production.json 은 보존된다(1의 백업은 안전망).
 > `Stop-Service WcsApi` / `Start-Service WcsApi` / `Get-Service WcsApi` 순정 cmdlet 도 동일.
 
-**3) 로그 확인** — sc.exe 서비스는 작업디렉토리가 `C:\WINDOWS\System32` 라 앱의 상대 `logs/` 가 **거기로** 풀린다:
+**3) 로그 확인** — 앱은 서비스 컨텍스트에서 작업디렉토리를 **exe 인접 배포 폴더**로 고정하므로(`WindowsServiceHelpers.IsWindowsService()` 게이트), 상대 `logs/` 가 **`<DEPLOY_DIR>\logs`(예: `C:\BOWOO\Wcs.Api\logs`)** 로 결정적으로 풀린다:
 ```powershell
-Get-ChildItem C:\WINDOWS\System32\logs\wcs-*.log | Sort LastWriteTime -Desc | Select -First 1 FullName, LastWriteTime
+Get-ChildItem C:\BOWOO\Wcs.Api\logs\wcs-*.log | Sort LastWriteTime -Desc | Select -First 1 FullName, LastWriteTime
 # 전용 추적 로그(S-TRACE-LOG-VIEWER)는 설정 경로(기본 D:\Rcs3dsInterlockingWcsLogs):
 Get-ChildItem D:\Rcs3dsInterlockingWcsLogs\trace-*.log
 ```
-> (NSSM 등록 서비스면 §5-3 대로 `AppDirectory`=`C:\BOWOO\Wcs.Api` 라 로그가 `C:\BOWOO\Wcs.Api\logs\` — 등록 방식에 따라 위치가 다르다.)
+> 배포 폴더가 다르면 그 폴더 하위 `logs\` 로 바뀐다(exe 경로 기준). NSSM 등록 서비스도 §5-3 `AppDirectory`=배포 폴더라 같은 `<DEPLOY_DIR>\logs\` 에 남는다 — 등록 방식과 무관하게 앱 로그 위치가 일치한다.
+> (과거: sc.exe 서비스는 작업디렉토리가 `C:\WINDOWS\System32` 라 로그가 `System32\logs` 로 흘렀다. 이제 앱이 서비스 컨텍스트에서 배포 폴더로 고정한다 — S-AUDIT-B-DEPLOY-HARDENING.)
 
 ---
 
@@ -357,7 +373,7 @@ nssm status WcsApi
 Get-Content C:\BOWOO\Wcs.Api\logs\nssm-err.log -Tail 40
 Get-Content C:\BOWOO\Wcs.Api\logs\wcs-*.log -Tail 40
 ```
-> **sc.exe 등록 서비스**(현장 표준·9-B)면 `nssm status` 대신 `sc.exe query WcsApi`, 앱 로그는 작업디렉토리(system32) 기준 **`C:\WINDOWS\System32\logs\wcs-*.log`** 에 있다. `-Tail` 은 상태 푸시/폴 스팸에 묻히니 `Select-String -Path <log> -Pattern "IF05|IF09|IF10|HANDSHAKE|FULL|ERROR|WARN|OFFLINE"` 로 필터해서 본다.
+> **sc.exe 등록 서비스**(현장 표준·9-B)면 `nssm status` 대신 `sc.exe query WcsApi`, 앱 로그는 배포 폴더 기준 **`C:\BOWOO\Wcs.Api\logs\wcs-*.log`**(=`<DEPLOY_DIR>\logs`) 에 있다(앱이 서비스 컨텍스트에서 작업디렉토리를 exe 인접 폴더로 고정 — §9-B step3). `-Tail` 은 상태 푸시/폴 스팸에 묻히니 `Select-String -Path <log> -Pattern "IF05|IF09|IF10|HANDSHAKE|FULL|ERROR|WARN|OFFLINE"` 로 필터해서 본다.
 
 ### 서비스는 Running 인데 5205 안 열림 / `ConnectionString 초기화되지 않음`
 - 원인: 연결문자열을 NSSM 환경변수에 넣어 깨짐 → 크래시 루프.
