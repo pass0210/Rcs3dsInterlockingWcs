@@ -32,7 +32,7 @@
 - `docs/SPEC.md` — 응축 스펙(레지스터 맵, 판정 표, 핸드셰이크, 시뮬레이터 동작). **먼저 읽을 것.**
 - `docs/ERD.md` — DB 스키마 17테이블. 대리키·p_id 순환·이력 분리 원칙 포함.
 - `docs/wcs_3ds_interface.html` — WCS↔3DS Modbus 정의 + 타이밍 차트 ①②③
-- `docs/wcs_rcs_3ds_master_spec.html` — 마스터 정의서(§6 투입 가부 표 = 판정 스펙)
+- `docs/wcs_rcs_3ds_master_spec.html` — 마스터 정의서(§05 IF-05 사유 표 = 판정 스펙 · §06 IF-08 상태 푸시 정의)
 - `docs/wcs_3ds_unified_sequence.html` — 통합 시퀀스(IF-05→08→10→11→12)
 - `docs/wcs_rcs_interface_kr.html` — WCS↔RCS API 정의(필드·엔드포인트)
 
@@ -42,8 +42,10 @@ backend/src/Wcs.Core        판정 엔진(순수 C#): RegisterMap, 모델, Depos
 backend/src/Wcs.PlcGateway  FluentModbus 마스터: 폴링 스냅샷 캐시 + 쓰기 큐
 backend/src/Wcs.Api         ASP.NET Core MVC Controllers: IF-05/09/10 + IF-08 상태 푸시 + 모니터링 API/SignalR + Windows Service 호스트
 backend/src/Wcs.Data        EF Core: 오더·예약·pId 이력·트랜잭션 로그(SqlServer 운영 / SQLite 테스트 — provider별 마이그레이션 분리)
+backend/src/Wcs.Migrations.SqlServer  EF Core 마이그레이션 — SQL Server(운영) provider
+backend/src/Wcs.Migrations.Sqlite     EF Core 마이그레이션 — SQLite(테스트/개발) provider
 backend/src/Wcs.Sim3ds      3DS PLC 시뮬레이터(FluentModbus, TCP 기본·RTU 옵션 --transport rtu) — 통합 테스트 상대역
-backend/tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정 케이스는 처음엔 RED가 정상, ToWire 검증은 GREEN)
+backend/tests/Wcs.Tests     xUnit — DepositDeciderTests가 스펙 그 자체(Decide 판정·ToWire 전부 GREEN — 구현 완료)
 ```
 
 ## 빌드/테스트 명령

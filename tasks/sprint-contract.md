@@ -1,93 +1,62 @@
-[Sprint Contract]
-Sprint ID: S-AUDIT-B-DEPLOY-HARDENING
-Title: 2026-07-01 전체 감사 묶음 B — 운영(Windows Service) 배포 전 차단 (재triage 후)
-Base: 최신 develop = 99d8038. feature 브랜치 feat/audit-b-deploy-hardening.
+[Sprint Contract] — S-AUDIT-E-DOCS (2026-07-01 전체 감사 묶음 E — 문서 일괄 정정)
+Base: 최신 develop = 99d8038. feature 브랜치 feat/audit-e-docs.
 
-════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════
 ## ★ RE-TRIAGE 결과 (현재 코드·문서 직접 판정)
-════════════════════════════════════════════════════════════════════════════
-- ① Serilog 상대경로: **유효(미해소)** — IN SCOPE(주 작업). appsettings.json:24 `logs/wcs-.log`·
-  appsettings.Development.json:28 `logs/wcs-dev-.log`(둘 다 상대)·Program.cs SetCurrentDirectory 0건.
-  sc.exe 서비스 로그가 System32\logs로 실측(DEPLOY-ONPREM.md §9-B/§10) — 조용한 유실은 아니나
-  위치 예측 불가·CWD 의존·제한계정 취약. (rollOnFileSizeLimit 1GB 유실은 묶음 A에서 이미 해소.)
-- ② install-service.ps1: **4 하위이슈 유효**(부 작업) — :32 LocalSystem 기본, :55 password=/depend= 부재,
-  :61 restart/5000 루프, 사전 SQL 점검 부재. 단 현장 표준=수동 sc.exe(§9-B)·NSSM 권장(§5-3)이라 '대안' 경로.
-- ③ 운영 README: **해소 — SCOPE OUT**. DEPLOY-ONPREM.md 12절 정비(§2-3 SQL 계정/권한·§5 설정/서비스·
-  §9/§9-B 재배포·§10 트러블슈팅·§11 WDAC)로 커버. 루트 README.md IF-08=푸시 de-stale 완료. 잔여=①의 로그
-  위치 변경을 DEPLOY-ONPREM.md에 반영하는 것뿐.
+════════════════════════════════════════════════════════════════════
+SCOPE OUT — 정정 확인(Verification 재확인만):
+- ② README stale → 해소(README.md:19-20 IF-08=푸시·폐지 폴링 명시·:8/:21 RTU/TCP·:55/:92 운영 SQL Server/개발 SQLite·:93 17테이블).
+- ③ master_spec §05 → **master_spec.html은 해소**(:211/216/220 타입 분기·note interface_kr §6 정합).
+- ④ appsettings.Development.json 주석 → 해소(:2 "launchSettings 부재로 기본=Production" 정확).
 
-════════════════════════════════════════════════════════════════════════════
+STILL VALID (IN SCOPE):
+- ③-잔여: **docs/wcs_3ds_unified_sequence.html:194-196** 무조건 "FULL·PAUSED는 NG"(타입 분기 미반영·canonical 스펙 소스·코드/master_spec §05/interface_kr §6와 충돌).
+- ⑤: **Dev 시드 chuteNo 미스매치 — 설정/시드 결함**(문서 아님). 자동-오염 벡터는 CLOSED(DbSeeder 명시 게이트). 근본 잔존: DbSeeder.cs:56-68 SORTER_3D chuteNo=30 ↔ appsettings.json:38 Sorters[0].ChuteNo=1 → 명시 SeedOnStartup=true 기동 시 SorterRegistry fail-loud. (feedback-archive:564·todo:18 추적.)
+- ⑥: TASKS.md:41 "16테이블"(→17)·:34-38 M3 폐지 IF-08 폴링 모델 / WcsDbContext.cs:7 "16테이블"(내부 :44/:48/:698은 17).
+
+ORCHESTRATOR-ONLY (Generator 편집 불가·안전규칙 "modify CLAUDE.md 금지" → main 직접):
+- ① CLAUDE.md **대부분 정정됨**(L43 MVC·IF-05/09/10·IF-08 푸시·L33 17테이블·L66 Serilog 완료 ✓). 잔여: L35 "§6 투입 가부 표=판정 스펙"(→§05 IF-05 사유 표·§06 IF-08 푸시)·솔루션 구조에 Wcs.Migrations.SqlServer/Sqlite 미표기·(선택)L46 M0 "RED 정상" 잔재.
+
+════════════════════════════════════════════════════════════════════
 ## Goal
-운영 Windows Service 배포 시 (a) 앱 로그가 예측가능·기록가능 위치에 결정적 생성되도록 Serilog 파일 sink
-작업 디렉터리 기준 고정(현재 sc.exe 서비스는 System32\logs로 흘러 예측 불가·제한계정 취약), (b) 프로젝트
-내장 서비스 등록 스크립트를 SQL 권한 실패·password·SQL 기동 순서·사전 점검 측면 견고화. 두 변경 모두
-DEPLOY-ONPREM.md와 정합하도록 문서 갱신. ③ 운영 README는 SCOPE OUT(이미 커버). 절대규칙 #7(경로/설정
-하드코딩 금지 — AppContext 파생/appsettings 오버라이드만)·#8(Wcs.Core 무변경).
+묶음 E 잔여 유효만 정정해 "문서/설정 = 실제 코드 동작" 단일 진실 회복: (1) canonical HTML FULL/PAUSED stale 제거(③-잔여), (2) Dev 시드 chuteNo↔Sorters 정렬로 명시 dev 시드 기동 복원(⑤·회귀 0), (3) TASKS.md·WcsDbContext 주석 정정(⑥). 각 정정은 코드/설정 실제 동작과 **정확 일치**(over-claim·재-stale·새 규칙 도입 금지). ① CLAUDE.md 잔여는 main이 별도 수행(Verification 포함·구현자=main).
 
-## Implementation Scope
-[모듈 1 — 로그 위치 결정성 (①)]
-1. Windows Service(비대화형) 컨텍스트에서 Serilog 파일 sink 상대경로 `logs/`가 CWD(System32)가 아니라
-   배포 폴더(exe 인접=AppContext.BaseDirectory 기준)로 해석되도록 앱 시작 지점에서 작업 디렉터리 기준 고정.
-   위치 Program.cs(Serilog 초기화 이전). #7: AppContext.BaseDirectory 파생만(리터럴 경로 하드코딩 금지).
-   appsettings의 `Serilog:WriteTo:File:path`는 상대(`logs/wcs-.log`) 유지 기본안(최종 위치=Q1·적용범위=Q2).
-2. 회귀 비발생: 정적 서빙(WebRootPath=ContentRoot/wwwroot·CWD 무관)·전용 추적 로그(TraceLog=절대경로
-   D:\Rcs3dsInterlockingWcsLogs)·operation_log/plc_event(DB·CWD 무관) 무영향 확인.
-3. DEPLOY-ONPREM.md §9-B step3·§10 로그 위치 서술을 새 동작과 정합화(System32\logs→확정 위치).
-[모듈 2 — install-service.ps1 견고화 (②)]
-4. 계정≠LocalSystem 시 SecureString password 파라미터 + `obj= <계정> password= <값>` 전달.
-5. 로컬 SQL 선기동 보장: `depend= <SQL 서비스명>`(파라미터화·기본값=Q4).
-6. 설치 전 사전 SQL 도달성 점검(SELECT 1) 실패 시 서비스 미생성·중단·안내(5초 무한 크래시루프 예방).
-7. 스크립트 헤더/주석 정정(:14-15 자동 Migrate 단언 오도 교정·:18 운영 README→DEPLOY-ONPREM.md 참조).
-8. DEPLOY-ONPREM.md §5-3 대안 블록에 password/depend=/사전점검 반영.
-[SCOPE OUT] ③ 운영 README(해소)·루트 README/CLAUDE.md/master_spec 일괄 정정(묶음 E)·base appsettings
-Trusted_Connection 자체 변경(운영은 Production.json SQL 인증 오버라이드)·묶음 A 항목(해소)·기본 계정 하향(Q5·기본 미포함).
+## Implementation Scope (Generator — CLAUDE.md 제외·③-잔여·⑤·⑥만)
+- **E-③** docs/wcs_3ds_unified_sequence.html:194-196 — 무조건 "FULL·PAUSED NG"를 타입 분기로 정정(슈트 FULL/PAUSED=IF-05 OK·보내고 대기·readiness는 IF-08 푸시 / 3D 소터만 PAUSED·셀만재 NG). 이미 정합된 master_spec §05·interface_kr §6·실코드(RcsController.QueryDestination)와 표현·의미 일치. 확정4 범위 내·새 규칙/수치 금지. HTML well-formedness 보존(태그 닫힘 대조).
+- **E-⑤** Dev 시드↔Sorters 단일 진실 정렬(설정/시드·코드 로직 무변경) — 명시 dev 시드가 fail-loud 없이 기동되게. 방식은 Q1 확정. 부수: DbSeeder 주석·appsettings 주석 정합. ★ **회귀 0(#7·#8)**: chuteNo=30 전제 자산(DbSeeder 의존 테스트·seed-field-*.sql·0701-CELL 검증) blast radius 열거+전 테스트 GREEN. 넓은 파급이면 최소-침습 대안.
+- **E-⑥** TASKS.md:41 16→17·:34-38 M3 IF-08 폴링→현행 푸시 모델(Q4)·WcsDbContext.cs:7 16→17(내부 정합·임의 수치 금지).
 
-## Parallel Modules: N/A (두 모듈 다 DEPLOY-ONPREM.md 공유 편집 → 단일 모듈).
-## Evaluation Dimensions:
-1) Functional — 로그가 의도 위치에 실제 생성·/health 정상·스크립트 문법/로직 올바름·사전점검 동작.
-2) Deployment-safety & regression — 로그 위치 변경이 DEPLOY-ONPREM.md와 정합·dev dotnet run/정적서빙/
-   TraceLog/DB 기록 회귀 0·#7(경로 하드코딩 0)·#8(Wcs.Core 무변경) 준수.
-(APPROVED=두 차원 AND. 동시성 차원 무관·미선언.)
+## Orchestrator(main) Scope — ① CLAUDE.md (Generator 금지·Verification 포함)
+- L35 §6 포인터→"§05 IF-05 사유 표(판정)·§06 IF-08 푸시". 솔루션 구조에 Wcs.Migrations.SqlServer/Sqlite 추가. (선택)L46 정리. 기정정 L43/L33/L66 유지 확인.
 
-## Detected Project Type: Backend/API
-(backend/src/Wcs.Api ASP.NET Core + Windows Service 호스트·Program.cs 부트스트랩. 프론트 변경 0. 변경 표면=
- startup/logging 인프라 + 배포 스크립트 + 배포 문서.)
+## Parallel Modules: N/A (single). ## Evaluation Dimensions: functional/accuracy only(단일·⑤ 회귀0은 이 축 내 게이트).
+## Detected Project Type: Full-stack (단 본 스프린트 프론트 무접촉·API 런타임 무변경 — 문서+백엔드 시드/설정).
 
-## Verification Scenarios (Backend/API)
-- Endpoints touched: 없음(HTTP 계약 무변경). liveness는 기존 GET /health(무변경) 사용.
-- Happy path: (기동/로그=실제 해피패스) Windows Service 컨텍스트 기동 시 wcs-*.log가 의도 위치(배포 폴더 하위
-  logs·Q1)에 생성·System32\logs 신규 유입 0. GET /health→200 {status,db,sorters} 불변. install-service.ps1
-  유효 인자 실행→서비스 생성+depend=/failure/env 의도대로(생성 후 정리 가능 검증).
-- Error cases: 제한 계정 기동 시 파일 로그 의도 위치 기록 또는 쓰기실패 진단가능(무음 삼킴 아님) / DB 도달불가
-  MigrateAsync throw fatal 진단이 의도 위치에서 확인 / 사전 SQL 점검 실패→서비스 미생성·중단 / 계정≠LocalSystem인데
-  password 미제공→사전 요구·검증(sc start 1069 예방).
-- Operational verification(필수·인프라 스프린트 실제 표면): 로그 경로 변경은 **실 서비스 컨텍스트 기동으로 실증**
-  (dotnet run은 CWD=프로젝트라 갭 재현 못 함 — 실 sc.exe/Windows Service 또는 IsWindowsService 경로 강제 동등 재현).
-  install-service.ps1은 정적 검토+PowerShell AST 파싱 통과+로직 워크스루(가능 시 폐기용 서비스명 dry-run→즉시 정리·
-  불가 시 정적 대체 명시). DEPLOY-ONPREM.md §9-B step3/§10 로그 경로가 코드 새 동작과 일치(문서-코드 격차 0).
-  무회귀: dotnet build 신규 경고 0·dotnet test 기존 GREEN·TraceLog/정적서빙/DB 기록 무영향.
+## Verification Scenarios
+- Web/UI: N/A(frontend/wwwroot 무접촉·사유 명시).
+- Backend/API(시드/설정 부트스트랩 + 주석 대조):
+  · S1[⑤] DbSeeder SORTER_3D chuteNo == appsettings Sorters[].ChuteNo(단일 진실) 코드/설정 대조.
+  · S2[⑤] 명시 SeedOnStartup=true + dev Provider/ConnectionStrings 오버라이드 콜드스타트 시 SORTER_3D가 매칭 Sorters[]로 SorterRegistry fail-loud 없이 provision.
+  · S3[③] unified_sequence.html:194-196 정정문 ↔ 실코드(슈트 full/paused OK·소터 PAUSED·셀만재 NG)·master_spec §05·interface_kr §6 일치. docs/*.html 무조건-NG 잔존 0 재스캔.
+  · S4[⑥] TASKS.md 테이블수==ERD 17·IF-08 폴링 오인 소지 제거.
+  · S5[⑥] WcsDbContext.cs 주석 테이블수 ERD 17·내부 L44/L48/L698 정합.
+  · S6[①·구현자=main] CLAUDE.md L35 포인터 §05/§06 정합·솔루션 구조 Migrations 2종·기정정 L43/L33/L66 유지.
+- E2E(2+ 계층): E1[⑤] appsettings(Provider/ConnectionStrings/Sorters)→DbInitializer 시드(SORTER_3D)→SorterRegistryFactory 매칭→app 기동. 정정 전 fail-loud→정정 후 완주. 회귀 게이트=DbSeeder 의존 테스트+전체 dotnet test GREEN.
 
-## Evaluation Criteria (weights)
-- (35%) 로그 위치 결정성: 서비스 컨텍스트 wcs-*.log 확정 위치 실 생성 실증·System32\logs 유입 0·#7 준수(리터럴 0).
-- (25%) 스크립트 견고화: password(SecureString)·depend=(파라미터)·사전 SQL 점검 동작·크래시루프 서비스 미생성·파싱 통과.
-- (20%) 문서 정합: DEPLOY-ONPREM.md 로그 위치(§9-B/§10)·§5-3 스크립트 절 코드와 정합·격차 0·③ SCOPE OUT 증거.
-- (15%) 무회귀: 빌드 경고 0(신규)·기존 테스트 GREEN·dev dotnet run 로그·정적서빙·TraceLog·DB 무영향·#8 Wcs.Core diff 0.
-- (5%) 범위 준수: 묶음 E/C·기본 계정 하향 등 스코프 밖 변경 0.
+## Evaluation Criteria (가중)
+- 정확성 45%(정정문↔지상진실 1:1·over-claim/폐지모델/임의수치 0·③ 확정4 범위) · ⑤ 회귀 0 25%(blast radius 열거+전 테스트 GREEN·코드 로직 무변경) · 재-stale/일관성 15%(FULL/PAUSED·테이블수·IF-08 모델 전 문서 동일 진실·HTML well-formed) · 스코프 준수 15%(SCOPE OUT ②④·master_spec §05 무편집·Generator CLAUDE.md 무편집·①=main).
 
-## Completion Conditions (AND)
-1. 서비스 컨텍스트 실 기동(또는 IsWindowsService 동등 재현)에서 wcs-*.log 의도 위치 생성 실증·System32\logs 신규 유입 0.
-2. #7 위반 0(경로 리터럴 하드코딩 없음)·#8 위반 0(Wcs.Core diff 0).
-3. install-service.ps1 password/depend=/사전점검 포함·PowerShell 파싱 통과+정적 로직 검토 통과(dry-run 환경 허용 시).
-4. DEPLOY-ONPREM.md 로그 위치·스크립트 서술이 새 코드와 정합(대조).
-5. dotnet build 신규 경고 0·dotnet test 기존 GREEN.
-6. dev dotnet run 로그·정적서빙·TraceLog·DB 기록 무회귀.
+## Completion Conditions
+- ③-잔여: unified_sequence.html 타입 분기 정정·docs/*.html 무조건-NG 잔존 0·코드 대조 통과.
+- ⑤: DbSeeder chuteNo↔Sorters 단일 진실·S2/E1 성립·전체 테스트 GREEN(회귀 0)·코드 로직 무변경.
+- ⑥: TASKS.md·WcsDbContext 테이블수 17·IF-08 구모델 정정.
+- ①(main): L35 포인터·Migrations 표기·기정정 유지(Verification 통과).
+- dotnet build 성공·dotnet test 전건 GREEN(신규 경고 0).
 
 ## Open Questions (★ 사용자 게이트 확정 2026-08-03)
-Q1. ✅ **로그 위치 = exe 인접 `<배포폴더>\logs`**(AppContext.BaseDirectory 기준·#7·NSSM AppDirectory 동작 동일).
-    기존 System32\logs → 이 위치로 변경 → DEPLOY-ONPREM.md §9-B step3·§10 로그 확인 경로를 `C:\BOWOO\Wcs.Api\logs`류로 갱신 필수.
-Q2. ✅ **IsWindowsService 게이트**(서비스 컨텍스트에만 작업디렉터리 고정). dev `dotnet run` 로그는 프로젝트/logs 유지(회귀 0).
-Q3. ✅ **install-service.ps1 견고화 포함**(저비용). 단 DEPLOY-ONPREM.md에 현장 표준=수동 sc.exe/NSSM, 이 스크립트=대안임을 명시.
-Q4. ✅ **depend= MSSQLSERVER**(로컬 기본 인스턴스). 파라미터화하되 기본값=MSSQLSERVER.
-Q5. ✅ **기본 계정 LocalSystem 유지**(인프라만 추가·기본값 하향 미포함 — 감사 C-17은 후속).
+Q1/Q2 [⑤] ✅ **appsettings.Development.json에 dev 전용 Sorters[] 항목(ChuteNo=30) 오버라이드 추가**(본 스프린트 포함·최소 침습·시드/테스트 자산 무변경·회귀 0). DbSeeder chuteNo 변경 안 함(30 유지). base appsettings Sorters(ChuteNo=1)도 무변경.
+Q3 [③] ✅ **unified_sequence.html:194-196 한정**(+docs/*.html 무조건-NG 잔존 0 재스캔으로 다른 곳 없음 확인).
+Q4 [⑥ M3] ✅ **"구 모델(당시 기록)" 주석 보존**(마일스톤 이력 정직성 — 재작성 대신 폐지 모델임을 명시해 IF-08 폴링 오인 방지).
+Q5 [① 처리] ✅ **CLAUDE.md 정정 = 오케스트레이터(main) 직접**(Generator 금지·안전규칙). Generator 완료 후 main이 편집→Evaluator S6 검증.
 
-> Planner self-check — Detected project type: Backend/API. Required scenario slots: 3 (endpoints-touched·happy-path-per-endpoint·error-cases-per-endpoint) + 1 보강(operational-verification). All slots filled: yes.
+> Planner self-check — Detected project type: Full-stack. Required scenario slots: 8 (Web/UI[N/A], Backend/API S1~S6, E2E E1). All slots filled: yes.
